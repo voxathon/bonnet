@@ -305,12 +305,23 @@ cdef void load_or_generate_identity(str path):
     os.chmod(path, 0o600)
 
 def main():
+    cdef str config_dir, default_userfile, default_identity
+    
+    config_dir = os.path.expanduser('~/.config/bonnet')
+    default_userfile = os.path.join(config_dir, 'userfile')
+    default_identity = os.path.join(config_dir, 'identity')
+    
     parser = argparse.ArgumentParser(description='Bonnet Server')
-    parser.add_argument('userfile', help='Path to userfile (trusted users + registration target)')
-    parser.add_argument('identity', help='Path to server Ed25519 private key')
+    parser.add_argument('userfile', nargs='?', default=default_userfile, help='Path to userfile (default: ~/.config/bonnet/userfile)')
+    parser.add_argument('identity', nargs='?', default=default_identity, help='Path to server Ed25519 private key (default: ~/.config/bonnet/identity)')
     parser.add_argument('--port', type=int, default=PORT_STANDARD, help='Port to listen on (default: 2272)')
     parser.add_argument('--privileged', action='store_true', help='Use privileged port 272')
     args = parser.parse_args()
+    
+    os.makedirs(config_dir, exist_ok=True)
+    if not os.path.exists(args.userfile):
+        open(args.userfile, 'a').close()
+        os.chmod(args.userfile, 0o600)
     
     port = PORT_PRIVILEGED if args.privileged else args.port
     load_or_generate_identity(args.identity)
