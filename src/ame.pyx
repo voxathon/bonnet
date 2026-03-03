@@ -217,6 +217,13 @@ cdef class Board:
         return AsyncResult(self._executor.submit(task))
 
     def query(self, str where=None, list values=None, str orderby=None, limit=None, bint include_content=False):
+        if where:
+            where = where.replace(";", "")
+        if orderby:
+            orderby = orderby.replace(";", "")
+        if limit is not None:
+            limit = int(limit)
+
         def task():
             return self._query_posts(where, values, orderby, limit, include_content)
         return AsyncResult(self._executor.submit(task))
