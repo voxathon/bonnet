@@ -51,6 +51,7 @@ $(BUILD_DIR)/orm.so: $(BUILD_DIR)/orm.c
 
 $(BIN_DIR)/bonnet: $(BUILD_DIR)/bonnet.c $(BUILD_DIR)/orm.so $(BUILD_DIR)/ame.so $(BUILD_DIR)/__init.so | $(BIN_DIR)
 	$(CLANG) $(CFLAGS) $(BUILD_DIR)/bonnet.c -o $@ $(LDFLAGS)
+	cp $(BUILD_DIR)/*.so $(BIN_DIR)/
 
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
