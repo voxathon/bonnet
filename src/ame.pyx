@@ -270,7 +270,12 @@ cdef class Ame:
         # Load existing boards
         for name in os.listdir(base_path):
             if os.path.isdir(os.path.join(base_path, name)) and not name.startswith('.'):
-                self._boards[name] = Board(self._base_path, name, self._executor)
+                try:
+                    self._boards[name] = Board(self._base_path, name, self._executor)
+                except Exception as e:
+                    # Log warning and continue loading other boards
+                    import logging
+                    logging.warning(f"Failed to load board '{name}': {e}")
 
     cpdef Board get_board(self, str name):
         with self._boards_lock:
