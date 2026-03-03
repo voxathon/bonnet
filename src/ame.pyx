@@ -140,8 +140,10 @@ cdef class Board:
     cdef void _delete_content(self, uint64_t post_num):
         cdef str file_path = os.path.join(self._articles_path, str(post_num))
         with self._lock:
-            if os.path.exists(file_path):
+            try:
                 os.remove(file_path)
+            except FileNotFoundError:
+                pass
 
     cdef Post _get_post(self, uint64_t post_num):
         cdef object post
