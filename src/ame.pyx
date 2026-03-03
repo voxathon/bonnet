@@ -81,6 +81,11 @@ cdef class Board:
     cdef object _executor
 
     def __init__(self, str base_path, str name, object executor):
+        # Prevent path traversal
+        name = "".join(c for c in name if c.isalnum() or c in "-_")
+        if not name:
+            raise ValueError("Invalid board name")
+
         self._base_path = base_path
         self._name = name
         self._executor = executor
@@ -278,17 +283,22 @@ cdef class Ame:
             if os.path.isdir(os.path.join(base_path, name)) and not name.startswith('.'):
                 self._boards[name] = Board(self._base_path, name, self._executor)
 
-    cpdef Board get_board(self, str name):
+    def get_board(self, str name):
+        name = "".join([c for c in name if c.isalnum() or c in "-_"])
         with self._boards_lock:
             return self._boards.get(name)
 
-    cpdef Board create_board(self, str name):
+    def create_board(self, str name):
+        name = "".join([c for c in name if c.isalnum() or c in "-_"])
+        if not name:
+            raise ValueError("Invalid board name")
         with self._boards_lock:
             if name not in self._boards:
                 self._boards[name] = Board(self._base_path, name, self._executor)
             return self._boards[name]
 
-    cpdef void close_board(self, str name):
+    def close_board(self, str name):
+        name = "".join([c for c in name if c.isalnum() or c in "-_"])
         with self._boards_lock:
             if name in self._boards:
                 self._boards[name].close()
