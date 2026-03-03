@@ -167,14 +167,17 @@ cdef class Board:
     cdef uint64_t _create_post(self, int last_modified, int creation_date, int last_bumped, bint closed, int sticky, str tags, str subject, str options, uint64_t root, str author, str signature, str content):
         cdef object post_num_obj
         cdef uint64_t post_num
-        with self._db.open() as ctx:
-            post_num_obj = ctx.insert_record(self._table, (
-                last_modified, creation_date, last_bumped, closed, sticky, tags, subject, options, root, author, signature
-            ), columns=['last_modified', 'creation_date', 'last_bumped', 'closed', 'sticky', 'tags', 'subject', 'options', 'root', 'author', 'signature'])
+        try:
+            with self._db.open() as ctx:
+                post_num_obj = ctx.insert_record(self._table, (
+                    last_modified, creation_date, last_bumped, closed, sticky, tags, subject, options, root, author, signature
+                ), columns=['last_modified', 'creation_date', 'last_bumped', 'closed', 'sticky', 'tags', 'subject', 'options', 'root', 'author', 'signature'])
 
-        post_num = post_num_obj
-        self._write_content(post_num, content)
-        return post_num
+            post_num = post_num_obj
+            self._write_content(post_num, content)
+            return post_num
+        except Exception as e:
+            raise RuntimeError(f"Post creation failed: {e}")
 
     cdef bint _update_post(self, uint64_t post_num, dict fields):
         cdef list set_exprs = []
