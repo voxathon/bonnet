@@ -197,14 +197,20 @@ cdef class Board:
         cdef object v
         cdef bint has_db_fields = False
         cdef str content = None
+        cdef set allowed_fields = {
+            'last_modified', 'creation_date', 'last_bumped', 'closed',
+            'sticky', 'tags', 'subject', 'options', 'root', 'author', 'signature'
+        }
 
         for k, v in fields.items():
             if k == 'content':
                 content = v
-            else:
+            elif k in allowed_fields:
                 set_exprs.append(f"{k}=?")
                 values.append(v)
                 has_db_fields = True
+            else:
+                raise ValueError(f"Invalid field name: {k}")
 
         if has_db_fields:
             values.append(post_num)
@@ -228,12 +234,31 @@ cdef class Board:
         return AsyncResult(self._executor.submit(task))
 
     def query(self, str where=None, list values=None, str orderby=None, limit=None, bint include_content=False):
+        cdef set valid_columns = {
+            'post_num', 'last_modified', 'creation_date', 'last_bumped',
+            'closed', 'sticky', 'tags', 'subject', 'options', 'root', 'author', 'signature'
+        }
+        cdef set valid_directions = {'ASC', 'DESC'}
+
         if where:
-            where = where.replace(";", "")
+            # Strip dangerous characters that could break out of parameterized queries
+            if any(char in where for char in [';', '--', '/*', '*/', 'xp_', 'sp_']):
+                raise ValueError("Invalid characters in where clause")
+
         if orderby:
-            orderby = orderby.replace(";", "")
+            # Validate orderby format: only allow "column" or "column ASC/DESC"
+            parts = orderby.strip().split()
+            if len(parts) == 0 or len(parts) > 2:
+                raise ValueError("Invalid orderby format")
+            if parts[0] not in valid_columns:
+                raise ValueError(f"Invalid column in orderby: {parts[0]}")
+            if len(parts) == 2 and parts[1].upper() not in valid_directions:
+                raise ValueError(f"Invalid direction in orderby: {parts[1]}")
+
         if limit is not None:
             limit = int(limit)
+            if limit < 0:
+                raise ValueError("Limit must be non-negative")
 
         def task():
             return self._query_posts(where, values, orderby, limit, include_content)
