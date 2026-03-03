@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, Future
 import threading
 import os
 import time
-from libc.stdint cimport uint64_t
+from libc.stdint cimport uint64_t, int64_t
 from orm import Database, Table
 
 cdef class AsyncResult:
@@ -42,9 +42,9 @@ cdef class AsyncResult:
 
 cdef class Post:
     cdef public uint64_t post_num
-    cdef public int last_modified
-    cdef public int creation_date
-    cdef public int last_bumped
+    cdef public int64_t last_modified
+    cdef public int64_t creation_date
+    cdef public int64_t last_bumped
     cdef public bint closed
     cdef public int sticky
     cdef public str tags
@@ -123,6 +123,12 @@ cdef class Board:
             id_cols=['post_num']
         )
 
+
+    cpdef void close(self):
+        # We use short-lived contexts for database connections, so there is no
+        # persistent DB connection to close here, but this method allows for future cleanup.
+        pass
+
     cdef str _read_content(self, uint64_t post_num):
         cdef str file_path = os.path.join(self._articles_path, str(post_num))
         if os.path.exists(file_path):
@@ -164,7 +170,7 @@ cdef class Board:
                 p.content = self._read_content(p.post_num)
         return final_posts
 
-    cdef uint64_t _create_post(self, int last_modified, int creation_date, int last_bumped, bint closed, int sticky, str tags, str subject, str options, uint64_t root, str author, str signature, str content):
+    cdef uint64_t _create_post(self, int64_t last_modified, int64_t creation_date, int64_t last_bumped, bint closed, int sticky, str tags, str subject, str options, uint64_t root, str author, str signature, str content):
         cdef object post_num_obj
         cdef uint64_t post_num
         try:
@@ -228,7 +234,7 @@ cdef class Board:
             return self._query_posts(where, values, orderby, limit, include_content)
         return AsyncResult(self._executor.submit(task))
 
-    def create_post(self, int last_modified=0, int creation_date=0, int last_bumped=0, bint closed=False, int sticky=0, str tags="", str subject="", str options="", uint64_t root=0, str author="", str signature="", str content=""):
+    def create_post(self, int64_t last_modified=0, int64_t creation_date=0, int64_t last_bumped=0, bint closed=False, int sticky=0, str tags="", str subject="", str options="", uint64_t root=0, str author="", str signature="", str content=""):
         if creation_date == 0:
             creation_date = int(time.time())
         if last_modified == 0:
@@ -270,12 +276,7 @@ cdef class Ame:
         # Load existing boards
         for name in os.listdir(base_path):
             if os.path.isdir(os.path.join(base_path, name)) and not name.startswith('.'):
-                try:
-                    self._boards[name] = Board(self._base_path, name, self._executor)
-                except Exception as e:
-                    # Log warning and continue loading other boards
-                    import logging
-                    logging.warning(f"Failed to load board '{name}': {e}")
+                self._boards[name] = Board(self._base_path, name, self._executor)
 
     cpdef Board get_board(self, str name):
         with self._boards_lock:
@@ -290,6 +291,7 @@ cdef class Ame:
     cpdef void close_board(self, str name):
         with self._boards_lock:
             if name in self._boards:
+                self._boards[name].close()
                 del self._boards[name]
 
     cpdef list list_boards(self):
@@ -298,4 +300,7 @@ cdef class Ame:
 
     cpdef void shutdown(self, bint wait=True):
         self._executor.shutdown(wait=wait)
-        self._boards.clear()
+        with self._boards_lock:
+            for board in self._boards.values():
+                board.close()
+            self._boards.clear()
