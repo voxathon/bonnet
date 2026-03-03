@@ -16,8 +16,10 @@ import functools
 from collections import namedtuple
 from collections.abc import Mapping
 
+__version__ = "0.1.0"
+
 __all__ = [
-    'Database', 'Schema', 'Table', 'DataSource', 'MemorySource',
+    '__version__', 'Database', 'Schema', 'Table', 'DataSource', 'MemorySource',
     'QueryBuilder', 'ExecutionContext', 'TableContext',
     'escape_like', 'head_like', 'tail_like', 'contain_like',
     'buckmode', 'normal_mode', 'with_ctx', 'to_obj', 'update_obj',
@@ -508,6 +510,7 @@ cdef class TableContext:
 
 
 cdef class ExecutionContext:
+    cdef dict __dict__
     cdef public object conn
     cdef public object cur
     cdef public object schema

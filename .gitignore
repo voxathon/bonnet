@@ -8,6 +8,8 @@ wheels/
 bin/
 instructions.md
 .ignore
+*.db
+*.py
 
 # Virtual environments
 .venv
