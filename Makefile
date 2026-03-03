@@ -18,7 +18,7 @@ LDFLAGS := -L$(PYTHON_LIBDIR) -lpython3.12 -Wl,-rpath,$(PYTHON_LIBDIR)
 
 .PHONY: all clean install
 
-all: $(BIN_DIR)/main
+all: $(BIN_DIR)/bonnet
 
 $(BUILD_DIR):
 	mkdir -p $@
@@ -26,7 +26,7 @@ $(BUILD_DIR):
 $(BIN_DIR):
 	mkdir -p $@
 
-$(BUILD_DIR)/main.c: $(SRC_DIR)/main.pyx | $(BUILD_DIR)
+$(BUILD_DIR)/bonnet.c: $(SRC_DIR)/bonnet.pyx | $(BUILD_DIR)
 	$(CYTHON) --embed -3 $< -o $@
 
 $(BUILD_DIR)/__init.c: $(SRC_DIR)/__init__.pyx | $(BUILD_DIR)
@@ -59,14 +59,14 @@ $(BUILD_DIR)/module3.so: $(BUILD_DIR)/module3.c
 $(BUILD_DIR)/orm.so: $(BUILD_DIR)/orm.c
 	$(CLANG) -shared -fPIC $(CFLAGS) $< -o $@
 
-$(BIN_DIR)/main: $(BUILD_DIR)/main.c $(BUILD_DIR)/module1.so $(BUILD_DIR)/module2.so $(BUILD_DIR)/module3.so $(BUILD_DIR)/orm.so $(BUILD_DIR)/__init.so | $(BIN_DIR)
-	$(CLANG) $(CFLAGS) $(BUILD_DIR)/main.c -o $@ $(LDFLAGS)
+$(BIN_DIR)/bonnet: $(BUILD_DIR)/bonnet.c $(BUILD_DIR)/module1.so $(BUILD_DIR)/module2.so $(BUILD_DIR)/module3.so $(BUILD_DIR)/orm.so $(BUILD_DIR)/__init.so | $(BIN_DIR)
+	$(CLANG) $(CFLAGS) $(BUILD_DIR)/bonnet.c -o $@ $(LDFLAGS)
 
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
 
 install: all
-	install -m 755 $(BIN_DIR)/main /usr/local/bin/bonnet
+	install -m 755 $(BIN_DIR)/bonnet /usr/local/bin/bonnet
 
 uv-build:
 	$(UV) run make all
