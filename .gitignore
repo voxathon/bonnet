@@ -11,6 +11,7 @@ instructions.md
 *.db
 *.py
 plan.md
+bonnet
 
 # Virtual environments
 .venv

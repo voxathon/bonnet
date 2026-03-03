@@ -114,7 +114,21 @@ cdef class Ume:
                 return User.decode(data)
         return None
 
-    cpdef User get(self, str username=None, uint64_t seq_numbr=0):
+    cdef size_t _find_record_by_publickey(self, bytes publickey):
+        cdef bytes target = publickey[:PUBLICKEY_SIZE].ljust(PUBLICKEY_SIZE, b'\x00')
+        cdef size_t pos = 0
+        cdef bytes data
+        with open(self._filepath, 'rb') as f:
+            while True:
+                data = f.read(RECORD_SIZE)
+                if len(data) < RECORD_SIZE:
+                    break
+                if data[USERNAME_SIZE + REGISTRAR_SIZE:USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE] == target:
+                    return pos
+                pos += 1
+        return -1
+
+    cpdef User get(self, str username=None, uint64_t seq_numbr=0, bytes publickey=None):
         cdef size_t pos
         if username is not None:
             pos = self._find_record_by_username(username)
@@ -124,7 +138,28 @@ cdef class Ume:
             pos = self._find_record_by_seq(seq_numbr)
             if pos != <size_t>-1:
                 return self._get_at_pos(pos)
+        elif publickey is not None:
+            pos = self._find_record_by_publickey(publickey)
+            if pos != <size_t>-1:
+                return self._get_at_pos(pos)
         return None
+
+    cpdef list get_all_by_publickey(self, bytes publickey):
+        cdef bytes target = publickey[:PUBLICKEY_SIZE].ljust(PUBLICKEY_SIZE, b'\x00')
+        cdef list users = []
+        cdef bytes data
+        cdef User user
+        with open(self._filepath, 'rb') as f:
+            while True:
+                data = f.read(RECORD_SIZE)
+                if len(data) < RECORD_SIZE:
+                    break
+                if data == b'\x00' * RECORD_SIZE:
+                    continue
+                if data[USERNAME_SIZE + REGISTRAR_SIZE:USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE] == target:
+                    user = User.decode(data)
+                    users.append(user)
+        return users
 
     cpdef User put(self, str username, str registrar, bytes publickey, bytes password):
         cdef size_t existing = self._find_record_by_username(username)
