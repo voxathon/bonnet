@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 bin/
+instructions.md
 
 # Virtual environments
 .venv
