@@ -3,6 +3,7 @@ import socket
 import hashlib
 import hmac
 import os
+import time
 import nacl.public
 import nacl.signing
 import nacl.bindings
@@ -41,8 +42,7 @@ def _unpack_header(data):
 
 def _xor_nonce(iv, seq):
     seq_bytes = struct.pack('>Q', seq)
-    nonce = bytes(a ^ b for a, b in zip(iv, seq_bytes))
-    return nonce
+    return iv[:4] + seq_bytes
 
 def _hkdf_extract(salt, ikm):
     if not salt:
@@ -62,6 +62,44 @@ def _hkdf_expand(prk, info, length):
 def _hkdf_derive(salt, ikm, info, length):
     prk = _hkdf_extract(salt, ikm)
     return _hkdf_expand(prk, info, length)
+
+
+cdef class MirroredUnit:
+    cdef public str subject_id
+    cdef public bytes pubkey
+    cdef public unsigned long long issued_at
+    cdef public unsigned long long expires_at
+    cdef public unsigned long long sequence
+    cdef public int status
+    cdef public bytes signature
+    cdef public bytes registrar_pubkey
+
+    def __init__(self, str subject_id, bytes pubkey, unsigned long long issued_at, unsigned long long expires_at, unsigned long long sequence, int status, bytes signature, bytes registrar_pubkey):
+        self.subject_id = subject_id
+        self.pubkey = pubkey
+        self.issued_at = issued_at
+        self.expires_at = expires_at
+        self.sequence = sequence
+        self.status = status
+        self.signature = signature
+        self.registrar_pubkey = registrar_pubkey
+
+    cpdef bytes payload(self):
+        cdef bytes subject_bytes = self.subject_id.encode('utf-8')
+        return struct.pack('>I', len(subject_bytes)) + subject_bytes +                self.pubkey +                struct.pack('>QQQI', self.issued_at, self.expires_at, self.sequence, self.status)
+
+    cpdef void verify(self, set allowlist):
+        if self.registrar_pubkey not in allowlist:
+            raise ValueError("Registrar not in allowlist")
+        if time.time() > self.expires_at:
+            raise ValueError("Mirrored unit expired")
+
+        cdef object verify_key = nacl.signing.VerifyKey(self.registrar_pubkey)
+        try:
+            verify_key.verify(self.payload(), self.signature)
+        except nacl.exceptions.BadSignature:
+            raise ValueError("Invalid signature")
+
 
 cdef class _Wire:
     cdef object sock
@@ -101,16 +139,16 @@ cdef class _RecordLayer:
         self.key = key
         self.iv = iv
 
-    cpdef bytes encrypt(self, bytes plaintext, unsigned long long seq):
+    cpdef bytes encrypt(self, bytes plaintext, unsigned long long seq, bytes aad=None):
         nonce = _xor_nonce(self.iv, seq)
         return nacl.bindings.crypto_aead_chacha20poly1305_ietf_encrypt(
-            plaintext, None, nonce, self.key
+            plaintext, aad, nonce, self.key
         )
 
-    cpdef bytes decrypt(self, bytes ciphertext, unsigned long long seq):
+    cpdef bytes decrypt(self, bytes ciphertext, unsigned long long seq, bytes aad=None):
         nonce = _xor_nonce(self.iv, seq)
         return nacl.bindings.crypto_aead_chacha20poly1305_ietf_decrypt(
-            ciphertext, None, nonce, self.key
+            ciphertext, aad, nonce, self.key
         )
 
 cdef class Session:
@@ -139,25 +177,37 @@ cdef class Session:
         if self._closed:
             raise ConnectionError("Session closed")
         ftype, flags, conn_id, seq, payload = self.wire.recv_frame()
+        cdef bytes aad = struct.pack('>HHBBQI', MAGIC, VERSION, ftype, flags, seq, len(payload))
+
         if ftype == FRAME_CLOSE:
             self._closed = 1
-            code = struct.unpack('>H', payload[:2])[0] if len(payload) >= 2 else 0
-            reason = payload[2:].decode('utf-8', errors='replace')
-            raise ConnectionError(f"Remote closed: {code} {reason}")
+            try:
+                plaintext = self.dec_layer.decrypt(payload, seq, aad)
+                code = struct.unpack('>H', plaintext[:2])[0] if len(plaintext) >= 2 else 0
+                reason = plaintext[2:].decode('utf-8', errors='replace')
+                raise ConnectionError(f"Remote closed: {code} {reason}")
+            except Exception as e:
+                raise ConnectionError(f"Remote closed: (decryption error: {e})")
         if ftype == FRAME_PING:
             self.send_pong(payload)
             return self.recv()
         if ftype != FRAME_APP_DATA:
             raise ValueError(f"Unexpected frame type: {ftype:#x}")
-        plaintext = self.dec_layer.decrypt(payload, seq)
+        plaintext = self.dec_layer.decrypt(payload, seq, aad)
         self.recv_seq += 1
         return plaintext
 
     cpdef void send(self, bytes data):
         if self._closed:
             raise ConnectionError("Session closed")
-        ciphertext = self.enc_layer.encrypt(data, self.send_seq)
-        self.wire.send_frame(FRAME_APP_DATA, 0, self.conn_id, self.send_seq, ciphertext)
+        cdef int ftype = FRAME_APP_DATA
+        cdef int flags = 0
+        cdef unsigned long long seq = self.send_seq
+        # plaintext length + AEAD_TAG (16)
+        cdef int payload_len = len(data) + AEAD_TAG
+        cdef bytes aad = struct.pack('>HHBBQI', MAGIC, VERSION, ftype, flags, seq, payload_len)
+        ciphertext = self.enc_layer.encrypt(data, seq, aad)
+        self.wire.send_frame(ftype, flags, self.conn_id, seq, ciphertext)
         self.send_seq += 1
 
     cdef void send_pong(self, bytes payload):
@@ -168,9 +218,14 @@ cdef class Session:
         if self._closed:
             return
         payload = struct.pack('>H', code) + reason.encode('utf-8')
+        cdef int ftype = FRAME_CLOSE
+        cdef int flags = 0
+        cdef unsigned long long seq = self.send_seq
+        cdef int payload_len = len(payload) + AEAD_TAG
+        cdef bytes aad = struct.pack('>HHBBQI', MAGIC, VERSION, ftype, flags, seq, payload_len)
         try:
-            ciphertext = self.enc_layer.encrypt(payload, self.send_seq)
-            self.wire.send_frame(FRAME_CLOSE, 0, self.conn_id, self.send_seq, ciphertext)
+            ciphertext = self.enc_layer.encrypt(payload, seq, aad)
+            self.wire.send_frame(ftype, flags, self.conn_id, seq, ciphertext)
         except:
             pass
         self._closed = 1
@@ -246,6 +301,12 @@ def connect(sock, client_identity, server_pinned=None, int port=2272):
         if server_id != bytes(server_pinned):
             raise ValueError("Server identity mismatch")
     
+    cdef object verify_key = nacl.signing.VerifyKey(server_id)
+    try:
+        verify_key.verify(transcript[:-(len(server_auth_payload)+HEADER_LEN)] + server_id, signature)
+    except nacl.exceptions.BadSignature:
+        raise ValueError("Server signature verification failed")
+
     server_eph_pub_obj = nacl.public.PublicKey(server_eph_pub)
     eph_shared = nacl.bindings.crypto_scalarmult(bytes(eph_priv), server_eph_pub)
     
@@ -254,16 +315,18 @@ def connect(sock, client_identity, server_pinned=None, int port=2272):
     ftype, flags, conn_id, seq, server_finished_payload = wire.recv_frame()
     if ftype != FRAME_SERVER_FINISHED:
         raise ValueError(f"Expected SERVER_FINISHED, got {ftype:#x}")
-    transcript += _pack_header(ftype, flags, conn_id, seq, len(server_finished_payload)) + server_finished_payload
     
     dec_layer = _RecordLayer(s_key, s_iv)
     enc_layer = _RecordLayer(c_key, c_iv)
     
-    mac_data = dec_layer.decrypt(server_finished_payload, seq)
+    cdef bytes aad_s_finished_recv = struct.pack('>HHBBQI', MAGIC, VERSION, ftype, flags, seq, len(server_finished_payload))
+    mac_data = dec_layer.decrypt(server_finished_payload, seq, aad_s_finished_recv)
     expected_mac = hashlib.sha256(finished_key + transcript).digest()
     if mac_data != expected_mac:
         raise ValueError("Server MAC verification failed")
     
+    transcript += _pack_header(ftype, flags, conn_id, seq, len(server_finished_payload)) + server_finished_payload
+
     client_id = bytes(client_identity.verify_key)
     sig_data = transcript + client_id
     signed = client_identity.sign(sig_data)
@@ -274,7 +337,8 @@ def connect(sock, client_identity, server_pinned=None, int port=2272):
     wire.send_frame(FRAME_CLIENT_AUTH, 0, conn_id, 0, client_auth_payload)
     
     client_mac = hashlib.sha256(finished_key + transcript).digest()
-    client_finished_payload = enc_layer.encrypt(client_mac, 0)
+    cdef bytes aad_c_finished = struct.pack('>HHBBQI', MAGIC, VERSION, FRAME_CLIENT_FINISHED, 0, 1, len(client_mac) + AEAD_TAG)
+    client_finished_payload = enc_layer.encrypt(client_mac, 1, aad_c_finished)
     transcript += _pack_header(FRAME_CLIENT_FINISHED, 0, conn_id, 1, len(client_finished_payload)) + client_finished_payload
     wire.send_frame(FRAME_CLIENT_FINISHED, 0, conn_id, 1, client_finished_payload)
     
@@ -330,9 +394,10 @@ def accept(sock, server_identity, client_pinned=None):
     dec_layer = _RecordLayer(c_key, c_iv)
     
     server_mac = hashlib.sha256(finished_key + transcript).digest()
-    server_finished_payload = enc_layer.encrypt(server_mac, 0)
-    wire.send_frame(FRAME_SERVER_FINISHED, 0, conn_id, 0, server_finished_payload)
+    cdef bytes aad_s_finished = struct.pack('>HHBBQI', MAGIC, VERSION, FRAME_SERVER_FINISHED, 0, 0, len(server_mac) + AEAD_TAG)
+    server_finished_payload = enc_layer.encrypt(server_mac, 0, aad_s_finished)
     transcript += _pack_header(FRAME_SERVER_FINISHED, 0, conn_id, 0, len(server_finished_payload)) + server_finished_payload
+    wire.send_frame(FRAME_SERVER_FINISHED, 0, conn_id, 0, server_finished_payload)
     
     ftype, flags, conn_id, seq, client_auth_payload = wire.recv_frame()
     if ftype != FRAME_CLIENT_AUTH:
@@ -360,13 +425,15 @@ def accept(sock, server_identity, client_pinned=None):
     ftype, flags, conn_id, seq, client_finished_payload = wire.recv_frame()
     if ftype != FRAME_CLIENT_FINISHED:
         raise ValueError(f"Expected CLIENT_FINISHED, got {ftype:#x}")
-    transcript += _pack_header(ftype, flags, conn_id, seq, len(client_finished_payload)) + client_finished_payload
     
-    client_mac = dec_layer.decrypt(client_finished_payload, seq)
+    cdef bytes aad_c_finished_recv = struct.pack('>HHBBQI', MAGIC, VERSION, ftype, flags, seq, len(client_finished_payload))
+    client_mac = dec_layer.decrypt(client_finished_payload, seq, aad_c_finished_recv)
     expected_mac = hashlib.sha256(finished_key + transcript).digest()
     if client_mac != expected_mac:
         raise ValueError("Client MAC verification failed")
     
+    transcript += _pack_header(ftype, flags, conn_id, seq, len(client_finished_payload)) + client_finished_payload
+
     c_app_key, c_app_iv, s_app_key, s_app_iv = _derive_app_keys(eph_shared, transcript)
     
     enc_layer = _RecordLayer(s_app_key, s_app_iv)
