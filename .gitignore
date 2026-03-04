@@ -12,6 +12,7 @@ instructions.md
 *.py
 plan.md
 bonnet
+*.md
 
 # Virtual environments
 .venv
