@@ -215,6 +215,9 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+# OpenSSL cache
+.cache/
+
 # PyPI configuration file
 .pypirc
 

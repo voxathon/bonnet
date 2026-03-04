@@ -10,8 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) or '.')
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'build'))
 
 from ume import Ume, User
-from iixp import accept, Session, FRAME_APP_DATA, FRAME_CLOSE
-import nacl.signing
+from tls import accept, Session, TLSError, Identity
 
 PORT_PRIVILEGED = 272
 PORT_STANDARD = 2272
@@ -52,9 +51,9 @@ cdef class BonnetServer:
         with open(identity_path, 'rb') as f:
             key_bytes = f.read()
         if len(key_bytes) == 32:
-            self.server_identity = nacl.signing.SigningKey(key_bytes)
+            self.server_identity = Identity.from_private_key(key_bytes)
         else:
-            self.server_identity = nacl.signing.SigningKey(key_bytes[:32])
+            self.server_identity = Identity.from_private_key(key_bytes[:32])
         
         self.listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -299,9 +298,9 @@ cdef class BonnetServer:
 cdef void load_or_generate_identity(str path):
     if os.path.exists(path):
         return
-    key = nacl.signing.SigningKey.generate()
+    key = Identity.generate()
     with open(path, 'wb') as f:
-        f.write(bytes(key))
+        f.write(bytes(key.private_key))
     os.chmod(path, 0o600)
 
 def main():
@@ -338,3 +337,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
