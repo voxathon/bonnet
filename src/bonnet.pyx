@@ -53,9 +53,7 @@ cdef class BonnetServer:
         if len(key_bytes) == 32:
             self.server_identity = Identity.from_private_key(key_bytes)
         else:
-            #self.server_identity = Identity.from_private_key(key_bytes[:32])
             raise ValueError("Identity file must contain exactly 32 bytes (Ed25519 private key)")
-            self.server_identity = Identity.from_private_key(key_bytes)
         
         self.listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
