@@ -1,301 +1,248 @@
-import sys
+# cython: language_level=3
+
+import asyncio
+import websockets
 import os
-import socket
-import selectors
 import struct
 import base64
 import argparse
+import time
 
+import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) or '.')
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'build'))
 
 from ume import Ume, User
-from tls import accept, Session, TLSError, Identity
+from crypto import Identity, EncryptedSession
+import nacl.exceptions
 
 PORT_PRIVILEGED = 272
 PORT_STANDARD = 2272
 
-cdef class ClientState:
-    cdef public int state
-    cdef public object session
-    cdef public bytes recv_buf
-    cdef public object user
-    cdef public list candidates
-    
-    def __init__(self, int state=0):
-        self.state = state
-        self.session = None
-        self.recv_buf = b''
-        self.user = None
-        self.candidates = None
-    
-    STATE_HANDSHAKE = 0
-    STATE_IDENTITY_WAIT = 1
-    STATE_READY = 2
-    STATE_CLOSING = 3
+cdef int CHALLENGE_SIZE = 32
+cdef int NONCE_SIZE = 24
 
 cdef class BonnetServer:
-    cdef object selector
-    cdef object listen_sock
+    cdef str userfile_path
     cdef object ume
     cdef object server_identity
-    cdef dict clients
-    cdef int running
     
-    def __init__(self, str userfile_path, str identity_path, int port):
-        self.selector = selectors.DefaultSelector()
+    def __init__(self, str userfile_path, str identity_path):
+        self.userfile_path = userfile_path
         self.ume = Ume(userfile_path)
-        self.clients = {}
-        self.running = 1
-        
         with open(identity_path, 'rb') as f:
             key_bytes = f.read()
-        if len(key_bytes) == 32:
-            self.server_identity = Identity.from_private_key(key_bytes)
-        else:
-            raise ValueError("Identity file must contain exactly 32 bytes (Ed25519 private key)")
-        
-        self.listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.listen_sock.setblocking(False)
-        self.listen_sock.bind(('0.0.0.0', port))
-        self.listen_sock.listen(128)
-        self.selector.register(self.listen_sock, selectors.EVENT_READ, None)
+        self.server_identity = Identity.from_private_key(key_bytes)
     
-    cdef void run(self):
-        while self.running:
-            events = self.selector.select(timeout=1.0)
-            for key, mask in events:
-                if key.data is None:
-                    self._accept_connection()
-                else:
-                    self._handle_client(key.fileobj, key.data, mask)
-    
-    cdef void _accept_connection(self):
-        cdef object client_sock, addr
-        cdef ClientState state
-        try:
-            client_sock, addr = self.listen_sock.accept()
-            client_sock.setblocking(False)
-            state = ClientState(ClientState.STATE_HANDSHAKE)
-            self.selector.register(client_sock, selectors.EVENT_READ, state)
-            self.clients[client_sock.fileno()] = (client_sock, state)
-        except BlockingIOError:
-            pass
-        except Exception as e:
-            pass
-    
-    cdef void _handle_client(self, object sock, ClientState state, int mask):
-        if state.state == ClientState.STATE_HANDSHAKE:
-            self._handle_handshake(sock, state)
-        elif state.state == ClientState.STATE_IDENTITY_WAIT:
-            if mask & selectors.EVENT_READ:
-                self._handle_identity_wait(sock, state)
-        elif state.state == ClientState.STATE_READY:
-            if mask & selectors.EVENT_READ:
-                self._handle_request(sock, state)
-    
-    cdef void _handle_handshake(self, object sock, ClientState state):
-        cdef object session
+    async def handle_connection(self, websocket):
+        cdef bytes challenge, client_pubkey, signature
         cdef list users
-        cdef bytes client_id
-        cdef str names
+        cdef object selected_user
+        cdef object session
+
         try:
-            sock.setblocking(True)
-            session = accept(sock, self.server_identity, None)
-            sock.setblocking(False)
+            # Phase 1: Challenge
+            challenge = os.urandom(CHALLENGE_SIZE)
+            await websocket.send(struct.pack('>I', len(challenge)) + challenge)
+
+            # Phase 2: Verify signature
+            handshake_frame = await self._recv_frame(websocket)
+            client_pubkey = handshake_frame[:32]
+            signature = handshake_frame[32:96]
             
-            client_id = session.peer_identity
-            users = self.ume.get_all_by_publickey(client_id)
+            if not Identity.verify(client_pubkey, challenge, signature):
+                await self._send_error(websocket, 401, "Invalid signature", None)
+                return
             
+            # Phase 3: Lookup user
+            users = self.ume.get_all_by_publickey(client_pubkey)
             if len(users) == 0:
-                session.close(401, "Unauthorized: unknown identity")
-                self._cleanup_client(sock, state)
+                await self._send_error(websocket, 404, "Unknown identity", None)
                 return
             
-            state.session = session
+            # Phase 4: Establish encrypted session
+            session = EncryptedSession(
+                self.server_identity.private_key,
+                client_pubkey
+            )
             
+            # Phase 5: Handle multi-username or single
             if len(users) == 1:
-                state.user = users[0]
-                state.state = ClientState.STATE_READY
-                session.send(b"OK 200 Welcome\n")
+                selected_user = users[0]
             else:
-                state.candidates = users
-                state.state = ClientState.STATE_IDENTITY_WAIT
-                names = ','.join(u.username for u in users)
-                session.send(f"IDENTITY_REQUIRED {names}\n".encode('utf-8'))
-        except Exception as e:
-            self._cleanup_client(sock, state)
-    
-    cdef void _handle_identity_wait(self, object sock, ClientState state):
-        cdef bytes data
-        cdef str cmd_line
-        cdef list parts
-        cdef str username
-        cdef object user
-        try:
-            data = state.session.recv()
-            if not data:
-                self._cleanup_client(sock, state)
-                return
-            
-            cmd_line = data.decode('utf-8').strip()
-            parts = cmd_line.split(None, 1)
-            
-            if len(parts) != 2 or parts[0].upper() != "IDENTITY":
-                state.session.send(b"ERR 400 Expected IDENTITY <username>\n")
-                return
-            
-            username = parts[1]
-            for user in state.candidates:
-                if user.username == username:
-                    state.user = user
-                    state.state = ClientState.STATE_READY
-                    state.session.send(b"OK 200 Welcome\n")
+                selected_user = await self._select_username(websocket, session, users)
+                if selected_user is None:
                     return
             
-            state.session.send(b"ERR 403 Username not valid for your identity\n")
-        except ConnectionError:
-            self._cleanup_client(sock, state)
-        except Exception as e:
-            try:
-                state.session.send(f"ERR 500 Internal error: {e}\n".encode('utf-8'))
-            except Exception:
-                self._cleanup_client(sock, state)
-    
-    cdef void _handle_request(self, object sock, ClientState state):
-        cdef bytes data
-        cdef str cmd_line
-        cdef list parts
-        cdef str response
-        try:
-            data = state.session.recv()
-            if not data:
-                self._cleanup_client(sock, state)
-                return
+            # Phase 6: Process request
+            while True:
+                try:
+                    await self._handle_request(websocket, session, selected_user)
+                except websockets.exceptions.ConnectionClosed:
+                    break
             
-            cmd_line = data.decode('utf-8').strip()
-            response = self._dispatch_command(cmd_line, state.session.peer_identity)
-            state.session.send(response.encode('utf-8'))
-        except ConnectionError:
-            self._cleanup_client(sock, state)
+        except nacl.exceptions.CryptoError:
+            await self._send_error(websocket, 400, "Decryption failed", session)
         except Exception as e:
             try:
-                state.session.send(f"ERR 500 Internal error: {e}".encode('utf-8'))
+                await self._send_error(websocket, 500, str(e), session)
+            except:
+                pass
+    
+    async def _select_username(self, websocket, session, users):
+        username_list = ','.join(u.username for u in users)
+        encrypted = session.encrypt(username_list.encode('utf-8'))
+        await self._send_frame(websocket, encrypted)
+        
+        encrypted_response = await self._recv_frame(websocket)
+        selected = session.decrypt(encrypted_response).decode('utf-8')
+        
+        for user in users:
+            if user.username == selected:
+                return user
+        return None
+    
+    async def _handle_request(self, websocket, session, user):
+        encrypted_request = await self._recv_frame(websocket)
+        plaintext = session.decrypt(encrypted_request)
+        response = self._dispatch_command(plaintext, user)
+        encrypted_response = session.encrypt(response)
+        await self._send_frame(websocket, encrypted_response)
+    
+    async def _send_frame(self, websocket, bytes data):
+        await websocket.send(struct.pack('>I', len(data)) + data)
+    
+    async def _recv_frame(self, websocket):
+        data = await websocket.recv()
+        if isinstance(data, bytes):
+            length = struct.unpack('>I', data[:4])[0]
+            if len(data) - 4 != length:
+                pass
+            return data[4:4+length]
+        raise ValueError("Expected binary frame")
+
+    async def _send_error(self, websocket, code, message, session):
+        # Format ERROR response: [0x01][code(2)][msg_len(1)][message]
+        msg_bytes = message.encode('utf-8')
+        payload = struct.pack('>BHB', 0x01, code, len(msg_bytes)) + msg_bytes
+        
+        if session is not None:
+            try:
+                encrypted = session.encrypt(payload)
+                await self._send_frame(websocket, encrypted)
             except Exception:
-                self._cleanup_client(sock, state)
-    
-    cdef str _dispatch_command(self, str cmd_line, bytes client_id):
-        cdef list parts = cmd_line.split(None, 4)
-        cdef str cmd
-        if not parts:
-            return "ERR 400 Bad Request: empty command"
-        
-        cmd = parts[0].upper()
-        
-        if cmd == "IDENTITY":
-            return "OK 200 (ignored)\n"
-        elif cmd == "REGISTER":
-            return self._cmd_register(parts, client_id)
-        elif cmd == "GET":
-            return self._cmd_get(parts)
-        elif cmd == "LIST":
-            return self._cmd_list(parts)
+                pass
         else:
-            return f"ERR 400 Bad Request: unknown command '{cmd}'"
+            try:
+                await self._send_frame(websocket, payload)
+            except Exception:
+                pass
+
+    cdef bytes _dispatch_command(self, bytes request, object user):
+        cdef int cmd
+        if len(request) == 0:
+            return self._build_error(400, "Empty request")
+
+        cmd = request[0]
+        data = request[1:]
+        
+        if cmd == 0x01:
+            return self._cmd_register(data, user)
+        elif cmd == 0x02:
+            return self._cmd_get(data)
+        elif cmd == 0x03:
+            return self._cmd_list(data)
+        else:
+            return self._build_error(400, f"Unknown command {cmd}")
+
+    cdef bytes _build_error(self, int code, str message):
+        msg_bytes = message.encode('utf-8')
+        return struct.pack('>BHB', 0x01, code, len(msg_bytes)) + msg_bytes
     
-    cdef str _cmd_register(self, list parts, bytes client_id):
-        cdef str username, registrar, pubkey_b64, pass_b64
-        cdef bytes publickey, password
-        cdef object user
-        
-        if len(parts) != 5:
-            return "ERR 400 Bad Request: REGISTER <username> <registrar> <pubkey_b64> <pass_b64>"
-        
-        username, registrar, pubkey_b64, pass_b64 = parts[1], parts[2], parts[3], parts[4]
-        
+    cdef bytes _cmd_register(self, bytes data, object registrar_user):
+        cdef int idx = 0
+        cdef int u_len, r_len, p_len
+        cdef str username, registrar
+        cdef bytes pubkey, password
+
         try:
-            publickey = base64.b64decode(pubkey_b64, validate=True)
-            password = base64.b64decode(pass_b64, validate=True)
-        except Exception:
-            return "ERR 400 Bad Request: invalid base64 encoding"
-        
-        if len(publickey) != 32:
-            return "ERR 400 Bad Request: publickey must be 32 bytes (Ed25519)"
-        
-        try:
-            user = self.ume.put(username, registrar, publickey, password)
-            return f"OK 201 Created {user.username} seq={user.seq_numbr}"
-        except ValueError as e:
-            return f"ERR 409 Conflict: {e}"
-    
-    cdef str _cmd_get(self, list parts):
+            u_len = data[idx]
+            idx += 1
+            username = data[idx:idx+u_len].decode('utf-8')
+            idx += u_len
+
+            r_len = data[idx]
+            idx += 1
+            registrar = data[idx:idx+r_len].decode('utf-8')
+            idx += r_len
+
+            pubkey = data[idx:idx+32]
+            idx += 32
+
+            p_len = data[idx]
+            idx += 1
+            password = data[idx:idx+p_len]
+            idx += p_len
+
+            import re
+            invalid_chars = re.compile(r'[@<>:"/\\|?*]')
+            if invalid_chars.search(username):
+                return self._build_error(400, "Username contains invalid characters")
+
+            user = self.ume.put(username, registrar, pubkey, password)
+
+            # Format OK Response for REGISTER
+            # Let's say OK is [0x00][user.username.encode()]
+            u_bytes = user.username.encode('utf-8')
+            return struct.pack('>B', 0x00) + u_bytes
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_get(self, bytes data):
+        cdef int u_len
         cdef str username
         cdef object user
-        
-        if len(parts) != 2:
-            return "ERR 400 Bad Request: GET <username>"
-        
-        username = parts[1]
-        user = self.ume.get(username=username)
-        
-        if user is None:
-            return f"ERR 404 Not Found: user '{username}'"
-        
-        pubkey_b64 = base64.b64encode(user.publickey).decode('ascii')
-        pass_b64 = base64.b64encode(user.password).decode('ascii')
-        return f"OK {user.username} {user.registrar} {pubkey_b64} {pass_b64} seq={user.seq_numbr}"
-    
-    cdef str _cmd_list(self, list parts):
-        cdef list users
-        cdef object user
-        cdef list lines
-        cdef int offset, limit
-        
-        offset = 0
-        limit = 100
-        
-        if len(parts) >= 2:
-            try:
-                offset = int(parts[1])
-            except (ValueError, IndexError):
-                pass
-        if len(parts) >= 3:
-            try:
-                limit = int(parts[2])
-            except (ValueError, IndexError):
-                pass
-        
-        users = self.ume.list_all()
-        lines = []
-        for user in users[offset:offset + limit]:
-            pubkey_b64 = base64.b64encode(user.publickey).decode('ascii')
-            lines.append(f"{user.username} {user.registrar} {pubkey_b64} seq={user.seq_numbr}")
-        
-        return f"OK {len(users)} users\n" + "\n".join(lines)
-    
-    cdef void _cleanup_client(self, object sock, ClientState state):
-        cdef int fd = sock.fileno()
-        try:
-            self.selector.unregister(sock)
-        except Exception:
-            pass
-        try:
-            sock.close()
-        except Exception:
-            pass
-        if fd in self.clients:
-            del self.clients[fd]
-    
-    cpdef void shutdown(self):
-        self.running = 0
-        try:
-            self.listen_sock.close()
-        except Exception:
-            pass
-        self.selector.close()
 
-cdef void load_or_generate_identity(str path):
+        try:
+            u_len = data[0]
+            username = data[1:1+u_len].decode('utf-8')
+
+            user = self.ume.get(username=username)
+            if user is None:
+                return self._build_error(404, f"User {username} not found")
+
+            # OK Response GET: [0x00][pubkey(32)][r_len(1)][registrar_bytes]
+            r_bytes = user.registrar.encode('utf-8')
+            return struct.pack('>B', 0x00) + user.publickey + struct.pack('>B', len(r_bytes)) + r_bytes
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+    
+    cdef bytes _cmd_list(self, bytes data):
+        cdef int offset, limit
+        cdef list users, lines
+        cdef object user
+
+        try:
+            if len(data) >= 8:
+                offset, limit = struct.unpack('>II', data[:8])
+            else:
+                offset = 0
+                limit = 100
+
+            users = self.ume.list_all()
+            page = users[offset:offset+limit]
+
+            # Pack usernames separated by commas, or zero-terminated string?
+            # Comma separated string for simplicity
+            u_list = ",".join(u.username for u in page).encode('utf-8')
+            return struct.pack('>B', 0x00) + u_list
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+def load_or_generate_identity(str path):
     if os.path.exists(path):
         return
     key = Identity.generate()
@@ -303,18 +250,21 @@ cdef void load_or_generate_identity(str path):
         f.write(bytes(key.private_key))
     os.chmod(path, 0o600)
 
-def main():
+async def main_async():
     cdef str config_dir, default_userfile, default_identity
+    cdef BonnetServer server
     
     config_dir = os.path.expanduser('~/.config/bonnet')
     default_userfile = os.path.join(config_dir, 'userfile')
     default_identity = os.path.join(config_dir, 'identity')
     
     parser = argparse.ArgumentParser(description='Bonnet Server')
-    parser.add_argument('userfile', nargs='?', default=default_userfile, help='Path to userfile (default: ~/.config/bonnet/userfile)')
-    parser.add_argument('identity', nargs='?', default=default_identity, help='Path to server Ed25519 private key (default: ~/.config/bonnet/identity)')
-    parser.add_argument('--port', type=int, default=PORT_STANDARD, help='Port to listen on (default: 2272)')
-    parser.add_argument('--privileged', action='store_true', help='Use privileged port 272')
+    parser.add_argument('userfile', nargs='?', default=default_userfile)
+    parser.add_argument('identity', nargs='?', default=default_identity)
+    parser.add_argument('--port', type=int, default=PORT_STANDARD)
+    parser.add_argument('--privileged', action='store_true')
+    parser.add_argument('--cert', help='TLS certificate path')
+    parser.add_argument('--key', help='TLS private key path')
     args = parser.parse_args()
     
     os.makedirs(config_dir, exist_ok=True)
@@ -325,16 +275,25 @@ def main():
     port = PORT_PRIVILEGED if args.privileged else args.port
     load_or_generate_identity(args.identity)
     
-    server = BonnetServer(args.userfile, args.identity, port)
-    print(f"Bonnet server listening on port {port}")
+    server = BonnetServer(args.userfile, args.identity)
     
-    try:
-        server.run()
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-    finally:
-        server.shutdown()
+    ssl_context = None
+    if args.cert and args.key:
+        import ssl
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(args.cert, args.key)
+
+    async with websockets.serve(
+        server.handle_connection,
+        '0.0.0.0',
+        port,
+        ssl=ssl_context
+    ):
+        print(f"Bonnet server listening on port {port}")
+        await asyncio.Future()  # Run forever
+
+def main():
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
-
