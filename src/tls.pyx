@@ -2,6 +2,7 @@
 
 import socket
 import os
+import time
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.string cimport memcpy
 
@@ -50,6 +51,8 @@ cdef extern from "openssl/ssl.h":
     int SSL_do_handshake(SSL *ssl)
     int SSL_is_init_finished(SSL *ssl)
     int SSL_get_error(SSL *ssl, int ret)
+    void SSL_set_connect_state(SSL *ssl)
+    void SSL_set_accept_state(SSL *ssl)
 
     int SSL_ERROR_NONE
     int SSL_ERROR_ZERO_RETURN
@@ -60,6 +63,7 @@ cdef extern from "openssl/ssl.h":
     int SSL_read(SSL *ssl, void *buf, int num)
     int SSL_write(SSL *ssl, const void *buf, int num)
     int SSL_pending(const SSL *ssl)
+    int SSL_shutdown(SSL *ssl)
 
     int SSL_set_verify(SSL *ssl, int mode, void *callback)
     int SSL_VERIFY_PEER
@@ -133,13 +137,19 @@ cdef SSL_CTX *_create_context(bint is_server) except NULL:
         raise MemoryError("Failed to create SSL_CTX")
     
     # TLS 1.3 only
-    SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION)
+    if SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION) != 1:
+        SSL_CTX_free(ctx)
+        raise TLSError("Failed to enforce TLS 1.3 minimum", 0, _get_openssl_error())
     
     # RPK only, no X.509
     cdef unsigned char cert_types[1]
     cert_types[0] = <unsigned char>TLSEXT_cert_type_rpk
-    SSL_CTX_set1_server_cert_type(ctx, cert_types, 1)
-    SSL_CTX_set1_client_cert_type(ctx, cert_types, 1)
+    if SSL_CTX_set1_server_cert_type(ctx, cert_types, 1) != 1:
+        SSL_CTX_free(ctx)
+        raise TLSError("Failed to set server cert type to RPK", 0, _get_openssl_error())
+    if SSL_CTX_set1_client_cert_type(ctx, cert_types, 1) != 1:
+        SSL_CTX_free(ctx)
+        raise TLSError("Failed to set client cert type to RPK", 0, _get_openssl_error())
     
     return ctx
 
@@ -249,12 +259,12 @@ cdef class Session:
             
             # Need more data from socket
             try:
-                net_len = self._sock.recv_into(net_buf, 8192)
+                data = self._sock.recv(8192)
             except BlockingIOError:
                 return b""
-            if net_len <= 0:
+            if not data:
                 return b""  # Connection closed
-            BIO_write(self._net_bio, net_buf, net_len)
+            BIO_write(self._net_bio, <const unsigned char*>data, len(data))
         
         # Read decrypted data
         cdef char app_buf[16384]
@@ -291,18 +301,30 @@ cdef class Session:
                 self._sock.sendall(PyBytes_FromStringAndSize(net_buf, net_len))
 
     def close(self, int code=0, str reason=""):
-        # Not fully implementing close notify for simplicity, but could SSL_shutdown
+        cdef char buf[8192]
+        cdef int buflen, ret
+        cdef size_t pending
+
+        # Send close_notify
+        if self._ssl:
+            SSL_shutdown(self._ssl)
+            # Drain any remaining data to send
+            pending = BIO_ctrl_pending(self._net_bio)
+            if pending > 0:
+                buflen = BIO_read(self._net_bio, buf, 8192 if pending > 8192 else <int>pending)
+                if buflen > 0:
+                    try:
+                        self._sock.sendall(PyBytes_FromStringAndSize(buf, buflen))
+                    except Exception:
+                        pass
+
         try:
             self._sock.close()
-        except:
+        except Exception:
             pass
 
     @property
     def peer_identity(self) -> bytes:
-        return self._peer_identity
-    
-    @property
-    def client_identity(self) -> bytes:
         return self._peer_identity
 
 cdef Session _create_session(SSL *ssl, BIO *net_bio, object sock, bytes peer_identity):
@@ -325,6 +347,11 @@ cdef Session _do_handshake(
     cdef char buf[8192]
     cdef int buflen
     
+    if is_server:
+        SSL_set_accept_state(ssl)
+    else:
+        SSL_set_connect_state(ssl)
+    
     while not SSL_is_init_finished(ssl):
         ret = SSL_do_handshake(ssl)
         if ret <= 0:
@@ -333,13 +360,14 @@ cdef Session _do_handshake(
             if err == SSL_ERROR_WANT_READ:
                 # Need data from network
                 try:
-                    buflen = sock.recv_into(buf, 8192)
+                    data = sock.recv(8192)
                 except BlockingIOError:
                     # In a real async framework we'd yield here
+                    time.sleep(0.001)
                     continue
-                if buflen <= 0:
+                if not data:
                     raise HandshakeError("Connection closed during handshake")
-                BIO_write(net_bio, buf, buflen)
+                BIO_write(net_bio, <const unsigned char*>data, len(data))
                 
             elif err == SSL_ERROR_WANT_WRITE:
                 pass # Handled below
