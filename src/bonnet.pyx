@@ -140,7 +140,6 @@ cdef class BonnetServer:
 
     cdef bytes _dispatch_command(self, bytes request, object user):
         cdef int cmd
-        cdef bytes data
         if len(request) == 0:
             return self._build_error(400, "Empty request")
 
@@ -165,8 +164,6 @@ cdef class BonnetServer:
         cdef int u_len, r_len, p_len
         cdef str username, registrar
         cdef bytes pubkey, password
-        cdef object user
-        cdef bytes u_bytes
 
         try:
             u_len = data[idx]
@@ -187,6 +184,14 @@ cdef class BonnetServer:
             password = data[idx:idx+p_len]
             idx += p_len
 
+            if "@" not in username:
+                return self._build_error(400, "Username must contain @homeserver.sex")
+
+            import re
+            invalid_chars = re.compile(r'[@<>:"/\\|?*]')
+            if invalid_chars.search(username.split('@')[0]):
+                return self._build_error(400, "Username contains invalid characters")
+
             user = self.ume.put(username, registrar, pubkey, password)
 
             # Format OK Response for REGISTER
@@ -201,7 +206,6 @@ cdef class BonnetServer:
         cdef int u_len
         cdef str username
         cdef object user
-        cdef bytes r_bytes
 
         try:
             u_len = data[0]
@@ -220,9 +224,8 @@ cdef class BonnetServer:
     
     cdef bytes _cmd_list(self, bytes data):
         cdef int offset, limit
-        cdef list users
-        cdef list page
-        cdef bytes u_list
+        cdef list users, lines
+        cdef object user
 
         try:
             if len(data) >= 8:
