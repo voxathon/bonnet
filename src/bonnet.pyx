@@ -140,9 +140,10 @@ cdef class BonnetServer:
 
     cdef bytes _dispatch_command(self, bytes request, object user):
         cdef int cmd
+        cdef bytes data
         if len(request) == 0:
             return self._build_error(400, "Empty request")
-        
+
         cmd = request[0]
         data = request[1:]
         
@@ -164,6 +165,8 @@ cdef class BonnetServer:
         cdef int u_len, r_len, p_len
         cdef str username, registrar
         cdef bytes pubkey, password
+        cdef object user
+        cdef bytes u_bytes
 
         try:
             u_len = data[idx]
@@ -198,6 +201,7 @@ cdef class BonnetServer:
         cdef int u_len
         cdef str username
         cdef object user
+        cdef bytes r_bytes
 
         try:
             u_len = data[0]
@@ -216,8 +220,9 @@ cdef class BonnetServer:
     
     cdef bytes _cmd_list(self, bytes data):
         cdef int offset, limit
-        cdef list users, lines
-        cdef object user
+        cdef list users
+        cdef list page
+        cdef bytes u_list
 
         try:
             if len(data) >= 8:
