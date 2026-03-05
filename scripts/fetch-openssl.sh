@@ -66,9 +66,6 @@ extract_deb() {
         fi
     )
 }
-        fi
-     )
-}
 
 download_and_verify "$LIBSSL_DEV_DEB" "$LIBSSL_DEV_SHA256"
 download_and_verify "$LIBSSL_DEB" "$LIBSSL_SHA256"
