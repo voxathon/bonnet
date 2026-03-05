@@ -50,7 +50,9 @@ download_and_verify() {
 }
 
 extract_deb() {
-     (
+    local deb_file="$1"
+    local output_dir="$2"
+    (
         cd "$TMPDIR"
         rm -f data.tar.* control.tar.* debian-binary
         ar x "$deb_file"
@@ -59,8 +61,11 @@ extract_deb() {
         elif [ -f data.tar.zst ]; then
             tar -xf data.tar.zst -C "$output_dir"
         else
-            echo "Error: Could not extract .deb file (unsupported compression" >&2
+            echo "Error: Could not extract .deb file (unsupported compression)" >&2
             exit 1
+        fi
+    )
+}
         fi
      )
 }
