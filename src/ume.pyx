@@ -224,7 +224,7 @@ cdef class Ume:
                 pass
         return users
 
-    cpdef User put(self, str username, str registrar, bytes publickey, bytes password):
+    cpdef User put(self, str username, str registrar, bytes publickey, bytes password=None):
         cdef size_t existing
         cdef bytes salt, password_hash
         cdef User user
@@ -236,8 +236,15 @@ cdef class Ume:
             existing = self._find_record_by_username(username)
             if existing != <size_t>-1:
                 raise ValueError(f"User '{username}' already exists")
-            salt = _generate_salt()
-            password_hash = _hash_password(password, salt)
+            
+            if password is not None:
+                salt = _generate_salt()
+                password_hash = _hash_password(password, salt)
+            else:
+                # Reserved for future HTTP use - zeroed fields
+                salt = b'\x00' * SALT_SIZE
+                password_hash = b'\x00' * HASH_SIZE
+            
             user = User(username, registrar, publickey, password_hash, salt, self._next_seq)
             self._next_seq += 1
             try:
