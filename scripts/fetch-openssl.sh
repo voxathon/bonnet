@@ -50,17 +50,19 @@ download_and_verify() {
 }
 
 extract_deb() {
-    local deb_file="$1"
-    local output_dir="$2"
-
-    echo "Extracting ${deb_file}..."
-
-    cd "$TMPDIR"
-    ar x "$deb_file"
-    tar -xf data.tar.xz -C "$output_dir" 2>/dev/null || tar -xf data.tar.zst -C "$output_dir" 2>/dev/null || {
-        echo "Error: Could not extract .deb file (unsupported compression)" >&2
-        exit 1
-    }
+     (
+        cd "$TMPDIR"
+        rm -f data.tar.* control.tar.* debian-binary
+        ar x "$deb_file"
+        if [ -f data.tar.xz ]; then
+            tar -xf data.tar.xz -C "$output_dir"
+        elif [ -f data.tar.zst ]; then
+            tar -xf data.tar.zst -C "$output_dir"
+        else
+            echo "Error: Could not extract .deb file (unsupported compression" >&2
+            exit 1
+        fi
+     )
 }
 
 download_and_verify "$LIBSSL_DEV_DEB" "$LIBSSL_DEV_SHA256"

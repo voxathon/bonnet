@@ -7,4 +7,4 @@ LIBSSL_DEV_SHA256=c11a307de554227fb6fe5ed35cd4ee9ec4e25cd978a0d6e5ebddaa5f5ba98a
 LIBSSL_DEB=libssl3t64_3.4.1-1ubuntu3_amd64.deb
 LIBSSL_SHA256=e7955dc73771755405b2bb00678830dba60b6c1af388a43273559677e51cea23
 
-UBUNTU_MIRROR=http://archive.ubuntu.com/ubuntu
+UBUNTU_MIRROR=https://archive.ubuntu.com/ubuntu
