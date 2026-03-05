@@ -10,8 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) or '.')
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'build'))
 
 from ume import Ume, User
-from iixp import accept, Session, FRAME_APP_DATA, FRAME_CLOSE
-import nacl.signing
+from tls import accept, Session, TLSError, Identity
 
 PORT_PRIVILEGED = 272
 PORT_STANDARD = 2272
@@ -52,9 +51,9 @@ cdef class BonnetServer:
         with open(identity_path, 'rb') as f:
             key_bytes = f.read()
         if len(key_bytes) == 32:
-            self.server_identity = nacl.signing.SigningKey(key_bytes)
+            self.server_identity = Identity.from_private_key(key_bytes)
         else:
-            self.server_identity = nacl.signing.SigningKey(key_bytes[:32])
+            raise ValueError("Identity file must contain exactly 32 bytes (Ed25519 private key)")
         
         self.listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -106,7 +105,7 @@ cdef class BonnetServer:
             session = accept(sock, self.server_identity, None)
             sock.setblocking(False)
             
-            client_id = session.client_identity
+            client_id = session.peer_identity
             users = self.ume.get_all_by_publickey(client_id)
             
             if len(users) == 0:
@@ -161,7 +160,7 @@ cdef class BonnetServer:
         except Exception as e:
             try:
                 state.session.send(f"ERR 500 Internal error: {e}\n".encode('utf-8'))
-            except:
+            except Exception:
                 self._cleanup_client(sock, state)
     
     cdef void _handle_request(self, object sock, ClientState state):
@@ -176,14 +175,14 @@ cdef class BonnetServer:
                 return
             
             cmd_line = data.decode('utf-8').strip()
-            response = self._dispatch_command(cmd_line, state.session.client_identity)
+            response = self._dispatch_command(cmd_line, state.session.peer_identity)
             state.session.send(response.encode('utf-8'))
         except ConnectionError:
             self._cleanup_client(sock, state)
         except Exception as e:
             try:
                 state.session.send(f"ERR 500 Internal error: {e}".encode('utf-8'))
-            except:
+            except Exception:
                 self._cleanup_client(sock, state)
     
     cdef str _dispatch_command(self, str cmd_line, bytes client_id):
@@ -216,9 +215,9 @@ cdef class BonnetServer:
         username, registrar, pubkey_b64, pass_b64 = parts[1], parts[2], parts[3], parts[4]
         
         try:
-            publickey = base64.b64decode(pubkey_b64)
-            password = base64.b64decode(pass_b64)
-        except:
+            publickey = base64.b64decode(pubkey_b64, validate=True)
+            password = base64.b64decode(pass_b64, validate=True)
+        except Exception:
             return "ERR 400 Bad Request: invalid base64 encoding"
         
         if len(publickey) != 32:
@@ -259,12 +258,12 @@ cdef class BonnetServer:
         if len(parts) >= 2:
             try:
                 offset = int(parts[1])
-            except:
+            except (ValueError, IndexError):
                 pass
         if len(parts) >= 3:
             try:
                 limit = int(parts[2])
-            except:
+            except (ValueError, IndexError):
                 pass
         
         users = self.ume.list_all()
@@ -279,11 +278,11 @@ cdef class BonnetServer:
         cdef int fd = sock.fileno()
         try:
             self.selector.unregister(sock)
-        except:
+        except Exception:
             pass
         try:
             sock.close()
-        except:
+        except Exception:
             pass
         if fd in self.clients:
             del self.clients[fd]
@@ -292,16 +291,16 @@ cdef class BonnetServer:
         self.running = 0
         try:
             self.listen_sock.close()
-        except:
+        except Exception:
             pass
         self.selector.close()
 
 cdef void load_or_generate_identity(str path):
     if os.path.exists(path):
         return
-    key = nacl.signing.SigningKey.generate()
+    key = Identity.generate()
     with open(path, 'wb') as f:
-        f.write(bytes(key))
+        f.write(bytes(key.private_key))
     os.chmod(path, 0o600)
 
 def main():
@@ -338,3 +337,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
