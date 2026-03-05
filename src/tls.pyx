@@ -443,7 +443,8 @@ def connect(
             if not pinned_pkey:
                 raise TLSError("Failed to load pinned server key", 0, _get_openssl_error())
             
-            SSL_add_expected_rpk(ssl, pinned_pkey)
+            if SSL_add_expected_rpk(ssl, pinned_pkey) != 1:
+                raise TLSError("Failed to register expected server RPK", 0, _get_openssl_error())
             SSL_set_verify(ssl, SSL_VERIFY_PEER, NULL)
         
         session = _do_handshake(ssl, net_bio, sock, False, server_pinned)
