@@ -184,12 +184,9 @@ cdef class BonnetServer:
             password = data[idx:idx+p_len]
             idx += p_len
 
-            if "@" not in username:
-                return self._build_error(400, "Username must contain @homeserver.sex")
-
             import re
             invalid_chars = re.compile(r'[@<>:"/\\|?*]')
-            if invalid_chars.search(username.split('@')[0]):
+            if invalid_chars.search(username):
                 return self._build_error(400, "Username contains invalid characters")
 
             user = self.ume.put(username, registrar, pubkey, password)
