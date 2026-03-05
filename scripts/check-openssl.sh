@@ -22,7 +22,7 @@ if [ -z "$VERSION_HEX" ]; then
     exit 0
 fi
 
-if [ "$VERSION_HEX" -ge "$MIN_VERSION" ] 2>/dev/null; then
+if (( "$VERSION_HEX" >= "$MIN_VERSION" )); then
     echo "yes"
 else
     echo "no"

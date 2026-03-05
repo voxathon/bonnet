@@ -29,8 +29,10 @@ BIN_DIR := bin
 
 MODULES := orm ame ume tls __init
 
+PYTHON_LIBNAME := $(patsubst lib%,%,$(basename $(PYTHON_LDLIBRARY)))
+
 CFLAGS := -O3 -I$(PYTHON_INCLUDE) $(OPENSSL_CFLAGS)
-LDFLAGS := -L$(PYTHON_LIBDIR) -lpython3.12 $(OPENSSL_LIBS) -Wl,-rpath,$(PYTHON_LIBDIR)
+LDFLAGS := -L$(PYTHON_LIBDIR) -l$(PYTHON_LIBNAME) $(OPENSSL_LIBS) -Wl,-rpath,$(PYTHON_LIBDIR)
 
 .PHONY: all clean install pyinstaller fetch-openssl
 
