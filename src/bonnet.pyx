@@ -215,8 +215,8 @@ cdef class BonnetServer:
         username, registrar, pubkey_b64, pass_b64 = parts[1], parts[2], parts[3], parts[4]
         
         try:
-            publickey = base64.b64decode(pubkey_b64)
-            password = base64.b64decode(pass_b64)
+            publickey = base64.b64decode(pubkey_b64, validate=True)
+            password = base64.b64decode(pass_b64, validate=True)
         except Exception:
             return "ERR 400 Bad Request: invalid base64 encoding"
         
