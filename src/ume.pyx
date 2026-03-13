@@ -15,6 +15,17 @@ from libc.stdint cimport uint64_t, int64_t
 cdef extern from "openssl/sha.h":
     unsigned char *SHA256(const unsigned char *d, size_t n, unsigned char *md)
 
+cdef extern from "openssl/evp.h":
+    ctypedef struct EVP_MD:
+        int dummy
+    const EVP_MD *EVP_sha256()
+
+cdef extern from "openssl/kdf.h":
+    int PKCS5_PBKDF2_HMAC(const char *password, int passlen,
+                          const unsigned char *salt, int saltlen,
+                          int iter, const EVP_MD *digest,
+                          int keylen, unsigned char *out)
+
 cdef size_t USERNAME_SIZE = 255
 cdef size_t REGISTRAR_SIZE = 255
 cdef size_t PUBLICKEY_SIZE = 32
@@ -22,7 +33,9 @@ cdef size_t SALT_SIZE = 16
 cdef size_t HASH_SIZE = 32
 cdef size_t PASSWORD_SIZE = SALT_SIZE + HASH_SIZE
 cdef size_t SEQ_NUMBR_SIZE = 8
-cdef size_t RECORD_SIZE = USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE + SEQ_NUMBR_SIZE
+cdef size_t FLAGS_SIZE = 2
+cdef size_t RECORD_SIZE = USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE + SEQ_NUMBR_SIZE + FLAGS_SIZE
+cdef int PBKDF2_ITERATIONS = 600000
 
 cdef class User:
     cdef public str username
@@ -31,14 +44,18 @@ cdef class User:
     cdef public bytes password_hash
     cdef public bytes salt
     cdef public uint64_t seq_numbr
+    cdef public bint is_administrator
+    cdef public bint is_moderator
 
-    def __init__(self, str username="", str registrar="", bytes publickey=b"", bytes password_hash=b"", bytes salt=b"", uint64_t seq_numbr=0):
+    def __init__(self, str username="", str registrar="", bytes publickey=b"", bytes password_hash=b"", bytes salt=b"", uint64_t seq_numbr=0, bint is_administrator=False, bint is_moderator=False):
         self.username = username
         self.registrar = registrar
         self.publickey = publickey
         self.password_hash = password_hash
         self.salt = salt
         self.seq_numbr = seq_numbr
+        self.is_administrator = is_administrator
+        self.is_moderator = is_moderator
 
     cpdef bytes encode(self):
         cdef bytes username_bytes = self.username.encode('ascii')[:USERNAME_SIZE].ljust(USERNAME_SIZE, b'\x00')
@@ -46,7 +63,8 @@ cdef class User:
         cdef bytes publickey_bytes = self.publickey
         cdef bytes password_bytes = self.salt + self.password_hash
         cdef bytes seq_bytes = struct.pack('<Q', self.seq_numbr)
-        return username_bytes + registrar_bytes + publickey_bytes + password_bytes + seq_bytes
+        cdef bytes flags_bytes = struct.pack('>BB', 1 if self.is_administrator else 0, 1 if self.is_moderator else 0)
+        return username_bytes + registrar_bytes + publickey_bytes + password_bytes + seq_bytes + flags_bytes
 
     @staticmethod
     cdef User decode(bytes data):
@@ -56,13 +74,15 @@ cdef class User:
         user.publickey = data[USERNAME_SIZE + REGISTRAR_SIZE:USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE]
         user.salt = data[USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE:USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + SALT_SIZE]
         user.password_hash = data[USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + SALT_SIZE:USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE]
-        user.seq_numbr = struct.unpack('<Q', data[USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE:])[0]
+        user.seq_numbr = struct.unpack('<Q', data[USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE:USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE + SEQ_NUMBR_SIZE])[0]
+        user.is_administrator = data[USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE + SEQ_NUMBR_SIZE] != 0
+        user.is_moderator = data[USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE + SEQ_NUMBR_SIZE + 1] != 0
         return user
 
     cpdef bint verify_password(self, bytes password):
         cdef unsigned char hash_out[32]
-        cdef bytes combined = self.salt + password
-        SHA256(combined, len(combined), hash_out)
+        PKCS5_PBKDF2_HMAC(password, len(password), self.salt, len(self.salt),
+                           PBKDF2_ITERATIONS, EVP_sha256(), 32, hash_out)
         return bytes(hash_out[:32]) == self.password_hash
 
 
@@ -72,8 +92,8 @@ cdef bytes _generate_salt():
 
 cdef bytes _hash_password(bytes password, bytes salt):
     cdef unsigned char hash_out[32]
-    cdef bytes combined = salt + password
-    SHA256(combined, len(combined), hash_out)
+    PKCS5_PBKDF2_HMAC(password, len(password), salt, len(salt),
+                       PBKDF2_ITERATIONS, EVP_sha256(), 32, hash_out)
     return bytes(hash_out[:32])
 
 
@@ -97,6 +117,7 @@ cdef class Ume:
     cdef uint64_t _find_max_seq(self):
         cdef uint64_t max_seq = 0
         cdef uint64_t seq
+        cdef bytes data
         try:
             with open(self._filepath, 'rb') as f:
                 while True:
@@ -104,7 +125,7 @@ cdef class Ume:
                     if len(data) < RECORD_SIZE:
                         break
                     try:
-                        seq = struct.unpack('<Q', data[USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE:])[0]
+                        seq = struct.unpack('<Q', data[USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE:USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE + SEQ_NUMBR_SIZE])[0]
                     except struct.error:
                         continue
                     if seq > max_seq:
@@ -141,7 +162,7 @@ cdef class Ume:
                     if len(data) < RECORD_SIZE:
                         break
                     try:
-                        rec_seq = struct.unpack('<Q', data[USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE:])[0]
+                        rec_seq = struct.unpack('<Q', data[USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE:USERNAME_SIZE + REGISTRAR_SIZE + PUBLICKEY_SIZE + PASSWORD_SIZE + SEQ_NUMBR_SIZE])[0]
                     except struct.error:
                         pos += 1
                         continue
@@ -224,7 +245,7 @@ cdef class Ume:
                 pass
         return users
 
-    cpdef User put(self, str username, str registrar, bytes publickey, bytes password=None):
+    cpdef User put(self, str username, str registrar, bytes publickey, bytes password=None, bint is_administrator=False, bint is_moderator=False):
         cdef size_t existing
         cdef bytes salt, password_hash
         cdef User user
@@ -241,11 +262,10 @@ cdef class Ume:
                 salt = _generate_salt()
                 password_hash = _hash_password(password, salt)
             else:
-                # Reserved for future HTTP use - zeroed fields
                 salt = b'\x00' * SALT_SIZE
                 password_hash = b'\x00' * HASH_SIZE
             
-            user = User(username, registrar, publickey, password_hash, salt, self._next_seq)
+            user = User(username, registrar, publickey, password_hash, salt, self._next_seq, is_administrator, is_moderator)
             self._next_seq += 1
             try:
                 with open(self._filepath, 'ab') as f:
@@ -254,7 +274,7 @@ cdef class Ume:
                 raise IOError(f"Failed to write user record: {e}")
         return user
 
-    cpdef bint upd(self, str username=None, uint64_t seq_numbr=0, str new_registrar=None, bytes new_publickey=None, bytes new_password=None):
+    cpdef bint upd(self, str username=None, uint64_t seq_numbr=0, str new_registrar=None, bytes new_publickey=None, bytes new_password=None, object new_administrator=None, object new_moderator=None):
         cdef size_t pos
         cdef User user
         with self._lock:
@@ -281,6 +301,10 @@ cdef class Ume:
             if new_password is not None:
                 user.salt = _generate_salt()
                 user.password_hash = _hash_password(new_password, user.salt)
+            if new_administrator is not None:
+                user.is_administrator = new_administrator
+            if new_moderator is not None:
+                user.is_moderator = new_moderator
 
             try:
                 with open(self._filepath, 'r+b') as f:
