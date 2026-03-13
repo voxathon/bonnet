@@ -9,4 +9,11 @@ dependencies = [
     "pyinstaller>=6.0.0",
     "websockets>=12.0",
     "pynacl>=1.5.0",
+    "click>=8.3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
 ]
