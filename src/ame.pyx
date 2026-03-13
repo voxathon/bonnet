@@ -79,6 +79,7 @@ cdef class Board:
     cdef object _table
     cdef object _lock
     cdef object _executor
+    cdef bint _closed
 
     def __init__(self, str base_path, str name, object executor):
         # Prevent path traversal
@@ -96,6 +97,7 @@ cdef class Board:
         self._db_path = os.path.join(board_path, "metadata.db")
         self._articles_path = board_path
         self._lock = threading.Lock()
+        self._closed = False
 
         self._db = Database(self._db_path)
 
@@ -130,9 +132,10 @@ cdef class Board:
 
 
     cpdef void close(self):
-        # We use short-lived contexts for database connections, so there is no
-        # persistent DB connection to close here, but this method allows for future cleanup.
-        pass
+        self._closed = True
+
+    cpdef bint is_closed(self):
+        return self._closed
 
     cdef str _read_content(self, uint64_t post_num):
         cdef str file_path = os.path.join(self._articles_path, str(post_num))
@@ -176,6 +179,8 @@ cdef class Board:
         return final_posts
 
     cdef uint64_t _create_post(self, int64_t last_modified, int64_t creation_date, int64_t last_bumped, bint closed, int sticky, str tags, str subject, str options, uint64_t root, str author, str signature, str content):
+        if self._closed:
+            raise RuntimeError("Board is closed")
         cdef object post_num_obj
         cdef uint64_t post_num
         try:
@@ -186,11 +191,15 @@ cdef class Board:
 
             post_num = post_num_obj
             self._write_content(post_num, content)
+            if root != 0:
+                self._update_post(root, {'last_bumped': creation_date})
             return post_num
         except Exception as e:
             raise RuntimeError(f"Post creation failed: {e}")
 
     cdef bint _update_post(self, uint64_t post_num, dict fields):
+        if self._closed:
+            raise RuntimeError("Board is closed")
         cdef list set_exprs = []
         cdef list values = []
         cdef str k
@@ -327,11 +336,25 @@ cdef class Ame:
         with self._boards_lock:
             if name in self._boards:
                 self._boards[name].close()
-                del self._boards[name]
+
+    def delete_board(self, str name):
+        import shutil
+        name = "".join([c for c in name if c.isalnum() or c in "-_"])
+        with self._boards_lock:
+            if name not in self._boards:
+                raise ValueError(f"Board '{name}' not found")
+            board = self._boards[name]
+            if not board.is_closed():
+                raise RuntimeError("Board must be closed before deletion")
+            board.close()
+            del self._boards[name]
+            board_path = os.path.join(self._base_path, name)
+            if os.path.exists(board_path):
+                shutil.rmtree(board_path)
 
     cpdef list list_boards(self):
         with self._boards_lock:
-            return list(self._boards.keys())
+            return [(name, board.is_closed()) for name, board in self._boards.items()]
 
     cpdef void shutdown(self, bint wait=True):
         self._executor.shutdown(wait=wait)
