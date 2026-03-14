@@ -5,6 +5,7 @@ import asyncio
 import os
 import struct
 import sys
+import sqlite3
 from pathlib import Path
 
 import click
@@ -12,6 +13,7 @@ from nacl.signing import SigningKey, VerifyKey
 from nacl.public import PrivateKey, PublicKey, Box
 from nacl.utils import random as random_bytes
 from nacl.encoding import RawEncoder
+from nacl.exceptions import CryptoError
 from datetime import datetime
 import websockets
 import websockets.exceptions
@@ -19,6 +21,7 @@ import websockets.exceptions
 
 IDENTITY_PATH = Path.home() / ".config" / "bonnet" / "client_identity"
 KNOWN_SERVERS_PATH = Path.home() / ".config" / "bonnet" / "known_servers"
+NAV_DB_PATH = Path("/var/lib/bonnet/nav.db")
 LOG_PATH = Path.cwd() / "bonnet-client.log"
 
 
@@ -109,6 +112,85 @@ class KnownServers:
             path.unlink()
             return True
         return False
+
+
+class NavDB:
+    def __init__(self, path: Path = NAV_DB_PATH):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _init_db(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS nav (
+                board_name TEXT PRIMARY KEY,
+                board_path TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                signature BLOB NOT NULL,
+                relay TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    def get(self, board_name: str) -> dict | None:
+        conn = sqlite3.connect(self.path)
+        cursor = conn.execute(
+            "SELECT board_name, board_path, origin, signature, relay FROM nav WHERE board_name=?",
+            [board_name],
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return {
+                "board_name": row[0],
+                "board_path": row[1],
+                "origin": row[2],
+                "signature": bytes(row[3]) if row[3] else b"",
+                "relay": row[4],
+            }
+        return None
+
+    def list_all(self) -> list[dict]:
+        conn = sqlite3.connect(self.path)
+        cursor = conn.execute(
+            "SELECT board_name, board_path, origin, signature, relay FROM nav"
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [
+            {
+                "board_name": row[0],
+                "board_path": row[1],
+                "origin": row[2],
+                "signature": bytes(row[3]) if row[3] else b"",
+                "relay": row[4],
+            }
+            for row in rows
+        ]
+
+    def upsert(
+        self,
+        board_name: str,
+        board_path: str,
+        origin: str,
+        signature: bytes,
+        relay: str,
+    ):
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay) VALUES (?, ?, ?, ?, ?)",
+            [board_name, board_path, origin, signature, relay],
+        )
+        conn.commit()
+        conn.close()
+
+    def delete(self, board_name: str):
+        conn = sqlite3.connect(self.path)
+        conn.execute("DELETE FROM nav WHERE board_name=?", [board_name])
+        conn.commit()
+        conn.close()
 
 
 class ServerUnknownError(Exception):
@@ -219,6 +301,7 @@ class BonnetClient:
         self.url = None
         self.server_pubkey = None
         self.known_servers = KnownServers()
+        self.nav = NavDB()
         self._logger = get_logger()
 
     async def configure(self, url: str, server_pubkey: bytes | None = None):
@@ -395,9 +478,33 @@ class BonnetClient:
             ok, result = await self._recv_response()
             if ok:
                 data = result["data"]
-                if not data:
+                if len(data) < 3:
                     return {"users": []}
-                users = data.decode("utf-8").split(",")
+
+                offset = 0
+                user_count = struct.unpack(">H", data[offset : offset + 2])[0]
+                offset += 2
+
+                users = []
+                for _ in range(user_count):
+                    username, offset = decode_string(data, offset)
+                    registrar, offset = decode_string(data, offset)
+                    origin, offset = decode_string(data, offset)
+                    relay, offset = decode_string(data, offset)
+                    key_len = data[offset]
+                    offset += 1
+                    pubkey = data[offset : offset + key_len].hex()
+                    offset += key_len
+                    users.append(
+                        {
+                            "username": username,
+                            "registrar": registrar,
+                            "origin": origin,
+                            "relay": relay,
+                            "pubkey": pubkey,
+                        }
+                    )
+
                 return {"users": users}
             return {"error": result}
         finally:
@@ -437,18 +544,79 @@ class BonnetClient:
             ok, result = await self._recv_response()
             if ok:
                 data = result["data"]
-                if not data:
+                if len(data) < 3:
                     return {"boards": []}
+
+                offset = 0
+                board_count = struct.unpack(">H", data[offset : offset + 2])[0]
+                offset += 2
+
                 boards = []
-                for entry in data.decode("utf-8").split(","):
-                    if entry.startswith("closed:"):
-                        boards.append((entry[7:], True))
-                    else:
-                        boards.append((entry, False))
+                for _ in range(board_count):
+                    name_len = data[offset]
+                    offset += 1
+                    name = data[offset : offset + name_len].decode("utf-8")
+                    offset += name_len
+                    origin_len = data[offset]
+                    offset += 1
+                    origin = data[offset : offset + origin_len].decode("utf-8")
+                    offset += origin_len
+                    board_sig_len = data[offset]
+                    offset += 1
+                    board_sig = data[offset : offset + board_sig_len]
+                    offset += board_sig_len
+                    closed = data[offset]
+                    offset += 1
+                    boards.append(
+                        {
+                            "name": name,
+                            "origin": origin,
+                            "signature": board_sig,
+                            "closed": bool(closed),
+                        }
+                    )
+
                 return {"boards": boards}
             return {"error": result}
         finally:
             await self._disconnect_after_command()
+
+    async def get_pubkey(self) -> dict:
+        await self._connect_for_command()
+        try:
+            await self._send_request(0x30)
+            ok, result = await self._recv_response()
+            if ok:
+                data = result["data"]
+                return {"pubkey": data}
+            return {"error": result}
+        finally:
+            await self._disconnect_after_command()
+
+    def verify_board_signature(
+        self, board_name: str, origin: str, signature: bytes, server_pubkey: bytes
+    ) -> bool:
+        try:
+            verify_key = VerifyKey(server_pubkey)
+            name_bytes = board_name.encode("utf-8")
+            origin_bytes = origin.encode("utf-8")
+            payload = (
+                struct.pack("B", len(name_bytes))
+                + name_bytes
+                + struct.pack("B", len(origin_bytes))
+                + origin_bytes
+            )
+            verify_key.verify(payload, signature)
+            return True
+        except (CryptoError, Exception):
+            return False
+
+    def sync_nav_from_boards(self, boards: list[dict], server_origin: str):
+        for board in boards:
+            name = board["name"]
+            origin = board["origin"]
+            signature = board["signature"]
+            self.nav.upsert(name, name, origin, signature, server_origin)
 
     async def create_post(
         self,
@@ -481,6 +649,7 @@ class BonnetClient:
                 last_modified = struct.unpack(">q", data[offset : offset + 8])[0]
                 offset += 8
                 author, offset = decode_string(data, offset)
+                author_registrar, offset = decode_string(data, offset)
                 tags_resp, offset = decode_string(data, offset)
                 subject_resp, offset = decode_string(data, offset)
                 options_resp, offset = decode_string(data, offset)
@@ -489,6 +658,7 @@ class BonnetClient:
                     "creation_date": creation_date,
                     "last_modified": last_modified,
                     "author": author,
+                    "author_registrar": author_registrar,
                     "tags": tags_resp,
                     "subject": subject_resp,
                     "options": options_resp,
@@ -526,6 +696,7 @@ class BonnetClient:
                 root = struct.unpack(">Q", data[offset : offset + 8])[0]
                 offset += 8
                 author, offset = decode_string(data, offset)
+                author_registrar, offset = decode_string(data, offset)
                 signature, offset = decode_string(data, offset)
                 content, _ = decode_content(data, offset)
                 return {
@@ -540,6 +711,7 @@ class BonnetClient:
                     "options": options,
                     "root": root,
                     "author": author,
+                    "author_registrar": author_registrar,
                     "signature": signature,
                     "content": content,
                 }
@@ -724,6 +896,7 @@ class BonnetClient:
                     root = struct.unpack(">Q", data[off : off + 8])[0]
                     off += 8
                     author, off = decode_string(data, off)
+                    author_registrar, off = decode_string(data, off)
                     signature, off = decode_string(data, off)
                     posts.append(
                         {
@@ -738,6 +911,7 @@ class BonnetClient:
                             "options": options,
                             "root": root,
                             "author": author,
+                            "author_registrar": author_registrar,
                             "signature": signature,
                         }
                     )
@@ -766,6 +940,7 @@ class BonnetClient:
 
     def _build_signed_payload(self, post: dict) -> bytes:
         author_bytes = post["author"].encode("utf-8")
+        author_registrar_bytes = (post.get("author_registrar") or "").encode("utf-8")
         tags_bytes = (post.get("tags") or "").encode("utf-8")
         subject_bytes = (post.get("subject") or "").encode("utf-8")
         options_bytes = (post.get("options") or "").encode("utf-8")
@@ -777,6 +952,8 @@ class BonnetClient:
             + struct.pack(">q", post["last_modified"])
             + struct.pack("B", len(author_bytes))
             + author_bytes
+            + struct.pack("B", len(author_registrar_bytes))
+            + author_registrar_bytes
             + struct.pack("B", len(tags_bytes))
             + tags_bytes
             + struct.pack("B", len(subject_bytes))
@@ -820,7 +997,10 @@ def print_post(post: dict, board: str | None = None):
     else:
         click.echo(f"Post #{post['post_num']}")
     click.echo(f"Subject: {click.style(post['subject'], bold=True)}")
-    click.echo(f"Author: {post['author']}")
+    author_display = post["author"]
+    if post.get("author_registrar"):
+        author_display = f"{post['author']}@{post['author_registrar']}"
+    click.echo(f"Author: {author_display}")
     click.echo(f"Created: {format_timestamp(post['creation_date'])}")
     if post.get("last_modified") and post["last_modified"] != post["creation_date"]:
         click.echo(f"Modified: {format_timestamp(post['last_modified'])}")
@@ -874,13 +1054,14 @@ async def repl(client: BonnetClient):
   /trust <host> <hex>   Trust server pubkey
   /known                List known servers
   /forget <host>        Remove server from known list
+  /nav                  Show local board navigation database
   register <user@reg>   Register new user
   get <username>        Get user info
   list-users [off] [n]  List users
   create-board <name>   Create board (admin)
   close-board <name>    Close board (read-only, admin)
   delete-board <name>   Delete board permanently (admin)
-  list-boards           List boards
+  list-boards           List boards (with origin metadata)
   create-post <board> [root]
                         Create post (interactive)
   get-post <board> <n>  Get post
@@ -967,6 +1148,18 @@ async def repl(client: BonnetClient):
                     click.echo(click.style(f"Forgot {hostname}", fg="green"))
                 else:
                     click.echo(f"Unknown server: {hostname}")
+
+            elif cmd == "/nav":
+                entries = client.nav.list_all()
+                if not entries:
+                    click.echo("No board navigation entries.")
+                else:
+                    click.echo(f"{'Board':<20} {'Origin':<20} {'Relay':<20}")
+                    click.echo("-" * 60)
+                    for e in entries:
+                        click.echo(
+                            f"{e['board_name']:<20} {e['origin']:<20} {e['relay']:<20}"
+                        )
 
             elif cmd == "whoami":
                 pubkey_hex = client.identity.public_key.hex()
@@ -1055,7 +1248,9 @@ async def repl(client: BonnetClient):
                             click.echo("No users.")
                         else:
                             for u in users:
-                                click.echo(f"  {u}")
+                                click.echo(
+                                    f"  {u['username']}@{u['registrar']} o={u['origin']} r={u['relay']} {u['pubkey'][:16]}..."
+                                )
                 except NotConfiguredError:
                     click.echo(
                         click.style("Not configured. Use /connect first.", fg="yellow")
@@ -1149,13 +1344,27 @@ async def repl(client: BonnetClient):
                         if not boards:
                             click.echo("No boards.")
                         else:
-                            for name, closed in boards:
-                                if closed:
+                            for board in boards:
+                                name = board["name"]
+                                origin = board["origin"]
+                                closed = board.get("closed", False)
+                                closed_str = (
+                                    f"[{click.style('closed', fg='yellow')}] "
+                                    if closed
+                                    else ""
+                                )
+                                if origin != "localhost":
                                     click.echo(
-                                        f"  [{click.style('closed', fg='yellow')}] /{name}"
+                                        f"  {closed_str}/{name} {click.style(f'@{origin}', fg='cyan')}"
                                     )
                                 else:
-                                    click.echo(f"  /{name}")
+                                    click.echo(f"  {closed_str}/{name}")
+                        client.sync_nav_from_boards(
+                            boards,
+                            client.server_pubkey.hex()
+                            if client.server_pubkey
+                            else "unknown",
+                        )
                 except NotConfiguredError:
                     click.echo(
                         click.style("Not configured. Use /connect first.", fg="yellow")

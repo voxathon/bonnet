@@ -7,8 +7,94 @@ from concurrent.futures import ThreadPoolExecutor, Future
 import threading
 import os
 import time
+import re
+import struct
 from libc.stdint cimport uint64_t, int64_t
 from orm import Database, Table
+
+
+cdef str _sanitize_board_name(str name):
+    name = "".join(c for c in name if c.isalnum() or c in "-_.")
+    if not name:
+        raise ValueError("Invalid board name")
+    if name.startswith('.') or '..' in name:
+        raise ValueError("Invalid board name")
+    return name
+
+
+cdef class NavDB:
+    cdef str _nav_path
+    cdef object _db
+    cdef object _lock
+
+    def __init__(self, str nav_db_path):
+        self._nav_path = nav_db_path
+        self._lock = threading.Lock()
+        nav_dir = os.path.dirname(nav_db_path)
+        if nav_dir:
+            os.makedirs(nav_dir, exist_ok=True)
+        self._db = Database(self._nav_path)
+        with self._db.open() as ctx:
+            ctx.execute("""
+            CREATE TABLE IF NOT EXISTS nav (
+                board_name TEXT PRIMARY KEY,
+                board_path TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                signature BLOB NOT NULL,
+                relay TEXT NOT NULL
+            )
+            """)
+
+    cpdef dict get(self, str board_name):
+        cdef list rows
+        with self._db.open() as ctx:
+            rows = ctx.execute("SELECT board_name, board_path, origin, signature, relay FROM nav WHERE board_name=?", [board_name]).fetchall()
+        if rows:
+            row = rows[0]
+            return {
+                'board_name': row[0],
+                'board_path': row[1],
+                'origin': row[2],
+                'signature': bytes(row[3]) if row[3] else b'',
+                'relay': row[4]
+            }
+        return None
+
+    cpdef list list_all(self):
+        cdef list rows
+        cdef list result = []
+        with self._db.open() as ctx:
+            rows = ctx.execute("SELECT board_name, board_path, origin, signature, relay FROM nav").fetchall()
+        for row in rows:
+            result.append({
+                'board_name': row[0],
+                'board_path': row[1],
+                'origin': row[2],
+                'signature': bytes(row[3]) if row[3] else b'',
+                'relay': row[4]
+            })
+        return result
+
+    cpdef void create_local(self, str board_name, str origin, bytes signature):
+        cdef str board_path = board_name
+        cdef str relay = origin
+        with self._db.open() as ctx:
+            ctx.execute(
+                "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay) VALUES (?, ?, ?, ?, ?)",
+                [board_name, board_path, origin, signature, relay]
+            )
+
+    cpdef void upsert_remote(self, str board_name, str board_path, str origin, bytes signature, str relay):
+        with self._db.open() as ctx:
+            ctx.execute(
+                "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay) VALUES (?, ?, ?, ?, ?)",
+                [board_name, board_path, origin, signature, relay]
+            )
+
+    cpdef void delete(self, str board_name):
+        with self._db.open() as ctx:
+            ctx.execute("DELETE FROM nav WHERE board_name=?", [board_name])
+
 
 cdef class AsyncResult:
     cdef object _future
@@ -52,6 +138,7 @@ cdef class Post:
     cdef public str options
     cdef public uint64_t root
     cdef public str author
+    cdef public str author_registrar
     cdef public str signature
     cdef public str content
 
@@ -67,6 +154,7 @@ cdef class Post:
         self.options = ""
         self.root = 0
         self.author = ""
+        self.author_registrar = ""
         self.signature = ""
         self.content = ""
 
@@ -105,18 +193,19 @@ cdef class Board:
         with self._db.open() as ctx:
             ctx.execute("""
             CREATE TABLE IF NOT EXISTS posts (
-                post_num      INTEGER PRIMARY KEY AUTOINCREMENT,
-                last_modified INTEGER NOT NULL,
-                creation_date INTEGER NOT NULL,
-                last_bumped   INTEGER NOT NULL,
-                closed        INTEGER DEFAULT 0,
-                sticky        INTEGER DEFAULT 0,
-                tags          TEXT,
-                subject       TEXT,
-                options       TEXT,
-                root          INTEGER DEFAULT 0,
-                author        TEXT,
-                signature     TEXT
+                post_num        INTEGER PRIMARY KEY AUTOINCREMENT,
+                last_modified   INTEGER NOT NULL,
+                creation_date   INTEGER NOT NULL,
+                last_bumped     INTEGER NOT NULL,
+                closed          INTEGER DEFAULT 0,
+                sticky          INTEGER DEFAULT 0,
+                tags            TEXT,
+                subject         TEXT,
+                options         TEXT,
+                root            INTEGER DEFAULT 0,
+                author          TEXT,
+                author_registrar TEXT,
+                signature       TEXT
             )
             """)
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_posts_root ON posts(root)")
@@ -125,7 +214,7 @@ cdef class Board:
 
         self._table = self._db.add_table(
             'posts',
-            'post_num last_modified creation_date last_bumped closed sticky tags subject options root author signature',
+            'post_num last_modified creation_date last_bumped closed sticky tags subject options root author author_registrar signature',
             proto=Post,
             id_cols=['post_num']
         )
@@ -178,7 +267,7 @@ cdef class Board:
                 p.content = self._read_content(p.post_num)
         return final_posts
 
-    cdef uint64_t _create_post(self, int64_t last_modified, int64_t creation_date, int64_t last_bumped, bint closed, int sticky, str tags, str subject, str options, uint64_t root, str author, str signature, str content):
+    cdef uint64_t _create_post(self, int64_t last_modified, int64_t creation_date, int64_t last_bumped, bint closed, int sticky, str tags, str subject, str options, uint64_t root, str author, str author_registrar, str signature, str content):
         if self._closed:
             raise RuntimeError("Board is closed")
         cdef object post_num_obj
@@ -186,8 +275,8 @@ cdef class Board:
         try:
             with self._db.open() as ctx:
                 post_num_obj = ctx.insert_record(self._table, (
-                    last_modified, creation_date, last_bumped, closed, sticky, tags, subject, options, root, author, signature
-                ), columns=['last_modified', 'creation_date', 'last_bumped', 'closed', 'sticky', 'tags', 'subject', 'options', 'root', 'author', 'signature'])
+                    last_modified, creation_date, last_bumped, closed, sticky, tags, subject, options, root, author, author_registrar, signature
+                ), columns=['last_modified', 'creation_date', 'last_bumped', 'closed', 'sticky', 'tags', 'subject', 'options', 'root', 'author', 'author_registrar', 'signature'])
 
             post_num = post_num_obj
             self._write_content(post_num, content)
@@ -245,7 +334,7 @@ cdef class Board:
     def query(self, str where=None, list values=None, str orderby=None, limit=None, bint include_content=False):
         cdef set valid_columns = {
             'post_num', 'last_modified', 'creation_date', 'last_bumped',
-            'closed', 'sticky', 'tags', 'subject', 'options', 'root', 'author', 'signature'
+            'closed', 'sticky', 'tags', 'subject', 'options', 'root', 'author', 'author_registrar', 'signature'
         }
         cdef set valid_directions = {'ASC', 'DESC'}
 
@@ -273,7 +362,7 @@ cdef class Board:
             return self._query_posts(where, values, orderby, limit, include_content)
         return AsyncResult(self._executor.submit(task))
 
-    def create_post(self, int64_t last_modified=0, int64_t creation_date=0, int64_t last_bumped=0, bint closed=False, int sticky=0, str tags="", str subject="", str options="", uint64_t root=0, str author="", str signature="", str content=""):
+    def create_post(self, int64_t last_modified=0, int64_t creation_date=0, int64_t last_bumped=0, bint closed=False, int sticky=0, str tags="", str subject="", str options="", uint64_t root=0, str author="", str author_registrar="", str signature="", str content=""):
         if creation_date == 0:
             creation_date = int(time.time())
         if last_modified == 0:
@@ -282,7 +371,7 @@ cdef class Board:
             last_bumped = creation_date
 
         def task():
-            cdef uint64_t post_num = self._create_post(last_modified, creation_date, last_bumped, closed, sticky, tags, subject, options, root, author, signature, content)
+            cdef uint64_t post_num = self._create_post(last_modified, creation_date, last_bumped, closed, sticky, tags, subject, options, root, author, author_registrar, signature, content)
             return self._get_post(post_num)
         return AsyncResult(self._executor.submit(task))
 
@@ -303,19 +392,37 @@ cdef class Ame:
     cdef object _executor
     cdef dict _boards
     cdef object _boards_lock
+    cdef object _nav
+    cdef str _origin
+    cdef object _signing_key
 
-    def __init__(self, str base_path, int num_workers=4):
+    def __init__(self, str base_path, str origin=None, object signing_key=None, int num_workers=4, str nav_db_path=None):
         self._base_path = base_path
+        self._origin = origin or "localhost"
+        self._signing_key = signing_key
         self._num_workers = num_workers
         self._executor = ThreadPoolExecutor(max_workers=num_workers)
         self._boards = {}
         self._boards_lock = threading.Lock()
         os.makedirs(base_path, exist_ok=True)
+        if nav_db_path is None:
+            nav_db_path = "/var/lib/bonnet/nav.db"
+        self._nav = NavDB(nav_db_path)
 
-        # Load existing boards
         for name in os.listdir(base_path):
             if os.path.isdir(os.path.join(base_path, name)) and not name.startswith('.'):
                 self._boards[name] = Board(self._base_path, name, self._executor)
+
+    cpdef NavDB get_nav(self):
+        return self._nav
+
+    cdef bytes _sign_board(self, str board_name):
+        if self._signing_key is None:
+            return b'\x00' * 64
+        name_bytes = board_name.encode('utf-8')
+        origin_bytes = self._origin.encode('utf-8')
+        payload = struct.pack('B', len(name_bytes)) + name_bytes + struct.pack('B', len(origin_bytes)) + origin_bytes
+        return bytes(self._signing_key.sign(payload).signature)
 
     def get_board(self, str name):
         name = "".join([c for c in name if c.isalnum() or c in "-_"])
@@ -329,6 +436,8 @@ cdef class Ame:
         with self._boards_lock:
             if name not in self._boards:
                 self._boards[name] = Board(self._base_path, name, self._executor)
+                signature = self._sign_board(name)
+                self._nav.create_local(name, self._origin, signature)
             return self._boards[name]
 
     def close_board(self, str name):
@@ -351,6 +460,7 @@ cdef class Ame:
             board_path = os.path.join(self._base_path, name)
             if os.path.exists(board_path):
                 shutil.rmtree(board_path)
+            self._nav.delete(name)
 
     cpdef list list_boards(self):
         with self._boards_lock:
