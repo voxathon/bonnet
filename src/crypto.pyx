@@ -48,6 +48,10 @@ cdef class Identity:
     def private_key(self):
         return self._private_key
 
+    @property
+    def signing_key(self):
+        return self._signing_key
+
 cdef class EncryptedSession:
     cdef object _box
     cdef bytes _peer_pubkey
