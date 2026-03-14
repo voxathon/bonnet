@@ -121,6 +121,7 @@ class TestPostCreateResponseFormat:
         creation_date = 1234567890
         last_modified = 1234567890
         author = b"alice"
+        author_registrar = b"localhost"
         tags = b"test,intro"
         subject = b"Hello"
         options = b""
@@ -132,6 +133,8 @@ class TestPostCreateResponseFormat:
             + struct.pack(">q", last_modified)
             + bytes([len(author)])
             + author
+            + bytes([len(author_registrar)])
+            + author_registrar
             + bytes([len(tags)])
             + tags
             + bytes([len(subject)])
@@ -160,6 +163,11 @@ class TestPostCreateResponseFormat:
         idx += 1
         assert response[idx : idx + a_len] == author
         idx += a_len
+
+        ar_len = response[idx]
+        idx += 1
+        assert response[idx : idx + ar_len] == author_registrar
+        idx += ar_len
 
         t_len = response[idx]
         idx += 1
@@ -218,6 +226,7 @@ class TestSignedPayloadFormat:
         creation_date = 1234567890
         last_modified = 1234567891
         author = b"alice"
+        author_registrar = b"localhost"
         tags = b"test,sign"
         subject = b"Signed Post"
         options = b""
@@ -229,6 +238,8 @@ class TestSignedPayloadFormat:
             + struct.pack(">q", last_modified)
             + bytes([len(author)])
             + author
+            + bytes([len(author_registrar)])
+            + author_registrar
             + bytes([len(tags)])
             + tags
             + bytes([len(subject)])
@@ -256,6 +267,11 @@ class TestSignedPayloadFormat:
         idx += 1
         assert payload[idx : idx + a_len] == author
         idx += a_len
+
+        ar_len = payload[idx]
+        idx += 1
+        assert payload[idx : idx + ar_len] == author_registrar
+        idx += ar_len
 
         t_len = payload[idx]
         idx += 1
