@@ -255,11 +255,11 @@ cdef class Board:
         post.content = self._read_content(post_num)
         return post
 
-    cdef list _query_posts(self, str where=None, list values=None, str orderby=None, limit=None, bint include_content=False):
+    cdef list _query_posts(self, str where=None, list values=None, str orderby=None, limit=None, offset=None, bint include_content=False):
         cdef list final_posts
         cdef object posts
         with self._db.open() as ctx:
-            posts = self._table.select(where=where, values=values, orderby=orderby, limit=limit, ctx=ctx)
+            posts = self._table.select(where=where, values=values, orderby=orderby, limit=limit, offset=offset, ctx=ctx)
         final_posts = list(posts)
         cdef Post p
         if include_content:
@@ -331,7 +331,7 @@ cdef class Board:
             return self._get_post(post_num)
         return AsyncResult(self._executor.submit(task))
 
-    def query(self, str where=None, list values=None, str orderby=None, limit=None, bint include_content=False):
+    def query(self, str where=None, list values=None, str orderby=None, limit=None, offset=None, bint include_content=False):
         cdef set valid_columns = {
             'post_num', 'last_modified', 'creation_date', 'last_bumped',
             'closed', 'sticky', 'tags', 'subject', 'options', 'root', 'author', 'author_registrar', 'signature'
@@ -358,8 +358,13 @@ cdef class Board:
             if limit < 0:
                 raise ValueError("Limit must be non-negative")
 
+        if offset is not None:
+            offset = int(offset)
+            if offset < 0:
+                raise ValueError("Offset must be non-negative")
+
         def task():
-            return self._query_posts(where, values, orderby, limit, include_content)
+            return self._query_posts(where, values, orderby, limit, offset, include_content)
         return AsyncResult(self._executor.submit(task))
 
     def create_post(self, int64_t last_modified=0, int64_t creation_date=0, int64_t last_bumped=0, bint closed=False, int sticky=0, str tags="", str subject="", str options="", uint64_t root=0, str author="", str author_registrar="", str signature="", str content=""):

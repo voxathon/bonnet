@@ -100,7 +100,7 @@ def to_obj(cls, obj_data=None, *fields, **field_map):
 # -------------------------------------------------------------
 
 cpdef str build_select(table, str where=None, str orderby=None,
-                       object limit=None, columns=None):
+                       object limit=None, object offset=None, columns=None):
     cdef list query = []
     cdef str table_name
     cdef str cols_str
@@ -127,6 +127,9 @@ cpdef str build_select(table, str where=None, str orderby=None,
     if limit:
         query.append(" LIMIT ")
         query.append(str(limit))
+    if offset:
+        query.append(" OFFSET ")
+        query.append(str(offset))
     return ''.join(query)
 
 
@@ -292,13 +295,13 @@ cdef class Table:
         ctx = self._ds_ctx() if ctx is None else self.ctx(ctx)
         return ctx.select_single(where=where, values=values, orderby=orderby, limit=limit, columns=columns)
 
-    def select(self, where=None, values=None, orderby=None, limit=None, columns=None, ctx=None):
+    def select(self, where=None, values=None, orderby=None, limit=None, offset=None, columns=None, ctx=None):
         ctx = self._ds_ctx() if ctx is None else self.ctx(ctx)
-        return ctx.select(where, values, orderby=orderby, limit=limit, columns=columns)
+        return ctx.select(where, values, orderby=orderby, limit=limit, offset=offset, columns=columns)
 
-    def select_iter(self, where=None, values=None, orderby=None, limit=None, columns=None, ctx=None):
+    def select_iter(self, where=None, values=None, orderby=None, limit=None, offset=None, columns=None, ctx=None):
         ctx = self._ds_ctx() if ctx is None else self.ctx(ctx)
-        return ctx.select_iter(where, values, orderby=orderby, limit=limit, columns=columns)
+        return ctx.select_iter(where, values, orderby=orderby, limit=limit, offset=offset, columns=columns)
 
     def insert(self, *values, columns=None, ctx=None):
         ctx = self._ds_ctx() if ctx is None else self.ctx(ctx)
@@ -439,8 +442,8 @@ cdef class QueryBuilder:
 
     @classmethod
     def build_select(cls, table, str where=None, str orderby=None,
-                     object limit=None, columns=None) -> str:
-        return build_select(table, where, orderby, limit, columns)
+                     object limit=None, object offset=None, columns=None) -> str:
+        return build_select(table, where, orderby, limit, offset, columns)
 
     @classmethod
     def build_insert(cls, table, tuple values, columns=None) -> str:
@@ -564,16 +567,16 @@ cdef class ExecutionContext:
         self.execute("VACUUM;")
 
     def select(self, table, str where=None, values=None, str orderby=None,
-               object limit=None, columns=None):
+               object limit=None, object offset=None, columns=None):
         if isinstance(table, Table):
-            return tuple(x for x in self.select_iter(table, where, values, orderby, limit, columns))
+            return tuple(x for x in self.select_iter(table, where, values, orderby, limit, offset, columns))
         else:
-            query = build_select(table, where, orderby, limit, columns)
+            query = build_select(table, where, orderby, limit, offset, columns)
             return self.execute(query, values).fetchall()
 
     def select_iter(self, table, str where=None, values=None, str orderby=None,
-                    object limit=None, columns=None):
-        query = build_select(table, where, orderby, limit, columns)
+                    object limit=None, object offset=None, columns=None):
+        query = build_select(table, where, orderby, limit, offset, columns)
         if isinstance(table, Table):
             for row_tuple in self.execute(query, values):
                 yield table.to_obj(row_tuple, columns=columns)
