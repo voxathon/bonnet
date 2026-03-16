@@ -7,12 +7,56 @@ import os
 import asyncio
 import time
 import re
+from datetime import datetime
 from enum import IntEnum
 from typing import Optional, Callable, List, Any
 from libc.stdint cimport uint64_t, int64_t
 
 import nacl.exceptions
 import websockets.client
+
+_log_file = None
+
+cdef void _log_msg(str msg):
+    global _log_file
+    if _log_file is None:
+        try:
+            _log_file = open('bonnet.log', 'a')
+        except:
+            return
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    _log_file.write(f"[{ts}] {msg}\n")
+    _log_file.flush()
+
+cdef void _log_hex(str label, bytes data):
+    global _log_file
+    if _log_file is None:
+        try:
+            _log_file = open('bonnet.log', 'a')
+        except:
+            return
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    _log_file.write(f"[{ts}] {label} ({len(data)} bytes):\n")
+    hex_str = data.hex()
+    for i in range(0, len(hex_str), 64):
+        _log_file.write(f"  {hex_str[i:i+64]}\n")
+    _log_file.flush()
+
+cdef void _log_dict(str label, dict d):
+    global _log_file
+    if _log_file is None:
+        try:
+            _log_file = open('bonnet.log', 'a')
+        except:
+            return
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    _log_file.write(f"[{ts}] {label}:\n")
+    for k, v in d.items():
+        if isinstance(v, str) and len(v) > 100:
+            _log_file.write(f"  {k}: {v[:100]}... ({len(v)} chars)\n")
+        else:
+            _log_file.write(f"  {k}: {v}\n")
+    _log_file.flush()
 
 READ_ONLY_COMMANDS = {0x02, 0x03, 0x11, 0x13, 0x14, 0x19, 0x30}
 
@@ -379,8 +423,23 @@ cdef class CommandHandler:
         cmd = request[0]
         data = request[1:]
         
+        cmd_names = {
+            0x01: 'REGISTER', 0x02: 'GET_USER', 0x03: 'LIST_USERS',
+            0x10: 'BOARD_CREATE', 0x11: 'BOARD_LIST', 0x12: 'POST_CREATE',
+            0x13: 'POST_GET', 0x14: 'POST_LIST', 0x15: 'POST_UPDATE',
+            0x16: 'POST_DELETE', 0x17: 'BOARD_CLOSE', 0x18: 'BOARD_DELETE',
+            0x19: 'QUERY_POSTS', 0x20: 'USER_PROMOTE', 0x21: 'USER_DEMOTE',
+            0x22: 'POST_SIGN', 0x30: 'GET_PUBKEY'
+        }
+        cmd_name = cmd_names.get(cmd, f'UNKNOWN_{cmd:02x}')
+        
+        username = conn.user.username if hasattr(conn, 'user') and conn.user else 'anonymous'
+        _log_msg(f"HANDLE: cmd=0x{cmd:02x} ({cmd_name}), user={username}")
+        _log_hex(f"HANDLE: request", request)
+        
         if conn.is_anonymous and cmd != 0x01:
             if not (self._config.anonymous_read and cmd in READ_ONLY_COMMANDS):
+                _log_msg(f"HANDLE: rejected - anonymous user cannot run cmd=0x{cmd:02x}")
                 return self._build_error(401, "Anonymous users must register first")
         
         if cmd == 0x01:
@@ -1124,7 +1183,11 @@ cdef class CommandHandler:
         cdef object board, result, post, author_user
         cdef bytes signed_payload, signature_bytes
 
+        _log_msg("POST_SIGN: starting")
+        _log_hex("POST_SIGN: request data", data)
+
         if not conn.is_registered():
+            _log_msg("POST_SIGN: rejected - not registered")
             return self._build_error(401, "Authentication required")
 
         try:
@@ -1140,26 +1203,55 @@ cdef class CommandHandler:
             sig_len = data[idx]
             idx += 1
             signature_hex = data[idx:idx+sig_len].decode('utf-8')
+            
+            _log_dict("POST_SIGN: parsed request", {
+                'board': board_name,
+                'post_num': post_num,
+                'signature_hex': signature_hex[:32] + '...' if len(signature_hex) > 32 else signature_hex
+            })
+            _log_msg(f"POST_SIGN: conn.user={conn.user.username if conn.user else 'None'}")
 
             board = self._ame.get_board(board_name)
             if board is None:
+                _log_msg(f"POST_SIGN: board '{board_name}' not found")
                 return self._build_error(404, f"Board '{board_name}' not found")
 
             if board.is_closed():
+                _log_msg(f"POST_SIGN: board '{board_name}' is closed")
                 return self._build_error(409, "Board is closed")
 
             result = board.get_post(post_num)
             post = result.result()
 
             if post is None:
+                _log_msg(f"POST_SIGN: post {post_num} not found")
                 return self._build_error(404, f"Post {post_num} not found")
 
+            _log_dict("POST_SIGN: post data", {
+                'post_num': post.post_num,
+                'author': post.author,
+                'author_registrar': post.author_registrar,
+                'creation_date': post.creation_date,
+                'last_modified': post.last_modified,
+                'subject': post.subject[:50] + '...' if len(post.subject) > 50 else post.subject,
+                'tags': post.tags,
+                'options': post.options,
+                'content_len': len(post.content)
+            })
+
+            _log_msg(f"POST_SIGN: checking can_edit_post(conn.user.username='{conn.user.username}', post.author='{post.author}')")
             if not conn.can_edit_post(post.author):
+                _log_msg(f"POST_SIGN: permission denied - conn.user='{conn.user.username}' != post.author='{post.author}'")
                 return self._build_error(403, "Only the author can sign this post")
+            
+            _log_msg(f"POST_SIGN: permission check passed")
 
             author_user = self._ume.get(username=post.author)
             if author_user is None:
+                _log_msg(f"POST_SIGN: author user '{post.author}' not found in ume")
                 return self._build_error(404, f"Author user not found")
+            
+            _log_msg(f"POST_SIGN: author_user found, pubkey={author_user.publickey.hex()}")
 
             author_bytes = post.author.encode('utf-8')
             author_registrar_bytes = (post.author_registrar or "").encode('utf-8')
@@ -1167,6 +1259,18 @@ cdef class CommandHandler:
             subject_bytes = (post.subject or "").encode('utf-8')
             options_bytes = (post.options or "").encode('utf-8')
             content_bytes = (post.content or "").encode('utf-8')
+
+            _log_dict("POST_SIGN: payload field lengths", {
+                'post_num': post.post_num,
+                'creation_date': post.creation_date,
+                'last_modified': post.last_modified,
+                'author': len(author_bytes),
+                'author_registrar': len(author_registrar_bytes),
+                'tags': len(tags_bytes),
+                'subject': len(subject_bytes),
+                'options': len(options_bytes),
+                'content': len(content_bytes)
+            })
 
             signed_payload = \
                 struct.pack('>Q', post.post_num) + \
@@ -1179,24 +1283,35 @@ cdef class CommandHandler:
                 struct.pack('>B', len(options_bytes)) + options_bytes + \
                 struct.pack('>I', len(content_bytes)) + content_bytes
 
+            _log_hex("POST_SIGN: signed_payload (server)", signed_payload)
+
             try:
                 signature_bytes = bytes.fromhex(signature_hex)
             except ValueError:
+                _log_msg("POST_SIGN: invalid signature format (not hex)")
                 return self._build_error(400, "Invalid signature format (expected hex)")
 
             if len(signature_bytes) != 64:
+                _log_msg(f"POST_SIGN: invalid signature length={len(signature_bytes)} (expected 64)")
                 return self._build_error(400, f"Invalid signature length: {len(signature_bytes)} (expected 64)")
 
             from crypto import Identity
-            if not Identity.verify(author_user.publickey, signed_payload, signature_bytes):
+            _log_msg(f"POST_SIGN: verifying signature with author_user.publickey={author_user.publickey.hex()}")
+            verify_result = Identity.verify(author_user.publickey, signed_payload, signature_bytes)
+            _log_msg(f"POST_SIGN: verification result={verify_result}")
+            
+            if not verify_result:
+                _log_msg("POST_SIGN: signature verification FAILED")
                 return self._build_error(400, "Signature verification failed")
 
             result = board.update_post(post_num, {'signature': signature_hex})
             result.result()
 
+            _log_msg("POST_SIGN: success")
             return struct.pack('>B', 0x00)
 
         except Exception as e:
+            _log_msg(f"POST_SIGN: exception: {e}")
             return self._build_error(400, str(e))
 
     cdef bytes _cmd_get_pubkey(self, bytes data, object conn):
