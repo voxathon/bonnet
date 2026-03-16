@@ -809,7 +809,7 @@ cdef class CommandHandler:
             if board is None:
                 return self._build_error(404, f"Board '{board_name}' not found")
 
-            result = board.query(orderby="last_bumped DESC", limit=limit, include_content=False)
+            result = board.query(orderby="last_bumped DESC", limit=limit, offset=offset, include_content=False)
             posts = result.result()
 
             payload = struct.pack('>B', 0x00)

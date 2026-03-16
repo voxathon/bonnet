@@ -206,6 +206,9 @@ cdef class Bonnet:
             else:
                 result = self.dispatch_local_command(line)
             
+            if result is None:
+                break
+            
             if result:
                 print(result)
                 _log_msg(f"REPL: result='{result[:200]}{'...' if len(result) > 200 else ''}'")
@@ -252,12 +255,6 @@ cdef class Bonnet:
         
         if cmd == "get-post":
             return self._cmd_get_post(parts)
-        
-        if cmd == "create-post":
-            return self._cmd_create_post(parts)
-        
-        if cmd == "update-post":
-            return self._cmd_update_post(parts)
         
         if cmd == "delete-post":
             return self._cmd_delete_post(parts)
@@ -443,12 +440,6 @@ cdef class Bonnet:
             return self._format_post(response, board)
         
         return self._parse_error(response)
-    
-    cdef str _cmd_create_post(self, list parts):
-        return "Interactive post creation not yet implemented. Use the client."
-    
-    cdef str _cmd_update_post(self, list parts):
-        return "Interactive post update not yet implemented. Use the client."
     
     async def _interactive_create_post(self, list parts):
         loop = asyncio.get_event_loop()
