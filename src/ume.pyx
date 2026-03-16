@@ -411,3 +411,16 @@ cdef class Ume:
             except OSError:
                 pass
         return users
+
+    cpdef User ensure_root_user(self, str origin, bytes publickey):
+        cdef User existing
+        existing = self.get(username="root")
+        if existing is not None:
+            if existing.publickey != publickey:
+                self.upd(username="root", new_publickey=publickey)
+            return self.get(username="root")
+        return self.put(
+            "root", origin, publickey,
+            record_origin=origin, relay=origin,
+            is_administrator=True
+        )
