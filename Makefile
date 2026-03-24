@@ -32,7 +32,7 @@ pyinstaller: $(SO_FILES) | $(BIN_DIR)
 	@cd $(BUILD_DIR) && find . -name '*.so' -exec cp --parents {} ../$(SRC_DIR)/ \;
 	PYTHONPATH=src .venv/bin/pyinstaller bonnet.spec --distpath $(BIN_DIR) --workpath build/pyi
 	@echo "Cleaning up .so files from src..."
-	@cd $(SRC_DIR) && find . -name '*.so' -delete
+	@cd $(SRC_DIR) && find . -name '*.so' -exec rm {} ;
 
 $(BUILD_DIR):
 	mkdir -p $@
