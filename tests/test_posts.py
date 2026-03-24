@@ -3,9 +3,9 @@
 import pytest
 import struct
 from unittest.mock import MagicMock, AsyncMock
-from crypto import Identity
-from ume import User
-from ame import Post
+from core.crypto import Identity
+from engine.ume import User
+from engine.ame import Post
 
 
 class TestPostCreateRequestFormat:

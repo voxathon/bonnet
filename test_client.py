@@ -1,3 +1,4 @@
+import pytest
 import asyncio
 import websockets
 import struct
@@ -13,10 +14,11 @@ import shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "build"))
 
-from crypto import Identity, EncryptedSession
-from ume import Ume
+from core.crypto import Identity, EncryptedSession
+from engine.ume import Ume
 
 
+@pytest.mark.asyncio
 async def test_anonymous_registration():
     """Test anonymous user registration flow"""
     print("\n=== Testing Anonymous Registration ===")
@@ -99,6 +101,7 @@ async def test_anonymous_registration():
         shutil.rmtree(test_dir)
 
 
+@pytest.mark.asyncio
 async def test_registered_user():
     """Test registered user with LIST command"""
     print("\n=== Testing Registered User ===")

@@ -10,7 +10,7 @@ import time
 import re
 import struct
 from libc.stdint cimport uint64_t, int64_t
-from orm import Database, Table
+from core.orm import Database, Table
 
 
 cdef str _sanitize_board_name(str name):
