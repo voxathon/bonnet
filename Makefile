@@ -1,6 +1,6 @@
 VENV_PYTHON := .venv/bin/python3
 UV := uv
-CLANG := clang
+CLANG := gcc
 CYTHON := .venv/bin/cython
 
 PYTHON_INCLUDE := $(shell $(VENV_PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('INCLUDEPY'))")
