@@ -58,7 +58,7 @@ cdef void _log_dict(str label, dict d):
             _log_file.write(f"  {k}: {v}\n")
     _log_file.flush()
 
-READ_ONLY_COMMANDS = {0x02, 0x03, 0x11, 0x13, 0x14, 0x19, 0x30}
+READ_ONLY_COMMANDS = {0x02, 0x03, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x61, 0x62, 0x63}
 
 cdef int CHALLENGE_SIZE = 32
 
@@ -407,14 +407,18 @@ cdef class Connection:
 cdef class CommandHandler:
     cdef object _ume
     cdef object _ame
+    cdef object _keibatsu
     cdef object _config
     cdef object _server_identity
+    cdef object _sync_mgr
     
-    def __init__(self, object ume, object ame, object config, object server_identity):
+    def __init__(self, object ume, object ame, object keibatsu, object config, object server_identity):
         self._ume = ume
         self._ame = ame
+        self._keibatsu = keibatsu
         self._config = config
         self._server_identity = server_identity
+        self._sync_mgr = SyncManager(ume, ame, config, server_identity)
     
     def handle(self, bytes request, object conn) -> bytes:
         if len(request) == 0:
@@ -429,7 +433,13 @@ cdef class CommandHandler:
             0x13: 'POST_GET', 0x14: 'POST_LIST', 0x15: 'POST_UPDATE',
             0x16: 'POST_DELETE', 0x17: 'BOARD_CLOSE', 0x18: 'BOARD_DELETE',
             0x19: 'QUERY_POSTS', 0x20: 'USER_PROMOTE', 0x21: 'USER_DEMOTE',
-            0x22: 'POST_SIGN', 0x30: 'GET_PUBKEY'
+            0x22: 'POST_SIGN', 0x30: 'GET_PUBKEY',
+            0x40: 'RULE_CREATE', 0x41: 'RULE_GET', 0x42: 'RULE_GET_BY_NAME',
+            0x43: 'RULE_LIST', 0x44: 'RULE_UPDATE',
+            0x50: 'REPORT_CREATE', 0x51: 'REPORT_GET', 0x52: 'REPORT_LIST_BY_CULPRIT',
+            0x53: 'REPORT_SIGN',
+            0x60: 'PUNISHMENT_CREATE', 0x61: 'PUNISHMENT_GET',
+            0x62: 'PUNISHMENT_LIST_ACTIVE', 0x63: 'IS_BANNED'
         }
         cmd_name = cmd_names.get(cmd, f'UNKNOWN_{cmd:02x}')
         
@@ -476,6 +486,32 @@ cdef class CommandHandler:
             return self._cmd_post_sign(data, conn)
         elif cmd == 0x30:
             return self._cmd_get_pubkey(data, conn)
+        elif cmd == 0x40:
+            return self._cmd_rule_create(data, conn)
+        elif cmd == 0x41:
+            return self._cmd_rule_get(data, conn)
+        elif cmd == 0x42:
+            return self._cmd_rule_get_by_name(data, conn)
+        elif cmd == 0x43:
+            return self._cmd_rule_list(data, conn)
+        elif cmd == 0x44:
+            return self._cmd_rule_update(data, conn)
+        elif cmd == 0x50:
+            return self._cmd_report_create(data, conn)
+        elif cmd == 0x51:
+            return self._cmd_report_get(data, conn)
+        elif cmd == 0x52:
+            return self._cmd_report_list_by_culprit(data, conn)
+        elif cmd == 0x53:
+            return self._cmd_report_sign(data, conn)
+        elif cmd == 0x60:
+            return self._cmd_punishment_create(data, conn)
+        elif cmd == 0x61:
+            return self._cmd_punishment_get(data, conn)
+        elif cmd == 0x62:
+            return self._cmd_punishment_list_active(data, conn)
+        elif cmd == 0x63:
+            return self._cmd_is_banned(data, conn)
         else:
             return self._build_error(400, f"Unknown command {cmd}")
     
@@ -730,7 +766,7 @@ cdef class CommandHandler:
         cdef int b_len
         cdef str board_name
         cdef uint64_t post_num
-        cdef object board, result, post
+        cdef object board, result, post, nav_entry
 
         if not conn.is_registered():
             return self._build_error(401, "Authentication required")
@@ -743,6 +779,12 @@ cdef class CommandHandler:
             idx += b_len
 
             post_num = struct.unpack('>Q', data[idx:idx+8])[0]
+
+            nav_entry = self._ame.get_nav().get(board_name)
+            if nav_entry is not None and nav_entry['origin'] != self._config.origin:
+                asyncio.create_task(self._sync_mgr.sync_from_peer(nav_entry['relay']))
+                origin_bytes = nav_entry['origin'].encode('utf-8')
+                return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
 
             board = self._ame.get_board(board_name)
             if board is None:
@@ -786,7 +828,7 @@ cdef class CommandHandler:
     cdef bytes _cmd_post_list(self, bytes data, object conn):
         cdef int b_len, offset, limit
         cdef str board_name
-        cdef object board, result
+        cdef object board, result, nav_entry
         cdef list posts
         cdef object post
         cdef bytes payload
@@ -804,6 +846,16 @@ cdef class CommandHandler:
             offset = struct.unpack('>I', data[idx:idx+4])[0]
             idx += 4
             limit = struct.unpack('>I', data[idx:idx+4])[0]
+
+            nav_entry = self._ame.get_nav().get(board_name)
+            if nav_entry is None:
+                board = self._ame.get_board(board_name)
+                if board is None:
+                    return self._build_error(404, f"Board '{board_name}' not found")
+            elif nav_entry['origin'] != self._config.origin:
+                asyncio.create_task(self._sync_mgr.sync_from_peer(nav_entry['relay']))
+                origin_bytes = nav_entry['origin'].encode('utf-8')
+                return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
 
             board = self._ame.get_board(board_name)
             if board is None:
@@ -1316,3 +1368,641 @@ cdef class CommandHandler:
 
     cdef bytes _cmd_get_pubkey(self, bytes data, object conn):
         return struct.pack('>B', 0x00) + self._server_identity.public_key
+
+    cdef bytes _cmd_rule_create(self, bytes data, object conn):
+        cdef int name_len, desc_len
+        cdef str rule_name, description
+        cdef object result, rule
+
+        if not conn.is_administrator():
+            return self._build_error(403, "Administrator permission required")
+
+        try:
+            idx = 0
+            name_len = data[idx]
+            idx += 1
+            rule_name = data[idx:idx+name_len].decode('utf-8')
+            idx += name_len
+
+            desc_len = data[idx]
+            idx += 1
+            description = data[idx:idx+desc_len].decode('utf-8')
+
+            result = self._keibatsu.create_rule(rule_name, description)
+            rule = result.result()
+
+            name_bytes = rule.rule_name.encode('utf-8')
+            desc_bytes = rule.description.encode('utf-8')
+
+            return struct.pack('>B', 0x00) + \
+                   struct.pack('>Q', rule.rule_num) + \
+                   struct.pack('>B', len(name_bytes)) + name_bytes + \
+                   struct.pack('>B', len(desc_bytes)) + desc_bytes
+
+        except ValueError as e:
+            return self._build_error(409, str(e))
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_rule_get(self, bytes data, object conn):
+        cdef uint64_t rule_num
+        cdef object result, rule
+
+        try:
+            rule_num = struct.unpack('>Q', data[:8])[0]
+
+            result = self._keibatsu.get_rule(rule_num)
+            rule = result.result()
+
+            if rule is None:
+                return self._build_error(404, f"Rule {rule_num} not found")
+
+            name_bytes = rule.rule_name.encode('utf-8')
+            desc_bytes = rule.description.encode('utf-8')
+
+            return struct.pack('>B', 0x00) + \
+                   struct.pack('>Q', rule.rule_num) + \
+                   struct.pack('>B', len(name_bytes)) + name_bytes + \
+                   struct.pack('>B', len(desc_bytes)) + desc_bytes
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_rule_get_by_name(self, bytes data, object conn):
+        cdef int name_len
+        cdef str rule_name
+        cdef object result, rule
+
+        try:
+            name_len = data[0]
+            rule_name = data[1:1+name_len].decode('utf-8')
+
+            result = self._keibatsu.get_rule_by_name(rule_name)
+            rule = result.result()
+
+            if rule is None:
+                return self._build_error(404, f"Rule '{rule_name}' not found")
+
+            name_bytes = rule.rule_name.encode('utf-8')
+            desc_bytes = rule.description.encode('utf-8')
+
+            return struct.pack('>B', 0x00) + \
+                   struct.pack('>Q', rule.rule_num) + \
+                   struct.pack('>B', len(name_bytes)) + name_bytes + \
+                   struct.pack('>B', len(desc_bytes)) + desc_bytes
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_rule_list(self, bytes data, object conn):
+        cdef object result
+        cdef list rules
+        cdef object rule
+        cdef bytes payload
+
+        try:
+            result = self._keibatsu.list_rules()
+            rules = result.result()
+
+            payload = struct.pack('>B', 0x00) + struct.pack('>H', len(rules))
+            for rule in rules:
+                name_bytes = rule.rule_name.encode('utf-8')
+                desc_bytes = rule.description.encode('utf-8')
+                payload += struct.pack('>Q', rule.rule_num)
+                payload += struct.pack('>B', len(name_bytes)) + name_bytes
+                payload += struct.pack('>B', len(desc_bytes)) + desc_bytes
+
+            return payload
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_rule_update(self, bytes data, object conn):
+        cdef uint64_t rule_num
+        cdef int field_count, field_type, field_len, i
+        cdef str rule_name, description
+        cdef object result, rule
+
+        if not conn.is_administrator():
+            return self._build_error(403, "Administrator permission required")
+
+        try:
+            idx = 0
+            rule_num = struct.unpack('>Q', data[idx:idx+8])[0]
+            idx += 8
+
+            field_count = data[idx]
+            idx += 1
+
+            rule_name = None
+            description = None
+
+            for i in range(field_count):
+                field_type = data[idx]
+                idx += 1
+
+                if field_type == 0x01:
+                    field_len = data[idx]
+                    idx += 1
+                    rule_name = data[idx:idx+field_len].decode('utf-8')
+                    idx += field_len
+                elif field_type == 0x02:
+                    field_len = data[idx]
+                    idx += 1
+                    description = data[idx:idx+field_len].decode('utf-8')
+                    idx += field_len
+                else:
+                    return self._build_error(400, f"Unknown field type: 0x{field_type:02x}")
+
+            result = self._keibatsu.update_rule(rule_num, rule_name, description)
+            rule = result.result()
+
+            name_bytes = rule.rule_name.encode('utf-8')
+            desc_bytes = rule.description.encode('utf-8')
+
+            return struct.pack('>B', 0x00) + \
+                   struct.pack('>Q', rule.rule_num) + \
+                   struct.pack('>B', len(name_bytes)) + name_bytes + \
+                   struct.pack('>B', len(desc_bytes)) + desc_bytes
+
+        except ValueError as e:
+            return self._build_error(409, str(e))
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_report_create(self, bytes data, object conn):
+        cdef uint64_t rule_num, culprit_post_num
+        cdef int culprit_len, reporter_len, desc_len, board_len, origin_len, relay_len
+        cdef bytes culprit_pubkey, reporter_pubkey
+        cdef str description, board, origin, relay
+        cdef object result, report
+
+        if not conn.is_registered():
+            return self._build_error(401, "Authentication required")
+
+        try:
+            idx = 0
+            rule_num = struct.unpack('>Q', data[idx:idx+8])[0]
+            idx += 8
+
+            culprit_len = data[idx]
+            idx += 1
+            culprit_pubkey = data[idx:idx+culprit_len]
+            idx += culprit_len
+
+            reporter_len = data[idx]
+            idx += 1
+            reporter_pubkey = data[idx:idx+reporter_len]
+            idx += reporter_len
+
+            desc_len = data[idx]
+            idx += 1
+            description = data[idx:idx+desc_len].decode('utf-8')
+            idx += desc_len
+
+            board_len = data[idx]
+            idx += 1
+            board = data[idx:idx+board_len].decode('utf-8') if board_len > 0 else None
+            idx += board_len if board_len > 0 else 0
+
+            culprit_post_num = struct.unpack('>Q', data[idx:idx+8])[0]
+            idx += 8
+
+            origin_len = data[idx]
+            idx += 1
+            origin = data[idx:idx+origin_len].decode('utf-8') if origin_len > 0 else None
+            idx += origin_len if origin_len > 0 else 0
+
+            relay_len = data[idx]
+            idx += 1
+            relay = data[idx:idx+relay_len].decode('utf-8') if relay_len > 0 else None
+
+            result = self._keibatsu.create_report(
+                rule_num, culprit_pubkey, reporter_pubkey, description,
+                board, culprit_post_num, origin, relay
+            )
+            report = result.result()
+
+            return self._encode_report(report)
+
+        except ValueError as e:
+            return self._build_error(404, str(e))
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _encode_report(self, object report):
+        cdef bytes culprit_bytes = report.culprit_pubkey
+        cdef bytes board_bytes = (report.culprit_board or "").encode('utf-8')
+        cdef bytes reporter_bytes = report.reporter_pubkey
+        cdef bytes origin_bytes = report.origin.encode('utf-8')
+        cdef bytes relay_bytes = report.relay.encode('utf-8')
+        cdef bytes desc_bytes = report.description.encode('utf-8')
+        cdef bytes origin_sig_bytes = (report.origin_sig or "").encode('utf-8')
+        cdef bytes reporter_sig_bytes = (report.reporter_sig or "").encode('utf-8')
+
+        return struct.pack('>B', 0x00) + \
+               struct.pack('>Q', report.report_num) + \
+               struct.pack('>Q', report.rule_num) + \
+               struct.pack('>B', len(culprit_bytes)) + culprit_bytes + \
+               struct.pack('>B', len(board_bytes)) + board_bytes + \
+               struct.pack('>Q', report.culprit_post_num) + \
+               struct.pack('>B', len(reporter_bytes)) + reporter_bytes + \
+               struct.pack('>q', report.report_time) + \
+               struct.pack('>B', len(origin_bytes)) + origin_bytes + \
+               struct.pack('>B', len(relay_bytes)) + relay_bytes + \
+               struct.pack('>B', len(desc_bytes)) + desc_bytes + \
+               struct.pack('>B', len(origin_sig_bytes)) + origin_sig_bytes + \
+               struct.pack('>B', len(reporter_sig_bytes)) + reporter_sig_bytes
+
+    cdef bytes _cmd_report_get(self, bytes data, object conn):
+        cdef uint64_t report_num
+        cdef object result, report
+
+        try:
+            report_num = struct.unpack('>Q', data[:8])[0]
+
+            result = self._keibatsu.get_report(report_num)
+            report = result.result()
+
+            if report is None:
+                return self._build_error(404, f"Report {report_num} not found")
+
+            return self._encode_report(report)
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_report_list_by_culprit(self, bytes data, object conn):
+        cdef int pubkey_len
+        cdef bytes pubkey
+        cdef object result
+        cdef list reports
+        cdef bytes payload
+
+        try:
+            pubkey_len = data[0]
+            pubkey = data[1:1+pubkey_len]
+
+            result = self._keibatsu.list_reports_by_culprit(pubkey)
+            reports = result.result()
+
+            payload = struct.pack('>B', 0x00) + struct.pack('>H', len(reports))
+            for report in reports:
+                payload += self._encode_report_entry(report)
+
+            return payload
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _encode_report_entry(self, object report):
+        cdef bytes culprit_bytes = report.culprit_pubkey
+        cdef bytes board_bytes = (report.culprit_board or "").encode('utf-8')
+        cdef bytes reporter_bytes = report.reporter_pubkey
+        cdef bytes origin_bytes = report.origin.encode('utf-8')
+        cdef bytes relay_bytes = report.relay.encode('utf-8')
+        cdef bytes desc_bytes = report.description.encode('utf-8')
+        cdef bytes origin_sig_bytes = (report.origin_sig or "").encode('utf-8')
+        cdef bytes reporter_sig_bytes = (report.reporter_sig or "").encode('utf-8')
+
+        return struct.pack('>Q', report.report_num) + \
+               struct.pack('>Q', report.rule_num) + \
+               struct.pack('>B', len(culprit_bytes)) + culprit_bytes + \
+               struct.pack('>B', len(board_bytes)) + board_bytes + \
+               struct.pack('>Q', report.culprit_post_num) + \
+               struct.pack('>B', len(reporter_bytes)) + reporter_bytes + \
+               struct.pack('>q', report.report_time) + \
+               struct.pack('>B', len(origin_bytes)) + origin_bytes + \
+               struct.pack('>B', len(relay_bytes)) + relay_bytes + \
+               struct.pack('>B', len(desc_bytes)) + desc_bytes + \
+               struct.pack('>B', len(origin_sig_bytes)) + origin_sig_bytes + \
+               struct.pack('>B', len(reporter_sig_bytes)) + reporter_sig_bytes
+
+    cdef bytes _cmd_report_sign(self, bytes data, object conn):
+        cdef uint64_t report_num
+        cdef int sig_len
+        cdef str signature_hex
+        cdef bytes signature_bytes
+        cdef object result, report
+
+        if not conn.is_registered():
+            return self._build_error(401, "Authentication required")
+
+        try:
+            idx = 0
+            report_num = struct.unpack('>Q', data[idx:idx+8])[0]
+            idx += 8
+
+            sig_len = data[idx]
+            idx += 1
+            signature_hex = data[idx:idx+sig_len].decode('utf-8')
+
+            result = self._keibatsu.get_report(report_num)
+            report = result.result()
+
+            if report is None:
+                return self._build_error(404, f"Report {report_num} not found")
+
+            if report.reporter_pubkey != conn.peer_public_key:
+                return self._build_error(403, "Only the reporter can sign this report")
+
+            try:
+                signature_bytes = bytes.fromhex(signature_hex)
+            except ValueError:
+                return self._build_error(400, "Invalid signature format (expected hex)")
+
+            if len(signature_bytes) != 64:
+                return self._build_error(400, f"Invalid signature length: {len(signature_bytes)} (expected 64)")
+
+            result = self._keibatsu.sign_report(report_num, signature_bytes)
+            result.result()
+
+            return struct.pack('>B', 0x00)
+
+        except ValueError as e:
+            return self._build_error(404, str(e))
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_punishment_create(self, bytes data, object conn):
+        cdef int pubkey_len, id_count, notes_len, i
+        cdef bytes pubkey
+        cdef list report_ids
+        cdef uint64_t report_id
+        cdef int64_t expires_at
+        cdef str notes
+        cdef object result, punishment
+
+        if not conn.is_moderator() and not conn.is_administrator():
+            return self._build_error(403, "Moderator permission required")
+
+        try:
+            idx = 0
+            pubkey_len = data[idx]
+            idx += 1
+            pubkey = data[idx:idx+pubkey_len]
+            idx += pubkey_len
+
+            id_count = data[idx]
+            idx += 1
+
+            report_ids = []
+            for i in range(id_count):
+                report_id = struct.unpack('>Q', data[idx:idx+8])[0]
+                idx += 8
+                report_ids.append(report_id)
+
+            expires_at = struct.unpack('>q', data[idx:idx+8])[0]
+            idx += 8
+
+            notes_len = data[idx]
+            idx += 1
+            notes = data[idx:idx+notes_len].decode('utf-8') if notes_len > 0 else ""
+
+            result = self._keibatsu.create_punishment(pubkey, report_ids, expires_at, notes)
+            punishment = result.result()
+
+            return self._encode_punishment(punishment)
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _encode_punishment(self, object punishment):
+        cdef bytes pubkey_bytes = punishment.punished_pubkey
+        cdef bytes notes_bytes = (punishment.ban_notes or "").encode('utf-8')
+        cdef bytes payload
+
+        payload = struct.pack('>B', 0x00) + \
+                  struct.pack('>B', len(pubkey_bytes)) + pubkey_bytes + \
+                  struct.pack('>B', len(punishment.report_ids))
+
+        for report_id in punishment.report_ids:
+            payload += struct.pack('>Q', report_id)
+
+        payload += struct.pack('>q', punishment.expires_at)
+        payload += struct.pack('>B', len(notes_bytes)) + notes_bytes
+
+        return payload
+
+    cdef bytes _cmd_punishment_get(self, bytes data, object conn):
+        cdef int pubkey_len
+        cdef bytes pubkey
+        cdef object result, punishment
+
+        try:
+            pubkey_len = data[0]
+            pubkey = data[1:1+pubkey_len]
+
+            result = self._keibatsu.get_punishment(pubkey)
+            punishment = result.result()
+
+            if punishment is None:
+                return self._build_error(404, "No punishment found for pubkey")
+
+            return self._encode_punishment(punishment)
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_punishment_list_active(self, bytes data, object conn):
+        cdef object result
+        cdef list punishments
+        cdef bytes payload
+
+        try:
+            result = self._keibatsu.list_active_punishments()
+            punishments = result.result()
+
+            payload = struct.pack('>B', 0x00) + struct.pack('>H', len(punishments))
+            for punishment in punishments:
+                payload += self._encode_punishment(punishment)
+
+            return payload
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_is_banned(self, bytes data, object conn):
+        cdef int pubkey_len
+        cdef bytes pubkey
+        cdef object result
+        cdef tuple banned_result
+        cdef bint banned
+        cdef str reason
+        cdef bytes reason_bytes
+
+        try:
+            pubkey_len = data[0]
+            pubkey = data[1:1+pubkey_len]
+
+            result = self._keibatsu.is_banned(pubkey)
+            banned_result = result.result()
+
+            banned = banned_result[0]
+            reason = banned_result[1] or "No reason given"
+            reason_bytes = reason.encode('utf-8')
+
+            return struct.pack('>B', 0x00) + \
+                   struct.pack('>B', 1 if banned else 0) + \
+                   struct.pack('>B', len(reason_bytes)) + reason_bytes
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+
+cdef class SyncManager:
+    cdef object _ume
+    cdef object _ame
+    cdef object _config
+    cdef object _server_identity
+    cdef set _inflight_syncs
+    
+    def __init__(self, object ume, object ame, object config, object server_identity):
+        self._ume = ume
+        self._ame = ame
+        self._config = config
+        self._server_identity = server_identity
+        self._inflight_syncs = set()
+    
+    async def sync_from_peer(self, str peer_hostname):
+        if peer_hostname in self._inflight_syncs:
+            _log_msg(f"SYNC: already syncing with {peer_hostname}, skipping")
+            return
+        self._inflight_syncs.add(peer_hostname)
+        
+        cdef Connection conn
+        cdef bint connected = False
+        
+        try:
+            conn = Connection.client(self._server_identity)
+            try:
+                await conn.connect(f"wss://{peer_hostname}:2272")
+                connected = True
+            except Exception as e:
+                _log_msg(f"SYNC: port 2272 failed for {peer_hostname}: {e}, trying 272")
+                await conn.close()
+                conn = Connection.client(self._server_identity)
+                try:
+                    await conn.connect(f"wss://{peer_hostname}:272")
+                    connected = True
+                except Exception as e2:
+                    _log_msg(f"SYNC: port 272 also failed for {peer_hostname}: {e2}")
+                    await conn.close()
+                    return
+            
+            await self._sync_boards(conn, peer_hostname)
+            await self._sync_users(conn, peer_hostname)
+            
+        except Exception as e:
+            _log_msg(f"SYNC: failed to sync with {peer_hostname}: {e}")
+        finally:
+            self._inflight_syncs.discard(peer_hostname)
+            if conn is not None:
+                await conn.close()
+    
+    async def _sync_boards(self, conn, str peer_hostname):
+        await conn.send_request(bytes([0x11]), b'')
+        response = await conn.recv_response()
+        
+        if len(response) == 0 or response[0] != 0x00:
+            _log_msg(f"SYNC: BOARD_LIST failed for {peer_hostname}")
+            return
+        
+        cdef int idx = 1
+        cdef int count = struct.unpack('>H', response[idx:idx+2])[0]
+        idx += 2
+        
+        if count == 0:
+            _log_msg(f"SYNC: no boards from {peer_hostname}")
+            return
+        
+        cdef object nav = self._ame.get_nav()
+        cdef int n_len, o_len, s_len
+        cdef str name, origin
+        cdef bytes signature
+        cdef int closed
+        cdef list batch = []
+        
+        for _ in range(count):
+            n_len = response[idx]
+            idx += 1
+            name = response[idx:idx+n_len].decode('utf-8')
+            idx += n_len
+            
+            o_len = response[idx]
+            idx += 1
+            origin = response[idx:idx+o_len].decode('utf-8')
+            idx += o_len
+            
+            s_len = response[idx]
+            idx += 1
+            signature = response[idx:idx+s_len]
+            idx += s_len
+            
+            closed = response[idx]
+            idx += 1
+            
+            batch.append((name, name, origin, signature, peer_hostname))
+        
+        if batch:
+            nav.upsert_remote_batch(batch)
+            _log_msg(f"SYNC: synced {len(batch)} boards from {peer_hostname}")
+    
+    async def _sync_users(self, conn, str peer_hostname):
+        cdef int offset = 0
+        cdef int limit = 100
+        cdef int total = 0
+        cdef bytes response
+        cdef int idx, count, u_len, r_len, o_len, rel_len, pk_len
+        cdef str username, registrar, record_origin, relay
+        cdef bytes publickey
+        cdef int result
+        
+        while True:
+            await conn.send_request(bytes([0x03]), struct.pack('>II', offset, limit))
+            response = await conn.recv_response()
+            
+            if len(response) == 0 or response[0] != 0x00:
+                break
+            
+            idx = 1
+            count = struct.unpack('>H', response[idx:idx+2])[0]
+            idx += 2
+            
+            if count == 0:
+                break
+            
+            for _ in range(count):
+                u_len = response[idx]
+                idx += 1
+                username = response[idx:idx+u_len].decode('utf-8')
+                idx += u_len
+                
+                r_len = response[idx]
+                idx += 1
+                registrar = response[idx:idx+r_len].decode('utf-8')
+                idx += r_len
+                
+                o_len = response[idx]
+                idx += 1
+                record_origin = response[idx:idx+o_len].decode('utf-8')
+                idx += o_len
+                
+                rel_len = response[idx]
+                idx += 1
+                relay = response[idx:idx+rel_len].decode('utf-8')
+                idx += rel_len
+                
+                pk_len = response[idx]
+                idx += 1
+                publickey = response[idx:idx+pk_len]
+                idx += pk_len
+                
+                result = self._ume.upsert_remote_user(username, registrar, publickey,
+                                                        record_origin, peer_hostname)
+                if result > 0:
+                    total += 1
+            
+            offset += limit
+        
+        _log_msg(f"SYNC: synced {total} users from {peer_hostname}")
