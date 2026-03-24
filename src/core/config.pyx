@@ -14,8 +14,9 @@ cdef class Config:
     cdef public str nav_db_path
     cdef public str reports_db_path
     cdef public str punishments_db_path
+    cdef public str log_dir
     
-    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None):
+    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None):
         if registrars is None:
             registrars = ["knolastna.me"]
         self.registrars = [r.lower() for r in registrars]
@@ -36,6 +37,9 @@ cdef class Config:
         if punishments_db_path is None:
             punishments_db_path = "/var/lib/bonnet/punishments.db"
         self.punishments_db_path = punishments_db_path
+        if log_dir is None:
+            log_dir = "/var/log/bonnet"
+        self.log_dir = log_dir
     
     @staticmethod
     def load(path: str) -> 'Config':
@@ -53,8 +57,9 @@ cdef class Config:
         nav_db_path = data.get('server', {}).get('nav_db_path', "/var/lib/bonnet/nav.db")
         reports_db_path = data.get('keibatsu', {}).get('reports_path', "/var/lib/bonnet/reports.db")
         punishments_db_path = data.get('keibatsu', {}).get('punishments_path', "/var/lib/bonnet/punishments.db")
+        log_dir = data.get('server', {}).get('log_dir', "/var/log/bonnet")
         
-        return Config(registrars=registrars, timeout_seconds=timeout_seconds, ame_path=ame_path, origin=origin, anonymous_read=anonymous_read, nav_db_path=nav_db_path, reports_db_path=reports_db_path, punishments_db_path=punishments_db_path)
+        return Config(registrars=registrars, timeout_seconds=timeout_seconds, ame_path=ame_path, origin=origin, anonymous_read=anonymous_read, nav_db_path=nav_db_path, reports_db_path=reports_db_path, punishments_db_path=punishments_db_path, log_dir=log_dir)
     
     @staticmethod
     def _create_default(path: str) -> 'Config':
@@ -63,6 +68,7 @@ registrars = ["localhost"]
 origin = "localhost"
 anonymous_read = true
 nav_db_path = "/var/lib/bonnet/nav.db"
+log_dir = "/var/log/bonnet"
 
 [limits]
 timeout_seconds = 30
@@ -81,7 +87,7 @@ punishments_path = "/var/lib/bonnet/punishments.db"
         
         os.chmod(path, 0o600)
         
-        return Config(registrars=["localhost"], timeout_seconds=30, ame_path="/var/spool/boards", origin="localhost", anonymous_read=True, nav_db_path="/var/lib/bonnet/nav.db", reports_db_path="/var/lib/bonnet/reports.db", punishments_db_path="/var/lib/bonnet/punishments.db")
+        return Config(registrars=["localhost"], timeout_seconds=30, ame_path="/var/spool/boards", origin="localhost", anonymous_read=True, nav_db_path="/var/lib/bonnet/nav.db", reports_db_path="/var/lib/bonnet/reports.db", punishments_db_path="/var/lib/bonnet/punishments.db", log_dir="/var/log/bonnet")
     
     def registrar_valid(self, registrar: str) -> bool:
         if not registrar:
