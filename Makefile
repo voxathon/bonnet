@@ -29,7 +29,7 @@ all: $(BIN_DIR)/bonnet
 
 pyinstaller: $(SO_FILES) | $(BIN_DIR)
 	@echo "Copying .so files to src for pyinstaller..."
-	@cd $(BUILD_DIR) && find . -name '*.so' -exec cp --parents {} ../$(SRC_DIR)/ \;
+	@cd $(BUILD_DIR) && tar cf - `find . -name '*.so'` | (cd ../$(SRC_DIR) && tar xf -)
 	PYTHONPATH=src .venv/bin/pyinstaller bonnet.spec --distpath $(BIN_DIR) --workpath build/pyi
 	@echo "Cleaning up .so files from src..."
 	@cd $(SRC_DIR) && find . -name '*.so' -delete
@@ -56,7 +56,7 @@ $(BUILD_DIR)/%.so: $(BUILD_DIR)/%.c
 $(BIN_DIR)/bonnet: $(BUILD_DIR)/app/server_embed.c $(SO_FILES) | $(BIN_DIR)
 	$(CLANG) $(CFLAGS) $< -o $@.bin $(LDFLAGS)
 	@echo "Copying .so files to bin directory..."
-	@cd $(BUILD_DIR) && find . -name '*.so' -exec cp --parents {} ../$(BIN_DIR)/ \;
+	@cd $(BUILD_DIR) && tar cf - `find . -name '*.so'` | (cd ../$(BIN_DIR) && tar xf -)
 	@printf '#!/bin/bash\nSCRIPT_DIR="$$(cd "$$(dirname "$$0")" && pwd)"\nVENV_DIR="$$(cd "$${SCRIPT_DIR}/.." && pwd)/.venv"\nPYTHONPATH="$${VENV_DIR}/lib/python3.12/site-packages:$${SCRIPT_DIR}"\nexport PYTHONPATH\nexec "$${SCRIPT_DIR}/bonnet.bin" "$$@"\n' > $@
 	@chmod +x $@
 
