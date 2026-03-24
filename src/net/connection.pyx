@@ -15,48 +15,7 @@ from libc.stdint cimport uint64_t, int64_t
 import nacl.exceptions
 import websockets.client
 
-_log_file = None
-
-cdef void _log_msg(str msg):
-    global _log_file
-    if _log_file is None:
-        try:
-            _log_file = open('bonnet.log', 'a')
-        except:
-            return
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-    _log_file.write(f"[{ts}] {msg}\n")
-    _log_file.flush()
-
-cdef void _log_hex(str label, bytes data):
-    global _log_file
-    if _log_file is None:
-        try:
-            _log_file = open('bonnet.log', 'a')
-        except:
-            return
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-    _log_file.write(f"[{ts}] {label} ({len(data)} bytes):\n")
-    hex_str = data.hex()
-    for i in range(0, len(hex_str), 64):
-        _log_file.write(f"  {hex_str[i:i+64]}\n")
-    _log_file.flush()
-
-cdef void _log_dict(str label, dict d):
-    global _log_file
-    if _log_file is None:
-        try:
-            _log_file = open('bonnet.log', 'a')
-        except:
-            return
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-    _log_file.write(f"[{ts}] {label}:\n")
-    for k, v in d.items():
-        if isinstance(v, str) and len(v) > 100:
-            _log_file.write(f"  {k}: {v[:100]}... ({len(v)} chars)\n")
-        else:
-            _log_file.write(f"  {k}: {v}\n")
-    _log_file.flush()
+from core.logging import log_msg, log_hex, log_dict
 
 READ_ONLY_COMMANDS = {0x02, 0x03, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x61, 0x62, 0x63}
 

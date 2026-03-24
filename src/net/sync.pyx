@@ -6,10 +6,7 @@ import struct
 import asyncio
 from net.connection import Connection
 from engine.facade import BonnetEngine
-
-
-cdef void _log_msg(str msg):
-    pass
+from core.logging import log_msg
 
 
 cdef class SyncManager:
@@ -30,7 +27,7 @@ cdef class SyncManager:
 
     async def sync_from_peer(self, str peer_hostname):
         if peer_hostname in self._inflight_syncs:
-            _log_msg(f"SYNC: already syncing with {peer_hostname}, skipping")
+            log_msg(f"SYNC: already syncing with {peer_hostname}, skipping")
             return
         self._inflight_syncs.add(peer_hostname)
 
@@ -43,14 +40,14 @@ cdef class SyncManager:
                 await conn.connect(f"wss://{peer_hostname}:2272")
                 connected = True
             except Exception as e:
-                _log_msg(f"SYNC: port 2272 failed for {peer_hostname}: {e}, trying 272")
+                log_msg(f"SYNC: port 2272 failed for {peer_hostname}: {e}, trying 272")
                 await conn.close()
                 conn = Connection.client(self._server_identity)
                 try:
                     await conn.connect(f"wss://{peer_hostname}:272")
                     connected = True
                 except Exception as e2:
-                    _log_msg(f"SYNC: port 272 also failed for {peer_hostname}: {e2}")
+                    log_msg(f"SYNC: port 272 also failed for {peer_hostname}: {e2}")
                     await conn.close()
                     return
 
@@ -58,7 +55,7 @@ cdef class SyncManager:
             await self._sync_users(conn, peer_hostname)
 
         except Exception as e:
-            _log_msg(f"SYNC: failed to sync with {peer_hostname}: {e}")
+            log_msg(f"SYNC: failed to sync with {peer_hostname}: {e}")
         finally:
             self._inflight_syncs.discard(peer_hostname)
             if conn is not None:
@@ -69,7 +66,7 @@ cdef class SyncManager:
         response = await conn.recv_response()
 
         if len(response) == 0 or response[0] != 0x00:
-            _log_msg(f"SYNC: BOARD_LIST failed for {peer_hostname}")
+            log_msg(f"SYNC: BOARD_LIST failed for {peer_hostname}")
             return
 
         cdef int idx = 1
@@ -77,7 +74,7 @@ cdef class SyncManager:
         idx += 2
 
         if count == 0:
-            _log_msg(f"SYNC: no boards from {peer_hostname}")
+            log_msg(f"SYNC: no boards from {peer_hostname}")
             return
 
         cdef object nav = self._ame.get_nav()
@@ -110,7 +107,7 @@ cdef class SyncManager:
 
         if batch:
             nav.upsert_remote_batch(batch)
-            _log_msg(f"SYNC: synced {len(batch)} boards from {peer_hostname}")
+            log_msg(f"SYNC: synced {len(batch)} boards from {peer_hostname}")
 
     async def _sync_users(self, conn, str peer_hostname):
         cdef int offset = 0
@@ -169,4 +166,4 @@ cdef class SyncManager:
 
             offset += limit
 
-        _log_msg(f"SYNC: synced {total} users from {peer_hostname}")
+        log_msg(f"SYNC: synced {total} users from {peer_hostname}")
