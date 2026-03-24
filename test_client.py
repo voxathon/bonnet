@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "bui
 
 from core.crypto import Identity, EncryptedSession
 from engine.ume import Ume
+import pytest
 
 
 @pytest.mark.asyncio
