@@ -203,9 +203,12 @@ cdef class Connection:
                 timeout=self._timeout_seconds
             )
             
-            challenge = await self._recv_frame()
-            if len(challenge) != CHALLENGE_SIZE:
-                raise ConnectionError(400, "Invalid challenge size")
+            frame = await self._recv_frame()
+            if len(frame) != 32 + CHALLENGE_SIZE:
+                raise ConnectionError(400, "Invalid challenge frame size")
+
+            self.peer_public_key = frame[:32]
+            challenge = frame[32:]
             
             await self._send_handshake(challenge)
             
@@ -352,11 +355,10 @@ cdef class Connection:
         raise ConnectionError(400, "Expected binary frame")
     
     async def _send_challenge(self):
-        await self._send_frame(self._challenge)
+        await self._send_frame(self._identity.public_key + self._challenge)
     
     async def _send_handshake(self, bytes challenge):
         signature = self._identity.sign(challenge)
-        self.peer_public_key = self._identity.public_key
         handshake = self._identity.public_key + signature
         await self._send_frame(handshake)
     
@@ -452,6 +454,11 @@ cdef class CommandHandler:
                 _log_msg(f"HANDLE: rejected - anonymous user cannot run cmd=0x{cmd:02x}")
                 return self._build_error(401, "Anonymous users must register first")
         
+        if not conn.is_anonymous and conn.user.is_banned:
+            if cmd not in READ_ONLY_COMMANDS:
+                _log_msg(f"HANDLE: rejected - banned user '{conn.user.username}' attempted cmd=0x{cmd:02x}")
+                return self._build_error(403, "You are banned from performing this action")
+
         if cmd == 0x01:
             return self._cmd_register(data, conn)
         elif cmd == 0x02:
