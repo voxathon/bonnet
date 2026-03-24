@@ -14,7 +14,7 @@ import threading
 import struct
 from concurrent.futures import ThreadPoolExecutor, Future
 from libc.stdint cimport uint64_t, int64_t
-from orm import Database, Table
+from core.orm import Database, Table
 
 
 cdef class AsyncResult:
