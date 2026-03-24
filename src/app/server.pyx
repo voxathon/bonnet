@@ -60,53 +60,20 @@ cdef void _log_dict(str label, dict d):
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) or '.')
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'build'))
 
-from ume import Ume
-from ame import Ame
-from conman import Connection, ConnectionError, CommandHandler
-from crypto import Identity
-from config import Config
-from keibatsu import Keibatsu
+from engine.ume import Ume
+from engine.ame import Ame
+from net.connection import Connection, ConnectionError
+from net.commands import CommandHandler
+from core.crypto import Identity
+from core.config import Config
+from engine.keibatsu import Keibatsu
+from app.cli import LocalConnection
+from engine.facade import BonnetEngine
 
 import nacl.exceptions
 
 PORT_PRIVILEGED = 272
 PORT_STANDARD = 2272
-
-cdef class LocalConnection:
-    cdef public object user
-    cdef public bytes peer_public_key
-    
-    def __init__(self, user, peer_pubkey):
-        self.user = user
-        self.peer_public_key = peer_pubkey
-    
-    @property
-    def is_anonymous(self) -> bool:
-        return False
-    
-    cpdef bint is_registered(self):
-        return True
-    
-    cpdef bint is_administrator(self):
-        return self.user is not None and self.user.is_administrator
-    
-    cpdef bint is_moderator(self):
-        return self.user is not None and self.user.is_moderator
-    
-    cpdef bint can_create_board(self):
-        return self.is_administrator()
-    
-    cpdef bint can_promote_to_mod(self):
-        return self.is_administrator()
-    
-    cpdef bint can_demote_mod(self):
-        return self.is_administrator()
-    
-    cpdef bint can_edit_post(self, str author):
-        return self.user is not None and self.user.username == author
-    
-    cpdef bint can_delete_post(self, str author):
-        return self.user is not None and self.user.username == author
 
 cdef class Bonnet:
     cdef str userfile_path
@@ -116,6 +83,7 @@ cdef class Bonnet:
     cdef object server_identity
     cdef object config
     cdef object command_handler
+    cdef public object engine
     cdef object root_user
     cdef object local_conn
     
@@ -148,7 +116,8 @@ cdef class Bonnet:
             'reports_db_path': config.reports_db_path,
             'punishments_db_path': config.punishments_db_path
         })
-        self.command_handler = CommandHandler(self.ume, self.ame, self.keibatsu, config, self.server_identity)
+        self.engine = BonnetEngine(self.ume, self.ame, self.keibatsu, config, self.server_identity)
+        self.command_handler = CommandHandler(self.engine)
         self.root_user = self.ume.ensure_root_user(config.origin, self.server_identity.public_key)
         _log_msg(f"INIT: root_user={self.root_user.username}, pubkey={self.root_user.publickey.hex()}")
         self.local_conn = LocalConnection(self.root_user, self.server_identity.public_key)
@@ -161,7 +130,7 @@ cdef class Bonnet:
             async with asyncio.timeout(self.config.timeout_seconds):
                 conn = Connection.server(
                     self.server_identity, websocket,
-                    self.ume, self.config, ame=self.ame
+                    self.engine
                 )
                 await conn.accept()
                 plaintext = await conn.recv_request()
