@@ -91,6 +91,18 @@ cdef class NavDB:
                 [board_name, board_path, origin, signature, relay]
             )
 
+    cpdef void upsert_remote_batch(self, list entries):
+        """
+        Batch upsert multiple nav entries in a single transaction.
+        entries: list of tuples (board_name, board_path, origin, signature, relay)
+        """
+        with self._db.open() as ctx:
+            for entry in entries:
+                ctx.execute(
+                    "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay) VALUES (?, ?, ?, ?, ?)",
+                    entry
+                )
+
     cpdef void delete(self, str board_name):
         with self._db.open() as ctx:
             ctx.execute("DELETE FROM nav WHERE board_name=?", [board_name])

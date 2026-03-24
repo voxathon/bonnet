@@ -14,7 +14,7 @@ SRC_DIR := src
 BUILD_DIR := build
 BIN_DIR := bin
 
-MODULES := orm ame ume crypto config conman __init
+MODULES := orm ame ume crypto config conman keibatsu __init
 
 PYTHON_LIBNAME := $(patsubst lib%,%,$(basename $(PYTHON_LDLIBRARY)))
 
@@ -25,7 +25,7 @@ LDFLAGS := -L$(PYTHON_LIBDIR) -l$(PYTHON_LIBNAME) $(OPENSSL_LIBS) -Wl,-rpath,$(P
 
 all: $(BIN_DIR)/bonnet
 
-pyinstaller: $(BUILD_DIR)/bonnet.so $(BUILD_DIR)/orm.so $(BUILD_DIR)/ame.so $(BUILD_DIR)/ume.so $(BUILD_DIR)/crypto.so $(BUILD_DIR)/config.so $(BUILD_DIR)/conman.so $(BUILD_DIR)/__init.so | $(BIN_DIR)
+pyinstaller: $(BUILD_DIR)/bonnet.so $(BUILD_DIR)/orm.so $(BUILD_DIR)/ame.so $(BUILD_DIR)/ume.so $(BUILD_DIR)/crypto.so $(BUILD_DIR)/config.so $(BUILD_DIR)/conman.so $(BUILD_DIR)/keibatsu.so $(BUILD_DIR)/__init.so | $(BIN_DIR)
 	cp $(BUILD_DIR)/*.so src/
 	PYTHONPATH=src .venv/bin/pyinstaller bonnet.spec --distpath $(BIN_DIR) --workpath build/pyi
 	rm -f src/*.so
@@ -65,6 +65,9 @@ $(BUILD_DIR)/config.c: $(SRC_DIR)/config.pyx | $(BUILD_DIR)
 $(BUILD_DIR)/conman.c: $(SRC_DIR)/conman.pyx | $(BUILD_DIR)
 	$(CYTHON) -3 $< -o $@
 
+$(BUILD_DIR)/keibatsu.c: $(SRC_DIR)/keibatsu.pyx | $(BUILD_DIR)
+	$(CYTHON) -3 $< -o $@
+
 $(BUILD_DIR)/__init.so: $(BUILD_DIR)/__init.c
 	$(CLANG) -shared -fPIC $(CFLAGS) $< -o $@ $(LDFLAGS)
 
@@ -86,10 +89,13 @@ $(BUILD_DIR)/config.so: $(BUILD_DIR)/config.c
 $(BUILD_DIR)/conman.so: $(BUILD_DIR)/conman.c
 	$(CLANG) -shared -fPIC $(CFLAGS) $< -o $@ $(LDFLAGS)
 
+$(BUILD_DIR)/keibatsu.so: $(BUILD_DIR)/keibatsu.c
+	$(CLANG) -shared -fPIC $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 $(BUILD_DIR)/bonnet.so: $(BUILD_DIR)/bonnet.c
 	$(CLANG) -shared -fPIC $(CFLAGS) $< -o $@ $(LDFLAGS)
 
-$(BIN_DIR)/bonnet: $(BUILD_DIR)/bonnet_embed.c $(BUILD_DIR)/orm.so $(BUILD_DIR)/ame.so $(BUILD_DIR)/ume.so $(BUILD_DIR)/crypto.so $(BUILD_DIR)/config.so $(BUILD_DIR)/conman.so $(BUILD_DIR)/__init.so | $(BIN_DIR)
+$(BIN_DIR)/bonnet: $(BUILD_DIR)/bonnet_embed.c $(BUILD_DIR)/orm.so $(BUILD_DIR)/ame.so $(BUILD_DIR)/ume.so $(BUILD_DIR)/crypto.so $(BUILD_DIR)/config.so $(BUILD_DIR)/conman.so $(BUILD_DIR)/keibatsu.so $(BUILD_DIR)/__init.so | $(BIN_DIR)
 	$(CLANG) $(CFLAGS) $(BUILD_DIR)/bonnet_embed.c -o $@.bin $(LDFLAGS)
 	cp $(BUILD_DIR)/*.so $(BIN_DIR)/
 	@printf '#!/bin/bash\nSCRIPT_DIR="$$(cd "$$(dirname "$$0")" && pwd)"\nVENV_DIR="$$(cd "$${SCRIPT_DIR}/.." && pwd)/.venv"\nPYTHONPATH="$${VENV_DIR}/lib/python3.12/site-packages:$${SCRIPT_DIR}"\nexport PYTHONPATH\nexec "$${SCRIPT_DIR}/bonnet.bin" "$$@"\n' > $@

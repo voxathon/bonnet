@@ -65,6 +65,7 @@ from ame import Ame
 from conman import Connection, ConnectionError, CommandHandler
 from crypto import Identity
 from config import Config
+from keibatsu import Keibatsu
 
 import nacl.exceptions
 
@@ -111,6 +112,7 @@ cdef class Bonnet:
     cdef str userfile_path
     cdef object ume
     cdef object ame
+    cdef object keibatsu
     cdef object server_identity
     cdef object config
     cdef object command_handler
@@ -128,15 +130,25 @@ cdef class Bonnet:
         _log_msg(f"INIT: server_identity pubkey={self.server_identity.public_key.hex()}")
         self.ame = Ame(config.ame_path, origin=config.origin, signing_key=self.server_identity.signing_key, nav_db_path=config.nav_db_path)
         _log_msg(f"INIT: Ame initialized, path={config.ame_path}, origin={config.origin}")
+        self.keibatsu = Keibatsu(
+            reports_path=config.reports_db_path,
+            punishments_path=config.punishments_db_path,
+            ume=self.ume,
+            signing_key=self.server_identity.signing_key,
+            origin=config.origin
+        )
+        _log_msg(f"INIT: Keibatsu initialized, reports={config.reports_db_path}, punishments={config.punishments_db_path}")
         self.config = config
         _log_dict("INIT: config", {
             'origin': config.origin,
             'ame_path': config.ame_path,
             'nav_db_path': config.nav_db_path,
             'timeout_seconds': config.timeout_seconds,
-            'anonymous_read': config.anonymous_read
+            'anonymous_read': config.anonymous_read,
+            'reports_db_path': config.reports_db_path,
+            'punishments_db_path': config.punishments_db_path
         })
-        self.command_handler = CommandHandler(self.ume, self.ame, config, self.server_identity)
+        self.command_handler = CommandHandler(self.ume, self.ame, self.keibatsu, config, self.server_identity)
         self.root_user = self.ume.ensure_root_user(config.origin, self.server_identity.public_key)
         _log_msg(f"INIT: root_user={self.root_user.username}, pubkey={self.root_user.publickey.hex()}")
         self.local_conn = LocalConnection(self.root_user, self.server_identity.public_key)
