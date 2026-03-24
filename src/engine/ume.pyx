@@ -303,7 +303,7 @@ cdef class Ume:
             raise ValueError(f"Public key must be exactly {PUBLICKEY_SIZE} bytes")
 
         with self._lock:
-            with open(self._filepath, 'ab') as lockfile:
+            with open(self._filepath, 'a+b') as lockfile:
                 fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX)
                 try:
                     existing = self._find_record_by_username(username)
@@ -325,8 +325,8 @@ cdef class Ume:
                     user = User(username, registrar, record_origin, relay, publickey, password_hash, salt, self._next_seq, is_administrator, is_moderator, is_banned, creation_time, relay_time)
                     self._next_seq += 1
                     try:
-                        with open(self._filepath, 'ab') as f:
-                            f.write(user.encode())
+                        lockfile.write(user.encode())
+                        lockfile.flush()
                     except OSError as e:
                         raise IOError(f"Failed to write user record: {e}")
                 finally:
@@ -337,7 +337,7 @@ cdef class Ume:
         cdef size_t pos
         cdef User user
         with self._lock:
-            with open(self._filepath, 'a+b') as lockfile:
+            with open(self._filepath, 'r+b') as lockfile:
                 fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX)
                 try:
                     if username is not None:
@@ -379,9 +379,9 @@ cdef class Ume:
                         user.relay_time = new_relay_time
 
                     try:
-                        with open(self._filepath, 'r+b') as f:
-                            f.seek(pos * RECORD_SIZE)
-                            f.write(user.encode())
+                        lockfile.seek(pos * RECORD_SIZE)
+                        lockfile.write(user.encode())
+                        lockfile.flush()
                     except OSError as e:
                         raise IOError(f"Failed to update user record: {e}")
                 finally:
@@ -392,7 +392,7 @@ cdef class Ume:
         cdef size_t pos
         cdef bytes empty_record = b'\x00' * RECORD_SIZE
         with self._lock:
-            with open(self._filepath, 'a+b') as lockfile:
+            with open(self._filepath, 'r+b') as lockfile:
                 fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX)
                 try:
                     if username is not None:
@@ -406,9 +406,9 @@ cdef class Ume:
                         return False
 
                     try:
-                        with open(self._filepath, 'r+b') as f:
-                            f.seek(pos * RECORD_SIZE)
-                            f.write(empty_record)
+                        lockfile.seek(pos * RECORD_SIZE)
+                        lockfile.write(empty_record)
+                        lockfile.flush()
                     except OSError as e:
                         raise IOError(f"Failed to delete user record: {e}")
                 finally:
@@ -492,7 +492,7 @@ cdef class Ume:
             raise ValueError(f"Public key must be exactly {PUBLICKEY_SIZE} bytes")
 
         with self._lock:
-            with open(self._filepath, 'a+b') as lockfile:
+            with open(self._filepath, 'r+b') as lockfile:
                 fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX)
                 try:
                     pos = self._find_record_by_username(username)
@@ -507,8 +507,9 @@ cdef class Ume:
                         )
                         self._next_seq += 1
                         try:
-                            with open(self._filepath, 'ab') as f:
-                                f.write(user.encode())
+                            lockfile.seek(0, 2) # seek to end
+                            lockfile.write(user.encode())
+                            lockfile.flush()
                         except OSError as e:
                             raise IOError(f"Failed to write user record: {e}")
                         return 1
@@ -526,9 +527,9 @@ cdef class Ume:
                         user.relay_time = <int64_t>_time.time()
 
                         try:
-                            with open(self._filepath, 'r+b') as f:
-                                f.seek(pos * RECORD_SIZE)
-                                f.write(user.encode())
+                            lockfile.seek(pos * RECORD_SIZE)
+                            lockfile.write(user.encode())
+                            lockfile.flush()
                         except OSError as e:
                             raise IOError(f"Failed to update user record: {e}")
                         return 2
