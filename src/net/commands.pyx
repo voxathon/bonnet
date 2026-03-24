@@ -974,7 +974,7 @@ cdef class CommandHandler:
                 _log_msg(f"POST_SIGN: invalid signature length={len(signature_bytes)} (expected 64)")
                 return self._build_error(400, f"Invalid signature length: {len(signature_bytes)} (expected 64)")
 
-            from crypto import Identity
+            from core.crypto import Identity
             _log_msg(f"POST_SIGN: verifying signature with author_user.publickey={author_user.publickey.hex()}")
             verify_result = Identity.verify(author_user.publickey, signed_payload, signature_bytes)
             _log_msg(f"POST_SIGN: verification result={verify_result}")
