@@ -5,9 +5,9 @@ import struct
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from conman import Connection, ConnectionMode, ConnectionState, ConnectionError
-from crypto import Identity, EncryptedSession
-from ume import User
+from net.connection import Connection, ConnectionMode, ConnectionState, ConnectionError
+from core.crypto import Identity, EncryptedSession
+from engine.ume import User
 
 
 class TestConnectionError:
@@ -39,7 +39,10 @@ class TestConnectionFactories:
         websocket = MagicMock()
         ume = MagicMock()
         config = MagicMock()
-        conn = Connection.server(identity, websocket, ume, config, timeout_seconds=30)
+        engine = MagicMock()
+        engine.ume = ume
+        engine.config = config
+        conn = Connection.server(identity, websocket, engine, timeout_seconds=30)
         assert conn.mode == ConnectionMode.SERVER
         assert conn.state == ConnectionState.AUTHENTICATING
         assert conn.is_client is False
@@ -59,7 +62,10 @@ class TestConnectionProperties:
         websocket = MagicMock()
         ume = MagicMock()
         config = MagicMock()
-        conn = Connection.server(identity, websocket, ume, config)
+        engine = MagicMock()
+        engine.ume = ume
+        engine.config = config
+        conn = Connection.server(identity, websocket, engine)
         user = MagicMock()
         user.username = "alice"
         conn.user = user
@@ -79,7 +85,10 @@ class TestConnectionPermissions:
         websocket = MagicMock()
         ume = MagicMock()
         config = MagicMock()
-        conn = Connection.server(identity, websocket, ume, config)
+        engine = MagicMock()
+        engine.ume = ume
+        engine.config = config
+        conn = Connection.server(identity, websocket, engine)
         conn.user = user
         return conn
 
@@ -211,7 +220,10 @@ class TestConnectionAccept:
 
         websocket.recv.side_effect = mock_recv
 
-        conn = Connection.server(server_identity, websocket, mock_ume, mock_config)
+        engine = MagicMock()
+        engine.ume = mock_ume
+        engine.config = mock_config
+        conn = Connection.server(server_identity, websocket, engine)
         await conn.accept()
 
         assert conn.is_anonymous is True
@@ -245,7 +257,10 @@ class TestConnectionAccept:
 
         websocket.recv.side_effect = mock_recv
 
-        conn = Connection.server(server_identity, websocket, mock_ume, mock_config)
+        engine = MagicMock()
+        engine.ume = mock_ume
+        engine.config = mock_config
+        conn = Connection.server(server_identity, websocket, engine)
         await conn.accept()
 
         assert conn.is_anonymous is False
@@ -278,7 +293,10 @@ class TestConnectionAccept:
 
         websocket.recv.side_effect = mock_recv
 
-        conn = Connection.server(server_identity, websocket, mock_ume, mock_config)
+        engine = MagicMock()
+        engine.ume = mock_ume
+        engine.config = mock_config
+        conn = Connection.server(server_identity, websocket, engine)
         with pytest.raises(ConnectionError) as exc_info:
             await conn.accept()
         assert exc_info.value.code == 401
@@ -318,7 +336,10 @@ class TestConnectionAccept:
 
         websocket.recv.side_effect = mock_recv
 
-        conn = Connection.server(server_identity, websocket, mock_ume, mock_config)
+        engine = MagicMock()
+        engine.ume = mock_ume
+        engine.config = mock_config
+        conn = Connection.server(server_identity, websocket, engine)
         await conn.accept()
 
         assert conn.is_anonymous is False
@@ -358,7 +379,10 @@ class TestConnectionAccept:
 
         websocket.recv.side_effect = mock_recv
 
-        conn = Connection.server(server_identity, websocket, mock_ume, mock_config)
+        engine = MagicMock()
+        engine.ume = mock_ume
+        engine.config = mock_config
+        conn = Connection.server(server_identity, websocket, engine)
         with pytest.raises(ConnectionError) as exc_info:
             await conn.accept()
         assert exc_info.value.code == 400
@@ -404,7 +428,10 @@ class TestConnectionSendRecvRequest:
         websocket = AsyncMock()
         ume = MagicMock()
         config = MagicMock()
-        conn = Connection.server(identity, websocket, ume, config)
+        engine = MagicMock()
+        engine.ume = ume
+        engine.config = config
+        conn = Connection.server(identity, websocket, engine)
         conn.state = ConnectionState.READY
         session = MagicMock()
         session.encrypt.return_value = b"encrypted"
@@ -456,7 +483,10 @@ class TestConnectionClose:
         websocket = AsyncMock()
         ume = MagicMock()
         config = MagicMock()
-        conn = Connection.server(identity, websocket, ume, config)
+        engine = MagicMock()
+        engine.ume = ume
+        engine.config = config
+        conn = Connection.server(identity, websocket, engine)
         conn.state = ConnectionState.READY
         conn.session = MagicMock()
         await conn.close()
