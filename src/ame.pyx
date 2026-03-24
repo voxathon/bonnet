@@ -351,8 +351,8 @@ cdef class Board:
         cdef set valid_directions = {'ASC', 'DESC'}
 
         if where:
-            # Strip dangerous characters that could break out of parameterized queries
-            if any(char in where for char in [';', '--', '/*', '*/', 'xp_', 'sp_']):
+            # Whitelist allowed characters in where clause
+            if not re.match(r"^[a-zA-Z0-9_ =?,.+-]*$", where):
                 raise ValueError("Invalid characters in where clause")
 
         if orderby:

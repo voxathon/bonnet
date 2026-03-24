@@ -82,11 +82,17 @@ cdef class User:
         self.creation_time = creation_time
         self.relay_time = relay_time
 
+    cdef bytes _encode_and_truncate(self, str s, size_t max_size):
+        cdef bytes b = s.encode('utf-8')
+        if len(b) <= max_size:
+            return b.ljust(max_size, b'\x00')
+        return b[:max_size].decode('utf-8', 'ignore').encode('utf-8').ljust(max_size, b'\x00')
+
     cpdef bytes encode(self):
-        cdef bytes username_bytes = self.username.encode('ascii')[:USERNAME_SIZE].ljust(USERNAME_SIZE, b'\x00')
-        cdef bytes registrar_bytes = self.registrar.encode('ascii')[:REGISTRAR_SIZE].ljust(REGISTRAR_SIZE, b'\x00')
-        cdef bytes record_origin_bytes = self.record_origin.encode('ascii')[:RECORD_ORIGIN_SIZE].ljust(RECORD_ORIGIN_SIZE, b'\x00')
-        cdef bytes relay_bytes = self.relay.encode('ascii')[:RELAY_SIZE].ljust(RELAY_SIZE, b'\x00')
+        cdef bytes username_bytes = self._encode_and_truncate(self.username, USERNAME_SIZE)
+        cdef bytes registrar_bytes = self._encode_and_truncate(self.registrar, REGISTRAR_SIZE)
+        cdef bytes record_origin_bytes = self._encode_and_truncate(self.record_origin, RECORD_ORIGIN_SIZE)
+        cdef bytes relay_bytes = self._encode_and_truncate(self.relay, RELAY_SIZE)
         cdef bytes publickey_bytes = self.publickey
         cdef bytes hash_bytes = self.password_hash
         cdef bytes salt_bytes = self.salt
@@ -99,10 +105,10 @@ cdef class User:
     @staticmethod
     cdef User decode(bytes data):
         cdef User user = User()
-        user.username = data[OFFSET_USERNAME:OFFSET_REGISTRAR].rstrip(b'\x00').decode('ascii')
-        user.registrar = data[OFFSET_REGISTRAR:OFFSET_RECORD_ORIGIN].rstrip(b'\x00').decode('ascii')
-        user.record_origin = data[OFFSET_RECORD_ORIGIN:OFFSET_RELAY].rstrip(b'\x00').decode('ascii')
-        user.relay = data[OFFSET_RELAY:OFFSET_PUBLICKEY].rstrip(b'\x00').decode('ascii')
+        user.username = data[OFFSET_USERNAME:OFFSET_REGISTRAR].rstrip(b'\x00').decode('utf-8', errors='replace')
+        user.registrar = data[OFFSET_REGISTRAR:OFFSET_RECORD_ORIGIN].rstrip(b'\x00').decode('utf-8', errors='replace')
+        user.record_origin = data[OFFSET_RECORD_ORIGIN:OFFSET_RELAY].rstrip(b'\x00').decode('utf-8', errors='replace')
+        user.relay = data[OFFSET_RELAY:OFFSET_PUBLICKEY].rstrip(b'\x00').decode('utf-8', errors='replace')
         user.publickey = data[OFFSET_PUBLICKEY:OFFSET_HASH]
         user.password_hash = data[OFFSET_HASH:OFFSET_SALT]
         user.salt = data[OFFSET_SALT:OFFSET_SEQ]
@@ -169,8 +175,14 @@ cdef class Ume:
             pass
         return max_seq
 
+    cdef bytes _encode_and_truncate(self, str s, size_t max_size):
+        cdef bytes b = s.encode('utf-8')
+        if len(b) <= max_size:
+            return b.ljust(max_size, b'\x00')
+        return b[:max_size].decode('utf-8', 'ignore').encode('utf-8').ljust(max_size, b'\x00')
+
     cdef size_t _find_record_by_username(self, str username):
-        cdef bytes target = username.encode('ascii')[:USERNAME_SIZE].ljust(USERNAME_SIZE, b'\x00')
+        cdef bytes target = self._encode_and_truncate(username, USERNAME_SIZE)
         cdef size_t pos = 0
         cdef bytes data
         try:
