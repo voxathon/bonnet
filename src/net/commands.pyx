@@ -31,6 +31,7 @@ cdef class CommandHandler:
     cdef object _config
     cdef object _server_identity
     cdef object _sync_mgr
+    cdef dict _rate_limits
     cdef public object _engine
     
     def __init__(self, object engine):
@@ -43,6 +44,20 @@ cdef class CommandHandler:
         self._sync_mgr = SyncManager(engine)
     
     def handle(self, bytes request, object conn) -> bytes:
+        # Rate limiting: simple token bucket or fixed window per connection
+        # Let's limit to 100 requests per second per connection
+        cdef double current_time = time.time()
+        if not hasattr(conn, '_request_timestamps'):
+            conn._request_timestamps = []
+
+        # Keep only timestamps within the last 1.0 seconds
+        conn._request_timestamps = [ts for ts in conn._request_timestamps if current_time - ts < 1.0]
+
+        if len(conn._request_timestamps) >= 100:
+            return self._build_error(429, "Too many requests. Please slow down.")
+
+        conn._request_timestamps.append(current_time)
+
         if len(request) == 0:
             return self._build_error(400, "Empty request")
         
@@ -1035,6 +1050,9 @@ cdef class CommandHandler:
         cdef uint64_t rule_num
         cdef object result, rule
 
+        if not conn.is_registered():
+            return self._build_error(401, "Authentication required")
+
         try:
             rule_num = struct.unpack('>Q', data[:8])[0]
 
@@ -1059,6 +1077,9 @@ cdef class CommandHandler:
         cdef int name_len
         cdef str rule_name
         cdef object result, rule
+
+        if not conn.is_registered():
+            return self._build_error(401, "Authentication required")
 
         try:
             name_len = data[0]
@@ -1086,6 +1107,9 @@ cdef class CommandHandler:
         cdef list rules
         cdef object rule
         cdef bytes payload
+
+        if not conn.is_registered():
+            return self._build_error(401, "Authentication required")
 
         try:
             result = self._keibatsu.list_rules()
