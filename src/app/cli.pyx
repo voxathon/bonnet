@@ -2,7 +2,6 @@
 import struct
 from core.crypto import Identity
 from engine.ume import User
-from engine.facade import BonnetEngine
 
 
 cdef class LocalConnection:
