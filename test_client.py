@@ -45,7 +45,9 @@ async def test_anonymous_registration():
             # 1. Read Challenge
             challenge_frame = await websocket.recv()
             length = struct.unpack(">I", challenge_frame[:4])[0]
-            challenge = challenge_frame[4 : 4 + length]
+            challenge_data = challenge_frame[4 : 4 + length]
+            server_pubkey = challenge_data[:32]
+            challenge = challenge_data[32:]
             print(f"Received challenge: {challenge.hex()}")
 
             # 2. Sign Challenge
@@ -58,7 +60,7 @@ async def test_anonymous_registration():
             )
 
             # 4. Establish Session
-            session = EncryptedSession(identity.private_key, server_identity.public_key)
+            session = EncryptedSession(identity.private_key, server_pubkey)
             print("Session established (anonymous mode)")
 
             # 5. Send REGISTER command (without password)
@@ -135,7 +137,9 @@ async def test_registered_user():
         # 1. Read Challenge
         challenge_frame = await websocket.recv()
         length = struct.unpack(">I", challenge_frame[:4])[0]
-        challenge = challenge_frame[4 : 4 + length]
+        challenge_data = challenge_frame[4 : 4 + length]
+        server_pubkey = challenge_data[:32]
+        challenge = challenge_data[32:]
         print(f"Received challenge: {challenge.hex()}")
 
         # 2. Sign Challenge
@@ -148,7 +152,7 @@ async def test_registered_user():
         )
 
         # 4. Establish Session
-        session = EncryptedSession(identity.private_key, server_identity.public_key)
+        session = EncryptedSession(identity.private_key, server_pubkey)
         print("Session established.")
 
         # 5. Send LIST command

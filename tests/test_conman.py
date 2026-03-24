@@ -204,7 +204,7 @@ class TestConnectionAccept:
             if len(sent_frames) < 1:
                 return b"\x00\x00\x00\x00"
             challenge_frame = sent_frames[0]
-            challenge = challenge_frame[4:]
+            challenge = challenge_frame[36:] # Frame is [4B len][32B pubkey][32B challenge]
             signature = client_identity.sign(challenge)
             handshake = client_identity.public_key + signature
             return struct.pack(">I", len(handshake)) + handshake
@@ -238,7 +238,7 @@ class TestConnectionAccept:
             if len(sent_frames) < 1:
                 return b"\x00\x00\x00\x00"
             challenge_frame = sent_frames[0]
-            challenge = challenge_frame[4:]
+            challenge = challenge_frame[36:]
             signature = client_identity.sign(challenge)
             handshake = client_identity.public_key + signature
             return struct.pack(">I", len(handshake)) + handshake
@@ -271,7 +271,7 @@ class TestConnectionAccept:
             if len(sent_frames) < 1:
                 return b"\x00\x00\x00\x00"
             challenge_frame = sent_frames[0]
-            challenge = challenge_frame[4:]
+            challenge = challenge_frame[36:]
             signature = wrong_key.sign(challenge)
             handshake = client_identity.public_key + signature
             return struct.pack(">I", len(handshake)) + handshake
@@ -306,7 +306,7 @@ class TestConnectionAccept:
                 return b"\x00\x00\x00\x00"
             if len(sent_frames) == 1:
                 challenge_frame = sent_frames[0]
-                challenge = challenge_frame[4:]
+                challenge = challenge_frame[36:]
                 signature = client_identity.sign(challenge)
                 handshake = client_identity.public_key + signature
                 return struct.pack(">I", len(handshake)) + handshake
@@ -346,7 +346,7 @@ class TestConnectionAccept:
                 return b"\x00\x00\x00\x00"
             if len(sent_frames) == 1:
                 challenge_frame = sent_frames[0]
-                challenge = challenge_frame[4:]
+                challenge = challenge_frame[36:]
                 signature = client_identity.sign(challenge)
                 handshake = client_identity.public_key + signature
                 return struct.pack(">I", len(handshake)) + handshake
