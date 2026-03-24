@@ -2,7 +2,7 @@
 
 import pytest
 import nacl.exceptions
-from crypto import Identity, EncryptedSession
+from core.crypto import Identity, EncryptedSession
 
 
 class TestIdentity:
