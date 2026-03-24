@@ -10,6 +10,7 @@ User Management Engine - Fixed-record-width KV datastore
 import os
 import struct
 import threading
+import fcntl
 from libc.stdint cimport uint64_t, int64_t
 
 cdef extern from "openssl/sha.h":
@@ -302,101 +303,116 @@ cdef class Ume:
             raise ValueError(f"Public key must be exactly {PUBLICKEY_SIZE} bytes")
 
         with self._lock:
-            existing = self._find_record_by_username(username)
-            if existing != <size_t>-1:
-                raise ValueError(f"User '{username}' already exists")
-            
-            if password is not None:
-                salt = _generate_salt()
-                password_hash = _hash_password(password, salt)
-            else:
-                salt = b'\x00' * SALT_SIZE
-                password_hash = b'\x00' * HASH_SIZE
-            
-            if creation_time == 0:
-                creation_time = <int64_t>_time.time()
-            if relay_time == 0:
-                relay_time = creation_time
-            
-            user = User(username, registrar, record_origin, relay, publickey, password_hash, salt, self._next_seq, is_administrator, is_moderator, is_banned, creation_time, relay_time)
-            self._next_seq += 1
-            try:
-                with open(self._filepath, 'ab') as f:
-                    f.write(user.encode())
-            except OSError as e:
-                raise IOError(f"Failed to write user record: {e}")
+            with open(self._filepath, 'ab') as lockfile:
+                fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX)
+                try:
+                    existing = self._find_record_by_username(username)
+                    if existing != <size_t>-1:
+                        raise ValueError(f"User '{username}' already exists")
+
+                    if password is not None:
+                        salt = _generate_salt()
+                        password_hash = _hash_password(password, salt)
+                    else:
+                        salt = b'\x00' * SALT_SIZE
+                        password_hash = b'\x00' * HASH_SIZE
+
+                    if creation_time == 0:
+                        creation_time = <int64_t>_time.time()
+                    if relay_time == 0:
+                        relay_time = creation_time
+
+                    user = User(username, registrar, record_origin, relay, publickey, password_hash, salt, self._next_seq, is_administrator, is_moderator, is_banned, creation_time, relay_time)
+                    self._next_seq += 1
+                    try:
+                        with open(self._filepath, 'ab') as f:
+                            f.write(user.encode())
+                    except OSError as e:
+                        raise IOError(f"Failed to write user record: {e}")
+                finally:
+                    fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
         return user
 
     cpdef bint upd(self, str username=None, uint64_t seq_numbr=0, str new_registrar=None, str new_record_origin=None, str new_relay=None, bytes new_publickey=None, bytes new_password=None, object new_administrator=None, object new_moderator=None, object new_banned=None, object new_creation_time=None, object new_relay_time=None):
         cdef size_t pos
         cdef User user
         with self._lock:
-            if username is not None:
-                pos = self._find_record_by_username(username)
-            elif seq_numbr > 0:
-                pos = self._find_record_by_seq(seq_numbr)
-            else:
-                raise ValueError("Must provide username or seq_numbr")
+            with open(self._filepath, 'a+b') as lockfile:
+                fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX)
+                try:
+                    if username is not None:
+                        pos = self._find_record_by_username(username)
+                    elif seq_numbr > 0:
+                        pos = self._find_record_by_seq(seq_numbr)
+                    else:
+                        raise ValueError("Must provide username or seq_numbr")
 
-            if pos == <size_t>-1:
-                return False
+                    if pos == <size_t>-1:
+                        return False
 
-            user = self._get_at_pos(pos)
-            if user is None:
-                return False
+                    user = self._get_at_pos(pos)
+                    if user is None:
+                        return False
 
-            if new_registrar is not None:
-                user.registrar = new_registrar
-            if new_record_origin is not None:
-                user.record_origin = new_record_origin
-            if new_relay is not None:
-                user.relay = new_relay
-            if new_publickey is not None:
-                if len(new_publickey) != PUBLICKEY_SIZE:
-                    raise ValueError(f"Public key must be exactly {PUBLICKEY_SIZE} bytes")
-                user.publickey = new_publickey
-            if new_password is not None:
-                user.salt = _generate_salt()
-                user.password_hash = _hash_password(new_password, user.salt)
-            if new_administrator is not None:
-                user.is_administrator = new_administrator
-            if new_moderator is not None:
-                user.is_moderator = new_moderator
-            if new_banned is not None:
-                user.is_banned = new_banned
-            if new_creation_time is not None:
-                user.creation_time = new_creation_time
-            if new_relay_time is not None:
-                user.relay_time = new_relay_time
+                    if new_registrar is not None:
+                        user.registrar = new_registrar
+                    if new_record_origin is not None:
+                        user.record_origin = new_record_origin
+                    if new_relay is not None:
+                        user.relay = new_relay
+                    if new_publickey is not None:
+                        if len(new_publickey) != PUBLICKEY_SIZE:
+                            raise ValueError(f"Public key must be exactly {PUBLICKEY_SIZE} bytes")
+                        user.publickey = new_publickey
+                    if new_password is not None:
+                        user.salt = _generate_salt()
+                        user.password_hash = _hash_password(new_password, user.salt)
+                    if new_administrator is not None:
+                        user.is_administrator = new_administrator
+                    if new_moderator is not None:
+                        user.is_moderator = new_moderator
+                    if new_banned is not None:
+                        user.is_banned = new_banned
+                    if new_creation_time is not None:
+                        user.creation_time = new_creation_time
+                    if new_relay_time is not None:
+                        user.relay_time = new_relay_time
 
-            try:
-                with open(self._filepath, 'r+b') as f:
-                    f.seek(pos * RECORD_SIZE)
-                    f.write(user.encode())
-            except OSError as e:
-                raise IOError(f"Failed to update user record: {e}")
+                    try:
+                        with open(self._filepath, 'r+b') as f:
+                            f.seek(pos * RECORD_SIZE)
+                            f.write(user.encode())
+                    except OSError as e:
+                        raise IOError(f"Failed to update user record: {e}")
+                finally:
+                    fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
         return True
 
     cpdef bint delete(self, str username=None, uint64_t seq_numbr=0):
         cdef size_t pos
         cdef bytes empty_record = b'\x00' * RECORD_SIZE
         with self._lock:
-            if username is not None:
-                pos = self._find_record_by_username(username)
-            elif seq_numbr > 0:
-                pos = self._find_record_by_seq(seq_numbr)
-            else:
-                raise ValueError("Must provide username or seq_numbr")
+            with open(self._filepath, 'a+b') as lockfile:
+                fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX)
+                try:
+                    if username is not None:
+                        pos = self._find_record_by_username(username)
+                    elif seq_numbr > 0:
+                        pos = self._find_record_by_seq(seq_numbr)
+                    else:
+                        raise ValueError("Must provide username or seq_numbr")
 
-            if pos == <size_t>-1:
-                return False
+                    if pos == <size_t>-1:
+                        return False
 
-            try:
-                with open(self._filepath, 'r+b') as f:
-                    f.seek(pos * RECORD_SIZE)
-                    f.write(empty_record)
-            except OSError as e:
-                raise IOError(f"Failed to delete user record: {e}")
+                    try:
+                        with open(self._filepath, 'r+b') as f:
+                            f.seek(pos * RECORD_SIZE)
+                            f.write(empty_record)
+                    except OSError as e:
+                        raise IOError(f"Failed to delete user record: {e}")
+                finally:
+                    fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
         return True
 
     cpdef void export(self, str export_path="./users"):
@@ -476,43 +492,48 @@ cdef class Ume:
             raise ValueError(f"Public key must be exactly {PUBLICKEY_SIZE} bytes")
 
         with self._lock:
-            pos = self._find_record_by_username(username)
-            
-            if pos == <size_t>-1:
-                # INSERT - user doesn't exist
-                user = User(
-                    username, registrar, record_origin, relay, publickey,
-                    b'\x00' * HASH_SIZE, b'\x00' * SALT_SIZE,
-                    self._next_seq, False, False, False,
-                    <int64_t>_time.time(), <int64_t>_time.time()
-                )
-                self._next_seq += 1
+            with open(self._filepath, 'a+b') as lockfile:
+                fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX)
                 try:
-                    with open(self._filepath, 'ab') as f:
-                        f.write(user.encode())
-                except OSError as e:
-                    raise IOError(f"Failed to write user record: {e}")
-                return 1
-            
-            # User exists - check origin
-            user = self._get_at_pos(pos)
-            if user is None:
-                return 0
-            
-            if user.record_origin == record_origin:
-                # UPDATE - same origin, safe to overwrite
-                user.registrar = registrar
-                user.relay = relay
-                user.publickey = publickey
-                user.relay_time = <int64_t>_time.time()
-                
-                try:
-                    with open(self._filepath, 'r+b') as f:
-                        f.seek(pos * RECORD_SIZE)
-                        f.write(user.encode())
-                except OSError as e:
-                    raise IOError(f"Failed to update user record: {e}")
-                return 2
-            
-            # SKIP - different origin, conflict
-            return 0
+                    pos = self._find_record_by_username(username)
+
+                    if pos == <size_t>-1:
+                        # INSERT - user doesn't exist
+                        user = User(
+                            username, registrar, record_origin, relay, publickey,
+                            b'\x00' * HASH_SIZE, b'\x00' * SALT_SIZE,
+                            self._next_seq, False, False, False,
+                            <int64_t>_time.time(), <int64_t>_time.time()
+                        )
+                        self._next_seq += 1
+                        try:
+                            with open(self._filepath, 'ab') as f:
+                                f.write(user.encode())
+                        except OSError as e:
+                            raise IOError(f"Failed to write user record: {e}")
+                        return 1
+
+                    # User exists - check origin
+                    user = self._get_at_pos(pos)
+                    if user is None:
+                        return 0
+
+                    if user.record_origin == record_origin:
+                        # UPDATE - same origin, safe to overwrite
+                        user.registrar = registrar
+                        user.relay = relay
+                        user.publickey = publickey
+                        user.relay_time = <int64_t>_time.time()
+
+                        try:
+                            with open(self._filepath, 'r+b') as f:
+                                f.seek(pos * RECORD_SIZE)
+                                f.write(user.encode())
+                        except OSError as e:
+                            raise IOError(f"Failed to update user record: {e}")
+                        return 2
+
+                    # SKIP - different origin, conflict
+                    return 0
+                finally:
+                    fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
