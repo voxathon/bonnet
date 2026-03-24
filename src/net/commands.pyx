@@ -31,6 +31,7 @@ cdef class CommandHandler:
     cdef object _config
     cdef object _server_identity
     cdef object _sync_mgr
+    cdef dict _rate_limits
     cdef public object _engine
     
     def __init__(self, object engine):
