@@ -351,9 +351,15 @@ cdef class Board:
         cdef set valid_directions = {'ASC', 'DESC'}
 
         if where:
-            # Whitelist allowed characters in where clause
-            if not re.match(r"^[a-zA-Z0-9_ =?,.+-]*$", where):
-                raise ValueError("Invalid characters in where clause")
+            # Strictly validate where clause for parameterized queries
+            # Only allow "column = ?" joined by AND/OR
+            parts = re.split(r'\s+(?i:AND|OR)\s+', where.strip())
+            for part in parts:
+                match = re.match(r"^([a-zA-Z0-9_]+)\s*=\s*\?$", part.strip())
+                if not match:
+                    raise ValueError("Invalid where clause format")
+                if match.group(1) not in valid_columns:
+                    raise ValueError(f"Invalid column in where clause: {match.group(1)}")
 
         if orderby:
             # Validate orderby format: only allow "column" or "column ASC/DESC"
