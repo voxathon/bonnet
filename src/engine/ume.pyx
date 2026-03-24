@@ -323,10 +323,10 @@ cdef class Ume:
                         relay_time = creation_time
 
                     user = User(username, registrar, record_origin, relay, publickey, password_hash, salt, self._next_seq, is_administrator, is_moderator, is_banned, creation_time, relay_time)
-                    self._next_seq += 1
                     try:
                         lockfile.write(user.encode())
                         lockfile.flush()
+                        self._next_seq += 1
                     except OSError as e:
                         raise IOError(f"Failed to write user record: {e}")
                 finally:
@@ -505,11 +505,11 @@ cdef class Ume:
                             self._next_seq, False, False, False,
                             <int64_t>_time.time(), <int64_t>_time.time()
                         )
-                        self._next_seq += 1
                         try:
                             lockfile.seek(0, 2) # seek to end
                             lockfile.write(user.encode())
                             lockfile.flush()
+                            self._next_seq += 1
                         except OSError as e:
                             raise IOError(f"Failed to write user record: {e}")
                         return 1
