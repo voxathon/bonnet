@@ -378,8 +378,8 @@ def build_report_create(
     return (
         struct.pack(">B", COMMANDS["REPORT_CREATE"])
         + struct.pack(">Q", rule_num)
-        + encode_string(culprit_pubkey.hex())
-        + encode_string(reporter_pubkey.hex())
+        + encode_bytes(culprit_pubkey)
+        + encode_bytes(reporter_pubkey)
         + encode_string(description)
         + encode_string(board or "")
         + struct.pack(">Q", post_num or 0)

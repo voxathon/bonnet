@@ -18,7 +18,6 @@ def parse_auth_header(auth: str) -> tuple[str, str]:
         if ":" in token:
             user, pwd = token.split(":", 1)
             user = user.strip()
-            pwd = pwd.strip()
             return user if user else "anonymous", pwd
         return token.strip() if token.strip() else "anonymous", ""
     return "anonymous", ""

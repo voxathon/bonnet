@@ -355,6 +355,11 @@ async def create_report(
     relay: str | None = None,
 ) -> Report:
     """Report a user for violating a rule."""
+    try:
+        bytes.fromhex(culprit_pubkey)
+    except ValueError:
+        raise ValueError(f"Invalid public key format: {culprit_pubkey}")
+
     client = get_client()
     username = get_username()
     password = get_password()
