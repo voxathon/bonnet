@@ -46,8 +46,15 @@ cdef class NavDB:
                 closed INTEGER DEFAULT 0
             )
             """)
-            ctx.execute("ALTER TABLE nav ADD COLUMN owner_pubkey BLOB")
-            ctx.execute("ALTER TABLE nav ADD COLUMN closed INTEGER DEFAULT 0")
+            # Ignore errors if columns already exist
+            try:
+                ctx.execute("ALTER TABLE nav ADD COLUMN owner_pubkey BLOB")
+            except Exception:
+                pass
+            try:
+                ctx.execute("ALTER TABLE nav ADD COLUMN closed INTEGER DEFAULT 0")
+            except Exception:
+                pass
 
     cpdef dict get(self, str board_name):
         cdef list rows

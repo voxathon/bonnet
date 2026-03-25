@@ -86,6 +86,25 @@ cdef class Bonnet:
                 await conn.accept()
                 plaintext = await conn.recv_request()
                 response = self.command_handler.handle(plaintext, conn)
+
+                # Intercept 429 Too Many Requests to tarpit
+                if len(response) >= 3 and response[0] == 0x01:
+                    code = struct.unpack(">H", response[1:3])[0]
+                    if code == 429:
+                        log_msg(f"TARPIT: forcing half-open state for {conn.remote_addr} after 429")
+                        # Monkey-patch the websocket protocol to prevent sending the CLOSE frame
+                        if hasattr(conn.websocket, 'protocol'):
+                            original_send_frame = conn.websocket.protocol.send_frame
+                            def dummy_send_frame(frame):
+                                if getattr(frame, 'opcode', None) == 8: # OP_CLOSE
+                                    pass
+                                else:
+                                    original_send_frame(frame)
+                            conn.websocket.protocol.send_frame = dummy_send_frame
+
+                        await conn.close()
+                        return
+
                 await conn.send_response(response)
                 await conn.close()
                 

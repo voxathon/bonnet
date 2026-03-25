@@ -15,7 +15,7 @@ import collections
 from datetime import datetime
 from libc.stdint cimport uint64_t, int64_t
 
-PUBLIC_COMMANDS = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63}
+PUBLIC_COMMANDS = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x71}
 
 _WHITELIST_PATTERN = re.compile(r'^[a-zA-Z0-9\-_]+$')
 _BLACKLIST_PATTERN = re.compile(r'[@<>:"/\\|?*]')
@@ -90,7 +90,8 @@ cdef class CommandHandler:
             0x50: 'REPORT_CREATE', 0x51: 'REPORT_GET', 0x52: 'REPORT_LIST_BY_CULPRIT',
             0x53: 'REPORT_SIGN', 0x54: 'REPORT_LIST_SINCE',
             0x60: 'PUNISHMENT_CREATE', 0x61: 'PUNISHMENT_GET',
-            0x62: 'PUNISHMENT_LIST_ACTIVE', 0x63: 'IS_BANNED'
+            0x62: 'PUNISHMENT_LIST_ACTIVE', 0x63: 'IS_BANNED',
+            0x70: 'PEER_KEY_ROTATE', 0x71: 'PEER_KEY_LIST'
         }
         cmd_name = cmd_names.get(cmd, f'UNKNOWN_{cmd:02x}')
         
@@ -171,6 +172,10 @@ cdef class CommandHandler:
             return self._cmd_punishment_list_active(data, conn)
         elif cmd == 0x63:
             return self._cmd_is_banned(data, conn)
+        elif cmd == 0x70:
+            return self._cmd_peer_key_rotate(data, conn)
+        elif cmd == 0x71:
+            return self._cmd_peer_key_list(data, conn)
         else:
             return self._build_error(400, f"Unknown command {cmd}")
     
@@ -213,6 +218,51 @@ cdef class CommandHandler:
             u_bytes = new_user.username.encode('utf-8')
             return struct.pack('>B', 0x00) + u_bytes
 
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_peer_key_rotate(self, bytes data, object conn):
+        cdef int idx = 0
+        cdef int origin_len
+        cdef str origin
+        cdef bytes old_pubkey, new_pubkey, signature
+
+        if not conn.is_registered():
+            return self._build_error(401, "Authentication required")
+
+        try:
+            origin_len = data[idx]
+            idx += 1
+            origin = data[idx:idx+origin_len].decode('utf-8')
+            idx += origin_len
+
+            old_pubkey = data[idx:idx+32]
+            idx += 32
+            new_pubkey = data[idx:idx+32]
+            idx += 32
+            signature = data[idx:idx+64]
+
+            if self._sync_mgr.rotate_peer_pubkey(origin, old_pubkey, new_pubkey, signature):
+                return struct.pack('>B', 0x00)
+            else:
+                return self._build_error(403, "Peer key rotation failed (invalid signature or old key mismatch)")
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_peer_key_list(self, bytes data, object conn):
+        cdef list keys
+        cdef bytes payload
+        cdef str origin
+
+        try:
+            keys = self._sync_mgr.list_peer_keys()
+            payload = struct.pack('>B', 0x00) + struct.pack('>H', len(keys))
+            for k in keys:
+                origin = k['origin']
+                origin_bytes = origin.encode('utf-8')
+                payload += struct.pack('>B', len(origin_bytes)) + origin_bytes
+                payload += struct.pack('>B', len(k['publickey'])) + k['publickey']
+            return payload
         except Exception as e:
             return self._build_error(400, str(e))
 
