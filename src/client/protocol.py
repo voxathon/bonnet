@@ -448,20 +448,6 @@ def parse_register_resp(payload: bytes) -> str:
     return username
 
 
-def parse_get_user_resp(payload: bytes, username: str) -> User:
-    offset = 0
-    pubkey = payload[offset:offset+32]
-    offset += 32
-    registrar, offset = decode_string(payload, offset)
-    return User(
-        username=username,
-        registrar=registrar,
-        record_origin="",  # Server doesn't return this in GET_USER
-        relay="",          # Server doesn't return this in GET_USER
-        public_key=pubkey.hex(),
-    )
-
-
 def parse_list_users_resp(payload: bytes) -> list[User]:
     offset = 0
     count = struct.unpack(">H", payload[offset : offset + 2])[0]
