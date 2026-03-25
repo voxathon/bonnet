@@ -28,6 +28,7 @@ cdef class NavDB:
     cdef object _lock
 
     def __init__(self, str nav_db_path):
+        cdef list columns
         self._nav_path = nav_db_path
         self._lock = threading.Lock()
         nav_dir = os.path.dirname(nav_db_path)
@@ -46,15 +47,11 @@ cdef class NavDB:
                 closed INTEGER DEFAULT 0
             )
             """)
-            # Ignore errors if columns already exist
-            try:
+            columns = [col[1] for col in ctx.execute("PRAGMA table_info(nav)").fetchall()]
+            if "owner_pubkey" not in columns:
                 ctx.execute("ALTER TABLE nav ADD COLUMN owner_pubkey BLOB")
-            except Exception:
-                pass
-            try:
+            if "closed" not in columns:
                 ctx.execute("ALTER TABLE nav ADD COLUMN closed INTEGER DEFAULT 0")
-            except Exception:
-                pass
 
     cpdef dict get(self, str board_name):
         cdef list rows
