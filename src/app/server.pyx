@@ -6,56 +6,10 @@ import os
 import sys
 import struct
 import argparse
-import logging
 from datetime import datetime
 from libc.stdint cimport uint64_t, int64_t
 
-_log = None
-_log_file = None
-
-cdef void _log_init():
-    global _log, _log_file
-    _log_file = open('bonnet.log', 'w')
-    
-    class TimestampFormatter(logging.Formatter):
-        def format(self, record):
-            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-            return f"[{ts}] {record.getMessage()}"
-    
-    handler = logging.StreamHandler(_log_file)
-    handler.setFormatter(TimestampFormatter())
-    _log = logging.getLogger('bonnet')
-    _log.setLevel(logging.DEBUG)
-    _log.addHandler(handler)
-
-cdef void _log_msg(str msg):
-    global _log
-    if _log:
-        _log.debug(msg)
-
-cdef void _log_hex(str label, bytes data):
-    global _log_file
-    if _log_file is None:
-        return
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-    _log_file.write(f"[{ts}] {label} ({len(data)} bytes):\n")
-    hex_str = data.hex()
-    for i in range(0, len(hex_str), 64):
-        _log_file.write(f"  {hex_str[i:i+64]}\n")
-    _log_file.flush()
-
-cdef void _log_dict(str label, dict d):
-    global _log_file
-    if _log_file is None:
-        return
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-    _log_file.write(f"[{ts}] {label}:\n")
-    for k, v in d.items():
-        if isinstance(v, str) and len(v) > 100:
-            _log_file.write(f"  {k}: {v[:100]}... ({len(v)} chars)\n")
-        else:
-            _log_file.write(f"  {k}: {v}\n")
-    _log_file.flush()
+from core.logging import init_logging, log_msg, log_hex, log_dict, get_log_path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) or '.')
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'build'))
@@ -72,9 +26,6 @@ from engine.facade import BonnetEngine
 
 import nacl.exceptions
 
-PORT_PRIVILEGED = 272
-PORT_STANDARD = 2272
-
 cdef class Bonnet:
     cdef str userfile_path
     cdef object ume
@@ -89,15 +40,15 @@ cdef class Bonnet:
     
     def __init__(self, str userfile_path, str identity_path, object config):
         self.userfile_path = userfile_path
-        _log_msg(f"INIT: userfile_path={userfile_path}")
+        log_msg(f"INIT: userfile_path={userfile_path}")
         self.ume = Ume(userfile_path)
-        _log_msg(f"INIT: Ume loaded, user count={len(list(self.ume.list_all()))}")
+        log_msg(f"INIT: Ume loaded, user count={len(list(self.ume.list_all()))}")
         with open(identity_path, 'rb') as f:
             key_bytes = f.read()
         self.server_identity = Identity.from_private_key(key_bytes)
-        _log_msg(f"INIT: server_identity pubkey={self.server_identity.public_key.hex()}")
+        log_msg(f"INIT: server_identity pubkey={self.server_identity.public_key.hex()}")
         self.ame = Ame(config.ame_path, origin=config.origin, signing_key=self.server_identity.signing_key, nav_db_path=config.nav_db_path)
-        _log_msg(f"INIT: Ame initialized, path={config.ame_path}, origin={config.origin}")
+        log_msg(f"INIT: Ame initialized, path={config.ame_path}, origin={config.origin}")
         self.keibatsu = Keibatsu(
             reports_path=config.reports_db_path,
             punishments_path=config.punishments_db_path,
@@ -105,9 +56,9 @@ cdef class Bonnet:
             signing_key=self.server_identity.signing_key,
             origin=config.origin
         )
-        _log_msg(f"INIT: Keibatsu initialized, reports={config.reports_db_path}, punishments={config.punishments_db_path}")
+        log_msg(f"INIT: Keibatsu initialized, reports={config.reports_db_path}, punishments={config.punishments_db_path}")
         self.config = config
-        _log_dict("INIT: config", {
+        log_dict("INIT: config", {
             'origin': config.origin,
             'ame_path': config.ame_path,
             'nav_db_path': config.nav_db_path,
@@ -119,9 +70,9 @@ cdef class Bonnet:
         self.engine = BonnetEngine(self.ume, self.ame, self.keibatsu, config, self.server_identity)
         self.command_handler = CommandHandler(self.engine)
         self.root_user = self.ume.ensure_root_user(config.origin, self.server_identity.public_key)
-        _log_msg(f"INIT: root_user={self.root_user.username}, pubkey={self.root_user.publickey.hex()}")
+        log_msg(f"INIT: root_user={self.root_user.username}, pubkey={self.root_user.publickey.hex()}")
         self.local_conn = LocalConnection(self.root_user, self.server_identity.public_key)
-        _log_msg("INIT: complete")
+        log_msg("INIT: complete")
     
     async def handle_connection(self, websocket):
         cdef object conn
@@ -176,7 +127,7 @@ cdef class Bonnet:
             if not line:
                 continue
             
-            _log_msg(f"REPL: input='{line}'")
+            log_msg(f"REPL: input='{line}'")
             parts = line.split()
             cmd = parts[0].lower() if parts else ""
             
@@ -192,16 +143,16 @@ cdef class Bonnet:
             
             if result:
                 print(result)
-                _log_msg(f"REPL: result='{result[:200]}{'...' if len(result) > 200 else ''}'")
+                log_msg(f"REPL: result='{result[:200]}{'...' if len(result) > 200 else ''}'")
     
     cdef str dispatch_local_command(self, str line):
         cdef list parts = line.split()
         cdef str cmd = parts[0].lower()
         
-        _log_msg(f"DISPATCH: cmd='{cmd}', parts={parts}")
+        log_msg(f"DISPATCH: cmd='{cmd}', parts={parts}")
         
         if cmd in ("quit", "/quit", "exit", "/exit"):
-            _log_msg("DISPATCH: quit requested")
+            log_msg("DISPATCH: quit requested")
             return None
         
         if cmd in ("help", "/help"):
@@ -252,6 +203,12 @@ cdef class Bonnet:
         if cmd == "demote":
             return self._cmd_demote(parts)
         
+        if cmd == "list-acls":
+            return self._cmd_list_acls()
+        
+        if cmd == "check-perm":
+            return self._cmd_check_perm(parts)
+        
         return f"Unknown command: {cmd}. Type 'help' for commands."
     
     cdef str _cmd_help(self):
@@ -280,6 +237,9 @@ cdef class Bonnet:
                         Delete post
   promote <username>    Promote to moderator (admin)
   demote <username>     Remove moderator (admin)
+  list-acls             List ACL entries
+  check-perm <board> [username]
+                        Check user permission for board
   quit                  Exit"""
     
     cdef str _cmd_whoami(self):
@@ -489,7 +449,7 @@ cdef class Bonnet:
         
         content_bytes = content.encode("utf-8")
         
-        _log_dict("CREATE_POST: input", {
+        log_dict("CREATE_POST: input", {
             'board': board,
             'root': root,
             'subject': subject,
@@ -506,50 +466,50 @@ cdef class Bonnet:
         request += self._encode_string(options)
         request += struct.pack(">I", len(content_bytes)) + content_bytes
         
-        _log_hex("CREATE_POST: POST_CREATE request", request)
-        _log_msg(f"CREATE_POST: local_conn.user={self.local_conn.user.username}, pubkey={self.local_conn.user.publickey.hex()}")
+        log_hex("CREATE_POST: POST_CREATE request", request)
+        log_msg(f"CREATE_POST: local_conn.user={self.local_conn.user.username}, pubkey={self.local_conn.user.publickey.hex()}")
         
         response = self.command_handler.handle(request, self.local_conn)
-        _log_hex("CREATE_POST: POST_CREATE response", response)
+        log_hex("CREATE_POST: POST_CREATE response", response)
         
         if response[0] == 0x00:
             post_num = struct.unpack(">Q", response[1:9])[0]
-            _log_msg(f"CREATE_POST: post created, post_num={post_num}")
+            log_msg(f"CREATE_POST: post created, post_num={post_num}")
             
             get_request = bytes([0x13]) + self._encode_string(board) + struct.pack(">Q", post_num)
-            _log_hex("CREATE_POST: POST_GET request", get_request)
+            log_hex("CREATE_POST: POST_GET request", get_request)
             
             get_response = self.command_handler.handle(get_request, self.local_conn)
-            _log_hex("CREATE_POST: POST_GET response", get_response)
+            log_hex("CREATE_POST: POST_GET response", get_response)
             
             if get_response[0] == 0x00:
                 post = self._parse_post_data(get_response)
-                _log_dict("CREATE_POST: parsed post", post)
+                log_dict("CREATE_POST: parsed post", post)
                 
                 signed_payload = self._build_signed_payload(post)
-                _log_hex("CREATE_POST: signed_payload (client)", signed_payload)
+                log_hex("CREATE_POST: signed_payload (client)", signed_payload)
                 
                 signature = self.server_identity.sign(signed_payload).hex()
-                _log_msg(f"CREATE_POST: signature={signature}")
-                _log_msg(f"CREATE_POST: signing with server_identity pubkey={self.server_identity.public_key.hex()}")
+                log_msg(f"CREATE_POST: signature={signature}")
+                log_msg(f"CREATE_POST: signing with server_identity pubkey={self.server_identity.public_key.hex()}")
                 
                 sign_request = bytes([0x22]) + self._encode_string(board) + struct.pack(">Q", post_num) + self._encode_string(signature)
-                _log_hex("CREATE_POST: POST_SIGN request", sign_request)
+                log_hex("CREATE_POST: POST_SIGN request", sign_request)
                 
                 sign_response = self.command_handler.handle(sign_request, self.local_conn)
-                _log_hex("CREATE_POST: POST_SIGN response", sign_response)
+                log_hex("CREATE_POST: POST_SIGN response", sign_response)
                 
                 if sign_response[0] == 0x00:
-                    _log_msg("CREATE_POST: sign success")
+                    log_msg("CREATE_POST: sign success")
                     return self._format_create_response(response) + f"\nSigned: {signature[:16]}..."
                 else:
-                    _log_msg(f"CREATE_POST: sign failed, error={self._parse_error(sign_response)}")
+                    log_msg(f"CREATE_POST: sign failed, error={self._parse_error(sign_response)}")
             else:
-                _log_msg(f"CREATE_POST: get failed, error={self._parse_error(get_response)}")
+                log_msg(f"CREATE_POST: get failed, error={self._parse_error(get_response)}")
             
             return self._format_create_response(response) + "\nWarning: Failed to sign post."
         else:
-            _log_msg(f"CREATE_POST: create failed, error={self._parse_error(response)}")
+            log_msg(f"CREATE_POST: create failed, error={self._parse_error(response)}")
         
         return self._parse_error(response)
     
@@ -821,6 +781,59 @@ cdef class Bonnet:
         
         return self._parse_error(response)
     
+    cdef str _cmd_list_acls(self):
+        cdef list lines = []
+        cdef object acl
+        cdef str matcher_info, boards_info
+        
+        lines.append(f"Admin bypass ACL: {self.config.admin_bypass_acl}")
+        lines.append(f"ACL entries: {len(self.config.acls)}")
+        lines.append("")
+        
+        for acl in self.config.acls:
+            if acl.matcher.pubkey:
+                matcher_info = f"pubkey={acl.matcher.pubkey.hex()[:16]}..."
+            elif acl.matcher.origin_pattern:
+                matcher_info = f"origin={acl.matcher.origin_pattern}"
+            else:
+                matcher_info = "wildcard=*"
+            
+            boards_info = ",".join(acl.board_patterns[:3])
+            if len(acl.board_patterns) > 3:
+                boards_info += "..."
+            
+            lines.append(f"  [{acl.name}]")
+            lines.append(f"    match: {matcher_info}")
+            lines.append(f"    boards: {boards_info}")
+            lines.append(f"    read={acl.read_perm}, write={acl.write_perm}")
+        
+        return "\n".join(lines)
+    
+    cdef str _cmd_check_perm(self, list parts):
+        cdef str board, username, origin
+        cdef object user, conn
+        cdef bint can_read, can_write
+        
+        if len(parts) < 2:
+            return "Usage: check-perm <board> [username]"
+        
+        board = parts[1]
+        username = parts[2] if len(parts) > 2 else "root"
+        
+        user = self.ume.get(username=username)
+        if user is None:
+            return f"User '{username}' not found"
+        
+        conn = LocalConnection(user, user.publickey, self.engine, origin=user.record_origin)
+        
+        can_read = self.engine.check_permission("read", board, conn)
+        can_write = self.engine.check_permission("write", board, conn)
+        
+        board_owner = self.ame.get_board_owner(board)
+        owner_info = f"owner={board_owner.hex()[:16]}..." if board_owner else "owner=none"
+        
+        return f"User: {username}@{user.record_origin}\nBoard: {board} ({owner_info})\nRead: {can_read}\nWrite: {can_write}"
+    
     cdef bytes _encode_string(self, str s):
         encoded = s.encode("utf-8")
         return struct.pack("B", len(encoded)) + encoded
@@ -984,7 +997,7 @@ cdef class Bonnet:
             + struct.pack(">I", len(content_bytes)) + content_bytes
         )
         
-        _log_dict("BUILD_PAYLOAD: field lengths", {
+        log_dict("BUILD_PAYLOAD: field lengths", {
             'post_num': post["post_num"],
             'creation_date': post["creation_date"],
             'last_modified': post["last_modified"],
@@ -1080,62 +1093,93 @@ def load_or_generate_identity(str path):
 
 
 async def main_async():
-    cdef str config_dir, default_userfile, default_identity
+    cdef str default_config
     cdef Bonnet server
     
-    _log_init()
-    _log_msg("MAIN: starting")
-    
-    config_dir = '/var/lib/bonnet'
-    default_userfile = os.path.join(config_dir, 'userfile')
-    default_identity = os.path.join(config_dir, 'identity')
-    default_config = os.path.join(config_dir, 'config.toml')
-    
-    _log_msg(f"MAIN: config_dir={config_dir}")
+    default_config = '/var/lib/bonnet/config.toml'
     
     parser = argparse.ArgumentParser(description='Bonnet Server')
-    parser.add_argument('userfile', nargs='?', default=default_userfile)
-    parser.add_argument('identity', nargs='?', default=default_identity)
     parser.add_argument('--config', default=default_config, help='Config file path')
-    parser.add_argument('--port', type=int, default=PORT_STANDARD)
-    parser.add_argument('--privileged', action='store_true')
-    parser.add_argument('--cert', help='TLS certificate path')
-    parser.add_argument('--key', help='TLS private key path')
+    parser.add_argument('--userfile', help='User database path (overrides config)')
+    parser.add_argument('--identity', help='Server identity path (overrides config)')
+    parser.add_argument('--port', type=int, help='Listening port (overrides config)')
+    parser.add_argument('--privileged', action='store_true', help='Use privileged port')
+    parser.add_argument('--cert', help='TLS certificate path (overrides config)')
+    parser.add_argument('--key', help='TLS private key path (overrides config)')
     args = parser.parse_args()
     
-    _log_dict("MAIN: args", {
-        'userfile': args.userfile,
-        'identity': args.identity,
+    config = Config.load(args.config)
+    
+    userfile_path = args.userfile if args.userfile else config.userfile_path
+    identity_path = args.identity if args.identity else config.identity_path
+    
+    if args.port is not None:
+        port = args.port
+    elif args.privileged:
+        port = config.port_privileged
+    else:
+        port = config.port_standard
+    
+    tls_enabled = config.tls_enabled
+    tls_cert = args.cert if args.cert else config.tls_cert_path
+    tls_key = args.key if args.key else config.tls_key_path
+    
+    if args.cert or args.key:
+        tls_enabled = True
+    
+    try:
+        init_logging(config.log_dir)
+        print(f"Logging to: {get_log_path()}")
+    except OSError as e:
+        print(f"FATAL: Failed to initialize logging: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    log_msg("MAIN: starting")
+    
+    log_dict("MAIN: args", {
         'config': args.config,
-        'port': args.port,
+        'userfile': userfile_path,
+        'identity': identity_path,
+        'port': port,
         'privileged': args.privileged,
-        'cert': args.cert,
-        'key': args.key
+        'cert': tls_cert,
+        'key': tls_key,
+        'tls_enabled': tls_enabled
     })
     
-    os.makedirs(config_dir, exist_ok=True)
-    if not os.path.exists(args.userfile):
-        open(args.userfile, 'a').close()
-        os.chmod(args.userfile, 0o600)
-        _log_msg(f"MAIN: created userfile={args.userfile}")
+    log_dict("MAIN: config", {
+        'data_dir': config.data_dir,
+        'origin': config.origin,
+        'port_standard': config.port_standard,
+        'port_privileged': config.port_privileged,
+        'max_connections': config.max_connections,
+        'max_request_size': config.max_request_size,
+        'rate_limit_requests': config.rate_limit_requests
+    })
     
-    port = PORT_PRIVILEGED if args.privileged else args.port
-    load_or_generate_identity(args.identity)
-    _log_msg(f"MAIN: port={port}")
+    data_dir = os.path.dirname(userfile_path) if userfile_path else config.data_dir
+    if data_dir:
+        os.makedirs(data_dir, exist_ok=True)
     
-    config = Config.load(args.config)
-    _log_msg(f"MAIN: config loaded")
+    if userfile_path and not os.path.exists(userfile_path):
+        open(userfile_path, 'a').close()
+        os.chmod(userfile_path, 0o600)
+        log_msg(f"MAIN: created userfile={userfile_path}")
     
-    server = Bonnet(args.userfile, args.identity, config)
+    if identity_path:
+        load_or_generate_identity(identity_path)
+    log_msg(f"MAIN: port={port}")
+    
+    server = Bonnet(userfile_path, identity_path, config)
     
     ssl_context = None
-    if args.cert and args.key:
+    if tls_enabled and tls_cert and tls_key:
         import ssl
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_context.load_cert_chain(args.cert, args.key)
-        _log_msg("MAIN: SSL enabled")
+        ssl_context.load_cert_chain(tls_cert, tls_key)
+        log_msg("MAIN: SSL enabled")
     
-    _log_msg("MAIN: starting server")
+    log_msg("MAIN: starting server")
     await server.run(port, ssl_context)
 
 

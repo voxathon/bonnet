@@ -162,31 +162,26 @@ cdef class Keibatsu:
 
         with self._reports_db.open() as ctx:
             ctx.execute("""
-            CREATE TABLE IF NOT EXISTS rules (
-                rule_num    INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_name   TEXT NOT NULL UNIQUE,
-                description TEXT NOT NULL
-            )
-            """)
-            ctx.execute("""
             CREATE TABLE IF NOT EXISTS reports (
-                report_num       INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_num       INTEGER NOT NULL,
+                origin           TEXT NOT NULL,
                 rule_num         INTEGER NOT NULL,
                 culprit_pubkey   BLOB NOT NULL,
                 culprit_board    TEXT,
                 culprit_post_num INTEGER DEFAULT 0,
                 reporter_pubkey  BLOB NOT NULL,
                 report_time      INTEGER NOT NULL,
-                origin           TEXT NOT NULL,
                 relay            TEXT NOT NULL,
                 description      TEXT NOT NULL,
                 origin_sig       TEXT,
                 reporter_sig     TEXT,
+                PRIMARY KEY (origin, report_num),
                 FOREIGN KEY (rule_num) REFERENCES rules(rule_num)
             )
             """)
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_culprit ON reports(culprit_pubkey)")
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_rule ON reports(rule_num)")
+            ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_time ON reports(report_time)")
 
         with self._punishments_db.open() as ctx:
             ctx.execute("""
@@ -207,9 +202,9 @@ cdef class Keibatsu:
 
         self._reports_table = self._reports_db.add_table(
             'reports',
-            'report_num rule_num culprit_pubkey culprit_board culprit_post_num reporter_pubkey report_time origin relay description origin_sig reporter_sig',
+            'report_num origin rule_num culprit_pubkey culprit_board culprit_post_num reporter_pubkey report_time relay description origin_sig reporter_sig',
             proto=Report,
-            id_cols=['report_num']
+            id_cols=['origin', 'report_num']
         )
 
         self._punishments_table = self._punishments_db.add_table(
@@ -307,11 +302,11 @@ cdef class Keibatsu:
             struct.pack("B", len(description_bytes)) + description_bytes
         )
 
-    cdef Report _get_report(self, uint64_t report_num):
+    cdef Report _get_report(self, str origin, uint64_t report_num):
         cdef object report
         with self._reports_db.open() as ctx:
             report = self._reports_table.select_single(
-                where="report_num=?", values=[report_num], ctx=ctx
+                where="origin=? AND report_num=?", values=[origin, report_num], ctx=ctx
             )
         return report
 
@@ -322,6 +317,38 @@ cdef class Keibatsu:
                 where="culprit_pubkey=?", values=[pubkey], ctx=ctx
             ))
         return reports
+
+    cdef list _list_reports_since(self, int64_t since_timestamp):
+        cdef list reports
+        with self._reports_db.open() as ctx:
+            reports = list(self._reports_table.select_iter(
+                where="report_time >= ? AND origin = ?",
+                values=[since_timestamp, self._origin],
+                orderby="report_time ASC",
+                ctx=ctx
+            ))
+        return reports
+
+    cdef bint _upsert_remote_report(self, uint64_t report_num, str origin, uint64_t rule_num,
+                                      bytes culprit_pubkey, str culprit_board, uint64_t culprit_post_num,
+                                      bytes reporter_pubkey, int64_t report_time, str relay,
+                                      str description, str origin_sig, str reporter_sig):
+        cdef bint inserted = False
+        with self._reports_db.open() as ctx:
+            existing = self._reports_table.select_single(
+                where="origin=? AND report_num=?", values=[origin, report_num], ctx=ctx
+            )
+            if existing is None:
+                ctx.insert_record(
+                    self._reports_table,
+                    (report_num, origin, rule_num, culprit_pubkey, culprit_board, culprit_post_num,
+                     reporter_pubkey, report_time, relay, description, origin_sig, reporter_sig),
+                    columns=['report_num', 'origin', 'rule_num', 'culprit_pubkey', 'culprit_board',
+                             'culprit_post_num', 'reporter_pubkey', 'report_time', 'relay',
+                             'description', 'origin_sig', 'reporter_sig']
+                )
+                inserted = True
+        return inserted
 
     cdef Report _create_report(self, uint64_t rule_num, bytes culprit_pubkey, 
                                bytes reporter_pubkey, str description,
@@ -343,17 +370,22 @@ cdef class Keibatsu:
             relay = self._origin
         
         with self._reports_db.open() as ctx:
-            report_num_obj = ctx.insert_record(
+            max_num = ctx.execute("SELECT MAX(report_num) FROM reports WHERE origin=?", [origin]).fetchone()[0]
+            if max_num is None:
+                report_num = 1
+            else:
+                report_num = max_num + 1
+            
+            ctx.insert_record(
                 self._reports_table,
-                (rule_num, culprit_pubkey, culprit_board, culprit_post_num, 
-                 reporter_pubkey, report_time, origin, relay, description, None, None),
-                columns=['rule_num', 'culprit_pubkey', 'culprit_board', 'culprit_post_num',
-                         'reporter_pubkey', 'report_time', 'origin', 'relay', 'description',
+                (report_num, origin, rule_num, culprit_pubkey, culprit_board, culprit_post_num, 
+                 reporter_pubkey, report_time, relay, description, None, None),
+                columns=['report_num', 'origin', 'rule_num', 'culprit_pubkey', 'culprit_board', 'culprit_post_num',
+                         'reporter_pubkey', 'report_time', 'relay', 'description',
                          'origin_sig', 'reporter_sig']
             )
         
-        report_num = report_num_obj
-        report = self._get_report(report_num)
+        report = self._get_report(origin, report_num)
         
         if self._signing_key is not None:
             signed_payload = self._build_signed_payload(report)
@@ -362,25 +394,25 @@ cdef class Keibatsu:
             
             with self._reports_db.open() as ctx:
                 ctx.execute(
-                    "UPDATE reports SET origin_sig=? WHERE report_num=?",
-                    [origin_sig, report_num]
+                    "UPDATE reports SET origin_sig=? WHERE origin=? AND report_num=?",
+                    [origin_sig, origin, report_num]
                 )
             
             report.origin_sig = origin_sig
         
         return report
 
-    cdef Report _sign_report(self, uint64_t report_num, bytes signature):
-        cdef Report report = self._get_report(report_num)
+    cdef Report _sign_report(self, str origin, uint64_t report_num, bytes signature):
+        cdef Report report = self._get_report(origin, report_num)
         if report is None:
-            raise ValueError(f"Report {report_num} does not exist")
+            raise ValueError(f"Report {origin}:{report_num} does not exist")
         
         cdef str reporter_sig = signature.hex()
         
         with self._reports_db.open() as ctx:
             ctx.execute(
-                "UPDATE reports SET reporter_sig=? WHERE report_num=?",
-                [reporter_sig, report_num]
+                "UPDATE reports SET reporter_sig=? WHERE origin=? AND report_num=?",
+                [reporter_sig, origin, report_num]
             )
         
         report.reporter_sig = reporter_sig
@@ -490,14 +522,29 @@ cdef class Keibatsu:
             return self._update_rule(rule_num, rule_name, description)
         return AsyncResult(self._executor.submit(task))
 
-    def get_report(self, uint64_t report_num):
+    def get_report(self, str origin, uint64_t report_num):
         def task():
-            return self._get_report(report_num)
+            return self._get_report(origin, report_num)
         return AsyncResult(self._executor.submit(task))
 
     def list_reports_by_culprit(self, bytes pubkey):
         def task():
             return self._list_reports_by_culprit(pubkey)
+        return AsyncResult(self._executor.submit(task))
+
+    def list_reports_since(self, int64_t since_timestamp):
+        def task():
+            return self._list_reports_since(since_timestamp)
+        return AsyncResult(self._executor.submit(task))
+
+    def upsert_remote_report(self, uint64_t report_num, str origin, uint64_t rule_num,
+                              bytes culprit_pubkey, str culprit_board, uint64_t culprit_post_num,
+                              bytes reporter_pubkey, int64_t report_time, str relay,
+                              str description, str origin_sig, str reporter_sig):
+        def task():
+            return self._upsert_remote_report(report_num, origin, rule_num, culprit_pubkey,
+                                               culprit_board, culprit_post_num, reporter_pubkey,
+                                               report_time, relay, description, origin_sig, reporter_sig)
         return AsyncResult(self._executor.submit(task))
 
     def create_report(self, uint64_t rule_num, bytes culprit_pubkey, bytes reporter_pubkey,
@@ -508,9 +555,9 @@ cdef class Keibatsu:
                                        culprit_board, culprit_post_num, origin, relay)
         return AsyncResult(self._executor.submit(task))
 
-    def sign_report(self, uint64_t report_num, bytes signature):
+    def sign_report(self, str origin, uint64_t report_num, bytes signature):
         def task():
-            return self._sign_report(report_num, signature)
+            return self._sign_report(origin, report_num, signature)
         return AsyncResult(self._executor.submit(task))
 
     def get_punishment(self, bytes pubkey):
