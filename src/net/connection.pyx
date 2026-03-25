@@ -69,6 +69,8 @@ cdef class Connection:
     cdef object _ame
     cdef object _config
     cdef public object _engine
+    cdef public str origin
+    cdef public str remote_addr
 
     def __init__(self):
         self.state = ConnectionState.DISCONNECTED
@@ -81,6 +83,8 @@ cdef class Connection:
         self._ume = None
         self._ame = None
         self._config = None
+        self.origin = None
+        self.remote_addr = None
 
     @staticmethod
     def client(object identity, int timeout_seconds=30):
@@ -104,6 +108,21 @@ cdef class Connection:
         conn._user_callback = user_callback
         conn._timeout_seconds = timeout_seconds
         conn.state = ConnectionState.AUTHENTICATING
+        
+        if websocket and hasattr(websocket, 'remote_address') and websocket.remote_address:
+            addr = websocket.remote_address
+            if isinstance(addr, tuple) and len(addr) > 0:
+                conn.remote_addr = str(addr[0])
+            elif addr is not None:
+                conn.remote_addr = str(addr)
+        
+        if websocket and hasattr(websocket, 'request') and websocket.request:
+            req = websocket.request
+            if hasattr(req, 'headers'):
+                host = req.headers.get('Host', '') if callable(getattr(req.headers, 'get', None)) else ''
+                if host and isinstance(host, str):
+                    conn.origin = host.split(':')[0]
+        
         return conn
 
     @property
@@ -254,6 +273,8 @@ cdef class Connection:
         await self._send_frame(encrypted)
 
     async def recv_request(self) -> bytes:
+        cdef int max_size = 0
+        
         if not self.is_ready:
             raise ConnectionError(500, f"Invalid state: {_state_name(self.state)}")
         if self.session is None:
@@ -263,7 +284,19 @@ cdef class Connection:
             self._recv_frame(),
             timeout=self._timeout_seconds
         )
-        return self.session.decrypt(encrypted)
+        
+        plaintext = self.session.decrypt(encrypted)
+        
+        if self._config is not None:
+            try:
+                max_size = self._config.max_request_size
+            except AttributeError:
+                max_size = 0
+        
+        if max_size > 0 and len(plaintext) > max_size:
+            raise ConnectionError(413, f"Request too large (max {max_size} bytes)")
+        
+        return plaintext
 
     async def send_response(self, bytes data):
         if not self.is_ready:
