@@ -14,7 +14,7 @@ import re
 from datetime import datetime
 from libc.stdint cimport uint64_t, int64_t
 
-READ_ONLY_COMMANDS = {0x02, 0x03, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x61, 0x62, 0x63}
+READ_ONLY_COMMANDS = {0x02, 0x03, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63}
 
 _WHITELIST_PATTERN = re.compile(r'^[a-zA-Z0-9\-_]+$')
 _BLACKLIST_PATTERN = re.compile(r'[@<>:"/\\|?*]')
@@ -86,7 +86,7 @@ cdef class CommandHandler:
             0x40: 'RULE_CREATE', 0x41: 'RULE_GET', 0x42: 'RULE_GET_BY_NAME',
             0x43: 'RULE_LIST', 0x44: 'RULE_UPDATE',
             0x50: 'REPORT_CREATE', 0x51: 'REPORT_GET', 0x52: 'REPORT_LIST_BY_CULPRIT',
-            0x53: 'REPORT_SIGN',
+            0x53: 'REPORT_SIGN', 0x54: 'REPORT_LIST_SINCE',
             0x60: 'PUNISHMENT_CREATE', 0x61: 'PUNISHMENT_GET',
             0x62: 'PUNISHMENT_LIST_ACTIVE', 0x63: 'IS_BANNED'
         }
@@ -157,6 +157,8 @@ cdef class CommandHandler:
             return self._cmd_report_list_by_culprit(data, conn)
         elif cmd == 0x53:
             return self._cmd_report_sign(data, conn)
+        elif cmd == 0x54:
+            return self._cmd_report_list_since(data, conn)
         elif cmd == 0x60:
             return self._cmd_punishment_create(data, conn)
         elif cmd == 0x61:
@@ -1344,16 +1346,24 @@ cdef class CommandHandler:
 
     cdef bytes _cmd_report_get(self, bytes data, object conn):
         cdef uint64_t report_num
+        cdef int origin_len
+        cdef str origin
         cdef object result, report
 
         try:
-            report_num = struct.unpack('>Q', data[:8])[0]
+            idx = 0
+            origin_len = data[idx]
+            idx += 1
+            origin = data[idx:idx+origin_len].decode('utf-8')
+            idx += origin_len
 
-            result = self._keibatsu.get_report(report_num)
+            report_num = struct.unpack('>Q', data[idx:idx+8])[0]
+
+            result = self._keibatsu.get_report(origin, report_num)
             report = result.result()
 
             if report is None:
-                return self._build_error(404, f"Report {report_num} not found")
+                return self._build_error(404, f"Report {origin}:{report_num} not found")
 
             return self._encode_report(report)
 
@@ -1408,8 +1418,8 @@ cdef class CommandHandler:
 
     cdef bytes _cmd_report_sign(self, bytes data, object conn):
         cdef uint64_t report_num
-        cdef int sig_len
-        cdef str signature_hex
+        cdef int sig_len, origin_len
+        cdef str signature_hex, origin
         cdef bytes signature_bytes
         cdef object result, report
 
@@ -1418,6 +1428,11 @@ cdef class CommandHandler:
 
         try:
             idx = 0
+            origin_len = data[idx]
+            idx += 1
+            origin = data[idx:idx+origin_len].decode('utf-8')
+            idx += origin_len
+
             report_num = struct.unpack('>Q', data[idx:idx+8])[0]
             idx += 8
 
@@ -1425,11 +1440,11 @@ cdef class CommandHandler:
             idx += 1
             signature_hex = data[idx:idx+sig_len].decode('utf-8')
 
-            result = self._keibatsu.get_report(report_num)
+            result = self._keibatsu.get_report(origin, report_num)
             report = result.result()
 
             if report is None:
-                return self._build_error(404, f"Report {report_num} not found")
+                return self._build_error(404, f"Report {origin}:{report_num} not found")
 
             if report.reporter_pubkey != conn.peer_public_key:
                 return self._build_error(403, "Only the reporter can sign this report")
@@ -1442,13 +1457,37 @@ cdef class CommandHandler:
             if len(signature_bytes) != 64:
                 return self._build_error(400, f"Invalid signature length: {len(signature_bytes)} (expected 64)")
 
-            result = self._keibatsu.sign_report(report_num, signature_bytes)
+            result = self._keibatsu.sign_report(origin, report_num, signature_bytes)
             result.result()
 
             return struct.pack('>B', 0x00)
 
         except ValueError as e:
             return self._build_error(404, str(e))
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_report_list_since(self, bytes data, object conn):
+        cdef int64_t since_timestamp
+        cdef object result
+        cdef list reports
+        cdef bytes payload
+
+        if not conn.is_registered():
+            return self._build_error(401, "Authentication required")
+
+        try:
+            since_timestamp = struct.unpack('>q', data[:8])[0]
+
+            result = self._keibatsu.list_reports_since(since_timestamp)
+            reports = result.result()
+
+            payload = struct.pack('>B', 0x00) + struct.pack('>H', len(reports))
+            for report in reports:
+                payload += self._encode_report_entry(report)
+
+            return payload
+
         except Exception as e:
             return self._build_error(400, str(e))
 

@@ -102,14 +102,34 @@ cdef class NavDB:
     cpdef void upsert_remote_batch(self, list entries):
         """
         Batch upsert multiple nav entries in a single transaction.
-        entries: list of tuples (board_name, board_path, origin, signature, relay)
+        entries: list of tuples (board_name, board_path, origin, signature, relay, closed)
         """
         with self._db.open() as ctx:
             for entry in entries:
+                if len(entry) == 6:
+                    board_name, board_path, origin, signature, relay, closed = entry
+                else:
+                    board_name, board_path, origin, signature, relay = entry
+                    closed = 0
                 ctx.execute(
-                    "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay, owner_pubkey, closed) VALUES (?, ?, ?, ?, ?, NULL, 0)",
-                    entry
+                    "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay, owner_pubkey, closed) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+                    [board_name, board_path, origin, signature, relay, closed]
                 )
+
+    cpdef void delete_by_origin_batch(self, str origin, list board_names_to_keep):
+        """
+        Delete nav entries for origin where board_name NOT in keep list.
+        Used for delta sync - removes boards deleted by their origin server.
+        """
+        if not board_names_to_keep:
+            with self._db.open() as ctx:
+                ctx.execute("DELETE FROM nav WHERE origin=?", [origin])
+            return
+        
+        cdef str placeholders = ",".join("?" * len(board_names_to_keep))
+        cdef str sql = f"DELETE FROM nav WHERE origin=? AND board_name NOT IN ({placeholders})"
+        with self._db.open() as ctx:
+            ctx.execute(sql, [origin] + board_names_to_keep)
 
     cpdef bytes get_owner(self, str board_name):
         cdef list rows
