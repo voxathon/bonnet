@@ -38,6 +38,17 @@ class IdentityStore:
         """)
         conn.commit()
 
+    def _derive_aes_key(self, password: str, key_salt: bytes) -> bytes:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return bcrypt.kdf(
+                password=password.encode('utf-8'),
+                salt=key_salt,
+                desired_key_bytes=24,
+                rounds=100
+            )
+
     def register(self, username: str, password: str) -> tuple[bytes, bytes]:
         conn = self._get_conn()
         cur = conn.cursor()
@@ -54,25 +65,17 @@ class IdentityStore:
         yescrypt_hash = hashlib.scrypt(
             password.encode('utf-8'),
             salt=auth_salt,
-            n=16384,
+            n=65536,
             r=8,
-            p=1,
-            maxmem=0
+            p=2,
+            maxmem=134217728
         ).hex()
 
         # 2. Keypair encryption
         key_salt = os.urandom(16)
         # bcrypt output is fixed to 60 chars string, but we want a 24-byte key for AES-192.
         # Let's derive the key using bcrypt.kdf, which is exactly for this purpose.
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            aes_key = bcrypt.kdf(
-                password=password.encode('utf-8'),
-                salt=key_salt,
-                desired_key_bytes=24,
-                rounds=16
-            )
+        aes_key = self._derive_aes_key(password, key_salt)
 
         signing_key = SigningKey.generate()
         private_key = bytes(signing_key)
@@ -109,15 +112,7 @@ class IdentityStore:
         key_salt = bytes(row["key_salt"])
         encrypted = bytes(row["encrypted_private_key"])
 
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            aes_key = bcrypt.kdf(
-                password=password.encode('utf-8'),
-                salt=key_salt,
-                desired_key_bytes=24,
-                rounds=16
-            )
+        aes_key = self._derive_aes_key(password, key_salt)
 
         aesgcm = AESGCM(aes_key)
         nonce = encrypted[:12]
@@ -127,6 +122,13 @@ class IdentityStore:
             return aesgcm.decrypt(nonce, ciphertext, None)
         except Exception as e:
             raise ValueError("Failed to decrypt private key") from e
+
+    def get_pubkey(self, username: str) -> bytes | None:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT public_key FROM identities WHERE username = ?", (username,))
+        row = cur.fetchone()
+        return bytes(row["public_key"]) if row else None
 
     def verify_password(self, username: str, password: str) -> bool:
         conn = self._get_conn()
@@ -143,10 +145,10 @@ class IdentityStore:
             actual_hash = hashlib.scrypt(
                 password.encode('utf-8'),
                 salt=auth_salt,
-                n=16384,
+                n=65536,
                 r=8,
-                p=1,
-                maxmem=0
+                p=2,
+                maxmem=134217728
             ).hex()
             return actual_hash == expected_hash
         except ValueError:

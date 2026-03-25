@@ -194,7 +194,8 @@ class BonnetClient:
         status, payload = parse_response(resp)
 
         if status == ResponseStatus.SUCCESS:
-            return parse_list_users_resp(payload)[0] if payload else None
+            users = parse_list_users_resp(payload)
+            return users[0] if users else None
         elif status == ResponseStatus.ERROR:
             return None
         raise BonnetError(f"Unexpected response: {status}")
