@@ -50,6 +50,9 @@ class IdentityStore:
             )
 
     def register(self, username: str, password: str) -> tuple[bytes, bytes]:
+        if not password:
+            raise ValueError("Password cannot be empty")
+
         conn = self._get_conn()
         cur = conn.cursor()
 
@@ -167,13 +170,6 @@ class IdentityStore:
         cur.execute("SELECT registered FROM identities WHERE username = ?", (username,))
         row = cur.fetchone()
         return bool(row and row["registered"])
-
-    def get_pubkey(self, username: str) -> bytes | None:
-        conn = self._get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT public_key FROM identities WHERE username = ?", (username,))
-        row = cur.fetchone()
-        return bytes(row["public_key"]) if row else None
 
     def list_users(self) -> list[dict]:
         conn = self._get_conn()
