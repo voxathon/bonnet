@@ -19,7 +19,7 @@ def test_identity_store():
         assert priv == recovered_priv
 
         # Verify Wrong Password Failure
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid password"):
             store.get_private_key("alice", "wrongpassword")
     finally:
         store.close()
