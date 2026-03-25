@@ -25,6 +25,7 @@ from app.cli import LocalConnection
 from engine.facade import BonnetEngine
 
 import nacl.exceptions
+from net.connection import ConnectionState
 
 cdef class Bonnet:
     cdef str userfile_path
@@ -92,17 +93,17 @@ cdef class Bonnet:
                     code = struct.unpack(">H", response[1:3])[0]
                     if code == 429:
                         log_msg(f"TARPIT: forcing half-open state for {conn.remote_addr} after 429")
-                        # Monkey-patch the websocket protocol to prevent sending the CLOSE frame
-                        if hasattr(conn.websocket, 'protocol'):
-                            original_send_frame = conn.websocket.protocol.send_frame
-                            def dummy_send_frame(frame):
-                                if getattr(frame, 'opcode', None) == 8: # OP_CLOSE
-                                    pass
-                                else:
-                                    original_send_frame(frame)
-                            conn.websocket.protocol.send_frame = dummy_send_frame
+                        try:
+                            import websockets.connection as _wsc
+                            conn.websocket.state = _wsc.State.CLOSED
+                        except (AttributeError, ImportError):
+                            try:
+                                import websockets.legacy.protocol as _wslp
+                                conn.websocket.state = _wslp.State.CLOSED
+                            except Exception:
+                                pass
 
-                        await conn.close()
+                        conn.state = ConnectionState.CLOSED
                         return
 
                 await conn.send_response(response)

@@ -144,6 +144,7 @@ cdef class Keibatsu:
                  str punishments_path="/var/lib/bonnet/punishments.db",
                  object ume=None, object signing_key=None, str origin="localhost",
                  int num_workers=2):
+        cdef bint needs_migration = False
         self._reports_path = reports_path
         self._punishments_path = punishments_path
         self._ume = ume
@@ -163,46 +164,66 @@ cdef class Keibatsu:
         self._punishments_db = Database(punishments_path)
 
         with self._reports_db.open() as ctx:
-            # We must gracefully handle the schema change for rollover
-            ctx.execute("""
-            CREATE TABLE IF NOT EXISTS reports_v2 (
-                report_num       INTEGER NOT NULL,
-                origin           TEXT NOT NULL,
-                rollover         INTEGER NOT NULL DEFAULT 0,
-                rule_num         INTEGER NOT NULL,
-                culprit_pubkey   BLOB NOT NULL,
-                culprit_board    TEXT,
-                culprit_post_num INTEGER DEFAULT 0,
-                reporter_pubkey  BLOB NOT NULL,
-                report_time      INTEGER NOT NULL,
-                relay            TEXT NOT NULL,
-                description      TEXT NOT NULL,
-                origin_sig       TEXT,
-                reporter_sig     TEXT,
-                PRIMARY KEY (origin, report_num, rollover),
-                FOREIGN KEY (rule_num) REFERENCES rules(rule_num)
-            )
-            """)
+            # Check if table exists and if it has the rollover column
             try:
-                # Migrate existing data if needed
+                ctx.execute("SELECT rollover FROM reports LIMIT 1")
+            except Exception:
+                try:
+                    ctx.execute("SELECT report_num FROM reports LIMIT 1")
+                    needs_migration = True
+                except Exception:
+                    pass
+
+            if needs_migration:
+                ctx.execute("""
+                CREATE TABLE reports_v2 (
+                    report_num       INTEGER NOT NULL,
+                    origin           TEXT NOT NULL,
+                    rollover         INTEGER NOT NULL DEFAULT 0,
+                    rule_num         INTEGER NOT NULL,
+                    culprit_pubkey   BLOB NOT NULL,
+                    culprit_board    TEXT,
+                    culprit_post_num INTEGER DEFAULT 0,
+                    reporter_pubkey  BLOB NOT NULL,
+                    report_time      INTEGER NOT NULL,
+                    relay            TEXT NOT NULL,
+                    description      TEXT NOT NULL,
+                    origin_sig       TEXT,
+                    reporter_sig     TEXT,
+                    PRIMARY KEY (origin, report_num, rollover),
+                    FOREIGN KEY (rule_num) REFERENCES rules(rule_num)
+                )
+                """)
                 ctx.execute("""
                 INSERT INTO reports_v2 (report_num, origin, rollover, rule_num, culprit_pubkey, culprit_board, culprit_post_num, reporter_pubkey, report_time, relay, description, origin_sig, reporter_sig)
                 SELECT report_num, origin, 0, rule_num, culprit_pubkey, culprit_board, culprit_post_num, reporter_pubkey, report_time, relay, description, origin_sig, reporter_sig FROM reports
                 """)
                 ctx.execute("DROP TABLE reports")
-            except Exception:
-                pass
-
-            ctx.execute("ALTER TABLE reports_v2 RENAME TO reports")
+                ctx.execute("ALTER TABLE reports_v2 RENAME TO reports")
+            else:
+                ctx.execute("""
+                CREATE TABLE IF NOT EXISTS reports (
+                    report_num       INTEGER NOT NULL,
+                    origin           TEXT NOT NULL,
+                    rollover         INTEGER NOT NULL DEFAULT 0,
+                    rule_num         INTEGER NOT NULL,
+                    culprit_pubkey   BLOB NOT NULL,
+                    culprit_board    TEXT,
+                    culprit_post_num INTEGER DEFAULT 0,
+                    reporter_pubkey  BLOB NOT NULL,
+                    report_time      INTEGER NOT NULL,
+                    relay            TEXT NOT NULL,
+                    description      TEXT NOT NULL,
+                    origin_sig       TEXT,
+                    reporter_sig     TEXT,
+                    PRIMARY KEY (origin, report_num, rollover),
+                    FOREIGN KEY (rule_num) REFERENCES rules(rule_num)
+                )
+                """)
 
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_culprit ON reports(culprit_pubkey)")
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_rule ON reports(rule_num)")
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_time ON reports(report_time)")
-            try:
-                # Attempt to add column for instances where table was already renamed back
-                ctx.execute("ALTER TABLE reports ADD COLUMN rollover INTEGER DEFAULT 0")
-            except Exception:
-                pass
 
         with self._punishments_db.open() as ctx:
             ctx.execute("""
