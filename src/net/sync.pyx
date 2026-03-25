@@ -113,8 +113,8 @@ cdef class SyncManager:
         self._worker_task = asyncio.create_task(self._sync_worker())
 
         cdef str sync_db_path = "/var/lib/bonnet/sync.db"
-        if hasattr(self._config, "data_dir") and self._config.data_dir:
-            sync_db_path = os.path.join(self._config.data_dir, "sync.db")
+        if hasattr(engine.config, "data_dir") and engine.config.data_dir:
+            sync_db_path = os.path.join(engine.config.data_dir, "sync.db")
         self._sync_db = SyncDB(sync_db_path)
 
     cpdef bytes get_peer_pubkey(self, str origin):
