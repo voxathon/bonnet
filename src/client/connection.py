@@ -45,6 +45,7 @@ from .protocol import (
     build_is_banned,
     ProtocolError,
     parse_register_resp,
+    parse_get_user_resp,
     parse_list_users_resp,
     parse_list_peers_resp,
     parse_board_list_resp,
@@ -183,13 +184,13 @@ class BonnetClient:
     async def __aexit__(self, *args):
         await self.close()
 
-    async def get_user(self, pubkey: bytes) -> User | None:
-        cmd = build_get_user(pubkey)
+    async def get_user(self, username: str) -> User | None:
+        cmd = build_get_user(username)
         resp = await self._send_command(cmd)
         status, payload = parse_response(resp)
 
         if status == ResponseStatus.SUCCESS:
-            return parse_list_users_resp(payload)[0] if payload else None
+            return parse_get_user_resp(payload, username)
         elif status == ResponseStatus.ERROR:
             return None
         raise BonnetError(f"Unexpected response: {status}")
