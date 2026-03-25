@@ -4,11 +4,90 @@
 
 import struct
 import asyncio
+import os
+import time
 from libc.stdint cimport uint64_t, int64_t
 from net.connection import Connection
 from engine.facade import BonnetEngine
 from core.logging import log_msg
+from core.orm import Database
 
+cdef class SyncDB:
+    cdef str _db_path
+    cdef object _db
+
+    def __init__(self, str db_path):
+        self._db_path = db_path
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        self._db = Database(self._db_path)
+        with self._db.open() as ctx:
+            ctx.execute("""
+            CREATE TABLE IF NOT EXISTS peer_keys (
+                origin TEXT PRIMARY KEY,
+                publickey BLOB NOT NULL,
+                first_seen INTEGER NOT NULL,
+                last_rotated INTEGER NOT NULL
+            )
+            """)
+
+    cpdef bytes get_peer_pubkey(self, str origin):
+        cdef list rows
+        with self._db.open() as ctx:
+            rows = ctx.execute("SELECT publickey FROM peer_keys WHERE origin=?", [origin]).fetchall()
+        if rows and rows[0][0]:
+            return bytes(rows[0][0])
+        return None
+
+    cpdef bint set_peer_pubkey_tofu(self, str origin, bytes publickey):
+        cdef bytes existing = self.get_peer_pubkey(origin)
+        if existing:
+            return existing == publickey
+
+        cdef int64_t now = int(time.time())
+        with self._db.open() as ctx:
+            ctx.execute(
+                "INSERT INTO peer_keys (origin, publickey, first_seen, last_rotated) VALUES (?, ?, ?, ?)",
+                [origin, publickey, now, now]
+            )
+        return True
+
+    cpdef bint rotate_peer_pubkey(self, str origin, bytes old_publickey, bytes new_publickey, bytes signature):
+        cdef bytes existing = self.get_peer_pubkey(origin)
+        if not existing:
+            return False
+        if existing != old_publickey:
+            return False
+
+        from core.crypto import Identity
+        cdef bytes origin_bytes = origin.encode('utf-8')
+        cdef bytes payload = struct.pack('B', len(origin_bytes)) + origin_bytes + old_publickey + new_publickey
+
+        if not Identity.verify(old_publickey, payload, signature):
+            return False
+
+        cdef int64_t now = int(time.time())
+        with self._db.open() as ctx:
+            ctx.execute(
+                "UPDATE peer_keys SET publickey=?, last_rotated=? WHERE origin=?",
+                [new_publickey, now, origin]
+            )
+        return True
+
+    cpdef list list_peer_keys(self):
+        cdef list rows
+        cdef list result = []
+        with self._db.open() as ctx:
+            rows = ctx.execute("SELECT origin, publickey, first_seen, last_rotated FROM peer_keys").fetchall()
+        for row in rows:
+            result.append({
+                'origin': row[0],
+                'publickey': bytes(row[1]),
+                'first_seen': row[2],
+                'last_rotated': row[3]
+            })
+        return result
 
 cdef class SyncManager:
     cdef object _ume
@@ -20,6 +99,7 @@ cdef class SyncManager:
     cdef set _inflight_syncs
     cdef object _sync_queue
     cdef object _worker_task
+    cdef public object _sync_db
 
     def __init__(self, object engine):
         self._engine = engine
@@ -31,6 +111,20 @@ cdef class SyncManager:
         self._inflight_syncs = set()
         self._sync_queue = asyncio.Queue()
         self._worker_task = asyncio.create_task(self._sync_worker())
+
+        cdef str sync_db_path = "/var/lib/bonnet/sync.db"
+        if hasattr(self._config, "data_dir") and self._config.data_dir:
+            sync_db_path = os.path.join(self._config.data_dir, "sync.db")
+        self._sync_db = SyncDB(sync_db_path)
+
+    cpdef bytes get_peer_pubkey(self, str origin):
+        return self._sync_db.get_peer_pubkey(origin)
+
+    cpdef bint rotate_peer_pubkey(self, str origin, bytes old_publickey, bytes new_publickey, bytes signature):
+        return self._sync_db.rotate_peer_pubkey(origin, old_publickey, new_publickey, signature)
+
+    cpdef list list_peer_keys(self):
+        return self._sync_db.list_peer_keys()
 
     async def _sync_worker(self):
         while True:
@@ -71,6 +165,12 @@ cdef class SyncManager:
                     log_msg(f"SYNC: port 272 also failed for {peer_hostname}: {e2}")
                     await conn.close()
                     return
+
+            # TOFU the peer's public key upon connection
+            if not self._sync_db.set_peer_pubkey_tofu(peer_hostname, conn.peer_public_key):
+                log_msg(f"SYNC: aborting sync with {peer_hostname} - public key mismatch (TOFU failed)")
+                await conn.close()
+                return
 
             await self._sync_boards(conn, peer_hostname)
             await self._sync_users(conn, peer_hostname)
@@ -278,7 +378,8 @@ cdef class SyncManager:
 
             result = self._keibatsu.upsert_remote_report(
                 report_num, origin, rule_num, culprit_pubkey, culprit_board, culprit_post_num,
-                reporter_pubkey, report_time, peer_hostname, description, origin_sig, reporter_sig
+                reporter_pubkey, report_time, peer_hostname, description, origin_sig, reporter_sig,
+                self._sync_db.get_peer_pubkey
             )
             if result.result():
                 total += 1
