@@ -10,13 +10,19 @@ cdef class Matcher:
     cdef public bytes pubkey
     cdef public str origin_pattern
     cdef public bint wildcard
+    cdef public bint anonymous
     
-    def __init__(self, bytes pubkey=None, str origin_pattern=None, bint wildcard=False):
+    def __init__(self, bytes pubkey=None, str origin_pattern=None, bint wildcard=False, bint anonymous=False):
         self.pubkey = pubkey
         self.origin_pattern = origin_pattern
         self.wildcard = wildcard
+        self.anonymous = anonymous
     
-    def matches(self, bytes peer_pubkey, str origin) -> bool:
+    def matches(self, bytes peer_pubkey, str origin, bint is_anonymous=False) -> bool:
+        if self.anonymous and is_anonymous:
+            return True
+        if self.anonymous and not is_anonymous:
+            return False
         if self.pubkey is not None:
             return peer_pubkey == self.pubkey
         if self.origin_pattern is not None:
@@ -36,6 +42,8 @@ cdef class Matcher:
             return Matcher(pubkey=bytes.fromhex(pubkey_hex))
         if 'origin' in data:
             return Matcher(origin_pattern=data['origin'])
+        if 'anonymous' in data and data['anonymous']:
+            return Matcher(anonymous=True)
         if 'wildcard' in data and data['wildcard']:
             return Matcher(wildcard=True)
         return Matcher(wildcard=True)
@@ -327,29 +335,38 @@ key_path = "./certs/bonnet.key"
             return False
         return registrar.lower() in self.registrars
     
-    def check_permission(self, str action, str board, bytes peer_pubkey, str origin, bint is_admin, bint is_mod, object board_owner) -> bool:
+    def check_permission(self, str action, str board, bytes peer_pubkey, str origin, bint is_admin, bint is_mod, object board_owner, bint is_anonymous=False) -> bool:
         if self.admin_bypass_acl and is_admin:
             return True
         
-        if board_owner is not None and peer_pubkey == board_owner:
+        if board_owner is not None and peer_pubkey is not None and peer_pubkey == board_owner:
             return True
         
         if action == "write" and is_mod:
             return True
         
+        anonymous_matches = []
         pubkey_matches = []
         origin_matches = []
         wildcard_matches = []
         
         for acl in self.acls:
-            if acl.matcher.matches(peer_pubkey, origin):
+            if acl.matcher.matches(peer_pubkey, origin, is_anonymous):
                 if acl.board_matches(board):
-                    if acl.matcher.pubkey is not None:
+                    if acl.matcher.anonymous:
+                        anonymous_matches.append(acl)
+                    elif acl.matcher.pubkey is not None:
                         pubkey_matches.append(acl)
                     elif acl.matcher.origin_pattern is not None:
                         origin_matches.append(acl)
                     else:
                         wildcard_matches.append(acl)
+        
+        for acl in anonymous_matches:
+            if action == "read":
+                return acl.read_perm
+            if action == "write":
+                return acl.write_perm
         
         for acl in pubkey_matches:
             if action == "read":

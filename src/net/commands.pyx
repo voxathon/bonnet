@@ -15,7 +15,7 @@ import collections
 from datetime import datetime
 from libc.stdint cimport uint64_t, int64_t
 
-READ_ONLY_COMMANDS = {0x02, 0x03, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63}
+PUBLIC_COMMANDS = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63}
 
 _WHITELIST_PATTERN = re.compile(r'^[a-zA-Z0-9\-_]+$')
 _BLACKLIST_PATTERN = re.compile(r'[@<>:"/\\|?*]')
@@ -79,7 +79,7 @@ cdef class CommandHandler:
         data = request[1:]
         
         cmd_names = {
-            0x01: 'REGISTER', 0x02: 'GET_USER', 0x03: 'LIST_USERS',
+            0x01: 'REGISTER', 0x02: 'GET_USER', 0x03: 'LIST_USERS', 0x04: 'LIST_PEERS',
             0x10: 'BOARD_CREATE', 0x11: 'BOARD_LIST', 0x12: 'POST_CREATE',
             0x13: 'POST_GET', 0x14: 'POST_LIST', 0x15: 'POST_UPDATE',
             0x16: 'POST_DELETE', 0x17: 'BOARD_CLOSE', 0x18: 'BOARD_DELETE',
@@ -98,12 +98,12 @@ cdef class CommandHandler:
         log_msg(f"HANDLE: cmd=0x{cmd:02x} ({cmd_name}), user={username}")
         log_hex(f"HANDLE: request", request)
         
-        if conn.is_anonymous and cmd != 0x01:
+        if conn.is_anonymous and cmd not in PUBLIC_COMMANDS:
             log_msg(f"HANDLE: rejected - anonymous user cannot run cmd=0x{cmd:02x}")
-            return self._build_error(401, "Anonymous users must register first")
+            return self._build_error(401, "Authentication required for this command")
         
         if not conn.is_anonymous and conn.user.is_banned:
-            if cmd not in READ_ONLY_COMMANDS:
+            if cmd not in PUBLIC_COMMANDS:
                 log_msg(f"HANDLE: rejected - banned user '{conn.user.username}' attempted cmd=0x{cmd:02x}")
                 return self._build_error(403, "You are banned from performing this action")
 
@@ -113,6 +113,8 @@ cdef class CommandHandler:
             return self._cmd_get(data, conn)
         elif cmd == 0x03:
             return self._cmd_list(data, conn)
+        elif cmd == 0x04:
+            return self._cmd_list_peers(data, conn)
         elif cmd == 0x10:
             return self._cmd_board_create(data, conn)
         elif cmd == 0x11:
@@ -266,6 +268,21 @@ cdef class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
+    cdef bytes _cmd_list_peers(self, bytes data, object conn):
+        cdef list peers
+        cdef bytes payload
+        cdef str peer
+
+        try:
+            peers = self._ame.list_peers()
+            payload = struct.pack('>B', 0x00) + struct.pack('>H', len(peers))
+            for peer in peers:
+                peer_bytes = peer.encode('utf-8')
+                payload += struct.pack('>B', len(peer_bytes)) + peer_bytes
+            return payload
+        except Exception as e:
+            return self._build_error(400, str(e))
+
     cdef bytes _cmd_board_create(self, bytes data, object conn):
         cdef int b_len
         cdef str board_name
@@ -303,9 +320,6 @@ cdef class CommandHandler:
         cdef dict nav_entry
         cdef bytes payload
         cdef list visible_boards
-
-        if not conn.is_registered():
-            return self._build_error(401, "Authentication required")
 
         try:
             boards = self._ame.list_boards()
@@ -444,9 +458,6 @@ cdef class CommandHandler:
         cdef uint64_t post_num
         cdef object board, result, post, nav_entry
 
-        if not conn.is_registered():
-            return self._build_error(401, "Authentication required")
-
         try:
             idx = 0
             b_len = data[idx]
@@ -515,9 +526,6 @@ cdef class CommandHandler:
         cdef list posts
         cdef object post
         cdef bytes payload
-
-        if not conn.is_registered():
-            return self._build_error(401, "Authentication required")
 
         try:
             idx = 0
@@ -734,9 +742,6 @@ cdef class CommandHandler:
         cdef list posts, values
         cdef object post
         cdef bytes payload
-
-        if not conn.is_registered():
-            return self._build_error(401, "Authentication required")
 
         try:
             idx = 0
@@ -1131,9 +1136,6 @@ cdef class CommandHandler:
         cdef uint64_t rule_num
         cdef object result, rule
 
-        if not conn.is_registered():
-            return self._build_error(401, "Authentication required")
-
         try:
             rule_num = struct.unpack('>Q', data[:8])[0]
 
@@ -1158,9 +1160,6 @@ cdef class CommandHandler:
         cdef int name_len
         cdef str rule_name
         cdef object result, rule
-
-        if not conn.is_registered():
-            return self._build_error(401, "Authentication required")
 
         try:
             name_len = data[0]
@@ -1188,9 +1187,6 @@ cdef class CommandHandler:
         cdef list rules
         cdef object rule
         cdef bytes payload
-
-        if not conn.is_registered():
-            return self._build_error(401, "Authentication required")
 
         try:
             result = self._keibatsu.list_rules()

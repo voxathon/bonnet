@@ -143,6 +143,19 @@ cdef class NavDB:
         with self._db.open() as ctx:
             ctx.execute("DELETE FROM nav WHERE board_name=?", [board_name])
 
+    cpdef list list_peers(self, str local_origin=None):
+        cdef list rows
+        cdef list result = []
+        with self._db.open() as ctx:
+            if local_origin:
+                rows = ctx.execute("SELECT DISTINCT relay FROM nav WHERE relay != ? AND relay != ''", [local_origin]).fetchall()
+            else:
+                rows = ctx.execute("SELECT DISTINCT relay FROM nav WHERE relay != ''").fetchall()
+        for row in rows:
+            if row[0]:
+                result.append(row[0])
+        return result
+
 
 cdef class AsyncResult:
     cdef object _future
@@ -529,6 +542,9 @@ cdef class Ame:
     cpdef list list_boards(self):
         with self._boards_lock:
             return [(name, board.is_closed()) for name, board in self._boards.items()]
+
+    cpdef list list_peers(self):
+        return self._nav.list_peers(local_origin=self._origin)
 
     cpdef void shutdown(self, bint wait=True):
         self._executor.shutdown(wait=wait)
