@@ -11,6 +11,7 @@ from engine.facade import BonnetEngine
 from core.logging import log_msg, log_hex, log_dict
 
 import re
+import collections
 from datetime import datetime
 from libc.stdint cimport uint64_t, int64_t
 
@@ -61,9 +62,10 @@ cdef class CommandHandler:
             return self._build_error(413, f"Request too large (max {max_size} bytes)")
         
         if not hasattr(conn, '_request_timestamps'):
-            conn._request_timestamps = []
+            conn._request_timestamps = collections.deque()
 
-        conn._request_timestamps = [ts for ts in conn._request_timestamps if current_time - ts < window]
+        while conn._request_timestamps and current_time - conn._request_timestamps[0] >= window:
+            conn._request_timestamps.popleft()
 
         if len(conn._request_timestamps) >= max_requests:
             return self._build_error(429, "Too many requests. Please slow down.")
@@ -204,7 +206,7 @@ cdef class CommandHandler:
             if existing_user is not None:
                 return self._build_error(409, f"Username '{username}' already exists")
 
-            new_user = self._ume.put(username, registrar, conn.peer_public_key, record_origin=self._config.origin, relay=self._config.origin, password=None)
+            new_user = self._ume.put(username, registrar, conn.peer_public_key, record_origin=self._config.origin, relay=self._config.origin)
 
             u_bytes = new_user.username.encode('utf-8')
             return struct.pack('>B', 0x00) + u_bytes
@@ -363,7 +365,7 @@ cdef class CommandHandler:
 
             nav_entry = self._ame.get_nav().get(board_name)
             if nav_entry is not None and nav_entry['origin'] != self._config.origin:
-                asyncio.create_task(self._sync_mgr.sync_from_peer(nav_entry['relay']))
+                asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
                 origin_bytes = nav_entry['origin'].encode('utf-8')
                 return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
 
@@ -460,7 +462,7 @@ cdef class CommandHandler:
 
             nav_entry = self._ame.get_nav().get(board_name)
             if nav_entry is not None and nav_entry['origin'] != self._config.origin:
-                asyncio.create_task(self._sync_mgr.sync_from_peer(nav_entry['relay']))
+                asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
                 origin_bytes = nav_entry['origin'].encode('utf-8')
                 return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
 
@@ -534,7 +536,7 @@ cdef class CommandHandler:
                 if board is None:
                     return self._build_error(404, f"Board '{board_name}' not found")
             elif nav_entry['origin'] != self._config.origin:
-                asyncio.create_task(self._sync_mgr.sync_from_peer(nav_entry['relay']))
+                asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
                 origin_bytes = nav_entry['origin'].encode('utf-8')
                 return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
 
