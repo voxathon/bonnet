@@ -26,16 +26,17 @@ cdef class BonnetEngine:
         Returns:
             True if permission granted, False otherwise
         """
-        cdef bytes peer_pubkey = conn.peer_public_key
+        cdef bytes peer_pubkey = conn.peer_public_key if hasattr(conn, 'peer_public_key') and conn.peer_public_key else None
         cdef bint is_admin = conn.is_administrator() if hasattr(conn, 'is_administrator') else False
         cdef bint is_mod = conn.is_moderator() if hasattr(conn, 'is_moderator') else False
+        cdef bint is_anonymous = conn.is_anonymous if hasattr(conn, 'is_anonymous') else True
         cdef str origin = self._resolve_origin(conn)
         cdef bytes board_owner = None
         
         if board:
             board_owner = self.ame.get_board_owner(board)
         
-        return self.config.check_permission(action, board, peer_pubkey, origin, is_admin, is_mod, board_owner)
+        return self.config.check_permission(action, board, peer_pubkey, origin, is_admin, is_mod, board_owner, is_anonymous)
     
     cdef str _resolve_origin(self, object conn):
         """
