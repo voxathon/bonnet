@@ -176,6 +176,9 @@ cdef class Bonnet:
         if cmd == "list-boards":
             return self._cmd_list_boards()
         
+        if cmd == "list-peers":
+            return self._cmd_list_peers()
+        
         if cmd == "close-board":
             return self._cmd_close_board(parts)
         
@@ -222,24 +225,25 @@ cdef class Bonnet:
   close-board <name>    Close board (read-only, admin)
   delete-board <name>   Delete board permanently (admin)
   list-boards           List boards
+  list-peers            List known peer servers
   create-post <board> [root]
-                        Create post (interactive)
+                         Create post (interactive)
   get-post <board> <n>  Get post
   list-posts <board> [off] [n]
-                        List posts
+                         List posts
   query-posts <board> [--where=...] [--value=...] [--orderby=...] [--limit=N]
-                        Query posts by metadata
+                         Query posts by metadata
   update-post <board> <n>
-                        Edit post (interactive)
+                         Edit post (interactive)
   sign-post <board> <n>
-                        Sign a post
+                         Sign a post
   delete-post <board> <n>
-                        Delete post
+                         Delete post
   promote <username>    Promote to moderator (admin)
   demote <username>     Remove moderator (admin)
   list-acls             List ACL entries
   check-perm <board> [username]
-                        Check user permission for board
+                         Check user permission for board
   quit                  Exit"""
     
     cdef str _cmd_whoami(self):
@@ -319,6 +323,15 @@ cdef class Bonnet:
         
         if response[0] == 0x00:
             return self._format_board_list(response)
+        
+        return self._parse_error(response)
+    
+    cdef str _cmd_list_peers(self):
+        request = bytes([0x04])
+        response = self.command_handler.handle(request, self.local_conn)
+        
+        if response[0] == 0x00:
+            return self._format_peer_list(response)
         
         return self._parse_error(response)
     
@@ -791,7 +804,9 @@ cdef class Bonnet:
         lines.append("")
         
         for acl in self.config.acls:
-            if acl.matcher.pubkey:
+            if acl.matcher.anonymous:
+                matcher_info = "anonymous=true"
+            elif acl.matcher.pubkey:
                 matcher_info = f"pubkey={acl.matcher.pubkey.hex()[:16]}..."
             elif acl.matcher.origin_pattern:
                 matcher_info = f"origin={acl.matcher.origin_pattern}"
@@ -892,6 +907,21 @@ cdef class Bonnet:
         
         if not lines:
             return "No boards."
+        return "\n".join(lines)
+    
+    cdef str _format_peer_list(self, bytes data):
+        cdef int offset = 1
+        cdef int count = struct.unpack(">H", data[offset:offset + 2])[0]
+        offset += 2
+        
+        lines = []
+        for _ in range(count):
+            peer = self._decode_string(data, offset)
+            offset += 1 + len(peer.encode())
+            lines.append(f"  {peer}")
+        
+        if not lines:
+            return "No peers."
         return "\n".join(lines)
     
     cdef str _format_post_list(self, bytes data):
