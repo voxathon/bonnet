@@ -71,6 +71,7 @@ cdef class Report:
     cdef public str description
     cdef public str origin_sig
     cdef public str reporter_sig
+    cdef public int rollover
 
     def __init__(self):
         self.report_num = 0
@@ -85,6 +86,7 @@ cdef class Report:
         self.description = ""
         self.origin_sig = None
         self.reporter_sig = None
+        self.rollover = 0
 
 
 cdef class Punishment:
@@ -142,6 +144,7 @@ cdef class Keibatsu:
                  str punishments_path="/var/lib/bonnet/punishments.db",
                  object ume=None, object signing_key=None, str origin="localhost",
                  int num_workers=2):
+        cdef bint needs_migration = False
         self._reports_path = reports_path
         self._punishments_path = punishments_path
         self._ume = ume
@@ -161,24 +164,64 @@ cdef class Keibatsu:
         self._punishments_db = Database(punishments_path)
 
         with self._reports_db.open() as ctx:
-            ctx.execute("""
-            CREATE TABLE IF NOT EXISTS reports (
-                report_num       INTEGER NOT NULL,
-                origin           TEXT NOT NULL,
-                rule_num         INTEGER NOT NULL,
-                culprit_pubkey   BLOB NOT NULL,
-                culprit_board    TEXT,
-                culprit_post_num INTEGER DEFAULT 0,
-                reporter_pubkey  BLOB NOT NULL,
-                report_time      INTEGER NOT NULL,
-                relay            TEXT NOT NULL,
-                description      TEXT NOT NULL,
-                origin_sig       TEXT,
-                reporter_sig     TEXT,
-                PRIMARY KEY (origin, report_num),
-                FOREIGN KEY (rule_num) REFERENCES rules(rule_num)
-            )
-            """)
+            # Check if table exists and if it has the rollover column
+            try:
+                ctx.execute("SELECT rollover FROM reports LIMIT 1")
+            except Exception:
+                try:
+                    ctx.execute("SELECT report_num FROM reports LIMIT 1")
+                    needs_migration = True
+                except Exception:
+                    pass
+
+            if needs_migration:
+                ctx.execute("""
+                CREATE TABLE reports_v2 (
+                    report_num       INTEGER NOT NULL,
+                    origin           TEXT NOT NULL,
+                    rollover         INTEGER NOT NULL DEFAULT 0,
+                    rule_num         INTEGER NOT NULL,
+                    culprit_pubkey   BLOB NOT NULL,
+                    culprit_board    TEXT,
+                    culprit_post_num INTEGER DEFAULT 0,
+                    reporter_pubkey  BLOB NOT NULL,
+                    report_time      INTEGER NOT NULL,
+                    relay            TEXT NOT NULL,
+                    description      TEXT NOT NULL,
+                    origin_sig       TEXT,
+                    reporter_sig     TEXT,
+                    PRIMARY KEY (origin, report_num, rollover),
+                    FOREIGN KEY (rule_num) REFERENCES rules(rule_num)
+                )
+                """)
+                ctx.execute("""
+                INSERT INTO reports_v2 (report_num, origin, rollover, rule_num, culprit_pubkey, culprit_board, culprit_post_num, reporter_pubkey, report_time, relay, description, origin_sig, reporter_sig)
+                SELECT report_num, origin, 0, rule_num, culprit_pubkey, culprit_board, culprit_post_num, reporter_pubkey, report_time, relay, description, origin_sig, reporter_sig FROM reports
+                """)
+                ctx.execute("ALTER TABLE reports RENAME TO reports_old")
+                ctx.execute("ALTER TABLE reports_v2 RENAME TO reports")
+                ctx.execute("DROP TABLE reports_old")
+            else:
+                ctx.execute("""
+                CREATE TABLE IF NOT EXISTS reports (
+                    report_num       INTEGER NOT NULL,
+                    origin           TEXT NOT NULL,
+                    rollover         INTEGER NOT NULL DEFAULT 0,
+                    rule_num         INTEGER NOT NULL,
+                    culprit_pubkey   BLOB NOT NULL,
+                    culprit_board    TEXT,
+                    culprit_post_num INTEGER DEFAULT 0,
+                    reporter_pubkey  BLOB NOT NULL,
+                    report_time      INTEGER NOT NULL,
+                    relay            TEXT NOT NULL,
+                    description      TEXT NOT NULL,
+                    origin_sig       TEXT,
+                    reporter_sig     TEXT,
+                    PRIMARY KEY (origin, report_num, rollover),
+                    FOREIGN KEY (rule_num) REFERENCES rules(rule_num)
+                )
+                """)
+
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_culprit ON reports(culprit_pubkey)")
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_rule ON reports(rule_num)")
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_time ON reports(report_time)")
@@ -202,9 +245,9 @@ cdef class Keibatsu:
 
         self._reports_table = self._reports_db.add_table(
             'reports',
-            'report_num origin rule_num culprit_pubkey culprit_board culprit_post_num reporter_pubkey report_time relay description origin_sig reporter_sig',
+            'report_num origin rollover rule_num culprit_pubkey culprit_board culprit_post_num reporter_pubkey report_time relay description origin_sig reporter_sig',
             proto=Report,
-            id_cols=['origin', 'report_num']
+            id_cols=['origin', 'report_num', 'rollover']
         )
 
         self._punishments_table = self._punishments_db.add_table(
@@ -302,11 +345,11 @@ cdef class Keibatsu:
             struct.pack("B", len(description_bytes)) + description_bytes
         )
 
-    cdef Report _get_report(self, str origin, uint64_t report_num):
+    cdef Report _get_report(self, str origin, uint64_t report_num, int rollover=0):
         cdef object report
         with self._reports_db.open() as ctx:
             report = self._reports_table.select_single(
-                where="origin=? AND report_num=?", values=[origin, report_num], ctx=ctx
+                where="origin=? AND report_num=? AND rollover=?", values=[origin, report_num, rollover], ctx=ctx
             )
         return report
 
@@ -332,18 +375,66 @@ cdef class Keibatsu:
     cdef bint _upsert_remote_report(self, uint64_t report_num, str origin, uint64_t rule_num,
                                       bytes culprit_pubkey, str culprit_board, uint64_t culprit_post_num,
                                       bytes reporter_pubkey, int64_t report_time, str relay,
-                                      str description, str origin_sig, str reporter_sig):
+                                      str description, str origin_sig, str reporter_sig, object peer_pubkey_resolver):
         cdef bint inserted = False
+        cdef Report report = Report()
+        report.report_num = report_num
+        report.rule_num = rule_num
+        report.culprit_pubkey = culprit_pubkey
+        report.culprit_board = culprit_board
+        report.culprit_post_num = culprit_post_num
+        report.reporter_pubkey = reporter_pubkey
+        report.report_time = report_time
+        report.origin = origin
+        report.relay = relay
+        report.description = description
+
+        cdef bytes payload = self._build_signed_payload(report)
+        from core.crypto import Identity
+
+        # Verify origin signature if provided
+        cdef bytes origin_pubkey
+        if origin_sig and peer_pubkey_resolver:
+            origin_pubkey = peer_pubkey_resolver(origin)
+            if not origin_pubkey:
+                return False
+            try:
+                if not Identity.verify(origin_pubkey, payload, bytes.fromhex(origin_sig)):
+                    return False
+            except ValueError:
+                return False
+
+        # Verify reporter signature if provided
+        if reporter_sig:
+            try:
+                if not Identity.verify(reporter_pubkey, payload, bytes.fromhex(reporter_sig)):
+                    return False
+            except ValueError:
+                return False
+
+        cdef list existings
+        cdef Report ext
+        cdef int max_rollover = -1
+        cdef bint duplicate = False
+
         with self._reports_db.open() as ctx:
-            existing = self._reports_table.select_single(
+            existings = list(self._reports_table.select_iter(
                 where="origin=? AND report_num=?", values=[origin, report_num], ctx=ctx
-            )
-            if existing is None:
+            ))
+
+            for ext in existings:
+                if ext.rollover > max_rollover:
+                    max_rollover = ext.rollover
+                if ext.origin_sig == origin_sig and ext.reporter_sig == reporter_sig and ext.description == description:
+                    duplicate = True
+                    break
+
+            if not duplicate:
                 ctx.insert_record(
                     self._reports_table,
-                    (report_num, origin, rule_num, culprit_pubkey, culprit_board, culprit_post_num,
+                    (report_num, origin, max_rollover + 1, rule_num, culprit_pubkey, culprit_board, culprit_post_num,
                      reporter_pubkey, report_time, relay, description, origin_sig, reporter_sig),
-                    columns=['report_num', 'origin', 'rule_num', 'culprit_pubkey', 'culprit_board',
+                    columns=['report_num', 'origin', 'rollover', 'rule_num', 'culprit_pubkey', 'culprit_board',
                              'culprit_post_num', 'reporter_pubkey', 'report_time', 'relay',
                              'description', 'origin_sig', 'reporter_sig']
                 )
@@ -378,9 +469,9 @@ cdef class Keibatsu:
             
             ctx.insert_record(
                 self._reports_table,
-                (report_num, origin, rule_num, culprit_pubkey, culprit_board, culprit_post_num, 
+                (report_num, origin, 0, rule_num, culprit_pubkey, culprit_board, culprit_post_num,
                  reporter_pubkey, report_time, relay, description, None, None),
-                columns=['report_num', 'origin', 'rule_num', 'culprit_pubkey', 'culprit_board', 'culprit_post_num',
+                columns=['report_num', 'origin', 'rollover', 'rule_num', 'culprit_pubkey', 'culprit_board', 'culprit_post_num',
                          'reporter_pubkey', 'report_time', 'relay', 'description',
                          'origin_sig', 'reporter_sig']
             )
@@ -522,9 +613,9 @@ cdef class Keibatsu:
             return self._update_rule(rule_num, rule_name, description)
         return AsyncResult(self._executor.submit(task))
 
-    def get_report(self, str origin, uint64_t report_num):
+    def get_report(self, str origin, uint64_t report_num, int rollover=0):
         def task():
-            return self._get_report(origin, report_num)
+            return self._get_report(origin, report_num, rollover)
         return AsyncResult(self._executor.submit(task))
 
     def list_reports_by_culprit(self, bytes pubkey):
@@ -540,11 +631,11 @@ cdef class Keibatsu:
     def upsert_remote_report(self, uint64_t report_num, str origin, uint64_t rule_num,
                               bytes culprit_pubkey, str culprit_board, uint64_t culprit_post_num,
                               bytes reporter_pubkey, int64_t report_time, str relay,
-                              str description, str origin_sig, str reporter_sig):
+                              str description, str origin_sig, str reporter_sig, object peer_pubkey_resolver):
         def task():
             return self._upsert_remote_report(report_num, origin, rule_num, culprit_pubkey,
                                                culprit_board, culprit_post_num, reporter_pubkey,
-                                               report_time, relay, description, origin_sig, reporter_sig)
+                                               report_time, relay, description, origin_sig, reporter_sig, peer_pubkey_resolver)
         return AsyncResult(self._executor.submit(task))
 
     def create_report(self, uint64_t rule_num, bytes culprit_pubkey, bytes reporter_pubkey,
