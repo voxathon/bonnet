@@ -169,8 +169,10 @@ def build_register(username: str, registrar: str) -> bytes:
     )
 
 
-def build_get_user(username: str) -> bytes:
-    return struct.pack(">B", COMMANDS["GET_USER"]) + encode_string(username)
+def build_get_user(pubkey: bytes) -> bytes:
+    if len(pubkey) != 32:
+        raise ProtocolError(f"Invalid pubkey length: {len(pubkey)}")
+    return struct.pack(">B", COMMANDS["GET_USER"]) + pubkey
 
 
 def build_list_users(offset: int, limit: int) -> bytes:
@@ -284,21 +286,13 @@ def build_post_delete(board: str, post_num: int) -> bytes:
 def build_query_posts(
     board: str, where: str, values: list[tuple[int, bytes]], orderby: str, limit: int
 ) -> bytes:
-    if where:
-        where_encoded = where.encode("utf-8")
-        where_bytes = struct.pack(">H", len(where_encoded)) + where_encoded
-    else:
-        where_bytes = struct.pack(">H", 0)
+    where_bytes = encode_string(where) if where else struct.pack(">B", 0)
 
     values_data = struct.pack(">B", len(values))
     for vtype, vdata in values:
         values_data += struct.pack(">B", vtype) + vdata
 
-    if orderby:
-        orderby_encoded = orderby.encode("utf-8")
-        orderby_bytes = struct.pack(">H", len(orderby_encoded)) + orderby_encoded
-    else:
-        orderby_bytes = struct.pack(">H", 0)
+    orderby_bytes = encode_string(orderby) if orderby else struct.pack(">B", 0)
 
     return (
         struct.pack(">B", COMMANDS["QUERY_POSTS"])
@@ -384,8 +378,8 @@ def build_report_create(
     return (
         struct.pack(">B", COMMANDS["REPORT_CREATE"])
         + struct.pack(">Q", rule_num)
-        + encode_bytes(culprit_pubkey)
-        + encode_bytes(reporter_pubkey)
+        + encode_string(culprit_pubkey.hex())
+        + encode_string(reporter_pubkey.hex())
         + encode_string(description)
         + encode_string(board or "")
         + struct.pack(">Q", post_num or 0)
@@ -629,42 +623,7 @@ def parse_post_list_resp(payload: bytes) -> list[PostSummary]:
 
 
 def parse_query_posts_resp(payload: bytes) -> list[PostSummary]:
-    posts = []
-    offset = 0
-
-    while offset < len(payload):
-        post_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        last_modified = struct.unpack(">q", payload[offset : offset + 8])[0]
-        offset += 8
-        creation_date = struct.unpack(">q", payload[offset : offset + 8])[0]
-        offset += 8
-        last_bumped = struct.unpack(">q", payload[offset : offset + 8])[0]
-        offset += 8
-        closed = payload[offset]
-        offset += 1
-        sticky = struct.unpack(">i", payload[offset : offset + 4])[0]
-        offset += 4
-        tags, offset = decode_string(payload, offset)
-        subject, offset = decode_string(payload, offset)
-        options, offset = decode_string(payload, offset)
-        root = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        author, offset = decode_string(payload, offset)
-        author_registrar, offset = decode_string(payload, offset)
-        signature, offset = decode_string(payload, offset)
-
-        posts.append(
-            PostSummary(
-                post_num=post_num,
-                creation_date=creation_date,
-                subject=subject,
-                author=author,
-                root=root,
-            )
-        )
-
-    return posts
+    return parse_post_list_resp(payload)
 
 
 def parse_get_pubkey_resp(payload: bytes) -> str:
