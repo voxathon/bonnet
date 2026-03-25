@@ -41,14 +41,18 @@ cdef class NavDB:
                 board_path TEXT NOT NULL,
                 origin TEXT NOT NULL,
                 signature BLOB NOT NULL,
-                relay TEXT NOT NULL
+                relay TEXT NOT NULL,
+                owner_pubkey BLOB,
+                closed INTEGER DEFAULT 0
             )
             """)
+            ctx.execute("ALTER TABLE nav ADD COLUMN owner_pubkey BLOB")
+            ctx.execute("ALTER TABLE nav ADD COLUMN closed INTEGER DEFAULT 0")
 
     cpdef dict get(self, str board_name):
         cdef list rows
         with self._db.open() as ctx:
-            rows = ctx.execute("SELECT board_name, board_path, origin, signature, relay FROM nav WHERE board_name=?", [board_name]).fetchall()
+            rows = ctx.execute("SELECT board_name, board_path, origin, signature, relay, owner_pubkey, closed FROM nav WHERE board_name=?", [board_name]).fetchall()
         if rows:
             row = rows[0]
             return {
@@ -56,7 +60,9 @@ cdef class NavDB:
                 'board_path': row[1],
                 'origin': row[2],
                 'signature': bytes(row[3]) if row[3] else b'',
-                'relay': row[4]
+                'relay': row[4],
+                'owner_pubkey': bytes(row[5]) if row[5] else None,
+                'closed': bool(row[6]) if row[6] else False
             }
         return None
 
@@ -64,44 +70,74 @@ cdef class NavDB:
         cdef list rows
         cdef list result = []
         with self._db.open() as ctx:
-            rows = ctx.execute("SELECT board_name, board_path, origin, signature, relay FROM nav").fetchall()
+            rows = ctx.execute("SELECT board_name, board_path, origin, signature, relay, owner_pubkey, closed FROM nav").fetchall()
         for row in rows:
             result.append({
                 'board_name': row[0],
                 'board_path': row[1],
                 'origin': row[2],
                 'signature': bytes(row[3]) if row[3] else b'',
-                'relay': row[4]
+                'relay': row[4],
+                'owner_pubkey': bytes(row[5]) if row[5] else None,
+                'closed': bool(row[6]) if row[6] else False
             })
         return result
 
-    cpdef void create_local(self, str board_name, str origin, bytes signature):
+    cpdef void create_local(self, str board_name, str origin, bytes signature, bytes owner_pubkey=None):
         cdef str board_path = board_name
         cdef str relay = origin
         with self._db.open() as ctx:
             ctx.execute(
-                "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay) VALUES (?, ?, ?, ?, ?)",
-                [board_name, board_path, origin, signature, relay]
+                "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay, owner_pubkey, closed) VALUES (?, ?, ?, ?, ?, ?, 0)",
+                [board_name, board_path, origin, signature, relay, owner_pubkey]
             )
 
     cpdef void upsert_remote(self, str board_name, str board_path, str origin, bytes signature, str relay):
         with self._db.open() as ctx:
             ctx.execute(
-                "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay) VALUES (?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay, owner_pubkey, closed) VALUES (?, ?, ?, ?, ?, NULL, 0)",
                 [board_name, board_path, origin, signature, relay]
             )
 
     cpdef void upsert_remote_batch(self, list entries):
         """
         Batch upsert multiple nav entries in a single transaction.
-        entries: list of tuples (board_name, board_path, origin, signature, relay)
+        entries: list of tuples (board_name, board_path, origin, signature, relay, closed)
         """
         with self._db.open() as ctx:
             for entry in entries:
+                if len(entry) == 6:
+                    board_name, board_path, origin, signature, relay, closed = entry
+                else:
+                    board_name, board_path, origin, signature, relay = entry
+                    closed = 0
                 ctx.execute(
-                    "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay) VALUES (?, ?, ?, ?, ?)",
-                    entry
+                    "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay, owner_pubkey, closed) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+                    [board_name, board_path, origin, signature, relay, closed]
                 )
+
+    cpdef void delete_by_origin_batch(self, str origin, list board_names_to_keep):
+        """
+        Delete nav entries for origin where board_name NOT in keep list.
+        Used for delta sync - removes boards deleted by their origin server.
+        """
+        if not board_names_to_keep:
+            with self._db.open() as ctx:
+                ctx.execute("DELETE FROM nav WHERE origin=?", [origin])
+            return
+        
+        cdef str placeholders = ",".join("?" * len(board_names_to_keep))
+        cdef str sql = f"DELETE FROM nav WHERE origin=? AND board_name NOT IN ({placeholders})"
+        with self._db.open() as ctx:
+            ctx.execute(sql, [origin] + board_names_to_keep)
+
+    cpdef bytes get_owner(self, str board_name):
+        cdef list rows
+        with self._db.open() as ctx:
+            rows = ctx.execute("SELECT owner_pubkey FROM nav WHERE board_name=?", [board_name]).fetchall()
+        if rows and rows[0][0]:
+            return bytes(rows[0][0])
+        return None
 
     cpdef void delete(self, str board_name):
         with self._db.open() as ctx:
@@ -439,6 +475,9 @@ cdef class Ame:
     cpdef NavDB get_nav(self):
         return self._nav
 
+    cpdef bytes get_board_owner(self, str board_name):
+        return self._nav.get_owner(board_name)
+
     cdef bytes _sign_board(self, str board_name):
         if self._signing_key is None:
             return b'\x00' * 64
@@ -452,7 +491,7 @@ cdef class Ame:
         with self._boards_lock:
             return self._boards.get(name)
 
-    def create_board(self, str name):
+    def create_board(self, str name, bytes owner_pubkey=None):
         name = "".join([c for c in name if c.isalnum() or c in "-_"])
         if not name:
             raise ValueError("Invalid board name")
@@ -460,7 +499,7 @@ cdef class Ame:
             if name not in self._boards:
                 self._boards[name] = Board(self._base_path, name, self._executor)
                 signature = self._sign_board(name)
-                self._nav.create_local(name, self._origin, signature)
+                self._nav.create_local(name, self._origin, signature, owner_pubkey)
             return self._boards[name]
 
     def close_board(self, str name):
@@ -468,6 +507,8 @@ cdef class Ame:
         with self._boards_lock:
             if name in self._boards:
                 self._boards[name].close()
+                with self._nav._db.open() as ctx:
+                    ctx.execute("UPDATE nav SET closed = 1 WHERE board_name = ?", [name])
 
     def delete_board(self, str name):
         import shutil
