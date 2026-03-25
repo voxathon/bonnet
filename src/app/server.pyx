@@ -26,9 +26,6 @@ from engine.facade import BonnetEngine
 
 import nacl.exceptions
 
-PORT_PRIVILEGED = 272
-PORT_STANDARD = 2272
-
 cdef class Bonnet:
     cdef str userfile_path
     cdef object ume
@@ -206,6 +203,12 @@ cdef class Bonnet:
         if cmd == "demote":
             return self._cmd_demote(parts)
         
+        if cmd == "list-acls":
+            return self._cmd_list_acls()
+        
+        if cmd == "check-perm":
+            return self._cmd_check_perm(parts)
+        
         return f"Unknown command: {cmd}. Type 'help' for commands."
     
     cdef str _cmd_help(self):
@@ -234,6 +237,9 @@ cdef class Bonnet:
                         Delete post
   promote <username>    Promote to moderator (admin)
   demote <username>     Remove moderator (admin)
+  list-acls             List ACL entries
+  check-perm <board> [username]
+                        Check user permission for board
   quit                  Exit"""
     
     cdef str _cmd_whoami(self):
@@ -775,6 +781,59 @@ cdef class Bonnet:
         
         return self._parse_error(response)
     
+    cdef str _cmd_list_acls(self):
+        cdef list lines = []
+        cdef object acl
+        cdef str matcher_info, boards_info
+        
+        lines.append(f"Admin bypass ACL: {self.config.admin_bypass_acl}")
+        lines.append(f"ACL entries: {len(self.config.acls)}")
+        lines.append("")
+        
+        for acl in self.config.acls:
+            if acl.matcher.pubkey:
+                matcher_info = f"pubkey={acl.matcher.pubkey.hex()[:16]}..."
+            elif acl.matcher.origin_pattern:
+                matcher_info = f"origin={acl.matcher.origin_pattern}"
+            else:
+                matcher_info = "wildcard=*"
+            
+            boards_info = ",".join(acl.board_patterns[:3])
+            if len(acl.board_patterns) > 3:
+                boards_info += "..."
+            
+            lines.append(f"  [{acl.name}]")
+            lines.append(f"    match: {matcher_info}")
+            lines.append(f"    boards: {boards_info}")
+            lines.append(f"    read={acl.read_perm}, write={acl.write_perm}")
+        
+        return "\n".join(lines)
+    
+    cdef str _cmd_check_perm(self, list parts):
+        cdef str board, username, origin
+        cdef object user, conn
+        cdef bint can_read, can_write
+        
+        if len(parts) < 2:
+            return "Usage: check-perm <board> [username]"
+        
+        board = parts[1]
+        username = parts[2] if len(parts) > 2 else "root"
+        
+        user = self.ume.get(username=username)
+        if user is None:
+            return f"User '{username}' not found"
+        
+        conn = LocalConnection(user, user.publickey, self.engine, origin=user.record_origin)
+        
+        can_read = self.engine.check_permission("read", board, conn)
+        can_write = self.engine.check_permission("write", board, conn)
+        
+        board_owner = self.ame.get_board_owner(board)
+        owner_info = f"owner={board_owner.hex()[:16]}..." if board_owner else "owner=none"
+        
+        return f"User: {username}@{user.record_origin}\nBoard: {board} ({owner_info})\nRead: {can_read}\nWrite: {can_write}"
+    
     cdef bytes _encode_string(self, str s):
         encoded = s.encode("utf-8")
         return struct.pack("B", len(encoded)) + encoded
@@ -1034,25 +1093,39 @@ def load_or_generate_identity(str path):
 
 
 async def main_async():
-    cdef str config_dir, default_userfile, default_identity
+    cdef str default_config
     cdef Bonnet server
     
-    config_dir = '/var/lib/bonnet'
-    default_userfile = os.path.join(config_dir, 'userfile')
-    default_identity = os.path.join(config_dir, 'identity')
-    default_config = os.path.join(config_dir, 'config.toml')
+    default_config = '/var/lib/bonnet/config.toml'
     
     parser = argparse.ArgumentParser(description='Bonnet Server')
-    parser.add_argument('userfile', nargs='?', default=default_userfile)
-    parser.add_argument('identity', nargs='?', default=default_identity)
     parser.add_argument('--config', default=default_config, help='Config file path')
-    parser.add_argument('--port', type=int, default=PORT_STANDARD)
-    parser.add_argument('--privileged', action='store_true')
-    parser.add_argument('--cert', help='TLS certificate path')
-    parser.add_argument('--key', help='TLS private key path')
+    parser.add_argument('--userfile', help='User database path (overrides config)')
+    parser.add_argument('--identity', help='Server identity path (overrides config)')
+    parser.add_argument('--port', type=int, help='Listening port (overrides config)')
+    parser.add_argument('--privileged', action='store_true', help='Use privileged port')
+    parser.add_argument('--cert', help='TLS certificate path (overrides config)')
+    parser.add_argument('--key', help='TLS private key path (overrides config)')
     args = parser.parse_args()
     
     config = Config.load(args.config)
+    
+    userfile_path = args.userfile if args.userfile else config.userfile_path
+    identity_path = args.identity if args.identity else config.identity_path
+    
+    if args.port is not None:
+        port = args.port
+    elif args.privileged:
+        port = config.port_privileged
+    else:
+        port = config.port_standard
+    
+    tls_enabled = config.tls_enabled
+    tls_cert = args.cert if args.cert else config.tls_cert_path
+    tls_key = args.key if args.key else config.tls_key_path
+    
+    if args.cert or args.key:
+        tls_enabled = True
     
     try:
         init_logging(config.log_dir)
@@ -1062,38 +1135,48 @@ async def main_async():
         sys.exit(1)
     
     log_msg("MAIN: starting")
-    log_msg(f"MAIN: config_dir={config_dir}")
     
     log_dict("MAIN: args", {
-        'userfile': args.userfile,
-        'identity': args.identity,
         'config': args.config,
-        'port': args.port,
+        'userfile': userfile_path,
+        'identity': identity_path,
+        'port': port,
         'privileged': args.privileged,
-        'cert': args.cert,
-        'key': args.key
+        'cert': tls_cert,
+        'key': tls_key,
+        'tls_enabled': tls_enabled
     })
     
-    os.makedirs(config_dir, exist_ok=True)
-    if not os.path.exists(args.userfile):
-        open(args.userfile, 'a').close()
-        os.chmod(args.userfile, 0o600)
-        log_msg(f"MAIN: created userfile={args.userfile}")
+    log_dict("MAIN: config", {
+        'data_dir': config.data_dir,
+        'origin': config.origin,
+        'port_standard': config.port_standard,
+        'port_privileged': config.port_privileged,
+        'max_connections': config.max_connections,
+        'max_request_size': config.max_request_size,
+        'rate_limit_requests': config.rate_limit_requests
+    })
     
-    port = PORT_PRIVILEGED if args.privileged else args.port
-    load_or_generate_identity(args.identity)
+    data_dir = os.path.dirname(userfile_path) if userfile_path else config.data_dir
+    if data_dir:
+        os.makedirs(data_dir, exist_ok=True)
+    
+    if userfile_path and not os.path.exists(userfile_path):
+        open(userfile_path, 'a').close()
+        os.chmod(userfile_path, 0o600)
+        log_msg(f"MAIN: created userfile={userfile_path}")
+    
+    if identity_path:
+        load_or_generate_identity(identity_path)
     log_msg(f"MAIN: port={port}")
     
-    config = Config.load(args.config)
-    log_msg(f"MAIN: config loaded")
-    
-    server = Bonnet(args.userfile, args.identity, config)
+    server = Bonnet(userfile_path, identity_path, config)
     
     ssl_context = None
-    if args.cert and args.key:
+    if tls_enabled and tls_cert and tls_key:
         import ssl
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_context.load_cert_chain(args.cert, args.key)
+        ssl_context.load_cert_chain(tls_cert, tls_key)
         log_msg("MAIN: SSL enabled")
     
     log_msg("MAIN: starting server")

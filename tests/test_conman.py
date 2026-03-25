@@ -213,7 +213,9 @@ class TestConnectionAccept:
             if len(sent_frames) < 1:
                 return b"\x00\x00\x00\x00"
             challenge_frame = sent_frames[0]
-            challenge = challenge_frame[36:] # Frame is [4B len][32B pubkey][32B challenge]
+            challenge = challenge_frame[
+                36:
+            ]  # Frame is [4B len][32B pubkey][32B challenge]
             signature = client_identity.sign(challenge)
             handshake = client_identity.public_key + signature
             return struct.pack(">I", len(handshake)) + handshake
@@ -428,6 +430,7 @@ class TestConnectionSendRecvRequest:
         websocket = AsyncMock()
         ume = MagicMock()
         config = MagicMock()
+        config.max_request_size = 0
         engine = MagicMock()
         engine.ume = ume
         engine.config = config

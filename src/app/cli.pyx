@@ -7,10 +7,16 @@ from engine.ume import User
 cdef class LocalConnection:
     cdef public object user
     cdef public bytes peer_public_key
+    cdef public str origin
+    cdef public str remote_addr
+    cdef public object _engine
 
-    def __init__(self, user, peer_pubkey):
+    def __init__(self, user, peer_pubkey, engine=None, origin=None):
         self.user = user
         self.peer_public_key = peer_pubkey
+        self._engine = engine
+        self.origin = origin or "localhost"
+        self.remote_addr = "localhost"
 
     @property
     def is_anonymous(self) -> bool:

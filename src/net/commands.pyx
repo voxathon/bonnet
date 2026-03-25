@@ -16,6 +16,21 @@ from libc.stdint cimport uint64_t, int64_t
 
 READ_ONLY_COMMANDS = {0x02, 0x03, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x61, 0x62, 0x63}
 
+_WHITELIST_PATTERN = re.compile(r'^[a-zA-Z0-9\-_]+$')
+_BLACKLIST_PATTERN = re.compile(r'[@<>:"/\\|?*]')
+
+cdef object _validate_name(str name, str field_name):
+    cdef int length = len(name)
+    if length == 0:
+        return (False, f"{field_name} cannot be empty")
+    if length > 255:
+        return (False, f"{field_name} too long (max 255 bytes)")
+    if not _WHITELIST_PATTERN.match(name):
+        return (False, f"{field_name} contains invalid characters")
+    if _BLACKLIST_PATTERN.search(name):
+        return (False, f"{field_name} contains invalid characters")
+    return (True, "")
+
 
 cdef class CommandHandler:
     cdef object _ume
@@ -37,16 +52,20 @@ cdef class CommandHandler:
         self._sync_mgr = SyncManager(engine)
     
     def handle(self, bytes request, object conn) -> bytes:
-        # Rate limiting: simple token bucket or fixed window per connection
-        # Let's limit to 100 requests per second per connection
         cdef double current_time = time.time()
+        cdef double window = float(self._config.rate_limit_window)
+        cdef int max_requests = self._config.rate_limit_requests
+        cdef int max_size = self._config.max_request_size
+        
+        if max_size > 0 and len(request) > max_size:
+            return self._build_error(413, f"Request too large (max {max_size} bytes)")
+        
         if not hasattr(conn, '_request_timestamps'):
             conn._request_timestamps = []
 
-        # Keep only timestamps within the last 1.0 seconds
-        conn._request_timestamps = [ts for ts in conn._request_timestamps if current_time - ts < 1.0]
+        conn._request_timestamps = [ts for ts in conn._request_timestamps if current_time - ts < window]
 
-        if len(conn._request_timestamps) >= 100:
+        if len(conn._request_timestamps) >= max_requests:
             return self._build_error(429, "Too many requests. Please slow down.")
 
         conn._request_timestamps.append(current_time)
@@ -78,9 +97,8 @@ cdef class CommandHandler:
         log_hex(f"HANDLE: request", request)
         
         if conn.is_anonymous and cmd != 0x01:
-            if not (self._config.anonymous_read and cmd in READ_ONLY_COMMANDS):
-                log_msg(f"HANDLE: rejected - anonymous user cannot run cmd=0x{cmd:02x}")
-                return self._build_error(401, "Anonymous users must register first")
+            log_msg(f"HANDLE: rejected - anonymous user cannot run cmd=0x{cmd:02x}")
+            return self._build_error(401, "Anonymous users must register first")
         
         if not conn.is_anonymous and conn.user.is_banned:
             if cmd not in READ_ONLY_COMMANDS:
@@ -165,12 +183,6 @@ cdef class CommandHandler:
             username = data[idx:idx+u_len].decode('utf-8')
             idx += u_len
             
-            if u_len > 255:
-                return self._build_error(400, "Username too long (max 255 chars)")
-            
-            if u_len == 0:
-                return self._build_error(400, "Username cannot be empty")
-
             r_len = data[idx]
             idx += 1
             registrar = data[idx:idx+r_len].decode('utf-8')
@@ -179,9 +191,9 @@ cdef class CommandHandler:
             if r_len == 0:
                 return self._build_error(400, "Registrar cannot be empty")
 
-            invalid_chars = re.compile(r'[@<>:"/\\|?*]')
-            if invalid_chars.search(username):
-                return self._build_error(400, "Username contains invalid characters")
+            valid, err = _validate_name(username, "Username")
+            if not valid:
+                return self._build_error(400, err)
 
             if not self._config.registrar_valid(registrar):
                 return self._build_error(403, f"Unknown registrar: {registrar}")
@@ -255,20 +267,24 @@ cdef class CommandHandler:
         cdef str board_name
         cdef object board
 
-        if not conn.can_create_board():
-            return self._build_error(403, "Administrator permission required")
+        if not conn.is_registered():
+            return self._build_error(401, "Authentication required")
+
+        if not conn.can_create_board() and not self._engine.check_permission("write", None, conn):
+            return self._build_error(403, "Permission denied to create boards")
 
         try:
             b_len = data[0]
             board_name = data[1:1+b_len].decode('utf-8')
 
-            if b_len == 0:
-                return self._build_error(400, "Board name cannot be empty")
+            valid, err = _validate_name(board_name, "Board name")
+            if not valid:
+                return self._build_error(400, err)
 
             if self._ame.get_board(board_name) is not None:
                 return self._build_error(409, f"Board '{board_name}' already exists")
 
-            board = self._ame.create_board(board_name)
+            board = self._ame.create_board(board_name, owner_pubkey=conn.peer_public_key)
             b_bytes = board_name.encode('utf-8')
             return struct.pack('>B', 0x00) + b_bytes
 
@@ -282,6 +298,7 @@ cdef class CommandHandler:
         cdef bytes signature
         cdef dict nav_entry
         cdef bytes payload
+        cdef list visible_boards
 
         if not conn.is_registered():
             return self._build_error(401, "Authentication required")
@@ -292,9 +309,14 @@ cdef class CommandHandler:
             
             nav_map = {e['board_name']: e for e in nav_entries}
             
-            payload = struct.pack('>B', 0x00) + struct.pack('>H', len(boards))
-            
+            visible_boards = []
             for name, closed in boards:
+                if self._engine.check_permission("read", name, conn):
+                    visible_boards.append((name, closed))
+            
+            payload = struct.pack('>B', 0x00) + struct.pack('>H', len(visible_boards))
+            
+            for name, closed in visible_boards:
                 nav_entry = nav_map.get(name)
                 if nav_entry:
                     origin = nav_entry['origin']
@@ -319,8 +341,9 @@ cdef class CommandHandler:
         cdef int b_len, s_len, t_len, o_len, c_len
         cdef uint64_t root
         cdef str board_name, subject, tags, options, content
-        cdef object board, post, result
+        cdef object board, post, result, nav_entry
         cdef list tags_list
+        cdef int idx
 
         if not conn.is_registered():
             return self._build_error(401, "Authentication required")
@@ -331,6 +354,26 @@ cdef class CommandHandler:
             idx += 1
             board_name = data[idx:idx+b_len].decode('utf-8')
             idx += b_len
+
+            valid, err = _validate_name(board_name, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
+            nav_entry = self._ame.get_nav().get(board_name)
+            if nav_entry is not None and nav_entry['origin'] != self._config.origin:
+                asyncio.create_task(self._sync_mgr.sync_from_peer(nav_entry['relay']))
+                origin_bytes = nav_entry['origin'].encode('utf-8')
+                return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
+
+            if not self._engine.check_permission("write", board_name, conn):
+                return self._build_error(403, "Permission denied for this board")
+
+            board = self._ame.get_board(board_name)
+            if board is None:
+                return self._build_error(404, f"Board '{board_name}' not found")
+
+            if board.is_closed():
+                return self._build_error(409, "Board is closed")
 
             root = struct.unpack('>Q', data[idx:idx+8])[0]
             idx += 8
@@ -354,32 +397,26 @@ cdef class CommandHandler:
             idx += 4
             content = data[idx:idx+c_len].decode('utf-8')
 
-            if t_len > 0:
-                tags_list = [t.strip() for t in tags.split(',') if t.strip()]
-                if len(tags_list) > 255:
-                    return self._build_error(400, "Too many tags (max 255)")
-                for tag in tags_list:
-                    if len(tag) > 255:
-                        return self._build_error(400, f"Tag too long: {tag[:50]}...")
-                tags = ','.join(tags_list)
-
-            board = self._ame.get_board(board_name)
-            if board is None:
-                return self._build_error(404, f"Board '{board_name}' not found")
+            tags_list = [t.strip() for t in tags.split(',') if t.strip()]
+            if len(tags_list) > 255:
+                return self._build_error(400, "Too many tags (max 255)")
+            for tag in tags_list:
+                if len(tag) > 255:
+                    return self._build_error(400, f"Tag too long: {tag[:50]}...")
 
             result = board.create_post(
+                root=root,
                 subject=subject,
-                tags=tags,
+                tags=','.join(tags_list),
                 options=options,
                 content=content,
-                root=root,
                 author=conn.user.username,
                 author_registrar=conn.user.registrar
             )
             post = result.result()
 
             author_bytes = post.author.encode('utf-8')
-            author_registrar_bytes = (post.author_registrar or "").encode('utf-8')
+            author_registrar_bytes = post.author_registrar.encode('utf-8')
             tags_bytes = (post.tags or "").encode('utf-8')
             subject_bytes = (post.subject or "").encode('utf-8')
             options_bytes = (post.options or "").encode('utf-8')
@@ -413,6 +450,10 @@ cdef class CommandHandler:
             board_name = data[idx:idx+b_len].decode('utf-8')
             idx += b_len
 
+            valid, err = _validate_name(board_name, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
             post_num = struct.unpack('>Q', data[idx:idx+8])[0]
 
             nav_entry = self._ame.get_nav().get(board_name)
@@ -420,6 +461,9 @@ cdef class CommandHandler:
                 asyncio.create_task(self._sync_mgr.sync_from_peer(nav_entry['relay']))
                 origin_bytes = nav_entry['origin'].encode('utf-8')
                 return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
+
+            if not self._engine.check_permission("read", board_name, conn):
+                return self._build_error(403, "Permission denied for this board")
 
             board = self._ame.get_board(board_name)
             if board is None:
@@ -461,7 +505,7 @@ cdef class CommandHandler:
             return self._build_error(400, str(e))
 
     cdef bytes _cmd_post_list(self, bytes data, object conn):
-        cdef int b_len, offset, limit
+        cdef int b_len, offset, limit, idx
         cdef str board_name
         cdef object board, result, nav_entry
         cdef list posts
@@ -478,9 +522,9 @@ cdef class CommandHandler:
             board_name = data[idx:idx+b_len].decode('utf-8')
             idx += b_len
 
-            offset = struct.unpack('>I', data[idx:idx+4])[0]
-            idx += 4
-            limit = struct.unpack('>I', data[idx:idx+4])[0]
+            valid, err = _validate_name(board_name, "Board name")
+            if not valid:
+                return self._build_error(400, err)
 
             nav_entry = self._ame.get_nav().get(board_name)
             if nav_entry is None:
@@ -492,9 +536,16 @@ cdef class CommandHandler:
                 origin_bytes = nav_entry['origin'].encode('utf-8')
                 return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
 
+            if not self._engine.check_permission("read", board_name, conn):
+                return self._build_error(403, "Permission denied for this board")
+
             board = self._ame.get_board(board_name)
             if board is None:
                 return self._build_error(404, f"Board '{board_name}' not found")
+
+            offset = struct.unpack('>I', data[idx:idx+4])[0]
+            idx += 4
+            limit = struct.unpack('>I', data[idx:idx+4])[0]
 
             result = board.query(orderby="last_bumped DESC", limit=limit, offset=offset, include_content=False)
             posts = result.result()
@@ -515,7 +566,7 @@ cdef class CommandHandler:
             return self._build_error(400, str(e))
 
     cdef bytes _cmd_post_update(self, bytes data, object conn):
-        cdef int b_len, field_count, field_type, field_len, i
+        cdef int b_len, field_count, field_type, field_len, i, idx
         cdef str board_name
         cdef uint64_t post_num
         cdef object board, result, post
@@ -537,6 +588,10 @@ cdef class CommandHandler:
             board_name = data[idx:idx+b_len].decode('utf-8')
             idx += b_len
 
+            valid, err = _validate_name(board_name, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
             post_num = struct.unpack('>Q', data[idx:idx+8])[0]
             idx += 8
 
@@ -557,6 +612,9 @@ cdef class CommandHandler:
                     idx += 1
                     fields['subject'] = data[idx:idx+field_len].decode('utf-8')
                     idx += field_len
+                    valid, err = _validate_name(fields['subject'], "Subject")
+                    if not valid:
+                        return self._build_error(400, err)
                 elif field_type == 0x03:
                     field_len = data[idx]
                     idx += 1
@@ -599,6 +657,9 @@ cdef class CommandHandler:
 
             is_mod = conn.is_moderator() or conn.is_administrator()
 
+            if not self._engine.check_permission("write", board_name, conn):
+                return self._build_error(403, "Permission denied for this board")
+
             for mf in mod_fields:
                 if not is_mod:
                     return self._build_error(403, f"Field '{mf}' requires moderator permission")
@@ -617,7 +678,7 @@ cdef class CommandHandler:
             return self._build_error(400, str(e))
 
     cdef bytes _cmd_post_delete(self, bytes data, object conn):
-        cdef int b_len
+        cdef int b_len, idx
         cdef str board_name
         cdef uint64_t post_num
         cdef object board, result, post
@@ -632,7 +693,14 @@ cdef class CommandHandler:
             board_name = data[idx:idx+b_len].decode('utf-8')
             idx += b_len
 
+            valid, err = _validate_name(board_name, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
             post_num = struct.unpack('>Q', data[idx:idx+8])[0]
+
+            if not self._engine.check_permission("write", board_name, conn):
+                return self._build_error(403, "Permission denied for this board")
 
             board = self._ame.get_board(board_name)
             if board is None:
@@ -656,8 +724,7 @@ cdef class CommandHandler:
             return self._build_error(400, str(e))
 
     cdef bytes _cmd_post_query(self, bytes data, object conn):
-        cdef int b_len, where_len, orderby_len, value_count, value_type, value_len, i
-        cdef int limit
+        cdef int b_len, where_len, orderby_len, value_count, value_type, value_len, i, limit, idx
         cdef str board_name, where_clause, orderby_clause
         cdef object board, result
         cdef list posts, values
@@ -673,6 +740,13 @@ cdef class CommandHandler:
             idx += 1
             board_name = data[idx:idx+b_len].decode('utf-8')
             idx += b_len
+
+            valid, err = _validate_name(board_name, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
+            if not self._engine.check_permission("read", board_name, conn):
+                return self._build_error(403, "Permission denied for this board")
 
             where_len = struct.unpack('>H', data[idx:idx+2])[0]
             idx += 2
@@ -766,8 +840,9 @@ cdef class CommandHandler:
             b_len = data[0]
             board_name = data[1:1+b_len].decode('utf-8')
 
-            if b_len == 0:
-                return self._build_error(400, "Board name cannot be empty")
+            valid, err = _validate_name(board_name, "Board name")
+            if not valid:
+                return self._build_error(400, err)
 
             board = self._ame.get_board(board_name)
             if board is None:
@@ -795,8 +870,9 @@ cdef class CommandHandler:
             b_len = data[0]
             board_name = data[1:1+b_len].decode('utf-8')
 
-            if b_len == 0:
-                return self._build_error(400, "Board name cannot be empty")
+            valid, err = _validate_name(board_name, "Board name")
+            if not valid:
+                return self._build_error(400, err)
 
             board = self._ame.get_board(board_name)
             if board is None:
@@ -884,6 +960,10 @@ cdef class CommandHandler:
             board_name = data[idx:idx+b_len].decode('utf-8')
             idx += b_len
 
+            valid, err = _validate_name(board_name, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
             post_num = struct.unpack('>Q', data[idx:idx+8])[0]
             idx += 8
 
@@ -897,6 +977,10 @@ cdef class CommandHandler:
                 'signature_hex': signature_hex[:32] + '...' if len(signature_hex) > 32 else signature_hex
             })
             log_msg(f"POST_SIGN: conn.user={conn.user.username if conn.user else 'None'}")
+
+            if not self._engine.check_permission("write", board_name, conn):
+                log_msg(f"POST_SIGN: ACL permission denied for board '{board_name}'")
+                return self._build_error(403, "Permission denied for this board")
 
             board = self._ame.get_board(board_name)
             if board is None:
