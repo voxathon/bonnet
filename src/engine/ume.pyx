@@ -13,43 +13,24 @@ import threading
 import fcntl
 from libc.stdint cimport uint64_t, int64_t
 
-cdef extern from "openssl/sha.h":
-    unsigned char *SHA256(const unsigned char *d, size_t n, unsigned char *md)
-
-cdef extern from "openssl/evp.h":
-    ctypedef struct EVP_MD:
-        int dummy
-    const EVP_MD *EVP_sha256()
-
-cdef extern from "openssl/kdf.h":
-    int PKCS5_PBKDF2_HMAC(const char *password, int passlen,
-                          const unsigned char *salt, int saltlen,
-                          int iter, const EVP_MD *digest,
-                          int keylen, unsigned char *out)
-
 cdef size_t USERNAME_SIZE = 255
 cdef size_t REGISTRAR_SIZE = 255
 cdef size_t RECORD_ORIGIN_SIZE = 255
 cdef size_t RELAY_SIZE = 255
 cdef size_t PUBLICKEY_SIZE = 32
-cdef size_t HASH_SIZE = 32
-cdef size_t SALT_SIZE = 16
 cdef size_t SEQ_NUMBR_SIZE = 8
 cdef size_t FLAGS_SIZE = 3
 cdef size_t CREATION_TIME_SIZE = 8
 cdef size_t RELAY_TIME_SIZE = 8
-cdef size_t RECORD_SIZE = USERNAME_SIZE + REGISTRAR_SIZE + RECORD_ORIGIN_SIZE + RELAY_SIZE + PUBLICKEY_SIZE + HASH_SIZE + SALT_SIZE + SEQ_NUMBR_SIZE + FLAGS_SIZE + CREATION_TIME_SIZE + RELAY_TIME_SIZE
-cdef int PBKDF2_ITERATIONS = 600000
+cdef size_t RECORD_SIZE = USERNAME_SIZE + REGISTRAR_SIZE + RECORD_ORIGIN_SIZE + RELAY_SIZE + PUBLICKEY_SIZE + SEQ_NUMBR_SIZE + FLAGS_SIZE + CREATION_TIME_SIZE + RELAY_TIME_SIZE
 
 cdef size_t OFFSET_USERNAME = 0
 cdef size_t OFFSET_REGISTRAR = USERNAME_SIZE
 cdef size_t OFFSET_RECORD_ORIGIN = USERNAME_SIZE + REGISTRAR_SIZE
 cdef size_t OFFSET_RELAY = USERNAME_SIZE + REGISTRAR_SIZE + RECORD_ORIGIN_SIZE
 cdef size_t OFFSET_PUBLICKEY = USERNAME_SIZE + REGISTRAR_SIZE + RECORD_ORIGIN_SIZE + RELAY_SIZE
-cdef size_t OFFSET_HASH = USERNAME_SIZE + REGISTRAR_SIZE + RECORD_ORIGIN_SIZE + RELAY_SIZE + PUBLICKEY_SIZE
-cdef size_t OFFSET_SALT = USERNAME_SIZE + REGISTRAR_SIZE + RECORD_ORIGIN_SIZE + RELAY_SIZE + PUBLICKEY_SIZE + HASH_SIZE
-cdef size_t OFFSET_SEQ = USERNAME_SIZE + REGISTRAR_SIZE + RECORD_ORIGIN_SIZE + RELAY_SIZE + PUBLICKEY_SIZE + HASH_SIZE + SALT_SIZE
-cdef size_t OFFSET_FLAGS = USERNAME_SIZE + REGISTRAR_SIZE + RECORD_ORIGIN_SIZE + RELAY_SIZE + PUBLICKEY_SIZE + HASH_SIZE + SALT_SIZE + SEQ_NUMBR_SIZE
+cdef size_t OFFSET_SEQ = USERNAME_SIZE + REGISTRAR_SIZE + RECORD_ORIGIN_SIZE + RELAY_SIZE + PUBLICKEY_SIZE
+cdef size_t OFFSET_FLAGS = USERNAME_SIZE + REGISTRAR_SIZE + RECORD_ORIGIN_SIZE + RELAY_SIZE + PUBLICKEY_SIZE + SEQ_NUMBR_SIZE
 cdef size_t OFFSET_CREATION_TIME = OFFSET_FLAGS + FLAGS_SIZE
 cdef size_t OFFSET_RELAY_TIME = OFFSET_CREATION_TIME + CREATION_TIME_SIZE
 
@@ -59,8 +40,6 @@ cdef class User:
     cdef public str record_origin
     cdef public str relay
     cdef public bytes publickey
-    cdef public bytes password_hash
-    cdef public bytes salt
     cdef public uint64_t seq_numbr
     cdef public bint is_administrator
     cdef public bint is_moderator
@@ -68,14 +47,12 @@ cdef class User:
     cdef public int64_t creation_time
     cdef public int64_t relay_time
 
-    def __init__(self, str username="", str registrar="", str record_origin="", str relay="", bytes publickey=b"", bytes password_hash=b"", bytes salt=b"", uint64_t seq_numbr=0, bint is_administrator=False, bint is_moderator=False, bint is_banned=False, int64_t creation_time=0, int64_t relay_time=0):
+    def __init__(self, str username="", str registrar="", str record_origin="", str relay="", bytes publickey=b"", uint64_t seq_numbr=0, bint is_administrator=False, bint is_moderator=False, bint is_banned=False, int64_t creation_time=0, int64_t relay_time=0):
         self.username = username
         self.registrar = registrar
         self.record_origin = record_origin
         self.relay = relay
         self.publickey = publickey
-        self.password_hash = password_hash
-        self.salt = salt
         self.seq_numbr = seq_numbr
         self.is_administrator = is_administrator
         self.is_moderator = is_moderator
@@ -95,13 +72,11 @@ cdef class User:
         cdef bytes record_origin_bytes = self._encode_and_truncate(self.record_origin, RECORD_ORIGIN_SIZE)
         cdef bytes relay_bytes = self._encode_and_truncate(self.relay, RELAY_SIZE)
         cdef bytes publickey_bytes = self.publickey
-        cdef bytes hash_bytes = self.password_hash
-        cdef bytes salt_bytes = self.salt
         cdef bytes seq_bytes = struct.pack('<Q', self.seq_numbr)
         cdef bytes flags_bytes = struct.pack('>BBB', 1 if self.is_administrator else 0, 1 if self.is_moderator else 0, 1 if self.is_banned else 0)
         cdef bytes creation_time_bytes = struct.pack('>q', self.creation_time)
         cdef bytes relay_time_bytes = struct.pack('>q', self.relay_time)
-        return username_bytes + registrar_bytes + record_origin_bytes + relay_bytes + publickey_bytes + hash_bytes + salt_bytes + seq_bytes + flags_bytes + creation_time_bytes + relay_time_bytes
+        return username_bytes + registrar_bytes + record_origin_bytes + relay_bytes + publickey_bytes + seq_bytes + flags_bytes + creation_time_bytes + relay_time_bytes
 
     @staticmethod
     cdef User decode(bytes data):
@@ -110,9 +85,7 @@ cdef class User:
         user.registrar = data[OFFSET_REGISTRAR:OFFSET_RECORD_ORIGIN].rstrip(b'\x00').decode('utf-8', errors='replace')
         user.record_origin = data[OFFSET_RECORD_ORIGIN:OFFSET_RELAY].rstrip(b'\x00').decode('utf-8', errors='replace')
         user.relay = data[OFFSET_RELAY:OFFSET_PUBLICKEY].rstrip(b'\x00').decode('utf-8', errors='replace')
-        user.publickey = data[OFFSET_PUBLICKEY:OFFSET_HASH]
-        user.password_hash = data[OFFSET_HASH:OFFSET_SALT]
-        user.salt = data[OFFSET_SALT:OFFSET_SEQ]
+        user.publickey = data[OFFSET_PUBLICKEY:OFFSET_SEQ]
         user.seq_numbr = struct.unpack('<Q', data[OFFSET_SEQ:OFFSET_FLAGS])[0]
         user.is_administrator = data[OFFSET_FLAGS] != 0
         user.is_moderator = data[OFFSET_FLAGS + 1] != 0
@@ -120,23 +93,6 @@ cdef class User:
         user.creation_time = struct.unpack('>q', data[OFFSET_CREATION_TIME:OFFSET_RELAY_TIME])[0]
         user.relay_time = struct.unpack('>q', data[OFFSET_RELAY_TIME:OFFSET_RELAY_TIME + RELAY_TIME_SIZE])[0]
         return user
-
-    cpdef bint verify_password(self, bytes password):
-        cdef unsigned char hash_out[32]
-        PKCS5_PBKDF2_HMAC(password, len(password), self.salt, len(self.salt),
-                           PBKDF2_ITERATIONS, EVP_sha256(), 32, hash_out)
-        return bytes(hash_out[:32]) == self.password_hash
-
-
-cdef bytes _generate_salt():
-    return os.urandom(SALT_SIZE)
-
-
-cdef bytes _hash_password(bytes password, bytes salt):
-    cdef unsigned char hash_out[32]
-    PKCS5_PBKDF2_HMAC(password, len(password), salt, len(salt),
-                       PBKDF2_ITERATIONS, EVP_sha256(), 32, hash_out)
-    return bytes(hash_out[:32])
 
 
 cdef class Ume:
@@ -245,7 +201,7 @@ cdef class Ume:
                     data = f.read(RECORD_SIZE)
                     if len(data) < RECORD_SIZE:
                         break
-                    if data[OFFSET_PUBLICKEY:OFFSET_HASH] == target:
+                    if data[OFFSET_PUBLICKEY:OFFSET_SEQ] == target:
                         return pos
                     pos += 1
         except OSError:
@@ -283,7 +239,7 @@ cdef class Ume:
                             break
                         if data == b'\x00' * RECORD_SIZE:
                             continue
-                        if data[OFFSET_PUBLICKEY:OFFSET_HASH] == target:
+                        if data[OFFSET_PUBLICKEY:OFFSET_SEQ] == target:
                             try:
                                 user = User.decode(data)
                                 users.append(user)
@@ -293,9 +249,8 @@ cdef class Ume:
                 pass
         return users
 
-    cpdef User put(self, str username, str registrar, bytes publickey, str record_origin="", str relay="", bytes password=None, bint is_administrator=False, bint is_moderator=False, bint is_banned=False, int64_t creation_time=0, int64_t relay_time=0):
+    cpdef User put(self, str username, str registrar, bytes publickey, str record_origin="", str relay="", bint is_administrator=False, bint is_moderator=False, bint is_banned=False, int64_t creation_time=0, int64_t relay_time=0):
         cdef size_t existing
-        cdef bytes salt, password_hash
         cdef User user
         import time as _time
 
@@ -310,19 +265,12 @@ cdef class Ume:
                     if existing != <size_t>-1:
                         raise ValueError(f"User '{username}' already exists")
 
-                    if password is not None:
-                        salt = _generate_salt()
-                        password_hash = _hash_password(password, salt)
-                    else:
-                        salt = b'\x00' * SALT_SIZE
-                        password_hash = b'\x00' * HASH_SIZE
-
                     if creation_time == 0:
                         creation_time = <int64_t>_time.time()
                     if relay_time == 0:
                         relay_time = creation_time
 
-                    user = User(username, registrar, record_origin, relay, publickey, password_hash, salt, self._next_seq, is_administrator, is_moderator, is_banned, creation_time, relay_time)
+                    user = User(username, registrar, record_origin, relay, publickey, self._next_seq, is_administrator, is_moderator, is_banned, creation_time, relay_time)
                     try:
                         lockfile.write(user.encode())
                         lockfile.flush()
@@ -333,7 +281,7 @@ cdef class Ume:
                     fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
         return user
 
-    cpdef bint upd(self, str username=None, uint64_t seq_numbr=0, str new_registrar=None, str new_record_origin=None, str new_relay=None, bytes new_publickey=None, bytes new_password=None, object new_administrator=None, object new_moderator=None, object new_banned=None, object new_creation_time=None, object new_relay_time=None):
+    cpdef bint upd(self, str username=None, uint64_t seq_numbr=0, str new_registrar=None, str new_record_origin=None, str new_relay=None, bytes new_publickey=None, object new_administrator=None, object new_moderator=None, object new_banned=None, object new_creation_time=None, object new_relay_time=None):
         cdef size_t pos
         cdef User user
         with self._lock:
@@ -364,9 +312,6 @@ cdef class Ume:
                         if len(new_publickey) != PUBLICKEY_SIZE:
                             raise ValueError(f"Public key must be exactly {PUBLICKEY_SIZE} bytes")
                         user.publickey = new_publickey
-                    if new_password is not None:
-                        user.salt = _generate_salt()
-                        user.password_hash = _hash_password(new_password, user.salt)
                     if new_administrator is not None:
                         user.is_administrator = new_administrator
                     if new_moderator is not None:
@@ -501,7 +446,6 @@ cdef class Ume:
                         # INSERT - user doesn't exist
                         user = User(
                             username, registrar, record_origin, relay, publickey,
-                            b'\x00' * HASH_SIZE, b'\x00' * SALT_SIZE,
                             self._next_seq, False, False, False,
                             <int64_t>_time.time(), <int64_t>_time.time()
                         )
