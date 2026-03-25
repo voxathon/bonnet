@@ -18,6 +18,8 @@ cdef class SyncManager:
     cdef public object _engine
     cdef object _server_identity
     cdef set _inflight_syncs
+    cdef object _sync_queue
+    cdef object _worker_task
 
     def __init__(self, object engine):
         self._engine = engine
@@ -27,12 +29,28 @@ cdef class SyncManager:
         self._config = engine.config
         self._server_identity = engine.server_identity
         self._inflight_syncs = set()
+        self._sync_queue = asyncio.Queue()
+        self._worker_task = asyncio.create_task(self._sync_worker())
 
-    async def sync_from_peer(self, str peer_hostname):
+    async def _sync_worker(self):
+        while True:
+            peer_hostname = await self._sync_queue.get()
+            try:
+                await self._do_sync_from_peer(peer_hostname)
+            except Exception as e:
+                log_msg(f"SYNC_WORKER: Error syncing from {peer_hostname}: {e}")
+            finally:
+                self._sync_queue.task_done()
+                self._inflight_syncs.discard(peer_hostname)
+
+    async def queue_sync(self, str peer_hostname):
         if peer_hostname in self._inflight_syncs:
             log_msg(f"SYNC: already syncing with {peer_hostname}, skipping")
             return
         self._inflight_syncs.add(peer_hostname)
+        await self._sync_queue.put(peer_hostname)
+
+    async def _do_sync_from_peer(self, str peer_hostname):
 
         cdef object conn
         cdef bint connected = False
@@ -61,7 +79,6 @@ cdef class SyncManager:
         except Exception as e:
             log_msg(f"SYNC: failed to sync with {peer_hostname}: {e}")
         finally:
-            self._inflight_syncs.discard(peer_hostname)
             if conn is not None:
                 await conn.close()
 
