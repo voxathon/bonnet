@@ -198,8 +198,9 @@ cdef class Keibatsu:
                 INSERT INTO reports_v2 (report_num, origin, rollover, rule_num, culprit_pubkey, culprit_board, culprit_post_num, reporter_pubkey, report_time, relay, description, origin_sig, reporter_sig)
                 SELECT report_num, origin, 0, rule_num, culprit_pubkey, culprit_board, culprit_post_num, reporter_pubkey, report_time, relay, description, origin_sig, reporter_sig FROM reports
                 """)
-                ctx.execute("DROP TABLE reports")
+                ctx.execute("ALTER TABLE reports RENAME TO reports_old")
                 ctx.execute("ALTER TABLE reports_v2 RENAME TO reports")
+                ctx.execute("DROP TABLE reports_old")
             else:
                 ctx.execute("""
                 CREATE TABLE IF NOT EXISTS reports (
