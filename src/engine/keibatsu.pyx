@@ -395,12 +395,13 @@ cdef class Keibatsu:
         cdef bytes origin_pubkey
         if origin_sig and peer_pubkey_resolver:
             origin_pubkey = peer_pubkey_resolver(origin)
-            if origin_pubkey:
-                try:
-                    if not Identity.verify(origin_pubkey, payload, bytes.fromhex(origin_sig)):
-                        return False
-                except ValueError:
+            if not origin_pubkey:
+                return False
+            try:
+                if not Identity.verify(origin_pubkey, payload, bytes.fromhex(origin_sig)):
                     return False
+            except ValueError:
+                return False
 
         # Verify reporter signature if provided
         if reporter_sig:
