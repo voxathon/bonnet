@@ -51,13 +51,13 @@ async def register_user(username: str) -> str:
 
 
 @mcp.tool
-async def get_user_by_pubkey(pubkey: str) -> User | None:
-    """Look up a user by their Ed25519 public key (hex string)."""
+async def get_user_by_username(target_username: str) -> User | None:
+    """Look up a user by their username."""
     client = get_client()
     username = get_username()
     async with client:
         await client.connect(username)
-        return await client.get_user(bytes.fromhex(pubkey))
+        return await client.get_user(target_username)
 
 
 @mcp.tool
