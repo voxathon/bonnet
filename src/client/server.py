@@ -17,37 +17,32 @@ def parse_auth_header(auth: str) -> tuple[str, str]:
         token = auth[7:].strip()
         if ":" in token:
             user, pwd = token.split(":", 1)
-            return user, pwd
-        return token, ""
+            user = user.strip()
+            pwd = pwd.strip()
+            return user if user else "anonymous", pwd
+        return token.strip() if token.strip() else "anonymous", ""
     return "anonymous", ""
 
 
 class AuthMiddleware(Middleware):
-    async def on_request(self, context: MiddlewareContext, call_next):
+    def _set_auth_context(self, context: MiddlewareContext):
         request = context.fastmcp_request
         if request:
             auth = request.headers.get("Authorization", "")
             username, password = parse_auth_header(auth)
             current_username.set(username)
             current_password.set(password)
+
+    async def on_request(self, context: MiddlewareContext, call_next):
+        self._set_auth_context(context)
         return await call_next(context)
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
-        request = context.fastmcp_request
-        if request:
-            auth = request.headers.get("Authorization", "")
-            username, password = parse_auth_header(auth)
-            current_username.set(username)
-            current_password.set(password)
+        self._set_auth_context(context)
         return await call_next(context)
 
     async def on_read_resource(self, context: MiddlewareContext, call_next):
-        request = context.fastmcp_request
-        if request:
-            auth = request.headers.get("Authorization", "")
-            username, password = parse_auth_header(auth)
-            current_username.set(username)
-            current_password.set(password)
+        self._set_auth_context(context)
         return await call_next(context)
 
 
