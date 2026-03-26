@@ -48,6 +48,16 @@ def get_password() -> str:
     return current_password.get() or ""
 
 
+def validate_pubkey(pubkey: str) -> bytes:
+    try:
+        pubkey_bytes = bytes.fromhex(pubkey)
+        if len(pubkey_bytes) != 32:
+            raise ValueError(f"Public key must be 32 bytes (64 hex characters), got {len(pubkey_bytes)} bytes.")
+        return pubkey_bytes
+    except ValueError as e:
+        raise ValueError(f"Invalid public key format: {pubkey}") from e
+
+
 @mcp.tool
 async def register_user(username: str, password: str) -> str:
     """Register a new user locally and on the Bonnet server. Returns the registered username."""
@@ -58,7 +68,7 @@ async def register_user(username: str, password: str) -> str:
     except ValueError as e:
         if str(e) == "User already exists locally":
             if not client.identity_store.verify_password(username, password):
-                raise ValueError("User already exists locally and password does not match.")
+                raise ValueError("User already exists locally and password does not match.") from e
             is_existing = True
             # If the user exists and password matches, we allow retrying the server registration
         else:
@@ -83,10 +93,7 @@ async def register_user(username: str, password: str) -> str:
 @mcp.tool
 async def get_user_by_pubkey(pubkey: str) -> User | None:
     """Look up a user by their Ed25519 public key (hex string)."""
-    try:
-        pubkey_bytes = bytes.fromhex(pubkey)
-    except ValueError:
-        raise ValueError(f"Invalid public key format: {pubkey}")
+    pubkey_bytes = validate_pubkey(pubkey)
 
     client = get_client()
     username = get_username()
@@ -365,10 +372,7 @@ async def create_report(
     relay: str | None = None,
 ) -> Report:
     """Report a user for violating a rule."""
-    try:
-        bytes.fromhex(culprit_pubkey)
-    except ValueError:
-        raise ValueError(f"Invalid public key format: {culprit_pubkey}")
+    validate_pubkey(culprit_pubkey)
 
     client = get_client()
     username = get_username()
@@ -393,10 +397,7 @@ async def get_report(origin: str, report_num: int) -> Report:
 @mcp.tool
 async def list_reports_by_culprit(pubkey: str) -> list[Report]:
     """List all reports against a user by their public key."""
-    try:
-        bytes.fromhex(pubkey)
-    except ValueError:
-        raise ValueError(f"Invalid public key format: {pubkey}")
+    validate_pubkey(pubkey)
 
     client = get_client()
     username = get_username()
@@ -421,10 +422,7 @@ async def create_punishment(
     pubkey: str, report_ids: list[int], expires_at: int, notes: str = ""
 ) -> Punishment:
     """Create a punishment (ban/warning). expires_at: 0=warning, -1=permanent, >0=unix timestamp. Requires mod privileges."""
-    try:
-        bytes.fromhex(pubkey)
-    except ValueError:
-        raise ValueError(f"Invalid public key format: {pubkey}")
+    validate_pubkey(pubkey)
 
     client = get_client()
     username = get_username()
@@ -437,10 +435,7 @@ async def create_punishment(
 @mcp.tool
 async def get_punishment(pubkey: str) -> Punishment | None:
     """Get active punishment for a user."""
-    try:
-        bytes.fromhex(pubkey)
-    except ValueError:
-        raise ValueError(f"Invalid public key format: {pubkey}")
+    validate_pubkey(pubkey)
 
     client = get_client()
     username = get_username()
@@ -462,10 +457,7 @@ async def list_active_punishments() -> list[Punishment]:
 @mcp.tool
 async def is_banned(pubkey: str) -> BannedStatus:
     """Check if a user is banned. Returns (banned, reason)."""
-    try:
-        bytes.fromhex(pubkey)
-    except ValueError:
-        raise ValueError(f"Invalid public key format: {pubkey}")
+    validate_pubkey(pubkey)
 
     client = get_client()
     username = get_username()
