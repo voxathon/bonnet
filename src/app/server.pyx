@@ -88,24 +88,6 @@ cdef class Bonnet:
                 plaintext = await conn.recv_request()
                 response = self.command_handler.handle(plaintext, conn)
 
-                # Intercept 429 Too Many Requests to tarpit
-                if len(response) >= 3 and response[0] == 0x01:
-                    code = struct.unpack(">H", response[1:3])[0]
-                    if code == 429:
-                        log_msg(f"TARPIT: forcing half-open state for {conn.remote_addr} after 429")
-                        try:
-                            import websockets.connection as _wsc
-                            conn.websocket.state = _wsc.State.CLOSED
-                        except (AttributeError, ImportError):
-                            try:
-                                import websockets.legacy.protocol as _wslp
-                                conn.websocket.state = _wslp.State.CLOSED
-                            except Exception:
-                                pass
-
-                        conn.state = ConnectionState.CLOSED
-                        return
-
                 await conn.send_response(response)
                 await conn.close()
                 
