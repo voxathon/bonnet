@@ -71,6 +71,7 @@ cdef class Connection:
     cdef public object _engine
     cdef public str origin
     cdef public str remote_addr
+    cdef public object _request_timestamps
 
     def __init__(self):
         self.state = ConnectionState.DISCONNECTED
