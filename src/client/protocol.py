@@ -169,8 +169,10 @@ def build_register(username: str, registrar: str) -> bytes:
     )
 
 
-def build_get_user(username: str) -> bytes:
-    return struct.pack(">B", COMMANDS["GET_USER"]) + encode_string(username)
+def build_get_user(pubkey: bytes) -> bytes:
+    if len(pubkey) != 32:
+        raise ProtocolError(f"Invalid pubkey length: {len(pubkey)}")
+    return struct.pack(">B", COMMANDS["GET_USER"]) + pubkey
 
 
 def build_list_users(offset: int, limit: int) -> bytes:
@@ -284,21 +286,13 @@ def build_post_delete(board: str, post_num: int) -> bytes:
 def build_query_posts(
     board: str, where: str, values: list[tuple[int, bytes]], orderby: str, limit: int
 ) -> bytes:
-    if where:
-        where_encoded = where.encode("utf-8")
-        where_bytes = struct.pack(">H", len(where_encoded)) + where_encoded
-    else:
-        where_bytes = struct.pack(">H", 0)
+    where_bytes = encode_string(where) if where else struct.pack(">B", 0)
 
     values_data = struct.pack(">B", len(values))
     for vtype, vdata in values:
         values_data += struct.pack(">B", vtype) + vdata
 
-    if orderby:
-        orderby_encoded = orderby.encode("utf-8")
-        orderby_bytes = struct.pack(">H", len(orderby_encoded)) + orderby_encoded
-    else:
-        orderby_bytes = struct.pack(">H", 0)
+    orderby_bytes = encode_string(orderby) if orderby else struct.pack(">B", 0)
 
     return (
         struct.pack(">B", COMMANDS["QUERY_POSTS"])
@@ -452,20 +446,6 @@ def build_is_banned(pubkey: bytes) -> bytes:
 def parse_register_resp(payload: bytes) -> str:
     username, _ = decode_string(payload, 0)
     return username
-
-
-def parse_get_user_resp(payload: bytes, username: str) -> User:
-    offset = 0
-    pubkey = payload[offset:offset+32]
-    offset += 32
-    registrar, offset = decode_string(payload, offset)
-    return User(
-        username=username,
-        registrar=registrar,
-        record_origin="",  # Server doesn't return this in GET_USER
-        relay="",          # Server doesn't return this in GET_USER
-        public_key=pubkey.hex(),
-    )
 
 
 def parse_list_users_resp(payload: bytes) -> list[User]:
