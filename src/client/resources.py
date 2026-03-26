@@ -10,7 +10,7 @@ async def list_boards_resource() -> list[Board]:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.board_list()
 
 
@@ -20,7 +20,7 @@ async def get_board_resource(board_name: str) -> Board:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         boards = await client.board_list()
         for board in boards:
             if board.name == board_name:
@@ -34,7 +34,7 @@ async def list_board_posts_resource(board_name: str) -> list[PostSummary]:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.post_list(board_name)
 
 
@@ -44,7 +44,7 @@ async def get_post_resource(board_name: str, post_num: int) -> Post:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.post_get(board_name, post_num)
 
 
@@ -54,7 +54,7 @@ async def get_thread_resource(board_name: str, root: int) -> list[Post]:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.query_posts(
             board_name,
             where="root = ?",
@@ -69,7 +69,7 @@ async def list_users_resource() -> list[User]:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.list_users()
 
 
@@ -79,7 +79,7 @@ async def list_rules_resource() -> list[Rule]:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.rule_list()
 
 
@@ -89,7 +89,7 @@ async def get_rule_resource(rule_num: int) -> Rule:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.rule_get(rule_num)
 
 
@@ -99,5 +99,5 @@ async def list_reports_by_culprit_resource(pubkey: str) -> list[Report]:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.report_list_by_culprit(pubkey)

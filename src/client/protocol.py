@@ -58,6 +58,12 @@ def encode_string(s: str) -> bytes:
     return struct.pack(">B", len(encoded)) + encoded
 
 
+def encode_bytes(data: bytes) -> bytes:
+    if len(data) > 255:
+        raise ProtocolError(f"Bytes too long: {len(data)} bytes")
+    return struct.pack(">B", len(data)) + data
+
+
 def encode_long_string(s: str) -> bytes:
     encoded = s.encode("utf-8")
     return struct.pack(">I", len(encoded)) + encoded
@@ -372,8 +378,8 @@ def build_report_create(
     return (
         struct.pack(">B", COMMANDS["REPORT_CREATE"])
         + struct.pack(">Q", rule_num)
-        + encode_string(culprit_pubkey.hex())
-        + encode_string(reporter_pubkey.hex())
+        + encode_bytes(culprit_pubkey)
+        + encode_bytes(reporter_pubkey)
         + encode_string(description)
         + encode_string(board or "")
         + struct.pack(">Q", post_num or 0)
@@ -603,7 +609,42 @@ def parse_post_list_resp(payload: bytes) -> list[PostSummary]:
 
 
 def parse_query_posts_resp(payload: bytes) -> list[PostSummary]:
-    return parse_post_list_resp(payload)
+    posts = []
+    offset = 0
+
+    while offset < len(payload):
+        post_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
+        offset += 8
+        last_modified = struct.unpack(">q", payload[offset : offset + 8])[0]
+        offset += 8
+        creation_date = struct.unpack(">q", payload[offset : offset + 8])[0]
+        offset += 8
+        last_bumped = struct.unpack(">q", payload[offset : offset + 8])[0]
+        offset += 8
+        closed = payload[offset]
+        offset += 1
+        sticky = struct.unpack(">i", payload[offset : offset + 4])[0]
+        offset += 4
+        tags, offset = decode_string(payload, offset)
+        subject, offset = decode_string(payload, offset)
+        options, offset = decode_string(payload, offset)
+        root = struct.unpack(">Q", payload[offset : offset + 8])[0]
+        offset += 8
+        author, offset = decode_string(payload, offset)
+        author_registrar, offset = decode_string(payload, offset)
+        signature, offset = decode_string(payload, offset)
+
+        posts.append(
+            PostSummary(
+                post_num=post_num,
+                creation_date=creation_date,
+                subject=subject,
+                author=author,
+                root=root,
+            )
+        )
+
+    return posts
 
 
 def parse_get_pubkey_resp(payload: bytes) -> str:
