@@ -1,5 +1,6 @@
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from fastmcp.server.dependencies import get_http_request
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
@@ -25,12 +26,14 @@ def parse_auth_header(auth: str) -> tuple[str, str]:
 
 class AuthMiddleware(Middleware):
     def _set_auth_context(self, context: MiddlewareContext):
-        request = context.fastmcp_request
-        if request:
+        try:
+            request = get_http_request()
             auth = request.headers.get("Authorization", "")
             username, password = parse_auth_header(auth)
             current_username.set(username)
             current_password.set(password)
+        except RuntimeError:
+            pass
 
     async def on_request(self, context: MiddlewareContext, call_next):
         self._set_auth_context(context)
