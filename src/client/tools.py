@@ -23,6 +23,9 @@ mcp = FastMCP("Bonnet BBS")
 current_username: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "username", default=None
 )
+current_password: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "password", default=""
+)
 identity_store: IdentityStore | None = None
 bonnet_url: str = "ws://localhost:2272"
 
@@ -41,23 +44,62 @@ def get_username() -> str:
     return username
 
 
+def get_password() -> str:
+    return current_password.get() or ""
+
+
+def validate_pubkey(pubkey: str) -> bytes:
+    try:
+        pubkey_bytes = bytes.fromhex(pubkey)
+        if len(pubkey_bytes) != 32:
+            raise ValueError(f"Public key must be 32 bytes (64 hex characters), got {len(pubkey_bytes)} bytes.")
+        return pubkey_bytes
+    except ValueError as e:
+        raise ValueError(f"Invalid public key format: {pubkey}") from e
+
+
 @mcp.tool
-async def register_user(username: str) -> str:
-    """Register a new user on the Bonnet server. Returns the registered username."""
+async def register_user(username: str, password: str) -> str:
+    """Register a new user locally and on the Bonnet server. Returns the registered username."""
     client = get_client()
+    is_existing = False
+    try:
+        client.identity_store.register(username, password)
+    except ValueError as e:
+        if str(e) == "User already exists locally":
+            if not client.identity_store.verify_password(username, password):
+                raise ValueError("User already exists locally and password does not match.") from e
+            is_existing = True
+            # If the user exists and password matches, we allow retrying the server registration
+        else:
+            raise
+
     async with client:
-        await client.connect(username)
+        # We need to authenticate to register on the server
+        await client.connect(username, password, require_auth=True)
+        # Register on backend
+        try:
+            await client._register(username)
+        except Exception as backend_err:
+            if is_existing and "already exists" in str(backend_err).lower():
+                # Verify that the server's record for this username matches our local pubkey
+                user = await client.get_user(client._public_key)
+                if user and user.username == username:
+                    return username
+            raise backend_err
         return username
 
 
 @mcp.tool
 async def get_user_by_pubkey(pubkey: str) -> User | None:
     """Look up a user by their Ed25519 public key (hex string)."""
+    pubkey_bytes = validate_pubkey(pubkey)
+
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
-        return await client.get_user(bytes.fromhex(pubkey))
+        await client.connect(username, require_auth=False)
+        return await client.get_user(pubkey_bytes)
 
 
 @mcp.tool
@@ -66,7 +108,7 @@ async def list_users(offset: int = 0, limit: int = 100) -> list[User]:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.list_users(offset, limit)
 
 
@@ -76,7 +118,7 @@ async def list_peers() -> list[Peer]:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.list_peers()
 
 
@@ -85,8 +127,9 @@ async def create_board(name: str) -> Board:
     """Create a new board. Requires admin privileges."""
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         return await client.board_create(name)
 
 
@@ -96,7 +139,7 @@ async def list_boards() -> list[Board]:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.board_list()
 
 
@@ -105,8 +148,9 @@ async def close_board(name: str) -> None:
     """Mark a board as read-only. Requires admin privileges."""
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         await client.board_close(name)
 
 
@@ -115,8 +159,9 @@ async def delete_board(name: str) -> None:
     """Delete a board from disk. Requires admin privileges. Must be closed first."""
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         await client.board_delete(name)
 
 
@@ -132,8 +177,9 @@ async def create_post(
     """Create a new post. root=0 starts a new thread, root>0 replies to that post."""
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         return await client.post_create(board, subject, content, tags, options, root)
 
 
@@ -143,7 +189,7 @@ async def get_post(board: str, post_num: int) -> Post:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.post_get(board, post_num)
 
 
@@ -153,7 +199,7 @@ async def list_posts(board: str, offset: int = 0, limit: int = 50) -> list[PostS
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.post_list(board, offset, limit)
 
 
@@ -171,8 +217,9 @@ async def update_post(
     """Update post fields. Author can edit content/subject/tags/options. Mods can also edit sticky/closed."""
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         await client.post_update(
             board, post_num, content, subject, tags, options, sticky, closed
         )
@@ -183,8 +230,9 @@ async def delete_post(board: str, post_num: int) -> None:
     """Delete a post."""
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         await client.post_delete(board, post_num)
 
 
@@ -212,7 +260,7 @@ async def query_posts(
                 parsed_values.append((2, encode_string(str(vval))))
 
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.query_posts(board, where, parsed_values, orderby, limit)
 
 
@@ -221,29 +269,32 @@ async def sign_post(board: str, post_num: int) -> str:
     """Sign a post with your identity. Only the post author can sign. Returns the signature hex."""
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         return await client.post_sign(board, post_num)
 
 
 @mcp.tool
-async def promote_user(username: str) -> None:
+async def promote_user(target_username: str) -> None:
     """Promote a user to moderator. Requires admin privileges."""
     client = get_client()
-    caller = get_username()
+    username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(caller)
-        await client.user_promote(username)
+        await client.connect(username, password, require_auth=True)
+        await client.user_promote(target_username)
 
 
 @mcp.tool
-async def demote_user(username: str) -> None:
+async def demote_user(target_username: str) -> None:
     """Remove moderator status from a user. Requires admin privileges."""
     client = get_client()
-    caller = get_username()
+    username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(caller)
-        await client.user_demote(username)
+        await client.connect(username, password, require_auth=True)
+        await client.user_demote(target_username)
 
 
 @mcp.tool
@@ -252,7 +303,7 @@ async def get_server_pubkey() -> str:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.get_server_pubkey()
 
 
@@ -261,8 +312,9 @@ async def create_rule(name: str, description: str) -> Rule:
     """Create a new community rule. Requires moderator privileges."""
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         return await client.rule_create(name, description)
 
 
@@ -272,7 +324,7 @@ async def get_rule(rule_num: int) -> Rule:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.rule_get(rule_num)
 
 
@@ -282,7 +334,7 @@ async def get_rule_by_name(name: str) -> Rule:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.rule_get_by_name(name)
 
 
@@ -292,7 +344,7 @@ async def list_rules() -> list[Rule]:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.rule_list()
 
 
@@ -303,8 +355,9 @@ async def update_rule(
     """Update a rule's name or description."""
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         return await client.rule_update(rule_num, name, description)
 
 
@@ -319,10 +372,13 @@ async def create_report(
     relay: str | None = None,
 ) -> Report:
     """Report a user for violating a rule."""
+    validate_pubkey(culprit_pubkey)
+
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         return await client.report_create(
             rule_num, culprit_pubkey, description, board, post_num, origin, relay
         )
@@ -334,17 +390,19 @@ async def get_report(origin: str, report_num: int) -> Report:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.report_get(origin, report_num)
 
 
 @mcp.tool
 async def list_reports_by_culprit(pubkey: str) -> list[Report]:
     """List all reports against a user by their public key."""
+    validate_pubkey(pubkey)
+
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.report_list_by_culprit(pubkey)
 
 
@@ -353,8 +411,9 @@ async def sign_report(origin: str, report_num: int) -> Report:
     """Sign a report as the reporter."""
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         return await client.report_sign(origin, report_num)
 
 
@@ -363,20 +422,25 @@ async def create_punishment(
     pubkey: str, report_ids: list[int], expires_at: int, notes: str = ""
 ) -> Punishment:
     """Create a punishment (ban/warning). expires_at: 0=warning, -1=permanent, >0=unix timestamp. Requires mod privileges."""
+    validate_pubkey(pubkey)
+
     client = get_client()
     username = get_username()
+    password = get_password()
     async with client:
-        await client.connect(username)
+        await client.connect(username, password, require_auth=True)
         return await client.punishment_create(pubkey, report_ids, expires_at, notes)
 
 
 @mcp.tool
 async def get_punishment(pubkey: str) -> Punishment | None:
     """Get active punishment for a user."""
+    validate_pubkey(pubkey)
+
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.punishment_get(pubkey)
 
 
@@ -386,15 +450,17 @@ async def list_active_punishments() -> list[Punishment]:
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.punishment_list_active()
 
 
 @mcp.tool
 async def is_banned(pubkey: str) -> BannedStatus:
     """Check if a user is banned. Returns (banned, reason)."""
+    validate_pubkey(pubkey)
+
     client = get_client()
     username = get_username()
     async with client:
-        await client.connect(username)
+        await client.connect(username, require_auth=False)
         return await client.is_banned(pubkey)

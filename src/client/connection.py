@@ -119,11 +119,19 @@ class BonnetClient:
         self._private_key: bytes | None = None
         self._public_key: bytes | None = None
 
-    async def connect(self, username: str) -> None:
+    async def connect(self, username: str, password: str = "", require_auth: bool = False) -> None:
         self.username = username
-        self._private_key, self._public_key = self.identity_store.get_or_create(
-            username
-        )
+        if require_auth:
+            if not password:
+                raise BonnetError("Password required for authenticated action")
+            self._private_key = self.identity_store.get_private_key(username, password)
+            self._public_key = self.identity_store.get_pubkey(username)
+        else:
+            # Ephemeral keypair for anonymous connection
+            from nacl.signing import SigningKey
+            signing_key = SigningKey.generate()
+            self._private_key = bytes(signing_key)
+            self._public_key = bytes(signing_key.verify_key)
 
         self.websocket = await websockets.connect(self.bonnet_url)
 
@@ -141,9 +149,6 @@ class BonnetClient:
 
         handshake = self._public_key + signature
         await self.websocket.send(encode_frame(handshake))
-
-        if not self.identity_store.is_registered(username):
-            await self._register(username)
 
     async def _register(self, username: str) -> str:
         cmd = build_register(username, "localhost")
@@ -189,7 +194,8 @@ class BonnetClient:
         status, payload = parse_response(resp)
 
         if status == ResponseStatus.SUCCESS:
-            return parse_list_users_resp(payload)[0] if payload else None
+            users = parse_list_users_resp(payload)
+            return users[0] if users else None
         elif status == ResponseStatus.ERROR:
             return None
         raise BonnetError(f"Unexpected response: {status}")
