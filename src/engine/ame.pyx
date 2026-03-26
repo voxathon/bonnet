@@ -147,7 +147,7 @@ cdef class NavDB:
         with self._db.open() as ctx:
             ctx.execute("DELETE FROM nav WHERE board_name=?", [board_name])
 
-    cpdef void _set_board_closed(self, str board_name):
+    cdef void _set_board_closed(self, str board_name):
         with self._db.open() as ctx:
             ctx.execute("UPDATE nav SET closed = 1 WHERE board_name = ?", [board_name])
 
@@ -528,7 +528,6 @@ cdef class Ame:
         with self._boards_lock:
             if name in self._boards:
                 self._boards[name].close()
-                # we don't have access to _db in cython class from outside unless public, so call a NavDB method
                 self._nav._set_board_closed(name)
 
     def delete_board(self, str name):
