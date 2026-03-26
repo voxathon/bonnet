@@ -61,7 +61,7 @@ cdef class CommandHandler:
         if max_size > 0 and len(request) > max_size:
             return self._build_error(413, f"Request too large (max {max_size} bytes)")
         
-        if not hasattr(conn, '_request_timestamps'):
+        if getattr(conn, '_request_timestamps', None) is None:
             conn._request_timestamps = collections.deque()
 
         while conn._request_timestamps and current_time - conn._request_timestamps[0] >= window:
