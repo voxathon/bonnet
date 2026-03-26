@@ -52,12 +52,14 @@ def get_password() -> str:
 async def register_user(username: str, password: str) -> str:
     """Register a new user locally and on the Bonnet server. Returns the registered username."""
     client = get_client()
+    is_existing = False
     try:
         client.identity_store.register(username, password)
     except ValueError as e:
         if str(e) == "User already exists locally":
             if not client.identity_store.verify_password(username, password):
                 raise ValueError("User already exists locally and password does not match.")
+            is_existing = True
             # If the user exists and password matches, we allow retrying the server registration
         else:
             raise
@@ -66,7 +68,13 @@ async def register_user(username: str, password: str) -> str:
         # We need to authenticate to register on the server
         await client.connect(username, password, require_auth=True)
         # Register on backend
-        await client._register(username)
+        try:
+            await client._register(username)
+        except Exception as backend_err:
+            if is_existing and "already exists" in str(backend_err).lower():
+                # It's already registered on the backend too. Just return the username.
+                return username
+            raise backend_err
         return username
 
 
