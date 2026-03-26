@@ -72,8 +72,10 @@ async def register_user(username: str, password: str) -> str:
             await client._register(username)
         except Exception as backend_err:
             if is_existing and "already exists" in str(backend_err).lower():
-                # It's already registered on the backend too. Just return the username.
-                return username
+                # Verify that the server's record for this username matches our local pubkey
+                user = await client.get_user(client._public_key)
+                if user and user.username == username:
+                    return username
             raise backend_err
         return username
 
