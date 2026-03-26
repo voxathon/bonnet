@@ -1,10 +1,8 @@
 import pytest
 import os
 import time
-import json
 from engine.keibatsu import Keibatsu, Punishment, Report, Rule
 from core.crypto import Identity
-from core.orm import Database
 
 @pytest.fixture
 def keibatsu_setup(temp_dir):
@@ -12,16 +10,6 @@ def keibatsu_setup(temp_dir):
     punishments_path = os.path.join(temp_dir, 'punishments.db')
     origin = "test_origin"
     ident = Identity.generate()
-
-    # We need to manually initialize the rules table here if it's not set up
-    with Database(reports_path).open() as ctx:
-        ctx.execute("""
-            CREATE TABLE IF NOT EXISTS rules (
-                rule_num INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_name TEXT NOT NULL,
-                description TEXT NOT NULL
-            )
-        """)
 
     k = Keibatsu(reports_path, punishments_path, signing_key=ident.signing_key, origin=origin)
     yield k, ident

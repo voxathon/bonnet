@@ -173,6 +173,14 @@ cdef class Keibatsu:
         self._punishments_db = Database(punishments_path)
 
         with self._reports_db.open() as ctx:
+            ctx.execute("""
+            CREATE TABLE IF NOT EXISTS rules (
+                rule_num    INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_name   TEXT NOT NULL,
+                description TEXT NOT NULL
+            )
+            """)
+
             # Check if table exists and if it has the rollover column
             try:
                 ctx.execute("SELECT rollover FROM reports LIMIT 1")

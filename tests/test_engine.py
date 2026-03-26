@@ -1,14 +1,10 @@
 import pytest
 import os
-import tempfile
 import time
-import struct
-import shutil
 from engine.ume import Ume
 from engine.ame import Ame
 from engine.keibatsu import Keibatsu
 from core.crypto import Identity
-from core.orm import Database
 
 def test_engine_integration(temp_dir):
     # initialize engine components
@@ -24,16 +20,6 @@ def test_engine_integration(temp_dir):
 
     ident = Identity.generate()
     ame = Ame(ame_path, origin='test_origin', signing_key=ident.signing_key, nav_db_path=nav_db_path)
-
-    # We need to manually initialize the rules table here if it's not set up
-    with Database(reports_path).open() as ctx:
-        ctx.execute("""
-            CREATE TABLE IF NOT EXISTS rules (
-                rule_num INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_name TEXT NOT NULL,
-                description TEXT NOT NULL
-            )
-        """)
 
     keibatsu = Keibatsu(reports_path, punishments_path, ume=ume, signing_key=ident.signing_key, origin='test_origin')
 
