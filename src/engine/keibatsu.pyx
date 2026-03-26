@@ -91,15 +91,24 @@ cdef class Report:
 
 cdef class Punishment:
     cdef public bytes punished_pubkey
-    cdef public list report_ids
+    cdef public str report_ids
     cdef public int64_t expires_at
     cdef public str ban_notes
 
     def __init__(self):
         self.punished_pubkey = b''
-        self.report_ids = []
+        self.report_ids = "[]"
         self.expires_at = 0
         self.ban_notes = ""
+
+    cpdef list get_report_ids(self):
+        try:
+            return json.loads(self.report_ids) if self.report_ids else []
+        except Exception:
+            return []
+
+    cpdef void set_report_ids(self, list value):
+        self.report_ids = json.dumps(value)
 
     cpdef bint is_warning(self):
         return self.expires_at == 0
@@ -515,12 +524,6 @@ cdef class Keibatsu:
             punishment = self._punishments_table.select_single(
                 where="punished_pubkey=?", values=[pubkey], ctx=ctx
             )
-        if punishment is None:
-            return None
-        try:
-            punishment.report_ids = json.loads(punishment.report_ids) if punishment.report_ids else []
-        except json.JSONDecodeError:
-            punishment.report_ids = []
         return punishment
 
     cdef Punishment _create_punishment(self, bytes pubkey, list report_ids,
@@ -579,10 +582,7 @@ cdef class Keibatsu:
         for row in rows:
             p = Punishment()
             p.punished_pubkey = bytes(row[0])
-            try:
-                p.report_ids = json.loads(row[1]) if row[1] else []
-            except json.JSONDecodeError:
-                p.report_ids = []
+            p.report_ids = row[1] if row[1] else "[]"
             p.expires_at = row[2]
             p.ban_notes = row[3] if row[3] else ""
             results.append(p)
