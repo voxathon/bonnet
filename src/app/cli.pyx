@@ -10,6 +10,7 @@ cdef class LocalConnection:
     cdef public str origin
     cdef public str remote_addr
     cdef public object _engine
+    cdef public object _request_timestamps
 
     def __init__(self, user, peer_pubkey, engine=None, origin=None):
         self.user = user
