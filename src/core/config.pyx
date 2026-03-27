@@ -98,6 +98,7 @@ cdef class Config:
     cdef public str log_dir
     cdef public list acls
     cdef public bint admin_bypass_acl
+    cdef public set public_commands
     
     cdef public str data_dir
     cdef public str identity_path
@@ -112,7 +113,7 @@ cdef class Config:
     cdef public str tls_cert_path
     cdef public str tls_key_path
     
-    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None):
+    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None):
         if registrars is None:
             registrars = ["knolastna.me"]
         self.registrars = [r.lower() for r in registrars]
@@ -124,6 +125,10 @@ cdef class Config:
             origin = "localhost"
         self.origin = origin
         self.anonymous_read = anonymous_read
+        
+        if public_commands is None:
+            public_commands = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x71}
+        self.public_commands = public_commands
         
         if data_dir is None:
             data_dir = "./data"
@@ -197,6 +202,31 @@ cdef class Config:
         anonymous_read = server.get('anonymous_read', True)
         admin_bypass_acl = server.get('admin_bypass_acl', True)
         
+        cmd_map = {
+            'GET_USER': 0x02, 'LIST_USERS': 0x03, 'LIST_PEERS': 0x04,
+            'BOARD_LIST': 0x11, 'POST_GET': 0x13, 'POST_LIST': 0x14,
+            'QUERY_POSTS': 0x19, 'GET_PUBKEY': 0x30,
+            'RULE_GET': 0x41, 'RULE_GET_BY_NAME': 0x42, 'RULE_LIST': 0x43,
+            'REPORT_GET': 0x51, 'REPORT_LIST_BY_CULPRIT': 0x52, 'REPORT_LIST_SINCE': 0x54,
+            'PUNISHMENT_GET': 0x61, 'PUNISHMENT_LIST_ACTIVE': 0x62, 'IS_BANNED': 0x63,
+            'PEER_KEY_LIST': 0x71, 'REGISTER': 0x01
+        }
+        default_public = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x71}
+        
+        public_commands_raw = server.get('public_commands', None)
+        if public_commands_raw is not None:
+            public_commands = set()
+            for cmd in public_commands_raw:
+                if isinstance(cmd, int):
+                    public_commands.add(cmd)
+                elif isinstance(cmd, str):
+                    if cmd.upper() in cmd_map:
+                        public_commands.add(cmd_map[cmd.upper()])
+                    elif cmd.startswith('0x'):
+                        public_commands.add(int(cmd, 16))
+        else:
+            public_commands = default_public
+        
         data_dir = server.get('data_dir', "./data")
         identity_path = server.get('identity_path', None)
         userfile_path = server.get('userfile_path', None)
@@ -235,6 +265,7 @@ cdef class Config:
             log_dir=log_dir,
             acls=acls,
             admin_bypass_acl=admin_bypass_acl,
+            public_commands=public_commands,
             data_dir=data_dir,
             identity_path=identity_path,
             userfile_path=userfile_path,
@@ -260,6 +291,7 @@ data_dir = "./data"
 log_dir = "./logs"
 port_standard = 2272
 port_privileged = 272
+# public_commands = ["REGISTER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PEER_KEY_LIST"]
 
 [[acl]]
 name = "local-full-access"
@@ -316,6 +348,7 @@ key_path = "./certs/bonnet.key"
             log_dir="./logs",
             acls=[default_acl],
             admin_bypass_acl=True,
+            public_commands=None,
             data_dir="./data",
             identity_path=None,
             userfile_path=None,

@@ -15,8 +15,6 @@ import collections
 from datetime import datetime
 from libc.stdint cimport uint64_t, int64_t
 
-PUBLIC_COMMANDS = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x71}
-
 _WHITELIST_PATTERN = re.compile(r'^[a-zA-Z0-9\-_]+$')
 _BLACKLIST_PATTERN = re.compile(r'[@<>:"/\\|?*]')
 
@@ -99,12 +97,12 @@ cdef class CommandHandler:
         log_msg(f"HANDLE: cmd=0x{cmd:02x} ({cmd_name}), user={username}")
         log_hex(f"HANDLE: request", request)
         
-        if conn.is_anonymous and cmd not in PUBLIC_COMMANDS:
+        if conn.is_anonymous and cmd not in self._config.public_commands:
             log_msg(f"HANDLE: rejected - anonymous user cannot run cmd=0x{cmd:02x}")
             return self._build_error(401, "Authentication required for this command")
         
         if not conn.is_anonymous and conn.user.is_banned:
-            if cmd not in PUBLIC_COMMANDS:
+            if cmd not in self._config.public_commands:
                 log_msg(f"HANDLE: rejected - banned user '{conn.user.username}' attempted cmd=0x{cmd:02x}")
                 return self._build_error(403, "You are banned from performing this action")
 
@@ -216,7 +214,7 @@ cdef class CommandHandler:
             new_user = self._ume.put(username, registrar, conn.peer_public_key, record_origin=self._config.origin, relay=self._config.origin)
 
             u_bytes = new_user.username.encode('utf-8')
-            return struct.pack('>B', 0x00) + u_bytes
+            return struct.pack('>B', 0x00) + struct.pack('>B', len(u_bytes)) + u_bytes
 
         except Exception as e:
             return self._build_error(400, str(e))
@@ -1577,7 +1575,7 @@ cdef class CommandHandler:
             result = self._keibatsu.create_punishment(pubkey, report_ids, expires_at, notes)
             punishment = result.result()
 
-            return self._encode_punishment(punishment)
+            return struct.pack('>B', 0x00) + self._encode_punishment(punishment)
 
         except Exception as e:
             return self._build_error(400, str(e))
@@ -1585,13 +1583,13 @@ cdef class CommandHandler:
     cdef bytes _encode_punishment(self, object punishment):
         cdef bytes pubkey_bytes = punishment.punished_pubkey
         cdef bytes notes_bytes = (punishment.ban_notes or "").encode('utf-8')
+        cdef list report_ids_list = punishment.get_report_ids()
         cdef bytes payload
 
-        payload = struct.pack('>B', 0x00) + \
-                  struct.pack('>B', len(pubkey_bytes)) + pubkey_bytes + \
-                  struct.pack('>B', len(punishment.report_ids))
+        payload = struct.pack('>B', len(pubkey_bytes)) + pubkey_bytes + \
+                  struct.pack('>B', len(report_ids_list))
 
-        for report_id in punishment.report_ids:
+        for report_id in report_ids_list:
             payload += struct.pack('>Q', report_id)
 
         payload += struct.pack('>q', punishment.expires_at)
@@ -1614,7 +1612,7 @@ cdef class CommandHandler:
             if punishment is None:
                 return self._build_error(404, "No punishment found for pubkey")
 
-            return self._encode_punishment(punishment)
+            return struct.pack('>B', 0x00) + self._encode_punishment(punishment)
 
         except Exception as e:
             return self._build_error(400, str(e))

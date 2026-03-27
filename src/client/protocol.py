@@ -241,6 +241,10 @@ def encode_tlv_str(field_type: int, value: str) -> bytes:
     return struct.pack(">B", field_type) + encode_string(value)
 
 
+def encode_tlv_long_str(field_type: int, value: str) -> bytes:
+    return struct.pack(">B", field_type) + encode_long_string(value)
+
+
 def encode_tlv_i32(field_type: int, value: int) -> bytes:
     return struct.pack(">Bi", field_type, value)
 
@@ -264,7 +268,7 @@ def build_post_update(
     for name, value in fields:
         if name not in field_map:
             raise ProtocolError(f"Unknown field: {name}")
-        tlv_data += struct.pack(">B", field_map[name]) + value
+        tlv_data += value
 
     return (
         struct.pack(">B", COMMANDS["POST_UPDATE"])
@@ -286,13 +290,15 @@ def build_post_delete(board: str, post_num: int) -> bytes:
 def build_query_posts(
     board: str, where: str, values: list[tuple[int, bytes]], orderby: str, limit: int
 ) -> bytes:
-    where_bytes = encode_string(where) if where else struct.pack(">B", 0)
+    where_encoded = where.encode("utf-8") if where else b""
+    where_bytes = struct.pack(">H", len(where_encoded)) + where_encoded
 
     values_data = struct.pack(">B", len(values))
     for vtype, vdata in values:
         values_data += struct.pack(">B", vtype) + vdata
 
-    orderby_bytes = encode_string(orderby) if orderby else struct.pack(">B", 0)
+    orderby_encoded = orderby.encode("utf-8") if orderby else b""
+    orderby_bytes = struct.pack(">H", len(orderby_encoded)) + orderby_encoded
 
     return (
         struct.pack(">B", COMMANDS["QUERY_POSTS"])
@@ -424,7 +430,7 @@ def build_punishment_create(
 
     return (
         struct.pack(">B", COMMANDS["PUNISHMENT_CREATE"])
-        + encode_string(pubkey.hex())
+        + encode_bytes(pubkey)
         + ids_data
         + struct.pack(">q", expires_at)
         + encode_string(notes)
@@ -432,7 +438,7 @@ def build_punishment_create(
 
 
 def build_punishment_get(pubkey: bytes) -> bytes:
-    return struct.pack(">B", COMMANDS["PUNISHMENT_GET"]) + encode_string(pubkey.hex())
+    return struct.pack(">B", COMMANDS["PUNISHMENT_GET"]) + encode_bytes(pubkey)
 
 
 def build_punishment_list_active() -> bytes:
@@ -440,7 +446,7 @@ def build_punishment_list_active() -> bytes:
 
 
 def build_is_banned(pubkey: bytes) -> bytes:
-    return struct.pack(">B", COMMANDS["IS_BANNED"]) + encode_string(pubkey.hex())
+    return struct.pack(">B", COMMANDS["IS_BANNED"]) + encode_bytes(pubkey)
 
 
 def parse_register_resp(payload: bytes) -> str:
