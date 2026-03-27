@@ -61,8 +61,15 @@ from .protocol import (
     parse_punishment_list_resp,
     parse_is_banned_resp,
     encode_tlv_str,
+    encode_tlv_long_str,
     encode_tlv_i32,
     encode_tlv_u8,
+    TLV_CONTENT,
+    TLV_SUBJECT,
+    TLV_OPTIONS,
+    TLV_TAGS,
+    TLV_STICKY,
+    TLV_CLOSED,
 )
 from .identity import IdentityStore
 from .models import (
@@ -119,7 +126,9 @@ class BonnetClient:
         self._private_key: bytes | None = None
         self._public_key: bytes | None = None
 
-    async def connect(self, username: str, password: str = "", require_auth: bool = False) -> None:
+    async def connect(
+        self, username: str, password: str = "", require_auth: bool = False
+    ) -> None:
         self.username = username
         if require_auth:
             if not password:
@@ -128,7 +137,6 @@ class BonnetClient:
             self._public_key = self.identity_store.get_pubkey(username)
         else:
             # Ephemeral keypair for anonymous connection
-            from nacl.signing import SigningKey
             signing_key = SigningKey.generate()
             self._private_key = bytes(signing_key)
             self._public_key = bytes(signing_key.verify_key)
@@ -334,17 +342,17 @@ class BonnetClient:
     ) -> None:
         fields = []
         if content is not None:
-            fields.append(("content", encode_tlv_str(content)))
+            fields.append(("content", encode_tlv_long_str(TLV_CONTENT, content)))
         if subject is not None:
-            fields.append(("subject", encode_tlv_str(subject)))
+            fields.append(("subject", encode_tlv_str(TLV_SUBJECT, subject)))
         if tags is not None:
-            fields.append(("tags", encode_tlv_str(tags)))
+            fields.append(("tags", encode_tlv_str(TLV_TAGS, tags)))
         if options is not None:
-            fields.append(("options", encode_tlv_str(options)))
+            fields.append(("options", encode_tlv_str(TLV_OPTIONS, options)))
         if sticky is not None:
-            fields.append(("sticky", encode_tlv_i32(sticky)))
+            fields.append(("sticky", encode_tlv_i32(TLV_STICKY, sticky)))
         if closed is not None:
-            fields.append(("closed", encode_tlv_u8(1 if closed else 0)))
+            fields.append(("closed", encode_tlv_u8(TLV_CLOSED, 1 if closed else 0)))
 
         if not fields:
             return
@@ -390,9 +398,19 @@ class BonnetClient:
             raise BonnetError(f"Redirect to: {decode_redirect(payload)}")
         raise BonnetError(f"Unexpected response: {status}")
 
-    async def post_sign(self, board: str, post_num: int) -> str:
-        post = await self.post_get(board, post_num)
-
+    async def post_sign(
+        self,
+        board: str,
+        post_num: int,
+        creation_date: int,
+        last_modified: int,
+        author: str,
+        author_registrar: str,
+        tags: str,
+        subject: str,
+        options: str,
+        content: str,
+    ) -> str:
         if self._private_key is None:
             raise BonnetError("No identity loaded")
 
@@ -400,15 +418,15 @@ class BonnetClient:
 
         from .protocol import encode_string, encode_long_string, struct
 
-        payload = struct.pack(">Q", post.post_num)
-        payload += struct.pack(">q", post.creation_date)
-        payload += struct.pack(">q", post.last_modified)
-        payload += encode_string(post.author)
-        payload += encode_string(post.author_registrar)
-        payload += encode_string(",".join(post.tags))
-        payload += encode_string(post.subject)
-        payload += encode_string(post.options)
-        payload += encode_long_string(post.content)
+        payload = struct.pack(">Q", post_num)
+        payload += struct.pack(">q", creation_date)
+        payload += struct.pack(">q", last_modified)
+        payload += encode_string(author)
+        payload += encode_string(author_registrar)
+        payload += encode_string(tags)
+        payload += encode_string(subject)
+        payload += encode_string(options)
+        payload += encode_long_string(content)
 
         signature = signing_key.sign(payload).signature.hex()
 
