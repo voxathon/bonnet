@@ -164,7 +164,11 @@ cdef class Connection:
         return self.user is not None and self.user.username == author
 
     cpdef bint can_delete_post(self, str author):
-        return self.user is not None and self.user.username == author
+        return self.user is not None and (
+            self.user.username == author or 
+            self.is_moderator() or 
+            self.is_administrator()
+        )
 
     async def connect(self, str url, object ssl_context=None):
         if self.mode != ConnectionMode.CLIENT:

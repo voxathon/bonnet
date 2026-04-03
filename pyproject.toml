@@ -36,6 +36,7 @@ dev = [
 
 [project.scripts]
 bonnet-client = "client:run"
+bonnet-simple = "client:run_simple"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/client"]
