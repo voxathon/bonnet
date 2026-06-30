@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 from core.config import Config, Matcher, ACLEntry
 from engine.ume import User
+from engine.facade import BonnetEngine
 from core.crypto import Identity
 
 
@@ -623,3 +624,84 @@ class TestConfigCheckPermissionIntegration:
             )
             is False
         )
+
+
+class TestACLOriginResolution:
+    """#4 -- conn.origin (Host header) must not be trusted for ACL matching.
+
+    Only an authenticated user's record_origin satisfies an origin-pattern ACL;
+    an anonymous connection that spoofs Host: localhost must NOT match.
+    """
+
+    def _engine_with_local_acl(self):
+        config = Config(
+            acls=[ACLEntry("local-full-access", Matcher(origin_pattern="localhost"), ["*"], True, True)],
+            admin_bypass_acl=False,
+        )
+        ame = MagicMock()
+        ame.get_board_owner.return_value = None
+        ume = MagicMock()
+        ident = Identity.generate()
+        return BonnetEngine(ume, ame, MagicMock(), config, ident), ident, config
+
+    def _conn(self, ident, host_header, user=None, peer_pubkey=None):
+        ws = MagicMock()
+        ws.remote_address = ("203.0.113.9", 12345)
+        req = MagicMock()
+        req.headers = {"Host": host_header}
+        ws.request = req
+        engine = MagicMock()
+        engine.ume = MagicMock()
+        engine.config = MagicMock(max_request_size=0)
+        from net.connection import Connection
+        conn = Connection.server(ident, ws, engine)
+        if user is not None:
+            conn.user = user
+        conn.peer_public_key = peer_pubkey or b"\x22" * 32
+        return conn
+
+    def test_anonymous_host_localhost_does_not_match(self):
+        engine, ident, config = self._engine_with_local_acl()
+        conn = self._conn(ident, host_header="localhost")  # spoofed Host header
+        # anonymous => _resolve_origin returns "unknown", not "localhost"
+        assert engine.check_permission("write", "anyboard", conn) is False
+        assert engine.check_permission("read", "anyboard", conn) is False
+
+    def test_authenticated_record_origin_localhost_matches(self):
+        engine, ident, config = self._engine_with_local_acl()
+        user = MagicMock()
+        user.record_origin = "localhost"
+        user.is_administrator = False
+        user.is_moderator = False
+        conn = self._conn(ident, host_header="evil.example", user=user)
+        # authenticated user with record_origin=localhost => matches ACL
+        assert engine.check_permission("write", "anyboard", conn) is True
+        assert engine.check_permission("read", "anyboard", conn) is True
+
+    def test_authenticated_wrong_record_origin_does_not_match(self):
+        engine, ident, config = self._engine_with_local_acl()
+        user = MagicMock()
+        user.record_origin = "remote.test"
+        user.is_administrator = False
+        user.is_moderator = False
+        conn = self._conn(ident, host_header="localhost", user=user)
+        # record_origin is remote.test, and the spoofed Host header is ignored
+        assert engine.check_permission("write", "anyboard", conn) is False
+
+    def test_anonymous_explicit_anonymous_acl_still_grants_read(self):
+        """An explicit `anonymous` ACL must still work for anonymous reads,
+        preserving read semantics after removing the Host-header fallback."""
+        config = Config(
+            acls=[
+                ACLEntry("anon-read", Matcher(anonymous=True), ["public"], True, False),
+                ACLEntry("local", Matcher(origin_pattern="localhost"), ["*"], True, True),
+            ],
+            admin_bypass_acl=False,
+        )
+        ame = MagicMock()
+        ame.get_board_owner.return_value = None
+        engine = BonnetEngine(MagicMock(), ame, MagicMock(), config, Identity.generate())
+        ident = Identity.generate()
+        conn = self._conn(ident, host_header="localhost")  # anonymous, spoofed Host
+        assert engine.check_permission("read", "public", conn) is True
+        assert engine.check_permission("write", "public", conn) is False
