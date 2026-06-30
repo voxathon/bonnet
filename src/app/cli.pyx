@@ -45,4 +45,8 @@ cdef class LocalConnection:
         return self.user is not None and self.user.username == author
 
     cpdef bint can_delete_post(self, str author):
-        return self.user is not None and self.user.username == author
+        return self.user is not None and (
+            self.user.username == author or 
+            self.is_moderator() or 
+            self.is_administrator()
+        )
