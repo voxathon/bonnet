@@ -7,6 +7,7 @@ import asyncio
 import os
 import time
 import re
+import socket
 import ipaddress
 from libc.stdint cimport uint64_t, int64_t
 from net.connection import Connection
@@ -24,14 +25,18 @@ _HOSTNAME_RE = re.compile(
 
 
 def _is_dialable_host(hostname):
-    """Return True if `hostname` is a safe outbound dial/relay target.
+    """Return True if `hostname` is a safe outbound dial/relay target (string gate).
 
     Rejects empty strings, IP literals in private/loopback/link-local/reserved/
-    multicast/unspecified ranges (SSRF defense), and strings that are not valid
-    hostnames. Public IPs and well-formed public-style hostnames are accepted.
-    This validates the *string form* only; it does not perform DNS resolution,
-    so a hostname that resolves to a private IP is not caught here -- callers
-    must combine this with TOFU peer-key verification for full protection.
+    multicast/unspecified ranges (SSRF defense), the special-use name `localhost`
+    and the `.localhost` TLD, and strings that are not valid hostnames. Public IPs
+    and well-formed public-style hostnames are accepted.
+
+    This is the cheap string/ingest gate used in `_sync_boards` and the
+    `queue_sync` call sites. It validates the *string form* only -- it does NOT
+    perform DNS resolution, so a hostname that resolves to a private IP is not
+    caught here. The authoritative SSRF gate at the outbound dial site is
+    `_resolves_to_global_only`, which must also pass before dialing.
     """
     if not hostname or not isinstance(hostname, str):
         return False
@@ -52,8 +57,51 @@ def _is_dialable_host(hostname):
                 or ip.is_multicast or ip.is_unspecified:
             return False
         return True
+    # Explicitly reject the special-use name 'localhost' and the .localhost TLD,
+    # which are syntactically valid hostnames but must never be dialed.
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
     # Otherwise require a syntactically valid hostname.
     return _HOSTNAME_RE.match(host) is not None
+
+
+def _resolves_to_global_only(hostname):
+    """Return True only if `hostname` resolves and EVERY resolved address is
+    globally routable (SSRF dial-site gate).
+
+    Resolves A/AAAA via `socket.getaddrinfo(hostname, None, proto=IPPROTO_TCP)`
+    and returns True only if there is at least one result and all results are
+    public (none of is_private/is_loopback/is_link_local/is_reserved/
+    is_multicast/is_unspecified). On resolution failure (gaierror/OSError),
+    empty results, or any non-global address, returns False. No caching; re-
+    resolved per dial (IP pinning belongs with the #3 TOFU-overhaul follow-up).
+    """
+    if not hostname or not isinstance(hostname, str):
+        return False
+    host = hostname.strip()
+    if not host:
+        return False
+    if host.startswith('[') and host.endswith(']') and len(host) >= 2:
+        host = host[1:len(host)-1]
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, OSError, ValueError, TypeError):
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            return False
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except (ValueError, TypeError):
+            return False
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved \
+                or ip.is_multicast or ip.is_unspecified:
+            return False
+    return True
 
 
 def _build_board_signature_payload(str name, str origin):
@@ -201,8 +249,13 @@ cdef class SyncManager:
         cdef object conn
         cdef bint connected = False
 
-        if not _is_dialable_host(peer_hostname):
-            log_msg(f"SYNC: refusing to dial non-dialable peer hostname '{peer_hostname}' (SSRF guard)")
+        # SSRF dial-site gate: require BOTH the cheap string check AND a DNS
+        # resolution check that every resolved address is globally routable.
+        # This blocks hostnames that pass the string check but resolve to
+        # private/loopback/link-local IPs (e.g. a rebind or poisoned relay),
+        # before any outbound Connection is opened (#2 / R2).
+        if not _is_dialable_host(peer_hostname) or not _resolves_to_global_only(peer_hostname):
+            log_msg(f"SYNC: refusing to dial non-dialable/non-global peer hostname '{peer_hostname}' (SSRF guard)")
             return
 
         try:

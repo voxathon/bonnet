@@ -4,6 +4,7 @@ relay/origin hostname validation / SSRF guard (#2)."""
 
 import asyncio
 import os
+import socket
 import struct
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,6 +15,7 @@ from net.sync import (
     SyncManager,
     SyncDB,
     _is_dialable_host,
+    _resolves_to_global_only,
     _build_board_signature_payload,
 )
 from engine.ame import Ame, NavDB
@@ -55,6 +57,15 @@ class TestIsDialableHost:
     def test_bracketed_ipv6_stripped(self):
         # A globally routable IPv6 inside brackets should still be evaluated.
         assert _is_dialable_host("[2606:4700:4700::1111]") is True
+
+    def test_rejects_localhost_special_use(self):
+        # R2: 'localhost' and the .localhost TLD are syntactically valid
+        # hostnames but must never be dialed.
+        assert _is_dialable_host("localhost") is False
+        assert _is_dialable_host("foo.localhost") is False
+        assert _is_dialable_host("sub.foo.localhost") is False
+        # A real public hostname that merely starts with 'localhost' is fine.
+        assert _is_dialable_host("localhost.example.com") is True
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +129,11 @@ async def sync_setup(temp_dir):
 # ---------------------------------------------------------------------------
 
 
+def _gai(family, ip):
+    """Build a single getaddrinfo result tuple for `ip` under `family`."""
+    return (family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, 0))
+
+
 class TestDoSyncFromPeerSSRFGuard:
     @pytest.mark.asyncio
     async def test_refuses_private_loopback(self, sync_setup):
@@ -132,6 +148,16 @@ class TestDoSyncFromPeerSSRFGuard:
             conn_mock.connect.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_refuses_localhost(self, sync_setup):
+        mgr, ident, ame, engine = sync_setup
+        conn_mock = MagicMock()
+        conn_mock.connect = AsyncMock()
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("net.sync.Connection", MagicMock(client=MagicMock(return_value=conn_mock)))
+            await mgr._do_sync_from_peer("localhost")
+        conn_mock.connect.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_dials_public_host(self, sync_setup):
         mgr, ident, ame, engine = sync_setup
         conn_mock = MagicMock()
@@ -144,10 +170,108 @@ class TestDoSyncFromPeerSSRFGuard:
         conn_mock.recv_response = AsyncMock(side_effect=[empty_boards])
 
         with pytest.MonkeyPatch().context() as mp:
+            # Mock DNS so the dial-site gate sees a globally routable address.
+            mp.setattr("socket.getaddrinfo", lambda h, p, proto=0: [_gai(socket.AF_INET, "8.8.8.8")])
             mp.setattr("net.sync.Connection", MagicMock(client=MagicMock(return_value=conn_mock)))
             await mgr._do_sync_from_peer("peer.example.com")
 
         conn_mock.connect.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refuses_hostname_resolving_to_private_ip(self, sync_setup):
+        """R2: a public-looking hostname whose DNS resolves to a private/
+        loopback/link-local IP must be refused before dialing."""
+        mgr, ident, ame, engine = sync_setup
+        for bad_ip in ["127.0.0.1", "10.0.0.1", "169.254.169.254"]:
+            conn_mock = MagicMock()
+            conn_mock.connect = AsyncMock()
+            with pytest.MonkeyPatch().context() as mp:
+                mp.setattr("socket.getaddrinfo", lambda h, p, proto=0: [_gai(socket.AF_INET, bad_ip)])
+                mp.setattr("net.sync.Connection", MagicMock(client=MagicMock(return_value=conn_mock)))
+                await mgr._do_sync_from_peer("peer.example.com")
+            conn_mock.connect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_refuses_hostname_with_any_private_resolution(self, sync_setup):
+        """If ANY resolved address is non-global, the dial is refused even when
+        some addresses are public."""
+        mgr, ident, ame, engine = sync_setup
+        conn_mock = MagicMock()
+        conn_mock.connect = AsyncMock()
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("socket.getaddrinfo", lambda h, p, proto=0: [
+                _gai(socket.AF_INET, "8.8.8.8"),
+                _gai(socket.AF_INET, "127.0.0.1"),
+            ])
+            mp.setattr("net.sync.Connection", MagicMock(client=MagicMock(return_value=conn_mock)))
+            await mgr._do_sync_from_peer("peer.example.com")
+        conn_mock.connect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_refuses_hostname_that_fails_resolution(self, sync_setup):
+        mgr, ident, ame, engine = sync_setup
+        conn_mock = MagicMock()
+        conn_mock.connect = AsyncMock()
+
+        def raise_gaierror(h, p, proto=0):
+            raise socket.gaierror("no such host")
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("socket.getaddrinfo", raise_gaierror)
+            mp.setattr("net.sync.Connection", MagicMock(client=MagicMock(return_value=conn_mock)))
+            await mgr._do_sync_from_peer("peer.example.com")
+        conn_mock.connect.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# #2 / R2 -- _resolves_to_global_only
+# ---------------------------------------------------------------------------
+
+
+class TestResolvesToGlobalOnly:
+    def test_public_ip_resolution_passes(self):
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("socket.getaddrinfo", lambda h, p, proto=0: [_gai(socket.AF_INET, "8.8.8.8")])
+            assert _resolves_to_global_only("peer.example.com") is True
+
+    def test_private_ip_resolution_fails(self):
+        for bad_ip in ["127.0.0.1", "10.0.0.1", "169.254.169.254", "192.168.1.1"]:
+            with pytest.MonkeyPatch().context() as mp:
+                mp.setattr("socket.getaddrinfo", lambda h, p, proto=0, bip=bad_ip: [_gai(socket.AF_INET, bip)])
+                assert _resolves_to_global_only("peer.example.com") is False, bad_ip
+
+    def test_mixed_resolution_fails(self):
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("socket.getaddrinfo", lambda h, p, proto=0: [
+                _gai(socket.AF_INET, "8.8.8.8"),
+                _gai(socket.AF_INET, "10.0.0.1"),
+            ])
+            assert _resolves_to_global_only("peer.example.com") is False
+
+    def test_resolution_failure_returns_false(self):
+        def raise_gaierror(h, p, proto=0):
+            raise socket.gaierror("no such host")
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("socket.getaddrinfo", raise_gaierror)
+            assert _resolves_to_global_only("peer.example.com") is False
+
+    def test_empty_resolution_returns_false(self):
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("socket.getaddrinfo", lambda h, p, proto=0: [])
+            assert _resolves_to_global_only("peer.example.com") is False
+
+    def test_public_ipv6_resolution_passes(self):
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("socket.getaddrinfo", lambda h, p, proto=0: [
+                _gai(socket.AF_INET6, "2606:4700:4700::1111"),
+            ])
+            assert _resolves_to_global_only("peer.example.com") is True
+
+    def test_rejects_empty_and_non_str(self):
+        assert _resolves_to_global_only("") is False
+        assert _resolves_to_global_only("   ") is False
+        assert _resolves_to_global_only(None) is False
 
 
 # ---------------------------------------------------------------------------
