@@ -41,14 +41,23 @@ cdef class BonnetEngine:
     cdef str _resolve_origin(self, object conn):
         """
         Resolve origin for ACL matching.
-        Priority: user.record_origin -> connection origin -> IP
+
+        Only a *locally-registered* user's record_origin is trusted for ACL
+        decisions, and only when it equals this server's configured origin.
+        The WebSocket `Host` header (conn.origin) is client-controllable and
+        MUST NOT be used for ACL matching (#4); and a remote-synced user's
+        record_origin is peer-supplied and forgeable, so it must not become an
+        ACL principal (R1) -- otherwise a peer could sync a user with
+        record_origin="localhost" to satisfy a `match.origin = "localhost"` ACL.
+        Locally-registered users (created via REGISTER) and the root user always
+        have record_origin == config.origin, so they still match origin-pattern
+        ACLs. Anonymous/unresolved connections, and any user whose
+        record_origin != config.origin, resolve to the literal "unknown", which
+        matches no origin-pattern ACL unless an explicit `anonymous` matcher
+        grants access. Cross-origin trust should use `match.pubkey`.
+        conn.origin remains populated for logging/diagnostics only.
         """
         if hasattr(conn, 'user') and conn.user and hasattr(conn.user, 'record_origin') and conn.user.record_origin:
-            return conn.user.record_origin
-        if hasattr(conn, 'origin') and conn.origin:
-            return conn.origin
-        if hasattr(conn, 'websocket') and conn.websocket and hasattr(conn.websocket, 'remote_address'):
-            addr = conn.websocket.remote_address
-            if addr:
-                return str(addr[0]) if isinstance(addr, tuple) else str(addr)
+            if conn.user.record_origin == self.config.origin:
+                return conn.user.record_origin
         return "unknown"
