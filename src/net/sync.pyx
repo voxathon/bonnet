@@ -6,11 +6,111 @@ import struct
 import asyncio
 import os
 import time
+import re
+import socket
+import ipaddress
 from libc.stdint cimport uint64_t, int64_t
 from net.connection import Connection
 from engine.facade import BonnetEngine
+from core.crypto import Identity
 from core.logging import log_msg
 from core.orm import Database
+
+# Strict hostname regex: dot-separated labels of [a-zA-Z0-9-], each label 1-63
+# chars, no leading/trailing dash, total length <= 253.
+_HOSTNAME_RE = re.compile(
+    r'^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)'
+    r'(\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$'
+)
+
+
+def _is_dialable_host(hostname):
+    """Return True if `hostname` is a safe outbound dial/relay target (string gate).
+
+    Rejects empty strings, IP literals in private/loopback/link-local/reserved/
+    multicast/unspecified ranges (SSRF defense), the special-use name `localhost`
+    and the `.localhost` TLD, and strings that are not valid hostnames. Public IPs
+    and well-formed public-style hostnames are accepted.
+
+    This is the cheap string/ingest gate used in `_sync_boards` and the
+    `queue_sync` call sites. It validates the *string form* only -- it does NOT
+    perform DNS resolution, so a hostname that resolves to a private IP is not
+    caught here. The authoritative SSRF gate at the outbound dial site is
+    `_resolves_to_global_only`, which must also pass before dialing.
+    """
+    if not hostname or not isinstance(hostname, str):
+        return False
+    host = hostname.strip()
+    if not host:
+        return False
+    # IPv6 literals may be wrapped in brackets when carried with a port; strip them.
+    if host.startswith('[') and host.endswith(']') and len(host) >= 2:
+        host = host[1:len(host)-1]
+    # IP literal?
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        # Reject anything that is not a globally routable address.
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved \
+                or ip.is_multicast or ip.is_unspecified:
+            return False
+        return True
+    # Explicitly reject the special-use name 'localhost' and the .localhost TLD,
+    # which are syntactically valid hostnames but must never be dialed.
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    # Otherwise require a syntactically valid hostname.
+    return _HOSTNAME_RE.match(host) is not None
+
+
+def _resolves_to_global_only(hostname):
+    """Return True only if `hostname` resolves and EVERY resolved address is
+    globally routable (SSRF dial-site gate).
+
+    Resolves A/AAAA via `socket.getaddrinfo(hostname, None, proto=IPPROTO_TCP)`
+    and returns True only if there is at least one result and all results are
+    public (none of is_private/is_loopback/is_link_local/is_reserved/
+    is_multicast/is_unspecified). On resolution failure (gaierror/OSError),
+    empty results, or any non-global address, returns False. No caching; re-
+    resolved per dial (IP pinning belongs with the #3 TOFU-overhaul follow-up).
+    """
+    if not hostname or not isinstance(hostname, str):
+        return False
+    host = hostname.strip()
+    if not host:
+        return False
+    if host.startswith('[') and host.endswith(']') and len(host) >= 2:
+        host = host[1:len(host)-1]
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, OSError, ValueError, TypeError):
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            return False
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except (ValueError, TypeError):
+            return False
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved \
+                or ip.is_multicast or ip.is_unspecified:
+            return False
+    return True
+
+
+def _build_board_signature_payload(str name, str origin):
+    """Reconstruct the canonical board signature payload (mirrors Ame._sign_board)."""
+    cdef bytes name_bytes = name.encode('utf-8')
+    cdef bytes origin_bytes = origin.encode('utf-8')
+    return struct.pack('B', len(name_bytes)) + name_bytes + \
+        struct.pack('B', len(origin_bytes)) + origin_bytes
+
 
 cdef class SyncDB:
     cdef str _db_path
@@ -98,7 +198,7 @@ cdef class SyncManager:
     cdef object _server_identity
     cdef set _inflight_syncs
     cdef object _sync_queue
-    cdef object _worker_task
+    cdef public object _worker_task
     cdef public object _sync_db
 
     def __init__(self, object engine):
@@ -148,6 +248,15 @@ cdef class SyncManager:
 
         cdef object conn
         cdef bint connected = False
+
+        # SSRF dial-site gate: require BOTH the cheap string check AND a DNS
+        # resolution check that every resolved address is globally routable.
+        # This blocks hostnames that pass the string check but resolve to
+        # private/loopback/link-local IPs (e.g. a rebind or poisoned relay),
+        # before any outbound Connection is opened (#2 / R2).
+        if not _is_dialable_host(peer_hostname) or not _resolves_to_global_only(peer_hostname):
+            log_msg(f"SYNC: refusing to dial non-dialable/non-global peer hostname '{peer_hostname}' (SSRF guard)")
+            return
 
         try:
             conn = Connection.client(self._server_identity)
@@ -201,6 +310,10 @@ cdef class SyncManager:
         cdef int closed
         cdef list batch = []
         cdef set peer_native_boards = set()
+        cdef bytes origin_pubkey
+        cdef bytes payload
+        cdef int verified = 0
+        cdef int skipped = 0
 
         for _ in range(count):
             n_len = response[idx]
@@ -221,14 +334,44 @@ cdef class SyncManager:
             closed = response[idx]
             idx += 1
 
+            # SSRF guard: reject entries whose origin or the relay we will store
+            # (peer_hostname) is not a dialable host, so poisoned relays/origins
+            # never reach nav (#2).
+            if not _is_dialable_host(origin) or not _is_dialable_host(peer_hostname):
+                log_msg(f"SYNC: skipping board '{name}' from {peer_hostname}: non-dialable origin='{origin}'/relay='{peer_hostname}'")
+                skipped += 1
+                continue
+
+            # Trust guard: verify the board signature against the origin's
+            # TOFU-pinned pubkey before storing, mirroring the report
+            # verification path. Entries whose origin has no pinned key or
+            # whose signature does not verify are dropped (#1).
+            origin_pubkey = self._sync_db.get_peer_pubkey(origin)
+            if origin_pubkey is None:
+                log_msg(f"SYNC: skipping board '{name}' from {peer_hostname}: no TOFU'd pubkey for origin '{origin}'")
+                skipped += 1
+                continue
+
+            payload = _build_board_signature_payload(name, origin)
+            try:
+                if not Identity.verify(origin_pubkey, payload, signature):
+                    log_msg(f"SYNC: skipping board '{name}' from {peer_hostname}: signature verification failed for origin '{origin}'")
+                    skipped += 1
+                    continue
+            except Exception as e:
+                log_msg(f"SYNC: skipping board '{name}' from {peer_hostname}: signature verification error: {e}")
+                skipped += 1
+                continue
+
             if origin == peer_hostname:
                 peer_native_boards.add(name)
 
             batch.append((name, name, origin, signature, peer_hostname, closed))
+            verified += 1
 
         if batch:
             nav.upsert_remote_batch(batch)
-            log_msg(f"SYNC: upserted {len(batch)} boards from {peer_hostname}")
+            log_msg(f"SYNC: upserted {len(batch)} boards from {peer_hostname} (verified={verified}, skipped={skipped})")
 
         nav.delete_by_origin_batch(peer_hostname, list(peer_native_boards))
         log_msg(f"SYNC: delta sync complete for {peer_hostname}, native boards: {len(peer_native_boards)}")

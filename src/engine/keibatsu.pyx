@@ -497,7 +497,7 @@ cdef class Keibatsu:
         
         if self._signing_key is not None:
             signed_payload = self._build_signed_payload(report)
-            signature = bytes(self._signing_key.sign(signed_payload))
+            signature = bytes(self._signing_key.sign(signed_payload).signature)
             origin_sig = signature.hex()
             
             with self._reports_db.open() as ctx:

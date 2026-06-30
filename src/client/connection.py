@@ -159,7 +159,7 @@ class BonnetClient:
         await self.websocket.send(encode_frame(handshake))
 
     async def _register(self, username: str) -> str:
-        cmd = build_register(username, "localhost")
+        cmd = build_register(username, "knolastna.me")
         resp = await self._send_command(cmd)
         status, payload = parse_response(resp)
 
