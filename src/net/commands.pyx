@@ -5,7 +5,7 @@
 import struct
 import asyncio
 import time
-from net.sync import SyncManager
+from net.sync import SyncManager, _is_dialable_host
 from core.crypto import Identity
 from engine.facade import BonnetEngine
 from core.logging import log_msg, log_hex, log_dict
@@ -37,7 +37,7 @@ cdef class CommandHandler:
     cdef object _keibatsu
     cdef object _config
     cdef object _server_identity
-    cdef object _sync_mgr
+    cdef public object _sync_mgr
     cdef dict _rate_limits
     cdef public object _engine
     
@@ -425,14 +425,22 @@ cdef class CommandHandler:
             if not valid:
                 return self._build_error(400, err)
 
-            nav_entry = self._ame.get_nav().get(board_name)
-            if nav_entry is not None and nav_entry['origin'] != self._config.origin:
-                asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
-                origin_bytes = nav_entry['origin'].encode('utf-8')
-                return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
-
+            # Auth + permission gate runs BEFORE the remote-board redirect so
+            # that only authenticated, ACL-permitted callers can trigger an
+            # outbound sync (#6). Previously the redirect/queue_sync fired
+            # before check_permission, letting an unauthorized (but registered)
+            # caller drive syncs.
             if not self._engine.check_permission("write", board_name, conn):
                 return self._build_error(403, "Permission denied for this board")
+
+            nav_entry = self._ame.get_nav().get(board_name)
+            if nav_entry is not None and nav_entry['origin'] != self._config.origin:
+                if _is_dialable_host(nav_entry['relay']):
+                    asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
+                else:
+                    log_msg(f"POST_CREATE: not queuing sync for remote board '{board_name}': non-dialable relay '{nav_entry['relay']}'")
+                origin_bytes = nav_entry['origin'].encode('utf-8')
+                return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
 
             board = self._ame.get_board(board_name)
             if board is None:
@@ -519,14 +527,19 @@ cdef class CommandHandler:
 
             post_num = struct.unpack('>Q', data[idx:idx+8])[0]
 
-            nav_entry = self._ame.get_nav().get(board_name)
-            if nav_entry is not None and nav_entry['origin'] != self._config.origin:
-                asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
-                origin_bytes = nav_entry['origin'].encode('utf-8')
-                return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
-
+            # Permission gate runs BEFORE the remote-board redirect so anonymous
+            # or unauthorized callers cannot trigger an outbound sync (#6).
             if not self._engine.check_permission("read", board_name, conn):
                 return self._build_error(403, "Permission denied for this board")
+
+            nav_entry = self._ame.get_nav().get(board_name)
+            if nav_entry is not None and nav_entry['origin'] != self._config.origin:
+                if _is_dialable_host(nav_entry['relay']):
+                    asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
+                else:
+                    log_msg(f"POST_GET: not queuing sync for remote board '{board_name}': non-dialable relay '{nav_entry['relay']}'")
+                origin_bytes = nav_entry['origin'].encode('utf-8')
+                return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
 
             board = self._ame.get_board(board_name)
             if board is None:
@@ -586,18 +599,23 @@ cdef class CommandHandler:
             if not valid:
                 return self._build_error(400, err)
 
+            # Permission gate runs BEFORE the remote-board redirect so anonymous
+            # or unauthorized callers cannot trigger an outbound sync (#6).
+            if not self._engine.check_permission("read", board_name, conn):
+                return self._build_error(403, "Permission denied for this board")
+
             nav_entry = self._ame.get_nav().get(board_name)
             if nav_entry is None:
                 board = self._ame.get_board(board_name)
                 if board is None:
                     return self._build_error(404, f"Board '{board_name}' not found")
             elif nav_entry['origin'] != self._config.origin:
-                asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
+                if _is_dialable_host(nav_entry['relay']):
+                    asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
+                else:
+                    log_msg(f"POST_LIST: not queuing sync for remote board '{board_name}': non-dialable relay '{nav_entry['relay']}'")
                 origin_bytes = nav_entry['origin'].encode('utf-8')
                 return struct.pack('>B', 0x02) + struct.pack('>B', len(origin_bytes)) + origin_bytes
-
-            if not self._engine.check_permission("read", board_name, conn):
-                return self._build_error(403, "Permission denied for this board")
 
             board = self._ame.get_board(board_name)
             if board is None:
@@ -1310,7 +1328,7 @@ cdef class CommandHandler:
         cdef uint64_t rule_num, culprit_post_num
         cdef int culprit_len, reporter_len, desc_len, board_len, origin_len, relay_len
         cdef bytes culprit_pubkey, reporter_pubkey
-        cdef str description, board, origin, relay
+        cdef str description, board
         cdef object result, report
 
         if not conn.is_registered():
@@ -1346,16 +1364,23 @@ cdef class CommandHandler:
 
             origin_len = data[idx]
             idx += 1
-            origin = data[idx:idx+origin_len].decode('utf-8') if origin_len > 0 else None
+            # Parse and discard client-supplied origin/relay: the report's
+            # origin attribution must always be bound to this server, never to
+            # a client-supplied value, otherwise any registered user could mint
+            # an origin_sig claiming a report originated elsewhere (#7).
+            client_origin = data[idx:idx+origin_len].decode('utf-8') if origin_len > 0 else None
             idx += origin_len if origin_len > 0 else 0
 
             relay_len = data[idx]
             idx += 1
-            relay = data[idx:idx+relay_len].decode('utf-8') if relay_len > 0 else None
+            client_relay = data[idx:idx+relay_len].decode('utf-8') if relay_len > 0 else None
+
+            if client_origin or client_relay:
+                log_msg(f"REPORT_CREATE: ignoring client-supplied origin='{client_origin}' relay='{client_relay}' (origin is server-bound)")
 
             result = self._keibatsu.create_report(
                 rule_num, culprit_pubkey, reporter_pubkey, description,
-                board, culprit_post_num, origin, relay
+                board, culprit_post_num, None, None
             )
             report = result.result()
 
