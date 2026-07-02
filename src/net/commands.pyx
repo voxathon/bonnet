@@ -6,8 +6,11 @@ import struct
 import asyncio
 import time
 from net.sync import SyncManager, _is_dialable_host
+from net.search_limiter import SearchLimiter
 from core.crypto import Identity
+from core.binutil import resolve_rg
 from engine.facade import BonnetEngine
+from engine.ame import SearchUnavailable, SearchTimedOut
 from core.logging import log_msg, log_hex, log_dict
 
 import re
@@ -40,7 +43,8 @@ cdef class CommandHandler:
     cdef public object _sync_mgr
     cdef dict _rate_limits
     cdef public object _engine
-    
+    cdef public object _search_limiter
+
     def __init__(self, object engine):
         self._engine = engine
         self._ume = engine.ume
@@ -49,6 +53,11 @@ cdef class CommandHandler:
         self._config = engine.config
         self._server_identity = engine.server_identity
         self._sync_mgr = SyncManager(engine)
+        self._search_limiter = SearchLimiter(
+            per_identity_concurrency=getattr(self._config, 'search_per_identity_concurrency', 1),
+            rate_limit=getattr(self._config, 'search_rate_limit', 10),
+            rate_window_seconds=getattr(self._config, 'search_rate_window_seconds', 60),
+        )
     
     def handle(self, bytes request, object conn) -> bytes:
         cdef double current_time = time.time()
@@ -81,7 +90,7 @@ cdef class CommandHandler:
             0x10: 'BOARD_CREATE', 0x11: 'BOARD_LIST', 0x12: 'POST_CREATE',
             0x13: 'POST_GET', 0x14: 'POST_LIST', 0x15: 'POST_UPDATE',
             0x16: 'POST_DELETE', 0x17: 'BOARD_CLOSE', 0x18: 'BOARD_DELETE',
-            0x19: 'QUERY_POSTS', 0x20: 'USER_PROMOTE', 0x21: 'USER_DEMOTE',
+            0x19: 'QUERY_POSTS', 0x1A: 'POST_CONTENT_SEARCH', 0x20: 'USER_PROMOTE', 0x21: 'USER_DEMOTE',
             0x22: 'POST_SIGN', 0x30: 'GET_PUBKEY',
             0x40: 'RULE_CREATE', 0x41: 'RULE_GET', 0x42: 'RULE_GET_BY_NAME',
             0x43: 'RULE_LIST', 0x44: 'RULE_UPDATE',
@@ -134,6 +143,8 @@ cdef class CommandHandler:
             return self._cmd_board_delete(data, conn)
         elif cmd == 0x19:
             return self._cmd_post_query(data, conn)
+        elif cmd == 0x1A:
+            return self._cmd_post_content_search(data, conn)
         elif cmd == 0x20:
             return self._cmd_user_promote(data, conn)
         elif cmd == 0x21:
@@ -900,6 +911,102 @@ cdef class CommandHandler:
 
             return payload
 
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    cdef bytes _cmd_post_content_search(self, bytes data, object conn):
+        cdef int b_len, pattern_len, idx
+        cdef int limit
+        cdef str board_name, pattern
+        cdef object board, result
+        cdef list posts
+        cdef object post
+        cdef bytes payload
+        cdef str identity_key
+        cdef bint admitted
+
+        try:
+            idx = 0
+            b_len = data[idx]
+            idx += 1
+            board_name = data[idx:idx+b_len].decode('utf-8')
+            idx += b_len
+
+            valid, err = _validate_name(board_name, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
+            if not self._engine.check_permission("read", board_name, conn):
+                return self._build_error(403, "Permission denied for this board")
+
+            # pattern: long_string (u32 length) -- regex per ripgrep
+            pattern_len = struct.unpack('>I', data[idx:idx+4])[0]
+            idx += 4
+            pattern = data[idx:idx+pattern_len].decode('utf-8')
+            idx += pattern_len
+            if not pattern:
+                return self._build_error(400, "search pattern cannot be empty")
+
+            # limit: u32 (0 => use configured default)
+            limit = struct.unpack('>I', data[idx:idx+4])[0]
+
+            # rg must be available; 503 if not (covers non-frozen envs without rg)
+            if resolve_rg() is None:
+                return self._build_error(503, "content search unavailable (ripgrep not found)")
+
+            board = self._ame.get_board(board_name)
+            if board is None:
+                # Local-only: remote/relay boards have no mirrored bodies -> 404.
+                return self._build_error(404, f"Board '{board_name}' not found")
+
+            identity_key = conn.peer_public_key.hex() if conn.peer_public_key else "anonymous"
+            admitted = self._search_limiter.acquire(
+                identity_key,
+                timeout=float(getattr(self._config, 'search_timeout_seconds', 10)),
+            )
+            if not admitted:
+                return self._build_error(429, "content search rate limit exceeded")
+            try:
+                result_limit = limit if limit > 0 else getattr(self._config, 'search_result_limit', 100)
+                result = board.content_search(
+                    pattern,
+                    max_count=getattr(self._config, 'search_max_count', 1000),
+                    timeout_seconds=getattr(self._config, 'search_timeout_seconds', 10),
+                    result_limit=result_limit,
+                )
+                posts = result.result()
+            finally:
+                self._search_limiter.release(identity_key)
+
+            payload = struct.pack('>B', 0x00)
+            for post in posts:
+                tags_bytes = (post.tags or "").encode('utf-8')
+                subject_bytes = (post.subject or "").encode('utf-8')
+                options_bytes = (post.options or "").encode('utf-8')
+                author_bytes = (post.author or "").encode('utf-8')
+                author_registrar_bytes = (post.author_registrar or "").encode('utf-8')
+                signature_bytes = (post.signature or "").encode('utf-8')
+
+                payload += struct.pack('>Q', post.post_num)
+                payload += struct.pack('>q', post.last_modified)
+                payload += struct.pack('>q', post.creation_date)
+                payload += struct.pack('>q', post.last_bumped)
+                payload += struct.pack('>B', 1 if post.closed else 0)
+                payload += struct.pack('>i', post.sticky if post.sticky else 0)
+                payload += struct.pack('>B', len(tags_bytes)) + tags_bytes
+                payload += struct.pack('>B', len(subject_bytes)) + subject_bytes
+                payload += struct.pack('>B', len(options_bytes)) + options_bytes
+                payload += struct.pack('>Q', post.root)
+                payload += struct.pack('>B', len(author_bytes)) + author_bytes
+                payload += struct.pack('>B', len(author_registrar_bytes)) + author_registrar_bytes
+                payload += struct.pack('>B', len(signature_bytes)) + signature_bytes
+
+            return payload
+
+        except SearchTimedOut:
+            return self._build_error(504, "content search timed out")
+        except SearchUnavailable:
+            return self._build_error(503, "content search unavailable (ripgrep not found)")
         except Exception as e:
             return self._build_error(400, str(e))
 
