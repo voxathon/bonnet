@@ -9,8 +9,21 @@ import os
 import time
 import re
 import struct
+import subprocess
+import json
 from libc.stdint cimport uint64_t, int64_t
 from core.orm import Database, Table
+from core.binutil import resolve_rg
+
+
+class SearchUnavailable(Exception):
+    """Raised when content search cannot run (e.g. rg binary missing)."""
+    pass
+
+
+class SearchTimedOut(Exception):
+    """Raised when a content search exceeds its timeout."""
+    pass
 
 
 cdef str _sanitize_board_name(str name):
@@ -406,17 +419,26 @@ cdef class Board:
             'closed', 'sticky', 'tags', 'subject', 'options', 'root', 'author', 'author_registrar', 'signature'
         }
         cdef set valid_directions = {'ASC', 'DESC'}
+        cdef set like_allowed = {'subject', 'author'}
 
         if where:
-            # Strictly validate where clause for parameterized queries
-            # Only allow "column = ?" joined by AND/OR
+            # Strictly validate where clause for parameterized queries.
+            # Allow "column = ?" for any valid column, and "column LIKE ?" for
+            # the substring-searchable text columns (subject, author) only.
             parts = re.split(r'\s+(?i:AND|OR)\s+', where.strip())
             for part in parts:
-                match = re.match(r"^([a-zA-Z0-9_]+)\s*=\s*\?$", part.strip())
-                if not match:
-                    raise ValueError("Invalid where clause format")
-                if match.group(1) not in valid_columns:
-                    raise ValueError(f"Invalid column in where clause: {match.group(1)}")
+                part = part.strip()
+                match = re.match(r"^([a-zA-Z0-9_]+)\s*=\s*\?$", part)
+                if match:
+                    if match.group(1) not in valid_columns:
+                        raise ValueError(f"Invalid column in where clause: {match.group(1)}")
+                    continue
+                match = re.match(r"^([a-zA-Z0-9_]+)\s+LIKE\s+\?$", part, re.IGNORECASE)
+                if match:
+                    if match.group(1) not in like_allowed:
+                        raise ValueError(f"LIKE not allowed for column: {match.group(1)}")
+                    continue
+                raise ValueError("Invalid where clause format")
 
         if orderby:
             # Validate orderby format: only allow "column" or "column ASC/DESC"
@@ -440,6 +462,108 @@ cdef class Board:
 
         def task():
             return self._query_posts(where, values, orderby, limit, offset, include_content)
+        return AsyncResult(self._executor.submit(task))
+
+    cdef list _hydrate_post_summaries(self, list post_nums):
+        """Hydrate a list of post_nums into Post objects (no content) preserving order."""
+        if not post_nums:
+            return []
+        cdef list result = []
+        cdef dict by_num
+        cdef list rows
+        cdef str placeholders = ",".join("?" * len(post_nums))
+        cdef str sql = f"SELECT post_num, last_modified, creation_date, last_bumped, closed, sticky, tags, subject, options, root, author, author_registrar, signature FROM posts WHERE post_num IN ({placeholders})"
+        with self._db.open() as ctx:
+            rows = ctx.execute(sql, post_nums).fetchall()
+        by_num = {row[0]: row for row in rows}
+        cdef object p
+        cdef uint64_t num
+        for num in post_nums:
+            row = by_num.get(num)
+            if row is None:
+                continue
+            p = Post()
+            p.post_num = row[0]
+            p.last_modified = row[1]
+            p.creation_date = row[2]
+            p.last_bumped = row[3]
+            p.closed = bool(row[4]) if row[4] else False
+            p.sticky = row[5] if row[5] else 0
+            p.tags = row[6] if row[6] is not None else ""
+            p.subject = row[7] if row[7] is not None else ""
+            p.options = row[8] if row[8] is not None else ""
+            p.root = row[9] if row[9] is not None else 0
+            p.author = row[10] if row[10] is not None else ""
+            p.author_registrar = row[11] if row[11] is not None else ""
+            p.signature = row[12] if row[12] is not None else ""
+            result.append(p)
+        return result
+
+    cdef list _content_search(self, str pattern, int max_count, int timeout_seconds, int result_limit):
+        """Run ripgrep over this board's post-body files and return hydrated Posts.
+
+        Post bodies are flat files named by post_num under self._articles_path.
+        `rg --json` emits newline-delimited JSON; match objects carry the file
+        path whose basename is the post_num. Results are deduped by post_num
+        and capped at result_limit, then hydrated from the metadata table.
+        """
+        cdef str rg_path = resolve_rg()
+        if rg_path is None:
+            raise SearchUnavailable("ripgrep (rg) binary not found")
+
+        cdef list argv = [rg_path, "--json", "--line-buffered", "--max-count", str(max_count), "--", pattern, self._articles_path]
+        cdef bytes stdout_data
+        try:
+            proc = subprocess.run(argv, capture_output=True, timeout=timeout_seconds)
+            stdout_data = proc.stdout
+        except subprocess.TimeoutExpired:
+            raise SearchTimedOut("content search timed out")
+
+        # rg exits 1 when there are no matches (normal); exit 2 is a real error.
+        if proc.returncode not in (0, 1):
+            raise RuntimeError(f"rg failed with exit code {proc.returncode}: {proc.stderr.decode('utf-8', errors='replace')}")
+
+        cdef set seen = set()
+        cdef list ordered_nums = []
+        cdef uint64_t post_num
+        cdef str line
+        cdef object obj
+        cdef str basename
+        for line in stdout_data.decode('utf-8', errors='replace').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if obj.get("type") != "match":
+                continue
+            try:
+                path_text = obj["data"]["path"]["text"]
+            except (KeyError, TypeError):
+                continue
+            basename = os.path.basename(path_text)
+            try:
+                post_num = int(basename)
+            except ValueError:
+                continue
+            if post_num in seen:
+                continue
+            seen.add(post_num)
+            ordered_nums.append(post_num)
+            if len(ordered_nums) >= result_limit:
+                break
+
+        return self._hydrate_post_summaries(ordered_nums)
+
+    def content_search(self, str pattern, int max_count=1000, int timeout_seconds=10, int result_limit=100):
+        if not pattern:
+            raise ValueError("search pattern cannot be empty")
+        if self._closed:
+            raise RuntimeError("Board is closed")
+        def task():
+            return self._content_search(pattern, max_count, timeout_seconds, result_limit)
         return AsyncResult(self._executor.submit(task))
 
     def create_post(self, int64_t last_modified=0, int64_t creation_date=0, int64_t last_bumped=0, bint closed=False, int sticky=0, str tags="", str subject="", str options="", uint64_t root=0, str author="", str author_registrar="", str signature="", str content=""):
