@@ -199,3 +199,64 @@ reports_path = "data/reports.db"
             assert config.reports_db_path == "/var/lib/bonnet/data/reports.db"
         finally:
             os.unlink(path)
+
+
+class TestConfigSearch:
+    def test_search_defaults(self):
+        config = Config(data_dir="/tmp/x")
+        assert config.search_max_count == 1000
+        assert config.search_timeout_seconds == 10
+        assert config.search_result_limit == 100
+        assert config.search_per_identity_concurrency == 1
+        assert config.search_rate_limit == 10
+        assert config.search_rate_window_seconds == 60
+
+    def test_public_commands_default_denies_content_search(self):
+        config = Config(data_dir="/tmp/x")
+        assert 0x19 in config.public_commands   # QUERY_POSTS stays public
+        assert 0x1A not in config.public_commands   # POST_CONTENT_SEARCH default-deny
+
+    def test_load_search_section_from_toml(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
+            f.write("""
+[server]
+origin = "test.example.com"
+
+[search]
+max_count = 500
+timeout_seconds = 5
+result_limit = 25
+per_identity_concurrency = 2
+rate_limit = 3
+rate_window_seconds = 30
+""")
+            f.flush()
+            path = f.name
+        try:
+            config = Config.load(path)
+            assert config.search_max_count == 500
+            assert config.search_timeout_seconds == 5
+            assert config.search_result_limit == 25
+            assert config.search_per_identity_concurrency == 2
+            assert config.search_rate_limit == 3
+            assert config.search_rate_window_seconds == 30
+            # no public_commands specified -> default set, which denies 0x1A
+            assert 0x1A not in config.public_commands
+        finally:
+            os.unlink(path)
+
+    def test_load_public_commands_by_name_includes_content_search(self):
+        # Operators can opt content search in via TOML using the cmd_map name.
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
+            f.write("""
+[server]
+origin = "test.example.com"
+public_commands = ["POST_CONTENT_SEARCH", "QUERY_POSTS"]
+""")
+            f.flush()
+            path = f.name
+        try:
+            config = Config.load(path)
+            assert config.public_commands == {0x19, 0x1A}
+        finally:
+            os.unlink(path)
