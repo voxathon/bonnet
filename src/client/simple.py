@@ -145,6 +145,16 @@ async def list_posts(board: str, auth: str) -> list[PostSummary]:
 
 
 @simple_mcp.tool
+async def search_posts(board: str, pattern: str, auth: str, limit: int = 100) -> list[PostSummary]:
+    """Search post content (bodies) on a local board for a regex pattern via server-side ripgrep."""
+    client = get_client()
+    username = resolve_username(auth)
+    async with client:
+        await client.connect(username, require_auth=False)
+        return await client.post_content_search(board, pattern, limit)
+
+
+@simple_mcp.tool
 async def get_post(board: str, post_num: int, auth: str) -> Post:
     """Get full post content by board and post number."""
     client = get_client()

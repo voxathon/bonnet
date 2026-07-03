@@ -112,8 +112,15 @@ cdef class Config:
     cdef public bint tls_enabled
     cdef public str tls_cert_path
     cdef public str tls_key_path
-    
-    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None):
+
+    cdef public int search_max_count
+    cdef public int search_timeout_seconds
+    cdef public int search_result_limit
+    cdef public int search_per_identity_concurrency
+    cdef public int search_rate_limit
+    cdef public int search_rate_window_seconds
+
+    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None, search_max_count: int = 1000, search_timeout_seconds: int = 10, search_result_limit: int = 100, search_per_identity_concurrency: int = 1, search_rate_limit: int = 10, search_rate_window_seconds: int = 60):
         if registrars is None:
             registrars = ["knolastna.me"]
         self.registrars = [r.lower() for r in registrars]
@@ -150,7 +157,14 @@ cdef class Config:
         self.tls_enabled = tls_enabled
         self.tls_cert_path = tls_cert_path
         self.tls_key_path = tls_key_path
-        
+
+        self.search_max_count = search_max_count
+        self.search_timeout_seconds = search_timeout_seconds
+        self.search_result_limit = search_result_limit
+        self.search_per_identity_concurrency = search_per_identity_concurrency
+        self.search_rate_limit = search_rate_limit
+        self.search_rate_window_seconds = search_rate_window_seconds
+
         if acls is None:
             acls = []
         self.acls = acls
@@ -194,18 +208,19 @@ cdef class Config:
         boards = data.get('boards', {})
         keibatsu = data.get('keibatsu', {})
         tls = data.get('tls', {})
-        
+        search = data.get('search', {})
+
         registrars = server.get('registrars', ["knolastna.me"])
         origin = server.get('origin', "localhost")
         timeout_seconds = limits.get('timeout_seconds', 30)
         ame_path = boards.get('path', "./boards")
         anonymous_read = server.get('anonymous_read', True)
         admin_bypass_acl = server.get('admin_bypass_acl', True)
-        
+
         cmd_map = {
             'GET_USER': 0x02, 'LIST_USERS': 0x03, 'LIST_PEERS': 0x04,
             'BOARD_LIST': 0x11, 'POST_GET': 0x13, 'POST_LIST': 0x14,
-            'QUERY_POSTS': 0x19, 'GET_PUBKEY': 0x30,
+            'QUERY_POSTS': 0x19, 'POST_CONTENT_SEARCH': 0x1A, 'GET_PUBKEY': 0x30,
             'RULE_GET': 0x41, 'RULE_GET_BY_NAME': 0x42, 'RULE_LIST': 0x43,
             'REPORT_GET': 0x51, 'REPORT_LIST_BY_CULPRIT': 0x52, 'REPORT_LIST_SINCE': 0x54,
             'PUNISHMENT_GET': 0x61, 'PUNISHMENT_LIST_ACTIVE': 0x62, 'IS_BANNED': 0x63,
@@ -246,7 +261,14 @@ cdef class Config:
         tls_enabled = tls.get('enabled', False)
         tls_cert_path = tls.get('cert_path', None)
         tls_key_path = tls.get('key_path', None)
-        
+
+        search_max_count = search.get('max_count', 1000)
+        search_timeout_seconds = search.get('timeout_seconds', 10)
+        search_result_limit = search.get('result_limit', 100)
+        search_per_identity_concurrency = search.get('per_identity_concurrency', 1)
+        search_rate_limit = search.get('rate_limit', 10)
+        search_rate_window_seconds = search.get('rate_window_seconds', 60)
+
         acls = []
         if 'acl' in data:
             for acl_data in data['acl']:
@@ -277,7 +299,13 @@ cdef class Config:
             rate_limit_window=rate_limit_window,
             tls_enabled=tls_enabled,
             tls_cert_path=tls_cert_path,
-            tls_key_path=tls_key_path
+            tls_key_path=tls_key_path,
+            search_max_count=search_max_count,
+            search_timeout_seconds=search_timeout_seconds,
+            search_result_limit=search_result_limit,
+            search_per_identity_concurrency=search_per_identity_concurrency,
+            search_rate_limit=search_rate_limit,
+            search_rate_window_seconds=search_rate_window_seconds
         )
     
     @staticmethod
@@ -292,6 +320,8 @@ log_dir = "./logs"
 port_standard = 2272
 port_privileged = 272
 # public_commands = ["REGISTER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PEER_KEY_LIST"]
+# Content search (POST_CONTENT_SEARCH) is default-deny for anonymous callers;
+# opt in by adding it to public_commands above if anonymous search is desired.
 
 [[acl]]
 name = "local-full-access"
@@ -313,6 +343,16 @@ path = "./boards"
 [keibatsu]
 reports_path = "reports.db"
 punishments_path = "punishments.db"
+
+[search]
+# Content search via ripgrep. rg is resolved at runtime (bundled in frozen
+# builds via _MEIPASS, otherwise via PATH); the server returns 503 if missing.
+max_count = 1000
+timeout_seconds = 10
+result_limit = 100
+per_identity_concurrency = 1
+rate_limit = 10
+rate_window_seconds = 60
 
 [tls]
 enabled = false

@@ -201,6 +201,9 @@ cdef class Bonnet:
         
         if cmd == "query-posts":
             return self._cmd_query_posts(parts)
+
+        if cmd == "content-search":
+            return self._cmd_content_search(parts)
         
         if cmd == "promote":
             return self._cmd_promote(parts)
@@ -235,6 +238,8 @@ cdef class Bonnet:
                          List posts
   query-posts <board> [--where=...] [--value=...] [--orderby=...] [--limit=N]
                          Query posts by metadata
+  content-search <board> <pattern> [--limit=N]
+                         Search post bodies (content) by regex
   update-post <board> <n>
                          Edit post (interactive)
   sign-post <board> <n>
@@ -769,6 +774,42 @@ cdef class Bonnet:
             return self._format_query_results(response)
         
         return self._parse_error(response)
+
+    cdef str _cmd_content_search(self, list parts):
+        if len(parts) < 3:
+            return "Usage: content-search <board> <pattern> [--limit=N]"
+
+        board = parts[1]
+        limit = 0
+        pattern_parts = []
+        cdef int i
+        for i in range(2, len(parts)):
+            if parts[i].startswith("--limit="):
+                try:
+                    limit = int(parts[i].split("=", 1)[1])
+                except ValueError:
+                    return "Invalid limit"
+            else:
+                pattern_parts.append(parts[i])
+
+        if not pattern_parts:
+            return "Usage: content-search <board> <pattern> [--limit=N]"
+        pattern = " ".join(pattern_parts)
+
+        cdef bytes request = self._build_content_search_request(board, pattern, limit)
+        response = self.command_handler.handle(request, self.local_conn)
+
+        if response[0] == 0x00:
+            return self._format_query_results(response)
+
+        return self._parse_error(response)
+
+    cdef bytes _build_content_search_request(self, str board, str pattern, int limit):
+        cdef bytes request = self._encode_string(board)
+        pattern_bytes = pattern.encode("utf-8")
+        request += struct.pack(">I", len(pattern_bytes)) + pattern_bytes
+        request += struct.pack(">I", limit)
+        return bytes([0x1A]) + request
     
     cdef str _cmd_promote(self, list parts):
         if len(parts) < 2:
