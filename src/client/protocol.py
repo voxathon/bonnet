@@ -140,6 +140,7 @@ COMMANDS = {
     "BOARD_CLOSE": 0x17,
     "BOARD_DELETE": 0x18,
     "QUERY_POSTS": 0x19,
+    "POST_CONTENT_SEARCH": 0x1A,
     "USER_PROMOTE": 0x20,
     "USER_DEMOTE": 0x21,
     "POST_SIGN": 0x22,
@@ -306,6 +307,15 @@ def build_query_posts(
         + where_bytes
         + values_data
         + orderby_bytes
+        + struct.pack(">I", limit)
+    )
+
+
+def build_post_content_search(board: str, pattern: str, limit: int = 100) -> bytes:
+    return (
+        struct.pack(">B", COMMANDS["POST_CONTENT_SEARCH"])
+        + encode_string(board)
+        + encode_long_string(pattern)
         + struct.pack(">I", limit)
     )
 
@@ -651,6 +661,12 @@ def parse_query_posts_resp(payload: bytes) -> list[PostSummary]:
         )
 
     return posts
+
+
+def parse_post_content_search_resp(payload: bytes) -> list[PostSummary]:
+    # The server serializes content-search results with the same per-post
+    # encoding as QUERY_POSTS, so reuse that decoder.
+    return parse_query_posts_resp(payload)
 
 
 def parse_get_pubkey_resp(payload: bytes) -> str:

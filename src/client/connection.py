@@ -25,6 +25,7 @@ from .protocol import (
     build_post_update,
     build_post_delete,
     build_query_posts,
+    build_post_content_search,
     build_post_sign,
     build_user_promote,
     build_user_demote,
@@ -52,6 +53,7 @@ from .protocol import (
     parse_post_get_resp,
     parse_post_list_resp,
     parse_query_posts_resp,
+    parse_post_content_search_resp,
     parse_get_pubkey_resp,
     parse_rule_resp,
     parse_rule_list_resp,
@@ -392,6 +394,21 @@ class BonnetClient:
 
         if status == ResponseStatus.SUCCESS:
             return parse_query_posts_resp(payload)
+        elif status == ResponseStatus.ERROR:
+            raise BonnetError(parse_error_response(payload))
+        elif status == ResponseStatus.REDIRECT:
+            raise BonnetError(f"Redirect to: {decode_redirect(payload)}")
+        raise BonnetError(f"Unexpected response: {status}")
+
+    async def post_content_search(
+        self, board: str, pattern: str, limit: int = 100
+    ) -> list[PostSummary]:
+        cmd = build_post_content_search(board, pattern, limit)
+        resp = await self._send_command(cmd)
+        status, payload = parse_response(resp)
+
+        if status == ResponseStatus.SUCCESS:
+            return parse_post_content_search_resp(payload)
         elif status == ResponseStatus.ERROR:
             raise BonnetError(parse_error_response(payload))
         elif status == ResponseStatus.REDIRECT:
