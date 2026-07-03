@@ -309,7 +309,13 @@ async def query_posts(
     limit: int = 100,
     auth: str | None = None,
 ) -> list[PostSummary]:
-    """Query posts with SQL WHERE clause. values is a list of [type, value] pairs (type: 1=int, 2=str)."""
+    """Query posts with a SQL WHERE clause over post metadata.
+
+    where is a clause of "column = ?" and/or "column LIKE ?" terms joined by
+    AND/OR. LIKE is permitted only on the subject and author columns; use
+    values to supply the bound parameters (type: 1=int, 2=str). For LIKE
+    substring matches pass a value like "%needle%".
+    """
     client = get_client()
     username = resolve_username(auth)
 
@@ -327,6 +333,26 @@ async def query_posts(
     async with client:
         await client.connect(username, require_auth=False)
         return await client.query_posts(board, where, parsed_values, orderby, limit)
+
+
+@mcp.tool
+async def search_posts(
+    board: str,
+    pattern: str,
+    limit: int = 100,
+    auth: str | None = None,
+) -> list[PostSummary]:
+    """Search post *content* (bodies) on a local board for a regex pattern.
+
+    Uses server-side ripgrep over the board's flat-file post bodies and returns
+    hydrated PostSummary objects. Only local-origin boards are searchable;
+    remote/relay boards return an error. Rate-limited per identity.
+    """
+    client = get_client()
+    username = resolve_username(auth)
+    async with client:
+        await client.connect(username, require_auth=False)
+        return await client.post_content_search(board, pattern, limit)
 
 
 @mcp.tool
