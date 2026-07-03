@@ -211,10 +211,10 @@ class TestConfigSearch:
         assert config.search_rate_limit == 10
         assert config.search_rate_window_seconds == 60
 
-    def test_public_commands_default_includes_content_search(self):
+    def test_public_commands_default_denies_content_search(self):
         config = Config(data_dir="/tmp/x")
-        assert 0x19 in config.public_commands   # QUERY_POSTS
-        assert 0x1A in config.public_commands   # POST_CONTENT_SEARCH
+        assert 0x19 in config.public_commands   # QUERY_POSTS stays public
+        assert 0x1A not in config.public_commands   # POST_CONTENT_SEARCH default-deny
 
     def test_load_search_section_from_toml(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
@@ -240,11 +240,13 @@ rate_window_seconds = 30
             assert config.search_per_identity_concurrency == 2
             assert config.search_rate_limit == 3
             assert config.search_rate_window_seconds == 30
-            assert 0x1A in config.public_commands
+            # no public_commands specified -> default set, which denies 0x1A
+            assert 0x1A not in config.public_commands
         finally:
             os.unlink(path)
 
     def test_load_public_commands_by_name_includes_content_search(self):
+        # Operators can opt content search in via TOML using the cmd_map name.
         with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
             f.write("""
 [server]

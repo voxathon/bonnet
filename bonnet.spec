@@ -12,8 +12,6 @@ import os
 import shutil
 from PyInstaller.utils.hooks import collect_submodules
 
-block_cipher = None
-
 # Compiled extensions are copied into src/ by the Makefile `pyinstaller` target
 # before this spec runs (see `cd build && tar cf - *.so | (cd ../src && tar xf -)`).
 src_dir = 'src'
@@ -48,7 +46,7 @@ hiddenimports = collect_submodules('client') + [
 ]
 
 a = Analysis(
-    ['src/app/server.pyx'],
+    ['src/app/main.py'],
     pathex=[src_dir],
     binaries=binaries,
     datas=datas,
@@ -56,10 +54,9 @@ a = Analysis(
     hookspath=[],
     runtime_hooks=[],
     excludes=[],
-    cipher=block_cipher,
     noarchive=False,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
     pyz,

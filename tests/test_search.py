@@ -131,6 +131,11 @@ def _init_rules(reports_path):
 async def engine_setup(temp_dir):
     ident = Identity.generate()
     config = _make_config(temp_dir, origin="local.test")
+    # Handler-level tests exercise logic past the anonymous gate, so opt
+    # POST_CONTENT_SEARCH into the public set here. (Content search is
+    # default-deny for anonymous callers; the dedicated
+    # test_anonymous_content_search_denied_by_default covers the default.)
+    config.public_commands = config.public_commands | {0x1A}
     userfile = os.path.join(temp_dir, "userfile")
     ume = Ume(userfile)
     ame = Ame(config.ame_path, origin=config.origin, signing_key=ident.signing_key,
@@ -535,8 +540,8 @@ class TestPostContentSearchHandler:
     async def test_anonymous_accepted_when_public(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
         config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False)]
-        # default public_commands includes 0x1A
-        assert 0x1A in config.public_commands
+        # explicitly opt POST_CONTENT_SEARCH into the public set
+        config.public_commands = config.public_commands | {0x1A}
         board = ame.create_board("localboard", owner_pubkey=ident.public_key)
         board.create_post(subject="S1", content="findme", author="alice", author_registrar=config.origin).result(timeout=5)
         conn = _anonymous_conn(ident)
@@ -544,6 +549,24 @@ class TestPostContentSearchHandler:
         # should NOT be a 401 auth gate; either success or downstream error
         err = _decode_error(resp)
         assert err is None or err[0] != 401
+
+    @pytest.mark.asyncio
+    async def test_anonymous_content_search_denied_by_default(self, engine_setup):
+        # Default config does NOT include 0x1A in public_commands, so an
+        # anonymous caller must get 401 even with read ACL granted.
+        handler, engine, ident, config, ume, ame, keibatsu = engine_setup
+        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False)]
+        # restore the default public set (the fixture opts 0x1A in for the
+        # other handler tests; here we exercise the unmodified default)
+        config.public_commands = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19,
+                                  0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54,
+                                  0x61, 0x62, 0x63, 0x71}
+        assert 0x1A not in config.public_commands
+        ame.create_board("localboard", owner_pubkey=ident.public_key)
+        conn = _anonymous_conn(ident)
+        resp = handler.handle(_build_content_search("localboard", "findme", 10), conn)
+        code, _ = _decode_error(resp)
+        assert code == 401
 
     @pytest.mark.asyncio
     async def test_anonymous_rejected_401_when_not_public(self, engine_setup):
