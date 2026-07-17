@@ -240,24 +240,21 @@ class TestServerExceptionsLogged:
         assert "conn.close()" in source
 
 
-class TestSyncDBTOFURaceCondition:
-    """Document the read-then-insert TOFU race in SyncDB.set_peer_pubkey_tofu."""
+class TestSyncDBAtomicTOFU:
+    """SyncDB TOFU is now atomic via TrustStore (Phase 6 fix)."""
 
-    def test_tofu_is_read_then_insert(self):
-        """SyncDB.set_peer_pubkey_tofu does:
-          1. get_peer_pubkey(origin)  — SELECT
-          2. if existing: return existing == publickey
-          3. if not: INSERT
-        This is a TOCTOU race — two concurrent first-contacts can both see None
-        and both try to INSERT, with one failing on the PRIMARY KEY constraint."""
+    def test_tofu_uses_atomic_trust_store(self):
+        """SyncDB.set_peer_pubkey_tofu now delegates to TrustStore.tofu_pin,
+        which uses INSERT OR IGNORE + SELECT — a single atomic operation."""
         import inspect
         from net.sync import SyncDB
 
         source = inspect.getsource(SyncDB.set_peer_pubkey_tofu)
 
-        assert "get_peer_pubkey" in source  # read
-        assert "INSERT" in source  # then insert
-        # No INSERT OR IGNORE, no UPSERT, no transaction wrapping both operations
-        assert "INSERT OR IGNORE" not in source
-        assert "INSERT OR REPLACE" not in source
-        assert "ON CONFLICT" not in source
+        # Delegates to TrustStore
+        assert "tofu_pin" in source
+        assert "self._trust" in source
+
+        # No read-then-insert pattern
+        assert "get_peer_pubkey" not in source
+        assert "INSERT" not in source
