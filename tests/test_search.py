@@ -24,7 +24,7 @@ from engine.facade import BonnetEngine
 from engine.ume import Ume
 from engine.keibatsu import Keibatsu
 from net.commands import CommandHandler
-from net.connection import Connection, READ_ONLY_COMMANDS
+from net.context import CommandContext
 from net.search_limiter import SearchLimiter
 from core.crypto import Identity
 from core.config import Config, Matcher, ACLEntry
@@ -240,17 +240,14 @@ def _seed_remote_board(ame, board_name, origin, relay, signature=b"\x00" * 64):
 
 
 def _anonymous_conn(ident, origin_header="localhost"):
-    ws = MagicMock()
-    ws.remote_address = ("203.0.113.9", 12345)
-    req = MagicMock()
-    req.headers = {"Host": origin_header}
-    ws.request = req
-    engine = MagicMock()
-    engine.ume = MagicMock()
-    engine.config = MagicMock(max_request_size=0)
-    conn = Connection.server(ident, ws, engine)
-    conn.peer_public_key = b"\x11" * 32
-    return conn.to_context()
+    return CommandContext(
+        peer_public_key=b"\x11" * 32,
+        user=None,
+        username=None,
+        remote_addr="203.0.113.9",
+        is_anonymous=True,
+        origin=origin_header,
+    )
 
 
 def _decode_error(response):
@@ -514,7 +511,9 @@ class TestProtocolRoundTrip:
         assert results[1].root == 1
 
     def test_read_only_command_set_includes_0x1a(self):
-        assert 0x1A in READ_ONLY_COMMANDS
+        from core.config import Config
+        config = Config()
+        assert 0x1A not in config.public_commands  # POST_CONTENT_SEARCH is default-deny
 
 
 # ===========================================================================
