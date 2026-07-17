@@ -17,12 +17,13 @@ datas = []
 binaries = []
 
 # Bundle ripgrep if discoverable at build time.
-rg_path = shutil.which('rg')
+# BONNET_RG_PATH env var overrides PATH lookup for the binary to bundle.
+rg_path = os.environ.get('BONNET_RG_PATH') or shutil.which('rg')
 if rg_path:
     binaries.append((rg_path, '.'))
 else:
-    print("WARNING: ripgrep (rg) not found on PATH at build time; "
-          "content search will return 503 at runtime.")
+    print("WARNING: ripgrep (rg) not found (set BONNET_RG_PATH or add to PATH) "
+          "at build time; content search will return 503 at runtime.")
 
 hiddenimports = collect_submodules('client') + [
     'core.binutil',

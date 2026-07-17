@@ -74,7 +74,7 @@ class ACLEntry:
 
 
 class Config:
-    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None, search_max_count: int = 1000, search_timeout_seconds: int = 10, search_result_limit: int = 100, search_per_identity_concurrency: int = 1, search_rate_limit: int = 10, search_rate_window_seconds: int = 60):
+    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None, search_max_count: int = 1000, search_timeout_seconds: int = 10, search_result_limit: int = 100, search_per_identity_concurrency: int = 1, search_rate_limit: int = 10, search_rate_window_seconds: int = 60, rg_path: str = None):
         if registrars is None:
             registrars = ["knolastna.me"]
         self.registrars = [r.lower() for r in registrars]
@@ -118,6 +118,7 @@ class Config:
         self.search_per_identity_concurrency = search_per_identity_concurrency
         self.search_rate_limit = search_rate_limit
         self.search_rate_window_seconds = search_rate_window_seconds
+        self.rg_path = rg_path
 
         if acls is None:
             acls = []
@@ -222,6 +223,7 @@ class Config:
         search_per_identity_concurrency = search.get('per_identity_concurrency', 1)
         search_rate_limit = search.get('rate_limit', 10)
         search_rate_window_seconds = search.get('rate_window_seconds', 60)
+        rg_path = search.get('rg_path', None)
 
         acls = []
         if 'acl' in data:
@@ -259,7 +261,8 @@ class Config:
             search_result_limit=search_result_limit,
             search_per_identity_concurrency=search_per_identity_concurrency,
             search_rate_limit=search_rate_limit,
-            search_rate_window_seconds=search_rate_window_seconds
+            search_rate_window_seconds=search_rate_window_seconds,
+            rg_path=rg_path
         )
 
     @staticmethod
@@ -301,6 +304,8 @@ punishments_path = "punishments.db"
 [search]
 # Content search via ripgrep. rg is resolved at runtime (bundled in frozen
 # builds via _MEIPASS, otherwise via PATH); the server returns 503 if missing.
+# Override the binary location explicitly:
+# rg_path = "/usr/local/bin/rg"
 max_count = 1000
 timeout_seconds = 10
 result_limit = 100

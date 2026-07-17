@@ -17,6 +17,7 @@ from net.connection import Connection, ConnectionError
 from net.commands import CommandHandler
 from core.crypto import Identity
 from core.config import Config
+from core.binutil import set_rg_path
 from engine.keibatsu import Keibatsu
 from app.cli import LocalConnection
 from engine.facade import BonnetEngine
@@ -34,6 +35,8 @@ class Bonnet:
             key_bytes = f.read()
         self.server_identity = Identity.from_private_key(key_bytes)
         log_msg(f"INIT: server_identity pubkey={self.server_identity.public_key.hex()}")
+        set_rg_path(config.rg_path)
+        log_msg(f"INIT: rg_path={config.rg_path or '(auto-resolve)'}")
         self.ame = Ame(config.ame_path, origin=config.origin, signing_key=self.server_identity.signing_key, nav_db_path=config.nav_db_path)
         log_msg(f"INIT: Ame initialized, path={config.ame_path}, origin={config.origin}")
         self.keibatsu = Keibatsu(
