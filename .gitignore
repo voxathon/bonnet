@@ -22,11 +22,6 @@ __pycache__/
 diff.txt
 AGENTS.md
 
-# C extensions
-*.so
-*.c
-*.pyd
-
 # Distribution / packaging
 .Python
 build/
@@ -187,9 +182,6 @@ dmypy.json
 
 # pytype static type analyzer
 .pytype/
-
-# Cython debug symbols
-cython_debug/
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

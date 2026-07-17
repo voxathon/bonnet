@@ -1119,7 +1119,7 @@ def load_or_generate_identity(path):
 
 
 async def main_async():
-    default_config = '/var/lib/bonnet/config.toml'
+    default_config = './config.toml'
 
     parser = argparse.ArgumentParser(description='Bonnet Server')
     parser.add_argument('--config', default=default_config, help='Config file path')

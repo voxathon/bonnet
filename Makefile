@@ -19,7 +19,7 @@ clean:
 	rm -rf build/pyi $(BIN_DIR) dist
 
 install: pyinstaller
-	install -m 755 $(BIN_DIR)/bonnet /usr/local/bin/bonnet
+	cp $(BIN_DIR)/bonnet ./bonnet
 
 uv-test:
 	PYTHONPATH=$(SRC_DIR) $(UV) run pytest tests/ -v

@@ -193,7 +193,7 @@ class SyncManager:
         self._sync_queue = asyncio.Queue()
         self._worker_task = asyncio.create_task(self._sync_worker())
 
-        sync_db_path = "/var/lib/bonnet/sync.db"
+        sync_db_path = "./data/sync.db"
         if hasattr(engine.config, "data_dir") and engine.config.data_dir:
             sync_db_path = os.path.join(engine.config.data_dir, "sync.db")
         self._sync_db = SyncDB(sync_db_path)

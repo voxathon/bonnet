@@ -546,7 +546,7 @@ class Ame:
         self._boards_lock = threading.Lock()
         os.makedirs(base_path, exist_ok=True)
         if nav_db_path is None:
-            nav_db_path = "/var/lib/bonnet/nav.db"
+            nav_db_path = "./data/nav.db"
         self._nav = NavDB(nav_db_path)
 
         for name in os.listdir(base_path):
@@ -588,7 +588,7 @@ class Ame:
         with self._boards_lock:
             if name in self._boards:
                 self._boards[name].close()
-                # we don't have access to _db in cython class from outside unless public, so call a NavDB method
+                # we don't have access to _db from outside unless public, so call a NavDB method
                 self._nav._set_board_closed(name)
 
     def delete_board(self, name: str):
