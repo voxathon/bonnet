@@ -146,8 +146,8 @@ class Config:
         if explicit_path is not None:
             if os.path.isabs(explicit_path):
                 return explicit_path
-            return os.path.join(self.data_dir, explicit_path)
-        return os.path.join(self.data_dir, default_name)
+            return os.path.join(self.data_dir, explicit_path).replace('\\', '/')
+        return os.path.join(self.data_dir, default_name).replace('\\', '/')
 
     @staticmethod
     def load(path: str) -> 'Config':

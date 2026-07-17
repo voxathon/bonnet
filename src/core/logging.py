@@ -26,7 +26,7 @@ def init_logging(log_dir: str = None) -> None:
         return
 
     if log_dir is None:
-        log_dir = '/var/log/bonnet'
+        log_dir = './logs'
 
     os.makedirs(log_dir, exist_ok=True)
 
