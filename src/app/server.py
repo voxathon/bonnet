@@ -1,5 +1,4 @@
 import asyncio
-import websockets
 import os
 import sys
 import struct
@@ -13,7 +12,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bui
 
 from engine.ume import Ume
 from engine.ame import Ame
-from net.connection import Connection, ConnectionError
 from net.commands import CommandHandler
 from core.crypto import Identity
 from core.config import Config
@@ -21,9 +19,9 @@ from core.binutil import set_rg_path
 from engine.keibatsu import Keibatsu
 from app.cli import LocalConnection
 from engine.facade import BonnetEngine
-
-import nacl.exceptions
-from net.connection import ConnectionState
+from net.http_server import BonnetHTTPServer
+from net.replay import ReplayLedger
+from net.rate_limiter import RateLimiter
 
 class Bonnet:
     def __init__(self, userfile_path, identity_path, config):
@@ -62,50 +60,52 @@ class Bonnet:
         self.root_user = self.ume.ensure_root_user(config.origin, self.server_identity.public_key)
         log_msg(f"INIT: root_user={self.root_user.username}, pubkey={self.root_user.publickey.hex()}")
         self.local_conn = LocalConnection(self.root_user, self.server_identity.public_key)
+        self.anonymous_identity = Identity.generate()
+        self.replay_ledger = ReplayLedger(
+            config.replay_db_path,
+            clock_skew_seconds=getattr(config, 'clock_skew_seconds', 30),
+        )
+        self.rate_limiter = RateLimiter(
+            max_requests=getattr(config, 'rate_limit_requests', 100),
+            window_seconds=getattr(config, 'rate_limit_window', 1),
+        )
+        self.http_server = BonnetHTTPServer(
+            command_handler=self.command_handler,
+            server_identity=self.server_identity,
+            config=config,
+            ume=self.ume,
+            anonymous_identity=self.anonymous_identity,
+            replay_ledger=self.replay_ledger,
+            rate_limiter=self.rate_limiter,
+        )
         log_msg("INIT: complete")
-
-    async def handle_connection(self, websocket):
-        conn = None
-        try:
-            async with asyncio.timeout(self.config.timeout_seconds):
-                conn = Connection.server(
-                    self.server_identity, websocket,
-                    self.engine
-                )
-                await conn.accept()
-                plaintext = await conn.recv_request()
-                ctx = conn.to_context()
-                response = self.command_handler.handle(plaintext, ctx)
-
-                await conn.send_response(response)
-
-        except asyncio.TimeoutError:
-            log_msg("HANDLE_CONNECTION: timeout")
-        except ConnectionError as e:
-            log_msg(f"HANDLE_CONNECTION: connection error {e.code}: {e.message}")
-        except nacl.exceptions.CryptoError:
-            log_msg("HANDLE_CONNECTION: crypto error during handshake or decryption")
-        except Exception as e:
-            log_msg(f"HANDLE_CONNECTION: unexpected error: {type(e).__name__}: {e}")
-        finally:
-            if conn is not None:
-                try:
-                    await conn.close()
-                except Exception:
-                    pass
 
     async def run(self, port, ssl_context):
         print(f"Bonnet server listening on port {port}")
         print(f"Server public key: {self.server_identity.public_key.hex()}")
         print(f"Root user: root@{self.config.origin}")
+        print(f"Anonymous key: {self.anonymous_identity.public_key.hex()}")
 
-        async with websockets.serve(
-            self.handle_connection,
-            '0.0.0.0',
-            port,
-            ssl=ssl_context
-        ):
-            await self.repl_loop()
+        import uvicorn
+        config = uvicorn.Config(
+            self.http_server,
+            host=self.config.http_host,
+            port=port,
+            ssl=ssl_context if ssl_context else None,
+            log_level="info",
+        )
+        server = uvicorn.Server(config)
+
+        # Run REPL and HTTP server concurrently
+        repl_task = asyncio.create_task(self.repl_loop())
+        try:
+            await server.serve()
+        finally:
+            repl_task.cancel()
+            try:
+                await repl_task
+            except asyncio.CancelledError:
+                pass
 
     async def repl_loop(self):
         loop = asyncio.get_event_loop()

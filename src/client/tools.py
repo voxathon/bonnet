@@ -29,7 +29,7 @@ current_password: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar
     "password", default=""
 )
 identity_store: IdentityStore | None = None
-bonnet_url: str = "ws://localhost:2272"
+bonnet_url: str = "https://localhost:2272"
 
 auth_tokens: dict[str, dict] = {}
 TOKEN_EXPIRY_SECONDS = 24 * 60 * 60

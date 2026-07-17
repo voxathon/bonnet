@@ -645,27 +645,22 @@ class TestACLOriginResolution:
         return BonnetEngine(ume, ame, MagicMock(), config, ident), ident, config
 
     def _conn(self, ident, host_header, user=None, peer_pubkey=None):
-        ws = MagicMock()
-        ws.remote_address = ("203.0.113.9", 12345)
-        req = MagicMock()
-        req.headers = {"Host": host_header}
-        ws.request = req
-        engine = MagicMock()
-        engine.ume = MagicMock()
-        engine.config = MagicMock(max_request_size=0)
-        from net.connection import Connection
-        conn = Connection.server(ident, ws, engine)
-        if user is not None:
-            conn.user = user
-        conn.peer_public_key = peer_pubkey or b"\x22" * 32
-        return conn
+        from net.context import CommandContext
+        return CommandContext(
+            peer_public_key=peer_pubkey or b"\x22" * 32,
+            user=user,
+            username=user.username if user else None,
+            remote_addr="203.0.113.9",
+            is_anonymous=user is None,
+            origin=host_header,
+        )
 
     def test_anonymous_host_localhost_does_not_match(self):
         engine, ident, config = self._engine_with_local_acl()
         conn = self._conn(ident, host_header="localhost")  # spoofed Host header
         # anonymous => _resolve_origin returns "unknown", not "localhost"
-        assert engine.check_permission("write", "anyboard", conn.to_context()) is False
-        assert engine.check_permission("read", "anyboard", conn.to_context()) is False
+        assert engine.check_permission("write", "anyboard", conn) is False
+        assert engine.check_permission("read", "anyboard", conn) is False
 
     def test_authenticated_record_origin_localhost_matches(self):
         engine, ident, config = self._engine_with_local_acl()
@@ -675,8 +670,8 @@ class TestACLOriginResolution:
         user.is_moderator = False
         conn = self._conn(ident, host_header="evil.example", user=user)
         # authenticated user with record_origin=localhost => matches ACL
-        assert engine.check_permission("write", "anyboard", conn.to_context()) is True
-        assert engine.check_permission("read", "anyboard", conn.to_context()) is True
+        assert engine.check_permission("write", "anyboard", conn) is True
+        assert engine.check_permission("read", "anyboard", conn) is True
 
     def test_authenticated_wrong_record_origin_does_not_match(self):
         engine, ident, config = self._engine_with_local_acl()
@@ -686,7 +681,7 @@ class TestACLOriginResolution:
         user.is_moderator = False
         conn = self._conn(ident, host_header="localhost", user=user)
         # record_origin is remote.test, and the spoofed Host header is ignored
-        assert engine.check_permission("write", "anyboard", conn.to_context()) is False
+        assert engine.check_permission("write", "anyboard", conn) is False
 
     def test_anonymous_explicit_anonymous_acl_still_grants_read(self):
         """An explicit `anonymous` ACL must still work for anonymous reads,
@@ -703,8 +698,8 @@ class TestACLOriginResolution:
         engine = BonnetEngine(MagicMock(), ame, MagicMock(), config, Identity.generate())
         ident = Identity.generate()
         conn = self._conn(ident, host_header="localhost")  # anonymous, spoofed Host
-        assert engine.check_permission("read", "public", conn.to_context()) is True
-        assert engine.check_permission("write", "public", conn.to_context()) is False
+        assert engine.check_permission("read", "public", conn) is True
+        assert engine.check_permission("write", "public", conn) is False
 
 
 class TestACLOriginLocalOnly:
@@ -722,19 +717,15 @@ class TestACLOriginLocalOnly:
         return BonnetEngine(MagicMock(), ame, MagicMock(), config, Identity.generate()), Identity.generate(), config
 
     def _conn(self, ident, user, peer_pubkey=None):
-        ws = MagicMock()
-        ws.remote_address = ("203.0.113.9", 12345)
-        req = MagicMock()
-        req.headers = {"Host": "evil.example"}
-        ws.request = req
-        engine = MagicMock()
-        engine.ume = MagicMock()
-        engine.config = MagicMock(max_request_size=0)
-        from net.connection import Connection
-        conn = Connection.server(ident, ws, engine)
-        conn.user = user
-        conn.peer_public_key = peer_pubkey or b"\x33" * 32
-        return conn
+        from net.context import CommandContext
+        return CommandContext(
+            peer_public_key=peer_pubkey or b"\x33" * 32,
+            user=user,
+            username=user.username if user else None,
+            remote_addr="203.0.113.9",
+            is_anonymous=user is None,
+            origin="evil.example",
+        )
 
     def _user(self, record_origin, pubkey, is_admin=False, is_mod=False):
         u = MagicMock()
@@ -753,8 +744,8 @@ class TestACLOriginLocalOnly:
         pubkey = Identity.generate().public_key
         user = self._user("local.test", pubkey)
         conn = self._conn(ident, user, peer_pubkey=pubkey)
-        assert engine.check_permission("write", "anyboard", conn.to_context()) is True
-        assert engine.check_permission("read", "anyboard", conn.to_context()) is True
+        assert engine.check_permission("write", "anyboard", conn) is True
+        assert engine.check_permission("read", "anyboard", conn) is True
 
     def test_remote_record_origin_localhost_does_not_match_localhost_acl(self):
         """R1 attack: a remote-synced user with record_origin='localhost' must
@@ -767,8 +758,8 @@ class TestACLOriginLocalOnly:
         pubkey = Identity.generate().public_key
         user = self._user("localhost", pubkey)  # forgeable peer-supplied origin
         conn = self._conn(ident, user, peer_pubkey=pubkey)
-        assert engine.check_permission("write", "anyboard", conn.to_context()) is False
-        assert engine.check_permission("read", "anyboard", conn.to_context()) is False
+        assert engine.check_permission("write", "anyboard", conn) is False
+        assert engine.check_permission("read", "anyboard", conn) is False
 
     def test_remote_record_origin_does_not_match_its_own_origin_acl(self):
         """A user whose record_origin is some remote origin resolves to
@@ -781,7 +772,7 @@ class TestACLOriginLocalOnly:
         pubkey = Identity.generate().public_key
         user = self._user("peer.example.com", pubkey)
         conn = self._conn(ident, user, peer_pubkey=pubkey)
-        assert engine.check_permission("read", "anyboard", conn.to_context()) is False
+        assert engine.check_permission("read", "anyboard", conn) is False
 
     def test_cross_origin_trust_via_pubkey_still_works(self):
         """Cross-origin trust is still possible via `match.pubkey`: a remote-
@@ -797,8 +788,8 @@ class TestACLOriginLocalOnly:
         )
         user = self._user("peer.example.com", pubkey)  # remote origin, untrusted for origin ACL
         conn = self._conn(ident, user, peer_pubkey=pubkey)
-        assert engine.check_permission("write", "anyboard", conn.to_context()) is True
-        assert engine.check_permission("read", "anyboard", conn.to_context()) is True
+        assert engine.check_permission("write", "anyboard", conn) is True
+        assert engine.check_permission("read", "anyboard", conn) is True
 
     def test_local_record_origin_mismatch_with_acl_denied(self):
         """A locally-registered user (record_origin == config.origin) is still
@@ -811,4 +802,4 @@ class TestACLOriginLocalOnly:
         pubkey = Identity.generate().public_key
         user = self._user("local.test", pubkey)
         conn = self._conn(ident, user, peer_pubkey=pubkey)
-        assert engine.check_permission("write", "anyboard", conn.to_context()) is False
+        assert engine.check_permission("write", "anyboard", conn) is False

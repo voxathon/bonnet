@@ -14,7 +14,7 @@ import pytest
 import pytest_asyncio
 
 from net.commands import CommandHandler
-from net.connection import Connection
+from net.context import CommandContext
 from engine.facade import BonnetEngine
 from engine.ume import Ume, User
 from engine.ame import Ame
@@ -86,25 +86,20 @@ async def engine_setup(temp_dir):
 
 
 def _auth_conn(ident, user=None, peer_pubkey=None, origin_header="evil.example"):
-    """A Connection.server with a spoofable Host header (origin_header).
+    """Build a CommandContext for testing.
 
     By default no user => anonymous. Pass a User to make it authenticated.
-    Returns a CommandContext via Connection.to_context().
     """
-    ws = MagicMock()
-    ws.remote_address = ("203.0.113.9", 12345)
-    req = MagicMock()
-    req.headers = {"Host": origin_header}
-    ws.request = req
-    engine = MagicMock()
-    engine.ume = MagicMock()
-    engine.config = MagicMock(max_request_size=0)
-    conn = Connection.server(ident, ws, engine)
-    if user is not None:
-        conn.user = user
-    if peer_pubkey is not None:
-        conn.peer_public_key = peer_pubkey
-    return conn.to_context()
+    if peer_pubkey is None:
+        peer_pubkey = b"\x11" * 32
+    return CommandContext(
+        peer_public_key=peer_pubkey,
+        user=user,
+        username=user.username if user else None,
+        remote_addr="203.0.113.9",
+        is_anonymous=user is None,
+        origin=origin_header,
+    )
 
 
 def _anonymous_conn(ident, origin_header="localhost"):

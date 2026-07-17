@@ -20,7 +20,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from net.context import CommandContext
 from net.rate_limiter import RateLimiter
-from net.connection import Connection, ConnectionState
 from app.cli import LocalConnection
 from core.crypto import Identity
 from engine.ume import User
@@ -103,50 +102,6 @@ class TestCommandContextPermissions:
         anon = CommandContext(peer_public_key=b"\x00" * 32, is_anonymous=True)
         assert anon.peer_public_key is not None
         assert len(anon.peer_public_key) == 32
-
-
-class TestConnectionToContext:
-    """Connection.to_context() produces a CommandContext with the right fields."""
-
-    def test_anonymous_connection(self):
-        ident = Identity.generate()
-        ws = MagicMock()
-        ws.remote_address = ("127.0.0.1", 12345)
-        engine = MagicMock()
-        engine.ume = MagicMock()
-        engine.config = MagicMock()
-        conn = Connection.server(ident, ws, engine)
-        conn.peer_public_key = b"\x44" * 32
-
-        ctx = conn.to_context()
-
-        assert ctx.peer_public_key == b"\x44" * 32
-        assert ctx.user is None
-        assert ctx.is_anonymous is True
-        assert ctx.is_registered is False
-        assert ctx.remote_addr == "127.0.0.1"
-
-    def test_authenticated_connection(self):
-        ident = Identity.generate()
-        ws = MagicMock()
-        ws.remote_address = ("10.0.0.1", 9999)
-        engine = MagicMock()
-        engine.ume = MagicMock()
-        engine.config = MagicMock()
-        conn = Connection.server(ident, ws, engine)
-        user = _mock_user("alice")
-        conn.user = user
-        conn.username = "alice"
-        conn.peer_public_key = b"\x55" * 32
-
-        ctx = conn.to_context()
-
-        assert ctx.peer_public_key == b"\x55" * 32
-        assert ctx.user is user
-        assert ctx.username == "alice"
-        assert ctx.is_anonymous is False
-        assert ctx.is_registered is True
-        assert ctx.is_administrator() is False
 
 
 class TestLocalConnectionToContext:
