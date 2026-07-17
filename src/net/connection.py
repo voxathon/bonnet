@@ -147,6 +147,17 @@ class Connection:
             self.is_administrator()
         )
 
+    def to_context(self):
+        from net.context import CommandContext
+        return CommandContext(
+            peer_public_key=self.peer_public_key or b"",
+            user=self.user,
+            username=self.username,
+            remote_addr=self.remote_addr or "unknown",
+            is_anonymous=self.user is None,
+            origin=self.origin or "unknown",
+        )
+
     async def connect(self, url: str, ssl_context: object = None):
         if self.mode != ConnectionMode.CLIENT:
             raise ConnectionError(500, "connect() only valid for client mode")
@@ -325,10 +336,16 @@ class Connection:
             raise ConnectionError(500, "No websocket connection")
 
         data = await self.websocket.recv()
-        if isinstance(data, bytes):
-            length = struct.unpack('>I', data[:4])[0]
-            return data[4:4+length]
-        raise ConnectionError(400, "Expected binary frame")
+        if not isinstance(data, bytes):
+            raise ConnectionError(400, "Expected binary frame")
+        if len(data) < 4:
+            raise ConnectionError(400, f"Frame too short: {len(data)} bytes, need at least 4")
+        length = struct.unpack('>I', data[:4])[0]
+        if 4 + length > len(data):
+            raise ConnectionError(400, f"Truncated frame: length field says {length} bytes but only {len(data) - 4} available")
+        if 4 + length < len(data):
+            raise ConnectionError(400, f"Trailing bytes in frame: length field says {length} but payload is {len(data) - 4} bytes")
+        return data[4:4+length]
 
     async def _send_challenge(self):
         await self._send_frame(self._identity.public_key + self._challenge)
