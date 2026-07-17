@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
-from .connection import BonnetClient
+from .http import BonnetHTTPClient as BonnetClient
 from .identity import IdentityStore
 from .models import (
     User,
