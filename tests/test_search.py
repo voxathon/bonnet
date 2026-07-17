@@ -96,6 +96,70 @@ class TestResolveRg:
         finally:
             binutil.reset_resolve_cache()
 
+    def test_explicit_path_via_setter(self, tmp_path, monkeypatch):
+        rg = tmp_path / "rg"
+        rg.write_text("#!/bin/sh\nexit 0\n")
+        rg.chmod(0o755)
+        binutil.reset_resolve_cache()
+        monkeypatch.setattr(binutil.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(binutil.shutil, "which", lambda cmd: None)
+        try:
+            binutil.set_rg_path(str(rg))
+            assert binutil.resolve_rg() == str(rg)
+        finally:
+            binutil.reset_resolve_cache()
+
+    def test_explicit_path_overrides_which(self, tmp_path, monkeypatch):
+        rg = tmp_path / "rg"
+        rg.write_text("#!/bin/sh\nexit 0\n")
+        rg.chmod(0o755)
+        binutil.reset_resolve_cache()
+        monkeypatch.setattr(binutil.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(binutil.shutil, "which", lambda cmd: "/other/rg")
+        try:
+            binutil.set_rg_path(str(rg))
+            assert binutil.resolve_rg() == str(rg)
+        finally:
+            binutil.reset_resolve_cache()
+
+    def test_env_var_fallback(self, tmp_path, monkeypatch):
+        rg = tmp_path / "rg"
+        rg.write_text("#!/bin/sh\nexit 0\n")
+        rg.chmod(0o755)
+        binutil.reset_resolve_cache()
+        monkeypatch.setattr(binutil.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(binutil.shutil, "which", lambda cmd: None)
+        monkeypatch.setenv("BONNET_RG_PATH", str(rg))
+        try:
+            assert binutil.resolve_rg() == str(rg)
+        finally:
+            binutil.reset_resolve_cache()
+
+    def test_explicit_path_not_found_falls_through(self, monkeypatch):
+        binutil.reset_resolve_cache()
+        monkeypatch.setattr(binutil.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(binutil.shutil, "which", lambda cmd: "/fallback/rg")
+        try:
+            binutil.set_rg_path("/nonexistent/path/rg")
+            assert binutil.resolve_rg() == "/fallback/rg"
+        finally:
+            binutil.reset_resolve_cache()
+
+    def test_reset_clears_explicit(self, tmp_path, monkeypatch):
+        rg = tmp_path / "rg"
+        rg.write_text("#!/bin/sh\nexit 0\n")
+        rg.chmod(0o755)
+        binutil.reset_resolve_cache()
+        monkeypatch.setattr(binutil.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(binutil.shutil, "which", lambda cmd: None)
+        try:
+            binutil.set_rg_path(str(rg))
+            assert binutil.resolve_rg() == str(rg)
+            binutil.reset_resolve_cache()
+            assert binutil.resolve_rg() is None
+        finally:
+            binutil.reset_resolve_cache()
+
 
 # ---------------------------------------------------------------------------
 # engine fixtures
