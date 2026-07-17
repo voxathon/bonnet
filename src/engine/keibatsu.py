@@ -108,8 +108,8 @@ class Punishment:
 
 class Keibatsu:
 
-    def __init__(self, reports_path: str = "/var/lib/bonnet/reports.db",
-                 punishments_path: str = "/var/lib/bonnet/punishments.db",
+    def __init__(self, reports_path: str = "./data/reports.db",
+                 punishments_path: str = "./data/punishments.db",
                  ume: object = None, signing_key: object = None, origin: str = "localhost",
                  num_workers: int = 2):
         needs_migration = False

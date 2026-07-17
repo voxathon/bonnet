@@ -18,26 +18,26 @@ class TestConfigPaths:
 
     def test_data_dir_explicit(self):
         """Explicit data_dir is used"""
-        config = Config(data_dir="/var/lib/bonnet")
-        assert config.data_dir == "/var/lib/bonnet"
-        assert config.identity_path == "/var/lib/bonnet/identity"
-        assert config.userfile_path == "/var/lib/bonnet/userfile"
+        config = Config(data_dir="./bonnet_data")
+        assert config.data_dir == "./bonnet_data"
+        assert config.identity_path == "./bonnet_data/identity"
+        assert config.userfile_path == "./bonnet_data/userfile"
 
     def test_identity_path_override(self):
         """Explicit identity_path overrides data_dir derivation"""
-        config = Config(data_dir="./data", identity_path="/secure/identity")
+        config = Config(data_dir="./data", identity_path="secure/identity")
         assert config.data_dir == "./data"
-        assert config.identity_path == "/secure/identity"
+        assert config.identity_path == "./data/secure/identity"
 
     def test_userfile_path_override(self):
         """Explicit userfile_path overrides data_dir derivation"""
-        config = Config(data_dir="./data", userfile_path="/etc/bonnet/users")
-        assert config.userfile_path == "/etc/bonnet/users"
+        config = Config(data_dir="./data", userfile_path="etc/users")
+        assert config.userfile_path == "./data/etc/users"
 
     def test_relative_path_resolves_from_data_dir(self):
         """Relative paths resolve from data_dir"""
-        config = Config(data_dir="/var/lib/bonnet", nav_db_path="custom/nav.db")
-        assert config.nav_db_path == "/var/lib/bonnet/custom/nav.db"
+        config = Config(data_dir="./bonnet_data", nav_db_path="custom/nav.db")
+        assert config.nav_db_path == "./bonnet_data/custom/nav.db"
 
     def test_log_dir_default(self):
         """Default log_dir is ./logs"""
@@ -46,8 +46,8 @@ class TestConfigPaths:
 
     def test_log_dir_explicit(self):
         """Explicit log_dir is used"""
-        config = Config(log_dir="/var/log/bonnet")
-        assert config.log_dir == "/var/log/bonnet"
+        config = Config(log_dir="./bonnet_logs")
+        assert config.log_dir == "./bonnet_logs"
 
 
 class TestConfigPorts:
@@ -101,11 +101,11 @@ class TestConfigTLS:
     def test_tls_enabled(self):
         """TLS can be enabled"""
         config = Config(
-            tls_enabled=True, tls_cert_path="/ssl/cert.pem", tls_key_path="/ssl/key.pem"
+            tls_enabled=True, tls_cert_path="./ssl/cert.pem", tls_key_path="./ssl/key.pem"
         )
         assert config.tls_enabled is True
-        assert config.tls_cert_path == "/ssl/cert.pem"
-        assert config.tls_key_path == "/ssl/key.pem"
+        assert config.tls_cert_path == "./ssl/cert.pem"
+        assert config.tls_key_path == "./ssl/key.pem"
 
 
 class TestConfigLoad:
@@ -115,7 +115,7 @@ class TestConfigLoad:
             f.write("""
 [server]
 origin = "test.example.com"
-data_dir = "/test/data"
+data_dir = "./test_data"
 port_standard = 9000
 port_privileged = 90
 
@@ -128,8 +128,8 @@ rate_limit_window = 2
 
 [tls]
 enabled = true
-cert_path = "/test/cert.pem"
-key_path = "/test/key.pem"
+cert_path = "./test_certs/cert.pem"
+key_path = "./test_certs/key.pem"
 """)
             f.flush()
             path = f.name
@@ -137,7 +137,7 @@ key_path = "/test/key.pem"
         try:
             config = Config.load(path)
             assert config.origin == "test.example.com"
-            assert config.data_dir == "/test/data"
+            assert config.data_dir == "./test_data"
             assert config.port_standard == 9000
             assert config.port_privileged == 90
             assert config.timeout_seconds == 45
@@ -146,8 +146,8 @@ key_path = "/test/key.pem"
             assert config.rate_limit_requests == 25
             assert config.rate_limit_window == 2
             assert config.tls_enabled is True
-            assert config.tls_cert_path == "/test/cert.pem"
-            assert config.tls_key_path == "/test/key.pem"
+            assert config.tls_cert_path == "./test_certs/cert.pem"
+            assert config.tls_key_path == "./test_certs/key.pem"
         finally:
             os.unlink(path)
 
@@ -168,16 +168,16 @@ key_path = "/test/key.pem"
         with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
             f.write("""
 [keibatsu]
-reports_path = "/custom/reports.db"
-punishments_path = "/custom/punishments.db"
+reports_path = "custom/reports.db"
+punishments_path = "custom/punishments.db"
 """)
             f.flush()
             path = f.name
 
         try:
             config = Config.load(path)
-            assert config.reports_db_path == "/custom/reports.db"
-            assert config.punishments_db_path == "/custom/punishments.db"
+            assert config.reports_db_path == "./data/custom/reports.db"
+            assert config.punishments_db_path == "./data/custom/punishments.db"
         finally:
             os.unlink(path)
 
@@ -186,7 +186,7 @@ punishments_path = "/custom/punishments.db"
         with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
             f.write("""
 [server]
-data_dir = "/var/lib/bonnet"
+data_dir = "./bonnet_data"
 
 [keibatsu]
 reports_path = "data/reports.db"
@@ -196,14 +196,14 @@ reports_path = "data/reports.db"
 
         try:
             config = Config.load(path)
-            assert config.reports_db_path == "/var/lib/bonnet/data/reports.db"
+            assert config.reports_db_path == "./bonnet_data/data/reports.db"
         finally:
             os.unlink(path)
 
 
 class TestConfigSearch:
     def test_search_defaults(self):
-        config = Config(data_dir="/tmp/x")
+        config = Config(data_dir="./tmp_x")
         assert config.search_max_count == 1000
         assert config.search_timeout_seconds == 10
         assert config.search_result_limit == 100
@@ -212,7 +212,7 @@ class TestConfigSearch:
         assert config.search_rate_window_seconds == 60
 
     def test_public_commands_default_denies_content_search(self):
-        config = Config(data_dir="/tmp/x")
+        config = Config(data_dir="./tmp_x")
         assert 0x19 in config.public_commands   # QUERY_POSTS stays public
         assert 0x1A not in config.public_commands   # POST_CONTENT_SEARCH default-deny
 

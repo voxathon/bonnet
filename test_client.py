@@ -34,7 +34,7 @@ async def test_anonymous_registration():
 
         print(f"Client Public Key: {identity.public_key.hex()}")
 
-        server_identity_file = os.path.expanduser("~/.config/bonnet/identity")
+        server_identity_file = "./data/identity"
         if not os.path.exists(server_identity_file):
             print(f"Server identity not found at {server_identity_file}")
             return
@@ -119,7 +119,7 @@ async def test_registered_user():
 
     print(f"Client Public Key: {identity.public_key.hex()}")
 
-    server_identity_file = os.path.expanduser("~/.config/bonnet/identity")
+    server_identity_file = "./data/identity"
     if not os.path.exists(server_identity_file):
         print(f"Server identity not found at {server_identity_file}")
         return
@@ -129,7 +129,7 @@ async def test_registered_user():
     server_identity = Identity.from_private_key(server_key_bytes)
 
     # Register the user directly in UME (password optional)
-    ume = Ume(os.path.expanduser("~/.config/bonnet/userfile"))
+    ume = Ume("./data/userfile")
     try:
         ume.put("testuser", "localhost", identity.public_key)
         print("Test user registered in UME.")
