@@ -1,19 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for Bonnet.
+"""PyInstaller spec for Bonnet (pure Python).
 
-Bundles the compiled Cython extensions (already built as .so under src/ by
-`make all`) and, when available, the ripgrep (`rg`) binary so that
-`core.binutil.resolve_rg` can find it under ``sys._MEIPASS`` at runtime. If
-`rg` is not present on PATH at build time the build still succeeds -- the
-server returns 503 for content search in that case.
+Bundles the pure-Python server modules and, when available, the ripgrep (`rg`)
+binary so that `core.binutil.resolve_rg` can find it under ``sys._MEIPASS`` at
+runtime. If `rg` is not present on PATH at build time the build still succeeds
+-- the server returns 503 for content search in that case.
 """
 
 import os
 import shutil
 from PyInstaller.utils.hooks import collect_submodules
 
-# Compiled extensions are copied into src/ by the Makefile `pyinstaller` target
-# before this spec runs (see `cd build && tar cf - *.so | (cd ../src && tar xf -)`).
 src_dir = 'src'
 
 datas = []
