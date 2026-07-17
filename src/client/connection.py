@@ -1,8 +1,9 @@
 import struct
 import websockets
-from nacl.signing import SigningKey, VerifyKey
-from nacl.public import PrivateKey, PublicKey, Box
+from nacl.signing import SigningKey
 from nacl.exceptions import CryptoError
+
+from core.crypto import EncryptedSession
 
 from .protocol import (
     encode_frame,
@@ -90,29 +91,6 @@ from .models import (
 
 class BonnetError(Exception):
     pass
-
-
-class EncryptedSession:
-    def __init__(self, private_key: bytes, server_pubkey: bytes):
-        signing_key = SigningKey(private_key)
-        self.x25519_private = signing_key.to_curve25519_private_key()
-
-        verify_key = VerifyKey(server_pubkey)
-        self.x25519_public = verify_key.to_curve25519_public_key()
-
-        self.box = Box(self.x25519_private, self.x25519_public)
-        self.nonce = 0
-
-    def _next_nonce(self) -> bytes:
-        nonce = self.nonce.to_bytes(24, "little")
-        self.nonce += 1
-        return nonce
-
-    def encrypt(self, plaintext: bytes) -> bytes:
-        return self.box.encrypt(plaintext, self._next_nonce())
-
-    def decrypt(self, ciphertext: bytes) -> bytes:
-        return self.box.decrypt(ciphertext)
 
 
 class BonnetClient:

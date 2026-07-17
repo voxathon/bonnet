@@ -3,6 +3,8 @@ import asyncio
 import time
 from net.sync import SyncManager, _is_dialable_host
 from net.search_limiter import SearchLimiter
+from net.context import CommandContext
+from net.rate_limiter import RateLimiter
 from core.crypto import Identity
 from core.binutil import resolve_rg
 from engine.facade import BonnetEngine
@@ -44,26 +46,20 @@ class CommandHandler:
             rate_limit=getattr(self._config, 'search_rate_limit', 10),
             rate_window_seconds=getattr(self._config, 'search_rate_window_seconds', 60),
         )
+        self._rate_limiter = RateLimiter(
+            max_requests=getattr(self._config, 'rate_limit_requests', 100),
+            window_seconds=getattr(self._config, 'rate_limit_window', 1),
+        )
 
-    def handle(self, request: bytes, conn) -> bytes:
-        current_time = time.time()
-        window = float(self._config.rate_limit_window)
-        max_requests = self._config.rate_limit_requests
+    def handle(self, request: bytes, ctx: CommandContext) -> bytes:
         max_size = self._config.max_request_size
 
         if max_size > 0 and len(request) > max_size:
             return self._build_error(413, f"Request too large (max {max_size} bytes)")
 
-        if getattr(conn, '_request_timestamps', None) is None:
-            conn._request_timestamps = collections.deque()
-
-        while conn._request_timestamps and current_time - conn._request_timestamps[0] >= window:
-            conn._request_timestamps.popleft()
-
-        if len(conn._request_timestamps) >= max_requests:
+        rl_key = self._rate_limiter.identity_key(ctx.peer_public_key) if ctx.peer_public_key else self._rate_limiter.address_key(ctx.remote_addr)
+        if not self._rate_limiter.check(rl_key):
             return self._build_error(429, "Too many requests. Please slow down.")
-
-        conn._request_timestamps.append(current_time)
 
         if len(request) == 0:
             return self._build_error(400, "Empty request")
@@ -88,89 +84,89 @@ class CommandHandler:
         }
         cmd_name = cmd_names.get(cmd, f'UNKNOWN_{cmd:02x}')
 
-        username = conn.user.username if hasattr(conn, 'user') and conn.user else 'anonymous'
+        username = ctx.user.username if ctx.user else 'anonymous'
         log_msg(f"HANDLE: cmd=0x{cmd:02x} ({cmd_name}), user={username}")
         log_hex(f"HANDLE: request", request)
 
-        if conn.is_anonymous and cmd not in self._config.public_commands:
+        if ctx.is_anonymous and cmd not in self._config.public_commands:
             log_msg(f"HANDLE: rejected - anonymous user cannot run cmd=0x{cmd:02x}")
             return self._build_error(401, "Authentication required for this command")
 
-        if not conn.is_anonymous and conn.user.is_banned:
+        if not ctx.is_anonymous and ctx.user.is_banned:
             if cmd not in self._config.public_commands:
-                log_msg(f"HANDLE: rejected - banned user '{conn.user.username}' attempted cmd=0x{cmd:02x}")
+                log_msg(f"HANDLE: rejected - banned user '{ctx.user.username}' attempted cmd=0x{cmd:02x}")
                 return self._build_error(403, "You are banned from performing this action")
 
         if cmd == 0x01:
-            return self._cmd_register(data, conn)
+            return self._cmd_register(data, ctx)
         elif cmd == 0x02:
-            return self._cmd_get(data, conn)
+            return self._cmd_get(data, ctx)
         elif cmd == 0x03:
-            return self._cmd_list(data, conn)
+            return self._cmd_list(data, ctx)
         elif cmd == 0x04:
-            return self._cmd_list_peers(data, conn)
+            return self._cmd_list_peers(data, ctx)
         elif cmd == 0x10:
-            return self._cmd_board_create(data, conn)
+            return self._cmd_board_create(data, ctx)
         elif cmd == 0x11:
-            return self._cmd_board_list(data, conn)
+            return self._cmd_board_list(data, ctx)
         elif cmd == 0x12:
-            return self._cmd_post_create(data, conn)
+            return self._cmd_post_create(data, ctx)
         elif cmd == 0x13:
-            return self._cmd_post_get(data, conn)
+            return self._cmd_post_get(data, ctx)
         elif cmd == 0x14:
-            return self._cmd_post_list(data, conn)
+            return self._cmd_post_list(data, ctx)
         elif cmd == 0x15:
-            return self._cmd_post_update(data, conn)
+            return self._cmd_post_update(data, ctx)
         elif cmd == 0x16:
-            return self._cmd_post_delete(data, conn)
+            return self._cmd_post_delete(data, ctx)
         elif cmd == 0x17:
-            return self._cmd_board_close(data, conn)
+            return self._cmd_board_close(data, ctx)
         elif cmd == 0x18:
-            return self._cmd_board_delete(data, conn)
+            return self._cmd_board_delete(data, ctx)
         elif cmd == 0x19:
-            return self._cmd_post_query(data, conn)
+            return self._cmd_post_query(data, ctx)
         elif cmd == 0x1A:
-            return self._cmd_post_content_search(data, conn)
+            return self._cmd_post_content_search(data, ctx)
         elif cmd == 0x20:
-            return self._cmd_user_promote(data, conn)
+            return self._cmd_user_promote(data, ctx)
         elif cmd == 0x21:
-            return self._cmd_user_demote(data, conn)
+            return self._cmd_user_demote(data, ctx)
         elif cmd == 0x22:
-            return self._cmd_post_sign(data, conn)
+            return self._cmd_post_sign(data, ctx)
         elif cmd == 0x30:
-            return self._cmd_get_pubkey(data, conn)
+            return self._cmd_get_pubkey(data, ctx)
         elif cmd == 0x40:
-            return self._cmd_rule_create(data, conn)
+            return self._cmd_rule_create(data, ctx)
         elif cmd == 0x41:
-            return self._cmd_rule_get(data, conn)
+            return self._cmd_rule_get(data, ctx)
         elif cmd == 0x42:
-            return self._cmd_rule_get_by_name(data, conn)
+            return self._cmd_rule_get_by_name(data, ctx)
         elif cmd == 0x43:
-            return self._cmd_rule_list(data, conn)
+            return self._cmd_rule_list(data, ctx)
         elif cmd == 0x44:
-            return self._cmd_rule_update(data, conn)
+            return self._cmd_rule_update(data, ctx)
         elif cmd == 0x50:
-            return self._cmd_report_create(data, conn)
+            return self._cmd_report_create(data, ctx)
         elif cmd == 0x51:
-            return self._cmd_report_get(data, conn)
+            return self._cmd_report_get(data, ctx)
         elif cmd == 0x52:
-            return self._cmd_report_list_by_culprit(data, conn)
+            return self._cmd_report_list_by_culprit(data, ctx)
         elif cmd == 0x53:
-            return self._cmd_report_sign(data, conn)
+            return self._cmd_report_sign(data, ctx)
         elif cmd == 0x54:
-            return self._cmd_report_list_since(data, conn)
+            return self._cmd_report_list_since(data, ctx)
         elif cmd == 0x60:
-            return self._cmd_punishment_create(data, conn)
+            return self._cmd_punishment_create(data, ctx)
         elif cmd == 0x61:
-            return self._cmd_punishment_get(data, conn)
+            return self._cmd_punishment_get(data, ctx)
         elif cmd == 0x62:
-            return self._cmd_punishment_list_active(data, conn)
+            return self._cmd_punishment_list_active(data, ctx)
         elif cmd == 0x63:
-            return self._cmd_is_banned(data, conn)
+            return self._cmd_is_banned(data, ctx)
         elif cmd == 0x70:
-            return self._cmd_peer_key_rotate(data, conn)
+            return self._cmd_peer_key_rotate(data, ctx)
         elif cmd == 0x71:
-            return self._cmd_peer_key_list(data, conn)
+            return self._cmd_peer_key_list(data, ctx)
         else:
             return self._build_error(400, f"Unknown command {cmd}")
 
@@ -178,7 +174,7 @@ class CommandHandler:
         msg_bytes = message.encode('utf-8')
         return struct.pack('>BHB', 0x01, code, len(msg_bytes)) + msg_bytes
 
-    def _cmd_register(self, data: bytes, conn) -> bytes:
+    def _cmd_register(self, data: bytes, ctx: CommandContext) -> bytes:
         idx = 0
 
         try:
@@ -206,7 +202,7 @@ class CommandHandler:
             if existing_user is not None:
                 return self._build_error(409, f"Username '{username}' already exists")
 
-            new_user = self._ume.put(username, registrar, conn.peer_public_key, record_origin=self._config.origin, relay=self._config.origin)
+            new_user = self._ume.put(username, registrar, ctx.peer_public_key, record_origin=self._config.origin, relay=self._config.origin)
 
             u_bytes = new_user.username.encode('utf-8')
             return struct.pack('>B', 0x00) + struct.pack('>B', len(u_bytes)) + u_bytes
@@ -214,10 +210,10 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_peer_key_rotate(self, data: bytes, conn) -> bytes:
+    def _cmd_peer_key_rotate(self, data: bytes, ctx: CommandContext) -> bytes:
         idx = 0
 
-        if not conn.is_registered():
+        if not ctx.is_registered:
             return self._build_error(401, "Authentication required")
 
         try:
@@ -239,7 +235,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_peer_key_list(self, data: bytes, conn) -> bytes:
+    def _cmd_peer_key_list(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             keys = self._sync_mgr.list_peer_keys()
             payload = struct.pack('>B', 0x00) + struct.pack('>H', len(keys))
@@ -252,7 +248,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_get(self, data: bytes, conn) -> bytes:
+    def _cmd_get(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             u_len = data[0]
             username = data[1:1+u_len].decode('utf-8')
@@ -267,7 +263,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_list(self, data: bytes, conn) -> bytes:
+    def _cmd_list(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             if len(data) >= 8:
                 offset, limit = struct.unpack('>II', data[:8])
@@ -295,7 +291,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_list_peers(self, data: bytes, conn) -> bytes:
+    def _cmd_list_peers(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             peers = self._ame.list_peers()
             payload = struct.pack('>B', 0x00) + struct.pack('>H', len(peers))
@@ -306,11 +302,11 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_board_create(self, data: bytes, conn) -> bytes:
-        if not conn.is_registered():
+    def _cmd_board_create(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.is_registered:
             return self._build_error(401, "Authentication required")
 
-        if not conn.can_create_board() and not self._engine.check_permission("write", None, conn):
+        if not ctx.can_create_board() and not self._engine.check_permission("write", None, ctx):
             return self._build_error(403, "Permission denied to create boards")
 
         try:
@@ -324,14 +320,14 @@ class CommandHandler:
             if self._ame.get_board(board_name) is not None:
                 return self._build_error(409, f"Board '{board_name}' already exists")
 
-            board = self._ame.create_board(board_name, owner_pubkey=conn.peer_public_key)
+            board = self._ame.create_board(board_name, owner_pubkey=ctx.peer_public_key)
             b_bytes = board_name.encode('utf-8')
             return struct.pack('>B', 0x00) + b_bytes
 
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_board_list(self, data: bytes, conn) -> bytes:
+    def _cmd_board_list(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             boards = self._ame.list_boards()
             nav_entries = self._ame.get_nav().list_all()
@@ -340,7 +336,7 @@ class CommandHandler:
 
             visible_boards = []
             for name, closed in boards:
-                if self._engine.check_permission("read", name, conn):
+                if self._engine.check_permission("read", name, ctx):
                     visible_boards.append((name, closed))
 
             payload = struct.pack('>B', 0x00) + struct.pack('>H', len(visible_boards))
@@ -366,8 +362,8 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_post_create(self, data: bytes, conn) -> bytes:
-        if not conn.is_registered():
+    def _cmd_post_create(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.is_registered:
             return self._build_error(401, "Authentication required")
 
         try:
@@ -386,7 +382,7 @@ class CommandHandler:
             # outbound sync (#6). Previously the redirect/queue_sync fired
             # before check_permission, letting an unauthorized (but registered)
             # caller drive syncs.
-            if not self._engine.check_permission("write", board_name, conn):
+            if not self._engine.check_permission("write", board_name, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
             nav_entry = self._ame.get_nav().get(board_name)
@@ -440,8 +436,8 @@ class CommandHandler:
                 tags=','.join(tags_list),
                 options=options,
                 content=content,
-                author=conn.user.username,
-                author_registrar=conn.user.registrar
+                author=ctx.user.username,
+                author_registrar=ctx.user.registrar
             )
             post = result.result()
 
@@ -464,7 +460,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_post_get(self, data: bytes, conn) -> bytes:
+    def _cmd_post_get(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             idx = 0
             b_len = data[idx]
@@ -480,7 +476,7 @@ class CommandHandler:
 
             # Permission gate runs BEFORE the remote-board redirect so anonymous
             # or unauthorized callers cannot trigger an outbound sync (#6).
-            if not self._engine.check_permission("read", board_name, conn):
+            if not self._engine.check_permission("read", board_name, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
             nav_entry = self._ame.get_nav().get(board_name)
@@ -531,7 +527,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_post_list(self, data: bytes, conn) -> bytes:
+    def _cmd_post_list(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             idx = 0
             b_len = data[idx]
@@ -545,7 +541,7 @@ class CommandHandler:
 
             # Permission gate runs BEFORE the remote-board redirect so anonymous
             # or unauthorized callers cannot trigger an outbound sync (#6).
-            if not self._engine.check_permission("read", board_name, conn):
+            if not self._engine.check_permission("read", board_name, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
             nav_entry = self._ame.get_nav().get(board_name)
@@ -587,8 +583,8 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_post_update(self, data: bytes, conn) -> bytes:
-        if not conn.is_registered():
+    def _cmd_post_update(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.is_registered:
             return self._build_error(401, "Authentication required")
 
         try:
@@ -668,16 +664,16 @@ class CommandHandler:
             if post is None:
                 return self._build_error(404, f"Post {post_num} not found")
 
-            is_mod = conn.is_moderator() or conn.is_administrator()
+            is_mod = ctx.is_moderator() or ctx.is_administrator()
 
-            if not self._engine.check_permission("write", board_name, conn):
+            if not self._engine.check_permission("write", board_name, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
             for mf in mod_fields:
                 if not is_mod:
                     return self._build_error(403, f"Field '{mf}' requires moderator permission")
 
-            if not is_mod and not conn.can_edit_post(post.author):
+            if not is_mod and not ctx.can_edit_post(post.author):
                 return self._build_error(403, "Can only edit your own posts")
 
             fields['last_modified'] = int(time.time())
@@ -690,8 +686,8 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_post_delete(self, data: bytes, conn) -> bytes:
-        if not conn.is_registered():
+    def _cmd_post_delete(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.is_registered:
             return self._build_error(401, "Authentication required")
 
         try:
@@ -707,7 +703,7 @@ class CommandHandler:
 
             post_num = struct.unpack('>Q', data[idx:idx+8])[0]
 
-            if not self._engine.check_permission("write", board_name, conn):
+            if not self._engine.check_permission("write", board_name, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
             board = self._ame.get_board(board_name)
@@ -720,7 +716,7 @@ class CommandHandler:
             if post is None:
                 return self._build_error(404, f"Post {post_num} not found")
 
-            if not conn.can_delete_post(post.author):
+            if not ctx.can_delete_post(post.author):
                 return self._build_error(403, "Can only delete your own posts")
 
             result = board.delete_post(post_num)
@@ -731,7 +727,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_post_query(self, data: bytes, conn) -> bytes:
+    def _cmd_post_query(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             idx = 0
             b_len = data[idx]
@@ -743,7 +739,7 @@ class CommandHandler:
             if not valid:
                 return self._build_error(400, err)
 
-            if not self._engine.check_permission("read", board_name, conn):
+            if not self._engine.check_permission("read", board_name, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
             where_len = struct.unpack('>H', data[idx:idx+2])[0]
@@ -826,7 +822,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_post_content_search(self, data: bytes, conn) -> bytes:
+    def _cmd_post_content_search(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             idx = 0
             b_len = data[idx]
@@ -838,7 +834,7 @@ class CommandHandler:
             if not valid:
                 return self._build_error(400, err)
 
-            if not self._engine.check_permission("read", board_name, conn):
+            if not self._engine.check_permission("read", board_name, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
             # pattern: long_string (u32 length) -- regex per ripgrep
@@ -861,7 +857,7 @@ class CommandHandler:
                 # Local-only: remote/relay boards have no mirrored bodies -> 404.
                 return self._build_error(404, f"Board '{board_name}' not found")
 
-            identity_key = conn.peer_public_key.hex() if conn.peer_public_key else "anonymous"
+            identity_key = ctx.peer_public_key.hex() if ctx.peer_public_key else "anonymous"
             admitted = self._search_limiter.acquire(
                 identity_key,
                 timeout=float(getattr(self._config, 'search_timeout_seconds', 10)),
@@ -912,8 +908,8 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_board_close(self, data: bytes, conn) -> bytes:
-        if not conn.can_create_board():
+    def _cmd_board_close(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.can_create_board():
             return self._build_error(403, "Administrator permission required")
 
         try:
@@ -938,8 +934,8 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_board_delete(self, data: bytes, conn) -> bytes:
-        if not conn.can_create_board():
+    def _cmd_board_delete(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.can_create_board():
             return self._build_error(403, "Administrator permission required")
 
         try:
@@ -963,8 +959,8 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_user_promote(self, data: bytes, conn) -> bytes:
-        if not conn.can_promote_to_mod():
+    def _cmd_user_promote(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.can_promote_to_mod():
             return self._build_error(403, "Administrator permission required")
 
         try:
@@ -985,8 +981,8 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_user_demote(self, data: bytes, conn) -> bytes:
-        if not conn.can_demote_mod():
+    def _cmd_user_demote(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.can_demote_mod():
             return self._build_error(403, "Administrator permission required")
 
         try:
@@ -1007,11 +1003,11 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_post_sign(self, data: bytes, conn) -> bytes:
+    def _cmd_post_sign(self, data: bytes, ctx: CommandContext) -> bytes:
         log_msg("POST_SIGN: starting")
         log_hex("POST_SIGN: request data", data)
 
-        if not conn.is_registered():
+        if not ctx.is_registered:
             log_msg("POST_SIGN: rejected - not registered")
             return self._build_error(401, "Authentication required")
 
@@ -1038,9 +1034,9 @@ class CommandHandler:
                 'post_num': post_num,
                 'signature_hex': signature_hex[:32] + '...' if len(signature_hex) > 32 else signature_hex
             })
-            log_msg(f"POST_SIGN: conn.user={conn.user.username if conn.user else 'None'}")
+            log_msg(f"POST_SIGN: ctx.user={ctx.user.username if ctx.user else 'None'}")
 
-            if not self._engine.check_permission("write", board_name, conn):
+            if not self._engine.check_permission("write", board_name, ctx):
                 log_msg(f"POST_SIGN: ACL permission denied for board '{board_name}'")
                 return self._build_error(403, "Permission denied for this board")
 
@@ -1072,9 +1068,9 @@ class CommandHandler:
                 'content_len': len(post.content)
             })
 
-            log_msg(f"POST_SIGN: checking can_edit_post(conn.user.username='{conn.user.username}', post.author='{post.author}')")
-            if not conn.can_edit_post(post.author):
-                log_msg(f"POST_SIGN: permission denied - conn.user='{conn.user.username}' != post.author='{post.author}'")
+            log_msg(f"POST_SIGN: checking can_edit_post(ctx.user.username='{ctx.user.username}', post.author='{post.author}')")
+            if not ctx.can_edit_post(post.author):
+                log_msg(f"POST_SIGN: permission denied - ctx.user='{ctx.user.username}' != post.author='{post.author}'")
                 return self._build_error(403, "Only the author can sign this post")
 
             log_msg("POST_SIGN: permission check passed")
@@ -1147,11 +1143,11 @@ class CommandHandler:
             log_msg(f"POST_SIGN: exception: {e}")
             return self._build_error(400, str(e))
 
-    def _cmd_get_pubkey(self, data: bytes, conn) -> bytes:
+    def _cmd_get_pubkey(self, data: bytes, ctx: CommandContext) -> bytes:
         return struct.pack('>B', 0x00) + self._server_identity.public_key
 
-    def _cmd_rule_create(self, data: bytes, conn) -> bytes:
-        if not conn.is_administrator():
+    def _cmd_rule_create(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.is_administrator():
             return self._build_error(403, "Administrator permission required")
 
         try:
@@ -1181,7 +1177,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_rule_get(self, data: bytes, conn) -> bytes:
+    def _cmd_rule_get(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             rule_num = struct.unpack('>Q', data[:8])[0]
 
@@ -1202,7 +1198,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_rule_get_by_name(self, data: bytes, conn) -> bytes:
+    def _cmd_rule_get_by_name(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             name_len = data[0]
             rule_name = data[1:1+name_len].decode('utf-8')
@@ -1224,7 +1220,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_rule_list(self, data: bytes, conn) -> bytes:
+    def _cmd_rule_list(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             result = self._keibatsu.list_rules()
             rules = result.result()
@@ -1242,8 +1238,8 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_rule_update(self, data: bytes, conn) -> bytes:
-        if not conn.is_administrator():
+    def _cmd_rule_update(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.is_administrator():
             return self._build_error(403, "Administrator permission required")
 
         try:
@@ -1290,8 +1286,8 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_report_create(self, data: bytes, conn) -> bytes:
-        if not conn.is_registered():
+    def _cmd_report_create(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.is_registered:
             return self._build_error(401, "Authentication required")
 
         try:
@@ -1375,7 +1371,7 @@ class CommandHandler:
                struct.pack('>B', len(origin_sig_bytes)) + origin_sig_bytes + \
                struct.pack('>B', len(reporter_sig_bytes)) + reporter_sig_bytes
 
-    def _cmd_report_get(self, data: bytes, conn) -> bytes:
+    def _cmd_report_get(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             idx = 0
             origin_len = data[idx]
@@ -1396,7 +1392,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_report_list_by_culprit(self, data: bytes, conn) -> bytes:
+    def _cmd_report_list_by_culprit(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             pubkey_len = data[0]
             pubkey = data[1:1+pubkey_len]
@@ -1436,8 +1432,8 @@ class CommandHandler:
                struct.pack('>B', len(origin_sig_bytes)) + origin_sig_bytes + \
                struct.pack('>B', len(reporter_sig_bytes)) + reporter_sig_bytes
 
-    def _cmd_report_sign(self, data: bytes, conn) -> bytes:
-        if not conn.is_registered():
+    def _cmd_report_sign(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.is_registered:
             return self._build_error(401, "Authentication required")
 
         try:
@@ -1460,7 +1456,7 @@ class CommandHandler:
             if report is None:
                 return self._build_error(404, f"Report {origin}:{report_num} not found")
 
-            if report.reporter_pubkey != conn.peer_public_key:
+            if report.reporter_pubkey != ctx.peer_public_key:
                 return self._build_error(403, "Only the reporter can sign this report")
 
             try:
@@ -1481,8 +1477,8 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_report_list_since(self, data: bytes, conn) -> bytes:
-        if not conn.is_registered():
+    def _cmd_report_list_since(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.is_registered:
             return self._build_error(401, "Authentication required")
 
         try:
@@ -1500,8 +1496,8 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_punishment_create(self, data: bytes, conn) -> bytes:
-        if not conn.is_moderator() and not conn.is_administrator():
+    def _cmd_punishment_create(self, data: bytes, ctx: CommandContext) -> bytes:
+        if not ctx.is_moderator() and not ctx.is_administrator():
             return self._build_error(403, "Moderator permission required")
 
         try:
@@ -1551,7 +1547,7 @@ class CommandHandler:
 
         return payload
 
-    def _cmd_punishment_get(self, data: bytes, conn) -> bytes:
+    def _cmd_punishment_get(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             pubkey_len = data[0]
             pubkey = data[1:1+pubkey_len]
@@ -1567,7 +1563,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_punishment_list_active(self, data: bytes, conn) -> bytes:
+    def _cmd_punishment_list_active(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             result = self._keibatsu.list_active_punishments()
             punishments = result.result()
@@ -1581,7 +1577,7 @@ class CommandHandler:
         except Exception as e:
             return self._build_error(400, str(e))
 
-    def _cmd_is_banned(self, data: bytes, conn) -> bytes:
+    def _cmd_is_banned(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             pubkey_len = data[0]
             pubkey = data[1:1+pubkey_len]

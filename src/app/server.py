@@ -65,6 +65,7 @@ class Bonnet:
         log_msg("INIT: complete")
 
     async def handle_connection(self, websocket):
+        conn = None
         try:
             async with asyncio.timeout(self.config.timeout_seconds):
                 conn = Connection.server(
@@ -73,19 +74,25 @@ class Bonnet:
                 )
                 await conn.accept()
                 plaintext = await conn.recv_request()
-                response = self.command_handler.handle(plaintext, conn)
+                ctx = conn.to_context()
+                response = self.command_handler.handle(plaintext, ctx)
 
                 await conn.send_response(response)
-                await conn.close()
 
         except asyncio.TimeoutError:
-            pass
-        except ConnectionError:
-            pass
+            log_msg("HANDLE_CONNECTION: timeout")
+        except ConnectionError as e:
+            log_msg(f"HANDLE_CONNECTION: connection error {e.code}: {e.message}")
         except nacl.exceptions.CryptoError:
-            pass
-        except Exception:
-            pass
+            log_msg("HANDLE_CONNECTION: crypto error during handshake or decryption")
+        except Exception as e:
+            log_msg(f"HANDLE_CONNECTION: unexpected error: {type(e).__name__}: {e}")
+        finally:
+            if conn is not None:
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
 
     async def run(self, port, ssl_context):
         print(f"Bonnet server listening on port {port}")
@@ -251,7 +258,7 @@ class Bonnet:
 
         username, registrar = user_reg.split("@", 1)
         request = bytes([0x01]) + self._encode_string(username) + self._encode_string(registrar)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return f"Registered: {username}"
@@ -264,7 +271,7 @@ class Bonnet:
 
         username = parts[1]
         request = bytes([0x02]) + self._encode_string(username)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             pubkey = response[1:33].hex()
@@ -289,7 +296,7 @@ class Bonnet:
                 pass
 
         request = bytes([0x03]) + struct.pack(">I", offset) + struct.pack(">I", limit)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return self._format_user_list(response)
@@ -302,7 +309,7 @@ class Bonnet:
 
         name = parts[1]
         request = bytes([0x10]) + self._encode_string(name)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return f"Board '{name}' created."
@@ -311,7 +318,7 @@ class Bonnet:
 
     def _cmd_list_boards(self) -> str:
         request = bytes([0x11])
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return self._format_board_list(response)
@@ -320,7 +327,7 @@ class Bonnet:
 
     def _cmd_list_peers(self) -> str:
         request = bytes([0x04])
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return self._format_peer_list(response)
@@ -333,7 +340,7 @@ class Bonnet:
 
         name = parts[1]
         request = bytes([0x17]) + self._encode_string(name)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return f"Board '{name}' closed (read-only)."
@@ -346,7 +353,7 @@ class Bonnet:
 
         name = parts[1]
         request = bytes([0x18]) + self._encode_string(name)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return f"Board '{name}' deleted."
@@ -362,7 +369,7 @@ class Bonnet:
         limit = int(parts[3]) if len(parts) > 3 else 50
 
         request = bytes([0x14]) + self._encode_string(board) + struct.pack(">I", offset) + struct.pack(">I", limit)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return self._format_post_list(response)
@@ -380,7 +387,7 @@ class Bonnet:
             return "Invalid post number"
 
         request = bytes([0x13]) + self._encode_string(board) + struct.pack(">Q", post_num)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return self._format_post(response, board)
@@ -469,7 +476,7 @@ class Bonnet:
         log_hex("CREATE_POST: POST_CREATE request", request)
         log_msg(f"CREATE_POST: local_conn.user={self.local_conn.user.username}, pubkey={self.local_conn.user.publickey.hex()}")
 
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
         log_hex("CREATE_POST: POST_CREATE response", response)
 
         if response[0] == 0x00:
@@ -479,7 +486,7 @@ class Bonnet:
             get_request = bytes([0x13]) + self._encode_string(board) + struct.pack(">Q", post_num)
             log_hex("CREATE_POST: POST_GET request", get_request)
 
-            get_response = self.command_handler.handle(get_request, self.local_conn)
+            get_response = self.command_handler.handle(get_request, self.local_conn.to_context())
             log_hex("CREATE_POST: POST_GET response", get_response)
 
             if get_response[0] == 0x00:
@@ -496,7 +503,7 @@ class Bonnet:
                 sign_request = bytes([0x22]) + self._encode_string(board) + struct.pack(">Q", post_num) + self._encode_string(signature)
                 log_hex("CREATE_POST: POST_SIGN request", sign_request)
 
-                sign_response = self.command_handler.handle(sign_request, self.local_conn)
+                sign_response = self.command_handler.handle(sign_request, self.local_conn.to_context())
                 log_hex("CREATE_POST: POST_SIGN response", sign_response)
 
                 if sign_response[0] == 0x00:
@@ -526,7 +533,7 @@ class Bonnet:
             return "Invalid post number"
 
         get_request = bytes([0x13]) + self._encode_string(board) + struct.pack(">Q", post_num)
-        response = self.command_handler.handle(get_request, self.local_conn)
+        response = self.command_handler.handle(get_request, self.local_conn.to_context())
 
         if response[0] != 0x00:
             return self._parse_error(response)
@@ -629,7 +636,7 @@ class Bonnet:
             elif field_type == 0x06:
                 request += bytes([field_type, 1 if value else 0])
 
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return f"Post #{post_num} updated."
@@ -671,7 +678,7 @@ class Bonnet:
             return "Invalid post number"
 
         request = bytes([0x16]) + self._encode_string(board) + struct.pack(">Q", post_num)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return "Post deleted."
@@ -689,7 +696,7 @@ class Bonnet:
             return "Invalid post number"
 
         request = bytes([0x13]) + self._encode_string(board) + struct.pack(">Q", post_num)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] != 0x00:
             return self._parse_error(response)
@@ -699,7 +706,7 @@ class Bonnet:
         signature = self.server_identity.sign(signed_payload).hex()
 
         sign_request = bytes([0x22]) + self._encode_string(board) + struct.pack(">Q", post_num) + self._encode_string(signature)
-        sign_response = self.command_handler.handle(sign_request, self.local_conn)
+        sign_response = self.command_handler.handle(sign_request, self.local_conn.to_context())
 
         if sign_response[0] == 0x00:
             return f"Post #{post_num} signed."
@@ -731,7 +738,7 @@ class Bonnet:
                 limit = int(p.split("=", 1)[1])
 
         request = self._build_query_request(board, where, values, orderby, limit)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return self._format_query_results(response)
@@ -759,7 +766,7 @@ class Bonnet:
         pattern = " ".join(pattern_parts)
 
         request = self._build_content_search_request(board, pattern, limit)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return self._format_query_results(response)
@@ -779,7 +786,7 @@ class Bonnet:
 
         username = parts[1]
         request = bytes([0x20]) + self._encode_string(username)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return f"{username} promoted to moderator."
@@ -792,7 +799,7 @@ class Bonnet:
 
         username = parts[1]
         request = bytes([0x21]) + self._encode_string(username)
-        response = self.command_handler.handle(request, self.local_conn)
+        response = self.command_handler.handle(request, self.local_conn.to_context())
 
         if response[0] == 0x00:
             return f"{username} demoted from moderator."
@@ -840,8 +847,8 @@ class Bonnet:
 
         conn = LocalConnection(user, user.publickey, self.engine, origin=user.record_origin)
 
-        can_read = self.engine.check_permission("read", board, conn)
-        can_write = self.engine.check_permission("write", board, conn)
+        can_read = self.engine.check_permission("read", board, conn.to_context())
+        can_write = self.engine.check_permission("write", board, conn.to_context())
 
         board_owner = self.ame.get_board_owner(board)
         owner_info = f"owner={board_owner.hex()[:16]}..." if board_owner else "owner=none"

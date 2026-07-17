@@ -465,7 +465,7 @@ class TestConnectionSendRecvRequest:
     @pytest.mark.asyncio
     async def test_recv_request_success(self, ready_connection):
         ready_connection.websocket.recv.return_value = (
-            struct.pack(">I", 10) + b"encrypted"
+            struct.pack(">I", 9) + b"encrypted"
         )
         result = await ready_connection.recv_request()
         assert result == b"decrypted"
