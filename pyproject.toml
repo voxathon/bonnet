@@ -9,8 +9,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "cython>=3.2.4",
-    "pyinstaller>=6.0.0",
     "websockets>=12.0",
     "pynacl>=1.5.0",
     "click>=8.3.1",
@@ -39,4 +37,4 @@ bonnet-client = "client:run"
 bonnet-simple = "client:run_simple"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/client"]
+packages = ["src/client", "src/core", "src/engine", "src/net", "src/app"]
