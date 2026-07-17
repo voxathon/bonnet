@@ -1,6 +1,6 @@
 import pytest
 import os
-from src.client.identity import IdentityStore
+from client.identity import IdentityStore
 
 def test_identity_store():
     store = IdentityStore("test_identities.db")
