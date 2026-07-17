@@ -250,7 +250,7 @@ def _anonymous_conn(ident, origin_header="localhost"):
     engine.config = MagicMock(max_request_size=0)
     conn = Connection.server(ident, ws, engine)
     conn.peer_public_key = b"\x11" * 32
-    return conn
+    return conn.to_context()
 
 
 def _decode_error(response):

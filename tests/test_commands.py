@@ -89,6 +89,7 @@ def _auth_conn(ident, user=None, peer_pubkey=None, origin_header="evil.example")
     """A Connection.server with a spoofable Host header (origin_header).
 
     By default no user => anonymous. Pass a User to make it authenticated.
+    Returns a CommandContext via Connection.to_context().
     """
     ws = MagicMock()
     ws.remote_address = ("203.0.113.9", 12345)
@@ -103,7 +104,7 @@ def _auth_conn(ident, user=None, peer_pubkey=None, origin_header="evil.example")
         conn.user = user
     if peer_pubkey is not None:
         conn.peer_public_key = peer_pubkey
-    return conn
+    return conn.to_context()
 
 
 def _anonymous_conn(ident, origin_header="localhost"):
