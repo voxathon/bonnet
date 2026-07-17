@@ -65,12 +65,9 @@ class TestNoV1Defects:
 
     def test_no_websocket_imports(self):
         """§2.3 bullet 6/7: No WebSocket code remains in production."""
-        from net import connection
-        source = inspect.getsource(connection)
-        assert "class Connection(" not in source  # Connection class removed
-        assert "import websockets" not in source
-        assert "EncryptedSession" not in source
-        assert "websockets.client" not in source
+        import importlib.util
+        assert importlib.util.find_spec("net.connection") is None
+        assert importlib.util.find_spec("client.connection") is None
 
     def test_server_logs_exceptions(self):
         """§2.3 bullet 7: Server HTTP handler logs errors, not swallows them."""

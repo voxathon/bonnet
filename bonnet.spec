@@ -36,7 +36,6 @@ hiddenimports = collect_submodules('client') + [
     'engine.keibatsu',
     'engine.facade',
     'net.commands',
-    'net.connection',
     'net.sync',
     'net.search_limiter',
     'app.cli',

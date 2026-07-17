@@ -2,7 +2,7 @@ import os
 import time
 from fastmcp import FastMCP
 
-from .connection import BonnetClient
+from .http import BonnetHTTPClient as BonnetClient
 from .identity import IdentityStore
 from .models import Board, Post, PostSummary, User
 
