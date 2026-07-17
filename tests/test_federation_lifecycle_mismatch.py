@@ -130,40 +130,36 @@ class TestFederationLifecycleMismatch:
     @pytest.mark.asyncio
     async def test_sync_manager_calls_multiple_commands(self, identities):
         """Document (without executing) that SyncManager._do_sync_from_peer
-        issues three sync phases over one Connection.client().
+        issues three sync phases over one BonnetHTTPClient (not Connection).
 
         This is a static analysis test — it inspects the source code to verify
-        the mismatch exists, rather than running the actual sync (which would
-        require network access).
+        the federation transport now uses HTTP (Phase 6), not WebSocket.
         """
         import inspect
         from net.sync import SyncManager
 
         source = inspect.getsource(SyncManager._do_sync_from_peer)
 
-        # The sync method calls three sub-syncs, all using the same conn
+        # The sync method calls three sub-syncs, all using the same client
         assert "_sync_boards" in source
         assert "_sync_users" in source
         assert "_sync_reports" in source
 
-        # All three are called with the same conn object opened once
-        assert "conn = Connection.client" in source
-        assert "await conn.connect" in source
+        # Uses BonnetHTTPClient, not Connection.client
+        assert "BonnetHTTPClient" in source
+        assert "Connection.client" not in source
 
-        # Verify each sub-sync uses send_request/recv_response (multiple commands)
+        # Verify each sub-sync uses _send_command (multiple commands over one client)
         boards_source = inspect.getsource(SyncManager._sync_boards)
-        assert "send_request" in boards_source
-        assert "recv_response" in boards_source
+        assert "_send_command" in boards_source
 
         users_source = inspect.getsource(SyncManager._sync_users)
-        assert "send_request" in users_source
-        assert "recv_response" in users_source
+        assert "_send_command" in users_source
         # Users sync is paged — sends multiple LIST_USERS commands in a loop
         assert "while True" in users_source
 
         reports_source = inspect.getsource(SyncManager._sync_reports)
-        assert "send_request" in reports_source
-        assert "recv_response" in reports_source
+        assert "_send_command" in reports_source
 
     def test_server_closes_after_one_command(self):
         """Document that the server's handle_connection processes exactly one command."""

@@ -93,11 +93,11 @@ def _build_engine(temp_dir):
 
 
 def _encode_board_list(entries):
-    """Encode a BOARD_LIST (0x11) response payload matching _sync_boards parser.
+    """Encode a BOARD_LIST response payload (after status byte, as returned by _send_command).
 
     entries: list of dicts with keys name, origin, signature (bytes), closed (int).
     """
-    payload = struct.pack(">B", 0x00) + struct.pack(">H", len(entries))
+    payload = struct.pack(">H", len(entries))
     for e in entries:
         name_b = e["name"].encode("utf-8")
         origin_b = e["origin"].encode("utf-8")
@@ -139,43 +139,37 @@ class TestDoSyncFromPeerSSRFGuard:
     async def test_refuses_private_loopback(self, sync_setup):
         mgr, ident, ame, engine = sync_setup
         for bad in ["127.0.0.1", "169.254.169.254", "10.0.0.1", "not a host"]:
-            conn_mock = MagicMock()
-            conn_mock.connect = AsyncMock()
+            client_mock = MagicMock()
             with pytest.MonkeyPatch().context() as mp:
-                mp.setattr("net.sync.Connection", MagicMock(client=MagicMock(return_value=conn_mock)))
+                mp.setattr("client.http.BonnetHTTPClient", MagicMock(return_value=client_mock))
                 await mgr._do_sync_from_peer(bad)
             # No outbound connection should have been opened.
-            conn_mock.connect.assert_not_called()
+            client_mock.connect.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_refuses_localhost(self, sync_setup):
         mgr, ident, ame, engine = sync_setup
-        conn_mock = MagicMock()
-        conn_mock.connect = AsyncMock()
+        client_mock = MagicMock()
         with pytest.MonkeyPatch().context() as mp:
-            mp.setattr("net.sync.Connection", MagicMock(client=MagicMock(return_value=conn_mock)))
+            mp.setattr("client.http.BonnetHTTPClient", MagicMock(return_value=client_mock))
             await mgr._do_sync_from_peer("localhost")
-        conn_mock.connect.assert_not_called()
+        client_mock.connect.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_dials_public_host(self, sync_setup):
         mgr, ident, ame, engine = sync_setup
-        conn_mock = MagicMock()
-        conn_mock.peer_public_key = ident.public_key
-        conn_mock.connect = AsyncMock()
-        conn_mock.close = AsyncMock()
-        conn_mock.send_request = AsyncMock()
-        # Build empty board/user/report responses so the sync completes quickly.
-        empty_boards = struct.pack(">B", 0x00) + struct.pack(">H", 0)
-        conn_mock.recv_response = AsyncMock(side_effect=[empty_boards])
+        client_mock = MagicMock()
+        client_mock.server_public_key = ident.public_key
+        client_mock.connect = AsyncMock()
+        client_mock.close = AsyncMock()
+        client_mock._send_command = AsyncMock(return_value=struct.pack(">H", 0))
 
         with pytest.MonkeyPatch().context() as mp:
-            # Mock DNS so the dial-site gate sees a globally routable address.
             mp.setattr("socket.getaddrinfo", lambda h, p, proto=0: [_gai(socket.AF_INET, "8.8.8.8")])
-            mp.setattr("net.sync.Connection", MagicMock(client=MagicMock(return_value=conn_mock)))
+            mp.setattr("client.http.BonnetHTTPClient", MagicMock(return_value=client_mock))
             await mgr._do_sync_from_peer("peer.example.com")
 
-        conn_mock.connect.assert_awaited()
+        client_mock.connect.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_refuses_hostname_resolving_to_private_ip(self, sync_setup):
@@ -183,44 +177,41 @@ class TestDoSyncFromPeerSSRFGuard:
         loopback/link-local IP must be refused before dialing."""
         mgr, ident, ame, engine = sync_setup
         for bad_ip in ["127.0.0.1", "10.0.0.1", "169.254.169.254"]:
-            conn_mock = MagicMock()
-            conn_mock.connect = AsyncMock()
+            client_mock = MagicMock()
             with pytest.MonkeyPatch().context() as mp:
                 mp.setattr("socket.getaddrinfo", lambda h, p, proto=0: [_gai(socket.AF_INET, bad_ip)])
-                mp.setattr("net.sync.Connection", MagicMock(client=MagicMock(return_value=conn_mock)))
+                mp.setattr("client.http.BonnetHTTPClient", MagicMock(return_value=client_mock))
                 await mgr._do_sync_from_peer("peer.example.com")
-            conn_mock.connect.assert_not_called()
+            client_mock.connect.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_refuses_hostname_with_any_private_resolution(self, sync_setup):
         """If ANY resolved address is non-global, the dial is refused even when
         some addresses are public."""
         mgr, ident, ame, engine = sync_setup
-        conn_mock = MagicMock()
-        conn_mock.connect = AsyncMock()
+        client_mock = MagicMock()
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr("socket.getaddrinfo", lambda h, p, proto=0: [
                 _gai(socket.AF_INET, "8.8.8.8"),
                 _gai(socket.AF_INET, "127.0.0.1"),
             ])
-            mp.setattr("net.sync.Connection", MagicMock(client=MagicMock(return_value=conn_mock)))
+            mp.setattr("client.http.BonnetHTTPClient", MagicMock(return_value=client_mock))
             await mgr._do_sync_from_peer("peer.example.com")
-        conn_mock.connect.assert_not_called()
+        client_mock.connect.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_refuses_hostname_that_fails_resolution(self, sync_setup):
         mgr, ident, ame, engine = sync_setup
-        conn_mock = MagicMock()
-        conn_mock.connect = AsyncMock()
+        client_mock = MagicMock()
 
         def raise_gaierror(h, p, proto=0):
             raise socket.gaierror("no such host")
 
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr("socket.getaddrinfo", raise_gaierror)
-            mp.setattr("net.sync.Connection", MagicMock(client=MagicMock(return_value=conn_mock)))
+            mp.setattr("client.http.BonnetHTTPClient", MagicMock(return_value=client_mock))
             await mgr._do_sync_from_peer("peer.example.com")
-        conn_mock.connect.assert_not_called()
+        client_mock.connect.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +271,20 @@ class TestResolvesToGlobalOnly:
 
 
 class TestSyncBoardsSignatureVerification:
+    def _make_sync_client(self, board_payload):
+        """Create a mock BonnetHTTPClient for _sync_boards tests."""
+        class FakeClient:
+            def __init__(self):
+                self._payload = board_payload
+                self.server_public_key = b"\x00" * 32
+            async def _send_command(self, cmd):
+                return self._payload
+            async def connect(self, ident):
+                pass
+            async def close(self):
+                pass
+        return FakeClient()
+
     @pytest.mark.asyncio
     async def test_accepts_correctly_signed_board(self, sync_setup):
         mgr, ident, ame, engine = sync_setup
@@ -291,15 +296,12 @@ class TestSyncBoardsSignatureVerification:
         name = "goodboard"
         sig = peer_ident.sign(_build_board_signature_payload(name, peer_origin))
 
-        conn = MagicMock()
-        conn.send_request = AsyncMock()
-        conn.recv_response = AsyncMock(
-            return_value=_encode_board_list([
-                {"name": name, "origin": peer_origin, "signature": sig, "closed": 0}
-            ])
-        )
+        payload = _encode_board_list([
+            {"name": name, "origin": peer_origin, "signature": sig, "closed": 0}
+        ])
+        client = self._make_sync_client(payload)
 
-        await mgr._sync_boards(conn, peer_origin)
+        await mgr._sync_boards(client, peer_origin)
 
         nav = ame.get_nav()
         entry = nav.get(name)
@@ -319,15 +321,12 @@ class TestSyncBoardsSignatureVerification:
         other_ident = Identity.generate()
         bad_sig = other_ident.sign(_build_board_signature_payload(name, peer_origin))
 
-        conn = MagicMock()
-        conn.send_request = AsyncMock()
-        conn.recv_response = AsyncMock(
-            return_value=_encode_board_list([
-                {"name": name, "origin": peer_origin, "signature": bad_sig, "closed": 0}
-            ])
-        )
+        payload = _encode_board_list([
+            {"name": name, "origin": peer_origin, "signature": bad_sig, "closed": 0}
+        ])
+        client = self._make_sync_client(payload)
 
-        await mgr._sync_boards(conn, peer_origin)
+        await mgr._sync_boards(client, peer_origin)
 
         assert ame.get_nav().get(name) is None
 
@@ -340,15 +339,12 @@ class TestSyncBoardsSignatureVerification:
         name = "untrusted"
         sig = peer_ident.sign(_build_board_signature_payload(name, peer_origin))
 
-        conn = MagicMock()
-        conn.send_request = AsyncMock()
-        conn.recv_response = AsyncMock(
-            return_value=_encode_board_list([
-                {"name": name, "origin": peer_origin, "signature": sig, "closed": 0}
-            ])
-        )
+        payload = _encode_board_list([
+            {"name": name, "origin": peer_origin, "signature": sig, "closed": 0}
+        ])
+        client = self._make_sync_client(payload)
 
-        await mgr._sync_boards(conn, peer_origin)
+        await mgr._sync_boards(client, peer_origin)
         assert ame.get_nav().get(name) is None
 
     @pytest.mark.asyncio
@@ -364,15 +360,12 @@ class TestSyncBoardsSignatureVerification:
         sig = peer_ident.sign(_build_board_signature_payload(name, peer_origin))
 
         # peer_hostname here is the relay that gets stored; use a private IP.
-        conn = MagicMock()
-        conn.send_request = AsyncMock()
-        conn.recv_response = AsyncMock(
-            return_value=_encode_board_list([
-                {"name": name, "origin": peer_origin, "signature": sig, "closed": 0}
-            ])
-        )
+        payload = _encode_board_list([
+            {"name": name, "origin": peer_origin, "signature": sig, "closed": 0}
+        ])
+        client = self._make_sync_client(payload)
 
-        await mgr._sync_boards(conn, "127.0.0.1")
+        await mgr._sync_boards(client, "127.0.0.1")
         assert ame.get_nav().get(name) is None
 
     @pytest.mark.asyncio
@@ -387,16 +380,13 @@ class TestSyncBoardsSignatureVerification:
         tampered = "tamperedboard"
         tampered_sig = Identity.generate().sign(_build_board_signature_payload(tampered, peer_origin))
 
-        conn = MagicMock()
-        conn.send_request = AsyncMock()
-        conn.recv_response = AsyncMock(
-            return_value=_encode_board_list([
-                {"name": good, "origin": peer_origin, "signature": good_sig, "closed": 0},
-                {"name": tampered, "origin": peer_origin, "signature": tampered_sig, "closed": 0},
-            ])
-        )
+        payload = _encode_board_list([
+            {"name": good, "origin": peer_origin, "signature": good_sig, "closed": 0},
+            {"name": tampered, "origin": peer_origin, "signature": tampered_sig, "closed": 0},
+        ])
+        client = self._make_sync_client(payload)
 
-        await mgr._sync_boards(conn, peer_origin)
+        await mgr._sync_boards(client, peer_origin)
         nav = ame.get_nav()
         assert nav.get(good) is not None
         assert nav.get(tampered) is None

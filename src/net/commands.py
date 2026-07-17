@@ -92,7 +92,7 @@ class CommandHandler:
             log_msg(f"HANDLE: rejected - anonymous user cannot run cmd=0x{cmd:02x}")
             return self._build_error(401, "Authentication required for this command")
 
-        if not ctx.is_anonymous and ctx.user.is_banned:
+        if not ctx.is_anonymous and ctx.user is not None and ctx.user.is_banned:
             if cmd not in self._config.public_commands:
                 log_msg(f"HANDLE: rejected - banned user '{ctx.user.username}' attempted cmd=0x{cmd:02x}")
                 return self._build_error(403, "You are banned from performing this action")

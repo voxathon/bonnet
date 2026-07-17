@@ -5,11 +5,15 @@ import time
 import re
 import socket
 import ipaddress
-from net.connection import Connection
 from engine.facade import BonnetEngine
 from core.crypto import Identity
+from core.trust import TrustStore
 from core.logging import log_msg
-from core.orm import Database
+
+from client.protocol import (
+    build_board_list, build_list_users, build_report_list_since,
+    parse_response, ResponseStatus,
+)
 
 # Strict hostname regex: dot-separated labels of [a-zA-Z0-9-], each label 1-63
 # chars, no leading/trailing dash, total length <= 253.
@@ -114,71 +118,22 @@ class SyncDB:
         db_dir = os.path.dirname(db_path)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
-        self._db = Database(self._db_path)
-        with self._db.open() as ctx:
-            ctx.execute("""
-            CREATE TABLE IF NOT EXISTS peer_keys (
-                origin TEXT PRIMARY KEY,
-                publickey BLOB NOT NULL,
-                first_seen INTEGER NOT NULL,
-                last_rotated INTEGER NOT NULL
-            )
-            """)
+        self._trust = TrustStore(db_path)
 
     def get_peer_pubkey(self, origin) -> bytes:
-        with self._db.open() as ctx:
-            rows = ctx.execute("SELECT publickey FROM peer_keys WHERE origin=?", [origin]).fetchall()
-        if rows and rows[0][0]:
-            return bytes(rows[0][0])
-        return None
+        return self._trust.get_pin(origin)
 
     def set_peer_pubkey_tofu(self, origin, publickey) -> bool:
-        existing = self.get_peer_pubkey(origin)
-        if existing:
-            return existing == publickey
-
-        now = int(time.time())
-        with self._db.open() as ctx:
-            ctx.execute(
-                "INSERT INTO peer_keys (origin, publickey, first_seen, last_rotated) VALUES (?, ?, ?, ?)",
-                [origin, publickey, now, now]
-            )
-        return True
+        return self._trust.tofu_pin(origin, publickey)
 
     def rotate_peer_pubkey(self, origin, old_publickey, new_publickey, signature) -> bool:
-        existing = self.get_peer_pubkey(origin)
-        if not existing:
-            return False
-        if existing != old_publickey:
-            return False
-
-        from core.crypto import Identity
-        origin_bytes = origin.encode('utf-8')
-        payload = struct.pack('B', len(origin_bytes)) + origin_bytes + old_publickey + new_publickey
-
-        if not Identity.verify(old_publickey, payload, signature):
-            return False
-
-        now = int(time.time())
-        with self._db.open() as ctx:
-            ctx.execute(
-                "UPDATE peer_keys SET publickey=?, last_rotated=? WHERE origin=?",
-                [new_publickey, now, origin]
-            )
-        return True
+        return self._trust.verify_rotation(origin, old_publickey, new_publickey, signature)
 
     def list_peer_keys(self) -> list:
-        result = []
-        with self._db.open() as ctx:
-            rows = ctx.execute("SELECT origin, publickey, first_seen, last_rotated FROM peer_keys").fetchall()
-        for row in rows:
-            result.append({
-                'origin': row[0],
-                'publickey': bytes(row[1]),
-                'first_seen': row[2],
-                'last_rotated': row[3]
-            })
-        return result
+        return self._trust.list_pins()
+
+    def close(self):
+        self._trust.close()
 
 class SyncManager:
 
@@ -226,62 +181,61 @@ class SyncManager:
         await self._sync_queue.put(peer_hostname)
 
     async def _do_sync_from_peer(self, peer_hostname):
-
-        conn = None
-        connected = False
-
         # SSRF dial-site gate: require BOTH the cheap string check AND a DNS
         # resolution check that every resolved address is globally routable.
-        # This blocks hostnames that pass the string check but resolve to
-        # private/loopback/link-local IPs (e.g. a rebind or poisoned relay),
-        # before any outbound Connection is opened (#2 / R2).
         if not _is_dialable_host(peer_hostname) or not _resolves_to_global_only(peer_hostname):
             log_msg(f"SYNC: refusing to dial non-dialable/non-global peer hostname '{peer_hostname}' (SSRF guard)")
             return
 
+        client = None
         try:
-            conn = Connection.client(self._server_identity)
+            from client.http import BonnetHTTPClient, BonnetHTTPError
+
+            # Try standard port first, then privileged
+            base_url = f"https://{peer_hostname}:2272"
+            client = BonnetHTTPClient(base_url=base_url, timeout=30.0)
+
             try:
-                await conn.connect(f"wss://{peer_hostname}:2272")
-                connected = True
+                await client.connect(self._server_identity)
             except Exception as e:
                 log_msg(f"SYNC: port 2272 failed for {peer_hostname}: {e}, trying 272")
-                await conn.close()
-                conn = Connection.client(self._server_identity)
+                await client.close()
+                base_url = f"https://{peer_hostname}:272"
+                client = BonnetHTTPClient(base_url=base_url, timeout=30.0)
                 try:
-                    await conn.connect(f"wss://{peer_hostname}:272")
-                    connected = True
+                    await client.connect(self._server_identity)
                 except Exception as e2:
                     log_msg(f"SYNC: port 272 also failed for {peer_hostname}: {e2}")
-                    await conn.close()
+                    await client.close()
                     return
 
-            # TOFU the peer's public key upon connection
-            if not self._sync_db.set_peer_pubkey_tofu(peer_hostname, conn.peer_public_key):
+            # TOFU the peer's public key
+            if not self._sync_db.set_peer_pubkey_tofu(peer_hostname, client.server_public_key):
                 log_msg(f"SYNC: aborting sync with {peer_hostname} - public key mismatch (TOFU failed)")
-                await conn.close()
+                await client.close()
                 return
 
-            await self._sync_boards(conn, peer_hostname)
-            await self._sync_users(conn, peer_hostname)
-            await self._sync_reports(conn, peer_hostname)
+            # Sync using multiple commands over one HTTP client (fixes v1 lifecycle mismatch)
+            await self._sync_boards(client, peer_hostname)
+            await self._sync_users(client, peer_hostname)
+            await self._sync_reports(client, peer_hostname)
 
         except Exception as e:
             log_msg(f"SYNC: failed to sync with {peer_hostname}: {e}")
         finally:
-            if conn is not None:
-                await conn.close()
+            if client is not None:
+                await client.close()
 
-    async def _sync_boards(self, conn, peer_hostname):
-        await conn.send_request(bytes([0x11]), b'')
-        response = await conn.recv_response()
-
-        if len(response) == 0 or response[0] != 0x00:
-            log_msg(f"SYNC: BOARD_LIST failed for {peer_hostname}")
+    async def _sync_boards(self, client, peer_hostname):
+        cmd = build_board_list()
+        try:
+            payload = await client._send_command(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: BOARD_LIST failed for {peer_hostname}: {e}")
             return
 
-        idx = 1
-        count = struct.unpack('>H', response[idx:idx+2])[0]
+        idx = 0
+        count = struct.unpack('>H', payload[idx:idx+2])[0]
         idx += 2
 
         nav = self._ame.get_nav()
@@ -291,22 +245,22 @@ class SyncManager:
         skipped = 0
 
         for _ in range(count):
-            n_len = response[idx]
+            n_len = payload[idx]
             idx += 1
-            name = response[idx:idx+n_len].decode('utf-8')
+            name = payload[idx:idx+n_len].decode('utf-8')
             idx += n_len
 
-            o_len = response[idx]
+            o_len = payload[idx]
             idx += 1
-            origin = response[idx:idx+o_len].decode('utf-8')
+            origin = payload[idx:idx+o_len].decode('utf-8')
             idx += o_len
 
-            s_len = response[idx]
+            s_len = payload[idx]
             idx += 1
-            signature = response[idx:idx+s_len]
+            signature = payload[idx:idx+s_len]
             idx += s_len
 
-            closed = response[idx]
+            closed = payload[idx]
             idx += 1
 
             # SSRF guard: reject entries whose origin or the relay we will store
@@ -327,9 +281,9 @@ class SyncManager:
                 skipped += 1
                 continue
 
-            payload = _build_board_signature_payload(name, origin)
+            sig_payload = _build_board_signature_payload(name, origin)
             try:
-                if not Identity.verify(origin_pubkey, payload, signature):
+                if not Identity.verify(origin_pubkey, sig_payload, signature):
                     log_msg(f"SYNC: skipping board '{name}' from {peer_hostname}: signature verification failed for origin '{origin}'")
                     skipped += 1
                     continue
@@ -351,20 +305,20 @@ class SyncManager:
         nav.delete_by_origin_batch(peer_hostname, list(peer_native_boards))
         log_msg(f"SYNC: delta sync complete for {peer_hostname}, native boards: {len(peer_native_boards)}")
 
-    async def _sync_users(self, conn, peer_hostname):
+    async def _sync_users(self, client, peer_hostname):
         offset = 0
         limit = 100
         total = 0
 
         while True:
-            await conn.send_request(bytes([0x03]), struct.pack('>II', offset, limit))
-            response = await conn.recv_response()
-
-            if len(response) == 0 or response[0] != 0x00:
+            cmd = build_list_users(offset, limit)
+            try:
+                payload = await client._send_command(cmd)
+            except Exception:
                 break
 
-            idx = 1
-            count = struct.unpack('>H', response[idx:idx+2])[0]
+            idx = 0
+            count = struct.unpack('>H', payload[idx:idx+2])[0]
             idx += 2
 
             if count == 0:
@@ -405,19 +359,19 @@ class SyncManager:
 
         log_msg(f"SYNC: synced {total} users from {peer_hostname}")
 
-    async def _sync_reports(self, conn, peer_hostname):
+    async def _sync_reports(self, client, peer_hostname):
         since_timestamp = 0
         total = 0
 
-        await conn.send_request(bytes([0x54]), struct.pack('>q', since_timestamp))
-        response = await conn.recv_response()
-
-        if len(response) == 0 or response[0] != 0x00:
-            log_msg(f"SYNC: REPORT_LIST_SINCE failed for {peer_hostname}")
+        cmd = build_report_list_since(since_timestamp)
+        try:
+            payload = await client._send_command(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: REPORT_LIST_SINCE failed for {peer_hostname}: {e}")
             return
 
-        idx = 1
-        count = struct.unpack('>H', response[idx:idx+2])[0]
+        idx = 0
+        count = struct.unpack('>H', payload[idx:idx+2])[0]
         idx += 2
 
         if count == 0:
