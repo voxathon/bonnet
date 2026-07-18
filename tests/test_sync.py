@@ -565,3 +565,134 @@ class TestSyncReportsParsing:
         await mgr._sync_reports(client, peer_hostname)
 
         engine.keibatsu.upsert_remote_report.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: Legacy unsigned sync fallback disabled by default
+# ---------------------------------------------------------------------------
+
+
+class TestLegacySyncDisabled:
+    """When allow_legacy_unsigned_user_sync is False (the default), the legacy
+    LIST_USERS and REPORT_LIST_SINCE sync paths are skipped entirely."""
+
+    @pytest.mark.asyncio
+    async def test_sync_users_skipped_when_disabled(self, sync_setup_real_ume):
+        mgr, ident, ame, engine, ume = sync_setup_real_ume
+        engine.config.allow_legacy_unsigned_user_sync = False
+        peer_hostname = "peer.example.com"
+
+        pubkey = Identity.generate().public_key
+        payload = _encode_user_list([{
+            "username": "should_not_appear",
+            "registrar": "peer.example.com",
+            "record_origin": "peer.example.com",
+            "relay": "peer.example.com",
+            "publickey": pubkey,
+        }])
+        client = FakeSyncClient([payload])
+
+        await mgr._sync_users(client, peer_hostname)
+
+        assert ume.get(username="should_not_appear") is None
+
+    @pytest.mark.asyncio
+    async def test_sync_reports_skipped_when_disabled(self, sync_setup):
+        mgr, ident, ame, engine = sync_setup
+        engine.config.allow_legacy_unsigned_user_sync = False
+        peer_hostname = "peer.example.com"
+
+        pubkey = Identity.generate().public_key
+        payload = _encode_report_list([{
+            "report_num": 1,
+            "rule_num": 1,
+            "culprit_pubkey": pubkey,
+            "board": "general",
+            "post_num": 42,
+            "reporter_pubkey": pubkey,
+            "report_time": 1700000000,
+            "origin": "peer.example.com",
+            "relay": "peer.example.com",
+            "description": "spam",
+            "origin_sig": "",
+            "reporter_sig": "",
+        }])
+        client = FakeSyncClient([payload])
+
+        engine.keibatsu.upsert_remote_report = MagicMock(
+            return_value=MagicMock(result=MagicMock(return_value=True))
+        )
+
+        await mgr._sync_reports(client, peer_hostname)
+
+        engine.keibatsu.upsert_remote_report.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_users_runs_when_enabled(self, sync_setup_real_ume):
+        mgr, ident, ame, engine, ume = sync_setup_real_ume
+        engine.config.allow_legacy_unsigned_user_sync = True
+        peer_hostname = "peer.example.com"
+
+        pubkey = Identity.generate().public_key
+        payload = _encode_user_list([{
+            "username": "legacy_user",
+            "registrar": "peer.example.com",
+            "record_origin": "peer.example.com",
+            "relay": "peer.example.com",
+            "publickey": pubkey,
+        }])
+        client = FakeSyncClient([payload])
+
+        await mgr._sync_users(client, peer_hostname)
+
+        user = ume.get(username="legacy_user")
+        assert user is not None
+        assert user.record_origin == "peer.example.com"
+
+    @pytest.mark.asyncio
+    async def test_sync_reports_runs_when_enabled(self, sync_setup):
+        mgr, ident, ame, engine = sync_setup
+        engine.config.allow_legacy_unsigned_user_sync = True
+        peer_hostname = "peer.example.com"
+
+        pubkey = Identity.generate().public_key
+        payload = _encode_report_list([{
+            "report_num": 1,
+            "rule_num": 1,
+            "culprit_pubkey": pubkey,
+            "board": "general",
+            "post_num": 42,
+            "reporter_pubkey": pubkey,
+            "report_time": 1700000000,
+            "origin": "peer.example.com",
+            "relay": "peer.example.com",
+            "description": "spam",
+            "origin_sig": "",
+            "reporter_sig": "",
+        }])
+        client = FakeSyncClient([payload])
+
+        engine.keibatsu.upsert_remote_report = MagicMock(
+            return_value=MagicMock(result=MagicMock(return_value=True))
+        )
+
+        await mgr._sync_reports(client, peer_hostname)
+
+        engine.keibatsu.upsert_remote_report.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_default_config_has_flag_false(self, temp_dir):
+        from core.config import Config
+        import os
+        config = Config(
+            origin="test.local",
+            data_dir=temp_dir,
+            ame_path=os.path.join(temp_dir, "ame"),
+            nav_db_path=os.path.join(temp_dir, "nav.db"),
+            reports_db_path=os.path.join(temp_dir, "reports.db"),
+            punishments_db_path=os.path.join(temp_dir, "pun.db"),
+            log_dir=os.path.join(temp_dir, "logs"),
+            identity_path=os.path.join(temp_dir, "id"),
+            userfile_path=os.path.join(temp_dir, "uf"),
+        )
+        assert config.allow_legacy_unsigned_user_sync is False

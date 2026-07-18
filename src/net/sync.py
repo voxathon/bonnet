@@ -13,9 +13,9 @@ from core.logging import log_msg
 from client.protocol import (
     build_board_list, build_list_users, build_report_list_since,
     build_user_registry_head, build_user_registry_nodes,
-    build_user_registry_records,
+    build_user_registry_records, build_user_registry_heads,
     parse_user_registry_head_resp, parse_user_registry_nodes_resp,
-    parse_user_registry_records_resp,
+    parse_user_registry_records_resp, parse_user_registry_heads_resp,
     parse_response, ResponseStatus,
 )
 
@@ -235,6 +235,7 @@ class SyncManager:
             await self._sync_users(client, peer_hostname)
             await self._sync_reports(client, peer_hostname)
             await self._sync_registry(client, peer_hostname)
+            await self._sync_relayed_origins(client, peer_hostname)
 
         except Exception as e:
             log_msg(f"SYNC: failed to sync with {peer_hostname}: {e}")
@@ -322,6 +323,10 @@ class SyncManager:
         log_msg(f"SYNC: delta sync complete for {peer_hostname}, native boards: {len(peer_native_boards)}")
 
     async def _sync_users(self, client, peer_hostname):
+        if not getattr(self._config, 'allow_legacy_unsigned_user_sync', False):
+            log_msg(f"SYNC: legacy unsigned user sync disabled, skipping LIST_USERS from {peer_hostname}")
+            return
+
         offset = 0
         limit = 100
         total = 0
@@ -376,6 +381,10 @@ class SyncManager:
         log_msg(f"SYNC: synced {total} users from {peer_hostname}")
 
     async def _sync_reports(self, client, peer_hostname):
+        if not getattr(self._config, 'allow_legacy_unsigned_user_sync', False):
+            log_msg(f"SYNC: legacy unsigned report sync disabled, skipping REPORT_LIST_SINCE from {peer_hostname}")
+            return
+
         since_timestamp = 0
         total = 0
 
@@ -607,3 +616,160 @@ class SyncManager:
                 log_msg(f"SYNC: upsert_remote_user failed for '{user.username}': {e}")
 
         log_msg(f"SYNC: normalized {total_normalized} users into UME from {peer_origin} registry")
+
+    # ------------------------------------------------------------------
+    # Relay origin discovery (Phase 6)
+    # ------------------------------------------------------------------
+
+    async def _sync_relayed_origins(self, client, peer_hostname):
+        """Discover cached origin heads advertised by a relay and sync any
+        origins we already trust (have a pinned key for).
+
+        This does NOT TOFU new origins — a relay cannot introduce trust in
+        an origin the receiver has not already pinned.  The receiver verifies
+        each head against the pinned origin key, never against the relay key.
+        """
+
+        if self._registry_store is None:
+            return
+
+        peer_origin = getattr(client, '_server_origin', None)
+        if not peer_origin:
+            return
+
+        # Fetch the relay's advertised head list
+        try:
+            cmd = build_user_registry_heads(offset=0, limit=100)
+            payload = await client._send_command(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: USER_REGISTRY_HEADS failed for {peer_hostname}: {e}")
+            return
+
+        try:
+            encoded_heads = parse_user_registry_heads_resp(payload)
+        except Exception as e:
+            log_msg(f"SYNC: failed to parse heads list from {peer_hostname}: {e}")
+            return
+
+        if not encoded_heads:
+            return
+
+        from core.user_registry import decode_head
+
+        for encoded in encoded_heads:
+            try:
+                head = decode_head(encoded)
+            except Exception:
+                continue
+
+            # Skip our own origin and the peer's own origin (already synced)
+            if head.origin == self._config.origin:
+                continue
+            if head.origin == peer_origin:
+                continue
+
+            # Only sync origins we already have a pinned key for
+            origin_pubkey = self._sync_db.get_peer_pubkey(head.origin)
+            if origin_pubkey is None:
+                log_msg(f"SYNC: relay advertises origin '{head.origin}' but no pinned key, skipping")
+                continue
+
+            # Check if we already have this root
+            state = self._registry_store.get_state(head.origin)
+            if state is not None and state["current_merkle_root"] == head.merkle_root:
+                continue
+
+            log_msg(f"SYNC: syncing relayed origin '{head.origin}' from relay {peer_hostname}")
+
+            # Fetch the full head (the list may have a summary; get the real one)
+            try:
+                cmd = build_user_registry_head(head.origin, 0)
+                head_payload = await client._send_command(cmd)
+            except Exception as e:
+                log_msg(f"SYNC: relayed HEAD fetch failed for {head.origin}: {e}")
+                continue
+
+            from core.user_registry import (
+                verify_head, compute_registry_key, compute_value_hash,
+            )
+            from engine.ume import User, RECORD_SIZE
+
+            try:
+                full_encoded = parse_user_registry_head_resp(head_payload)
+                full_head = decode_head(full_encoded)
+            except Exception:
+                continue
+
+            if not verify_head(full_head, origin_pubkey):
+                log_msg(f"SYNC: relayed head signature failed for {head.origin}")
+                continue
+
+            if full_head.origin != head.origin:
+                continue
+
+            # Fetch all records for this origin from the relay
+            actual_seq = full_head.registry_seq
+            try:
+                cmd = build_user_registry_records(head.origin, actual_seq, [], include_proofs=False)
+                rec_payload = await client._send_command(cmd)
+            except Exception as e:
+                log_msg(f"SYNC: relayed records fetch failed for {head.origin}: {e}")
+                continue
+
+            try:
+                record_entries = parse_user_registry_records_resp(rec_payload)
+            except Exception:
+                continue
+
+            records_for_store: list[tuple[bytes, str, bytes, bytes]] = []
+            for entry in record_entries:
+                if entry["present"] != 1:
+                    continue
+                raw_record = entry["raw_record"]
+                if len(raw_record) != RECORD_SIZE:
+                    continue
+                try:
+                    user = User.decode(raw_record)
+                except Exception:
+                    continue
+                if user.record_origin != head.origin:
+                    continue
+                if len(user.publickey) != 32:
+                    continue
+                key = compute_registry_key(head.origin, user.username)
+                vh = compute_value_hash(raw_record)
+                if key != entry["registry_key"]:
+                    continue
+                records_for_store.append((key, user.username, raw_record, vh))
+
+            # Accept atomically
+            result = self._registry_store.accept_remote_head(
+                origin=head.origin,
+                head=full_head,
+                origin_pubkey=origin_pubkey,
+                records=records_for_store,
+                nodes=[],
+            )
+
+            if not result.accepted:
+                log_msg(f"SYNC: relayed head rejected for {head.origin}: {result.reason}")
+                continue
+
+            log_msg(f"SYNC: relayed head accepted for {head.origin} seq {full_head.registry_seq}")
+
+            # Normalize into UME
+            max_ct_correction = getattr(self._config, 'max_creation_time_correction', 86400)
+            for key, username, raw_record, vh in records_for_store:
+                user = User.decode(raw_record)
+                try:
+                    self._ume.upsert_remote_user(
+                        username=user.username,
+                        registrar=user.registrar,
+                        publickey=user.publickey,
+                        record_origin=user.record_origin,
+                        relay=peer_hostname,
+                        creation_time=user.creation_time,
+                        max_creation_time_correction=max_ct_correction,
+                    )
+                except ValueError as e:
+                    log_msg(f"SYNC: relayed upsert failed for '{user.username}': {e}")
