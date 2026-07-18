@@ -657,3 +657,253 @@ class TestRegistrySyncInsertDelete:
         head1_b = node_b.registry_store.get_head("origin-a.test", h1.registry_seq)
         head2_b = node_b.registry_store.get_head("origin-a.test", h2.registry_seq)
         assert head2_b.previous_head_hash == head1_b.head_hash
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: Relay topology tests
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def relay_b(temp_dir):
+    s = RegistryTestServer(temp_dir, "relay-b.test")
+    yield s
+    s.cleanup()
+
+@pytest_asyncio.fixture
+async def node_c(temp_dir):
+    s = RegistryTestServer(temp_dir, "node-c.test")
+    yield s
+    s.cleanup()
+
+@pytest_asyncio.fixture
+async def origin_d(temp_dir):
+    s = RegistryTestServer(temp_dir, "origin-d.test")
+    yield s
+    s.cleanup()
+
+
+class TestRelayTopology:
+    """Origin A -> relay B -> node C transfer while preserving origin proofs."""
+
+    @pytest.mark.asyncio
+    async def test_three_hop_transfer(self, origin_a, relay_b, node_c):
+        """Node C gets origin A's users through relay B.
+
+        1. Origin A creates users and builds a signed head.
+        2. Relay B syncs from origin A (direct).
+        3. Node C syncs from relay B (relayed).
+        4. Node C verifies origin A's head with origin A's pinned key.
+        5. Node C has the same users as origin A.
+        """
+        # 1. Origin A creates users
+        alice_key = Identity.generate().public_key
+        origin_a.ume.put("alice", "origin-a.test", alice_key,
+                         record_origin="origin-a.test", relay="origin-a.test")
+        origin_a.registry_service.build_snapshot()
+
+        # 2. Relay B syncs from origin A
+        relay_b.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "origin-a.test", origin_a.server_identity.public_key
+        )
+        async with origin_a.make_client() as http_client:
+            client = ASGISyncClient(
+                http_client, relay_b.server_identity,
+                origin_a.anonymous_identity, "origin-a.test"
+            )
+            await relay_b.handler._sync_mgr._sync_registry(client, "origin-a.test")
+
+        # Verify relay B has origin A's head
+        head_b = relay_b.registry_store.get_head("origin-a.test")
+        assert head_b is not None
+        assert head_b.origin == "origin-a.test"
+
+        # 3. Node C pins origin A's key (out-of-band trust)
+        node_c.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "origin-a.test", origin_a.server_identity.public_key
+        )
+        # Node C also pins relay B's key
+        node_c.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "relay-b.test", relay_b.server_identity.public_key
+        )
+
+        # 4. Node C syncs from relay B
+        async with relay_b.make_client() as http_client:
+            client = ASGISyncClient(
+                http_client, node_c.server_identity,
+                relay_b.anonymous_identity, "relay-b.test"
+            )
+            await node_c.handler._sync_mgr._sync_registry(client, "relay-b.test")
+            await node_c.handler._sync_mgr._sync_relayed_origins(client, "relay-b.test")
+
+        # 5. Node C has origin A's head (relayed through B)
+        head_c = node_c.registry_store.get_head("origin-a.test")
+        assert head_c is not None
+        assert head_c.origin == "origin-a.test"
+        assert head_c.merkle_root == head_b.merkle_root
+
+        # 6. Node C has origin A's users
+        alice_c = node_c.ume.get(username="alice")
+        assert alice_c is not None
+        assert alice_c.record_origin == "origin-a.test"
+        assert alice_c.publickey == alice_key
+
+    @pytest.mark.asyncio
+    async def test_relay_preserves_origin_proof(self, origin_a, relay_b, node_c):
+        """The raw attested bytes retained by node C match origin A's exactly."""
+        origin_a.ume.put("bob", "origin-a.test", Identity.generate().public_key,
+                         record_origin="origin-a.test", relay="origin-a.test")
+        head_a = origin_a.registry_service.build_snapshot()
+
+        # Relay B syncs from A
+        relay_b.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "origin-a.test", origin_a.server_identity.public_key
+        )
+        async with origin_a.make_client() as http_client:
+            client = ASGISyncClient(
+                http_client, relay_b.server_identity,
+                origin_a.anonymous_identity, "origin-a.test"
+            )
+            await relay_b.handler._sync_mgr._sync_registry(client, "origin-a.test")
+
+        # Node C pins both keys and syncs from relay B
+        node_c.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "origin-a.test", origin_a.server_identity.public_key
+        )
+        node_c.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "relay-b.test", relay_b.server_identity.public_key
+        )
+        async with relay_b.make_client() as http_client:
+            client = ASGISyncClient(
+                http_client, node_c.server_identity,
+                relay_b.anonymous_identity, "relay-b.test"
+            )
+            await node_c.handler._sync_mgr._sync_registry(client, "relay-b.test")
+            await node_c.handler._sync_mgr._sync_relayed_origins(client, "relay-b.test")
+
+        # The sidecar record on node C matches the one on relay B
+        key = compute_registry_key("origin-a.test", "bob")
+        raw_c = node_c.registry_store.get_record("origin-a.test", key)
+        raw_b = relay_b.registry_store.get_record("origin-a.test", key)
+        assert raw_c is not None
+        assert raw_b is not None
+        assert raw_c == raw_b
+
+    @pytest.mark.asyncio
+    async def test_relay_does_not_introduce_trust(self, origin_a, relay_b, node_c):
+        """A relay advertising an origin the receiver has not pinned is skipped."""
+        origin_a.ume.put("alice", "origin-a.test", Identity.generate().public_key,
+                         record_origin="origin-a.test", relay="origin-a.test")
+        origin_a.registry_service.build_snapshot()
+
+        # Relay B syncs from origin A
+        relay_b.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "origin-a.test", origin_a.server_identity.public_key
+        )
+        async with origin_a.make_client() as http_client:
+            client = ASGISyncClient(
+                http_client, relay_b.server_identity,
+                origin_a.anonymous_identity, "origin-a.test"
+            )
+            await relay_b.handler._sync_mgr._sync_registry(client, "origin-a.test")
+
+        # Node C pins relay B's key but NOT origin A's key
+        node_c.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "relay-b.test", relay_b.server_identity.public_key
+        )
+
+        # Node C syncs from relay B
+        async with relay_b.make_client() as http_client:
+            client = ASGISyncClient(
+                http_client, node_c.server_identity,
+                relay_b.anonymous_identity, "relay-b.test"
+            )
+            await node_c.handler._sync_mgr._sync_registry(client, "relay-b.test")
+            await node_c.handler._sync_mgr._sync_relayed_origins(client, "relay-b.test")
+
+        # Node C should NOT have origin A's head (no pinned key)
+        head_c = node_c.registry_store.get_head("origin-a.test")
+        assert head_c is None
+
+        # Node C should NOT have alice in UME
+        alice_c = node_c.ume.get(username="alice")
+        assert alice_c is None
+
+
+class TestMultiOriginRelay:
+    """Origin A and origin D -> relay B -> node C."""
+
+    @pytest.mark.asyncio
+    async def test_two_origins_through_one_relay(self, origin_a, origin_d, relay_b, node_c):
+        """Relay B caches heads from two origins; node C syncs both through B."""
+        # Origin A creates a user
+        alice_key = Identity.generate().public_key
+        origin_a.ume.put("alice", "origin-a.test", alice_key,
+                         record_origin="origin-a.test", relay="origin-a.test")
+        origin_a.registry_service.build_snapshot()
+
+        # Origin D creates a user
+        dave_key = Identity.generate().public_key
+        origin_d.ume.put("dave", "origin-d.test", dave_key,
+                         record_origin="origin-d.test", relay="origin-d.test")
+        origin_d.registry_service.build_snapshot()
+
+        # Relay B syncs from both origins
+        relay_b.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "origin-a.test", origin_a.server_identity.public_key
+        )
+        async with origin_a.make_client() as http_client:
+            client = ASGISyncClient(
+                http_client, relay_b.server_identity,
+                origin_a.anonymous_identity, "origin-a.test"
+            )
+            await relay_b.handler._sync_mgr._sync_registry(client, "origin-a.test")
+
+        relay_b.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "origin-d.test", origin_d.server_identity.public_key
+        )
+        async with origin_d.make_client() as http_client:
+            client = ASGISyncClient(
+                http_client, relay_b.server_identity,
+                origin_d.anonymous_identity, "origin-d.test"
+            )
+            await relay_b.handler._sync_mgr._sync_registry(client, "origin-d.test")
+
+        # Verify relay B has both origins cached
+        assert relay_b.registry_store.get_head("origin-a.test") is not None
+        assert relay_b.registry_store.get_head("origin-d.test") is not None
+
+        # Node C pins all three keys
+        node_c.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "origin-a.test", origin_a.server_identity.public_key
+        )
+        node_c.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "origin-d.test", origin_d.server_identity.public_key
+        )
+        node_c.handler._sync_mgr._sync_db.set_peer_pubkey_tofu(
+            "relay-b.test", relay_b.server_identity.public_key
+        )
+
+        # Node C syncs from relay B
+        async with relay_b.make_client() as http_client:
+            client = ASGISyncClient(
+                http_client, node_c.server_identity,
+                relay_b.anonymous_identity, "relay-b.test"
+            )
+            await node_c.handler._sync_mgr._sync_registry(client, "relay-b.test")
+            await node_c.handler._sync_mgr._sync_relayed_origins(client, "relay-b.test")
+
+        # Node C has both origins
+        assert node_c.registry_store.get_head("origin-a.test") is not None
+        assert node_c.registry_store.get_head("origin-d.test") is not None
+
+        # Node C has users from both origins
+        alice_c = node_c.ume.get(username="alice")
+        assert alice_c is not None
+        assert alice_c.record_origin == "origin-a.test"
+        assert alice_c.publickey == alice_key
+
+        dave_c = node_c.ume.get(username="dave")
+        assert dave_c is not None
+        assert dave_c.record_origin == "origin-d.test"
+        assert dave_c.publickey == dave_key
