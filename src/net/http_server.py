@@ -157,6 +157,7 @@ class BonnetHTTPServer:
             "anonymous_key": self._anonymous_public_key.hex(),
             "anonymous_private_key": self._anonymous_identity.private_key.hex(),
             "command_endpoint": "/v2/command",
+            "capabilities": ["user-registry-merkle-v1"],
         }).encode("utf-8")
 
         msg = HTTPMessage(
@@ -318,9 +319,10 @@ class BonnetHTTPServer:
                                                         remote_addr, scope, request_nonce=request_nonce_for_response)
                         return
             else:
-                # Unknown key — not anonymous, not in UME, not registering
-                # Allow REGISTER (0x01) to proceed for unregistered keys
-                if body[0] != 0x01:
+                # Unknown key — not anonymous, not in UME.
+                # Allow REGISTER (0x01) to proceed for unregistered keys.
+                # Allow public commands to proceed as an unregistered principal.
+                if body[0] != 0x01 and body[0] not in self._config.public_commands:
                     await self._send_protocol_error(send, 403, "Unknown key; register first",
                                                     remote_addr, scope, request_nonce=request_nonce_for_response)
                     return

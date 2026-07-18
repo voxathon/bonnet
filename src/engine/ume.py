@@ -94,6 +94,7 @@ class Ume:
         self._filepath = filepath
         self._lock = threading.Lock()
         self._next_seq = 0
+        self._mutation_callbacks: list = []
         with self._lock:
             if not os.path.exists(self._filepath):
                 try:
@@ -101,6 +102,16 @@ class Ume:
                 except OSError as e:
                     raise IOError(f"Failed to create user database: {e}")
             self._next_seq = self._find_max_seq() + 1
+
+    def register_mutation_callback(self, callback) -> None:
+        self._mutation_callbacks.append(callback)
+
+    def _notify_mutation(self) -> None:
+        for cb in self._mutation_callbacks:
+            try:
+                cb()
+            except Exception:
+                pass
 
     def _find_max_seq(self) -> int:
         max_seq = 0
@@ -258,6 +269,7 @@ class Ume:
                         raise IOError(f"Failed to write user record: {e}")
                 finally:
                     _flock_unlock(lockfile.fileno())
+        self._notify_mutation()
         return user
 
     def upd(self, username: str = None, seq_numbr: int = 0, new_registrar: str = None, new_record_origin: str = None, new_relay: str = None, new_publickey: bytes = None, new_administrator=None, new_moderator=None, new_banned=None, new_creation_time=None, new_relay_time=None) -> bool:
@@ -308,6 +320,7 @@ class Ume:
                         raise IOError(f"Failed to update user record: {e}")
                 finally:
                     _flock_unlock(lockfile.fileno())
+        self._notify_mutation()
         return True
 
     def delete(self, username: str = None, seq_numbr: int = 0) -> bool:
@@ -334,6 +347,7 @@ class Ume:
                         raise IOError(f"Failed to delete user record: {e}")
                 finally:
                     _flock_unlock(lockfile.fileno())
+        self._notify_mutation()
         return True
 
     def export(self, export_path: str = "./users") -> None:
@@ -350,7 +364,7 @@ class Ume:
                             try:
                                 user = User.decode(data)
                                 ban_marker = "!" if user.is_banned else ""
-                                line = f"{ban_marker}<{user.username}@{user.registrar}>[{user.record_origin}|{user.relay}]:{user.publickey.hex()}\n"
+                                line = f"{ban_marker}<{user.username}@{user.registrar}>[{user.record_origin}|{user.relay}]:{user.publickey.hex()}\tcreation_time={user.creation_time}\trelay_time={user.relay_time}\n"
                                 fout.write(line)
                             except (struct.error, UnicodeDecodeError):
                                 continue
@@ -377,6 +391,27 @@ class Ume:
                 pass
         return users
 
+    def snapshot_raw_records(self) -> list[bytes]:
+        """Return exact raw RECORD_SIZE byte chunks for all non-deleted slots.
+
+        Holds the UME lock for the entire read to provide a consistent view.
+        Returns a list of immutable ``bytes`` values (not a generator).
+        """
+        records: list[bytes] = []
+        with self._lock:
+            try:
+                with open(self._filepath, 'rb') as f:
+                    while True:
+                        data = f.read(RECORD_SIZE)
+                        if len(data) < RECORD_SIZE:
+                            break
+                        if data == b'\x00' * RECORD_SIZE:
+                            continue
+                        records.append(bytes(data))
+            except OSError:
+                pass
+        return records
+
     def ensure_root_user(self, origin: str, publickey: bytes) -> User:
         existing = self.get(username="root")
         if existing is not None:
@@ -390,7 +425,9 @@ class Ume:
         )
 
     def upsert_remote_user(self, username: str, registrar: str, publickey: bytes,
-                           record_origin: str, relay: str) -> int:
+                           record_origin: str, relay: str,
+                           creation_time: int | None = None,
+                           max_creation_time_correction: int | None = None) -> int:
         """
         Atomically insert or update user from remote sync.
         Returns:
@@ -410,11 +447,14 @@ class Ume:
                     pos = self._find_record_by_username(username)
 
                     if pos == -1:
-                        # INSERT - user doesn't exist
+                        ct = creation_time if creation_time is not None else int(_time.time())
+                        now = int(_time.time())
+                        if ct > now + 300:
+                            raise ValueError(f"creation_time {ct} is in the future")
                         user = User(
                             username, registrar, record_origin, relay, publickey,
                             self._next_seq, False, False, False,
-                            int(_time.time()), int(_time.time())
+                            ct, now
                         )
                         try:
                             lockfile.seek(0, 2)  # seek to end
@@ -436,6 +476,18 @@ class Ume:
                         user.relay = relay
                         user.publickey = publickey
                         user.relay_time = int(_time.time())
+                        if creation_time is not None:
+                            now = int(_time.time())
+                            if creation_time > now + 300:
+                                raise ValueError(f"creation_time {creation_time} is in the future")
+                            if max_creation_time_correction is not None:
+                                delta = abs(creation_time - user.creation_time)
+                                if delta > max_creation_time_correction:
+                                    raise ValueError(
+                                        f"creation_time correction {delta}s exceeds "
+                                        f"max {max_creation_time_correction}s"
+                                    )
+                            user.creation_time = creation_time
 
                         try:
                             lockfile.seek(pos * RECORD_SIZE)
