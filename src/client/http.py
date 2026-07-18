@@ -89,10 +89,12 @@ class BonnetHTTPClient:
         trust_store_path: Optional[str] = None,
         max_connections: int = 10,
         timeout: float = 30.0,
+        verify: bool | str = True,
     ):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._max_connections = max_connections
+        self._verify = verify
 
         self._identity: Optional[Identity] = None
         self._private_key: Optional[bytes] = None
@@ -133,7 +135,7 @@ class BonnetHTTPClient:
                 base_url=self._base_url,
                 timeout=httpx.Timeout(self._timeout),
                 limits=httpx.Limits(max_connections=self._max_connections),
-                verify=False,  # dev/test; production uses real TLS
+                verify=self._verify,
             )
 
     # ------------------------------------------------------------------
@@ -175,20 +177,22 @@ class BonnetHTTPClient:
     async def connect_anonymous(self, anonymous_private_key: Optional[bytes] = None) -> None:
         """Connect anonymously using the server's shared anonymous key.
 
-        The anonymous private key is published by the server (it's a shared key
-        by design). If not provided, the client must obtain it out-of-band.
+        The anonymous private key is published by the server in its discovery
+        document. If not provided explicitly, it is fetched automatically.
         """
         info = await self.discover()
         self._server_public_key = bytes.fromhex(info["public_key"])
         self._server_origin = info["origin"]
         self._anonymous_public_key = bytes.fromhex(info["anonymous_key"])
 
-        if anonymous_private_key:
-            self._anonymous_private_key = anonymous_private_key
-        else:
-            # The anonymous private key should be fetched from a well-known endpoint
-            # For now, it must be provided out-of-band
-            raise BonnetHTTPError(500, "Anonymous private key must be provided")
+        if anonymous_private_key is None:
+            anon_priv_hex = info.get("anonymous_private_key")
+            if anon_priv_hex:
+                anonymous_private_key = bytes.fromhex(anon_priv_hex)
+            else:
+                raise BonnetHTTPError(500, "Server does not publish anonymous private key")
+
+        self._anonymous_private_key = anonymous_private_key
 
         self._is_anonymous = True
 
@@ -569,3 +573,98 @@ class _ServerKeyResolver(KeyResolver):
 
     def resolve_public_key(self, key_id: str) -> bytes:
         return self._key
+
+
+class BonnetMCPClient:
+    """IdentityStore-aware wrapper around BonnetHTTPClient for MCP tool servers.
+
+    Provides the v1-compatible connect API that the MCP tools (tools.py,
+    simple.py) expect:
+
+        client = BonnetMCPClient(identity_store, bonnet_url)
+        async with client:
+            await client.connect(username, password, require_auth=True)
+            await client.board_create("test")
+
+    When require_auth=True, the wrapper unlocks the local Ed25519 key from the
+    IdentityStore using username+password and delegates to
+    BonnetHTTPClient.connect(identity, username).
+
+    When require_auth=False, it connects anonymously (the server publishes its
+    shared anonymous private key via discovery) so read-only public commands
+    work without a password.
+    """
+
+    def __init__(self, identity_store, base_url: str = "https://localhost:2272",
+                 trust_store_path: Optional[str] = None, verify: bool | str = True,
+                 **kwargs):
+        self.identity_store = identity_store
+        self._http = BonnetHTTPClient(
+            base_url=base_url,
+            trust_store_path=trust_store_path,
+            verify=verify,
+            **kwargs,
+        )
+        self._public_key: Optional[bytes] = None
+        self._connected_username: Optional[str] = None
+
+    async def __aenter__(self) -> "BonnetMCPClient":
+        return self
+
+    async def __aexit__(self, *args):
+        await self.close()
+
+    async def close(self):
+        await self._http.close()
+
+    async def connect(self, username: str, password: Optional[str] = None,
+                      require_auth: bool = False) -> None:
+        """Connect to the server.
+
+        require_auth=True: unlock the local Ed25519 key with username+password
+        and connect as an authenticated user.
+        require_auth=False: connect anonymously for public read commands.
+        """
+        self._connected_username = username
+        if require_auth:
+            if password is None:
+                raise BonnetHTTPError(500, "Password required for authenticated connection")
+            private_key = self.identity_store.get_private_key(username, password)
+            identity = Identity.from_private_key(private_key)
+            self._public_key = identity.public_key
+            await self._http.connect(identity, username)
+        else:
+            self._public_key = self.identity_store.get_pubkey(username)
+            await self._http.connect_anonymous()
+
+    async def _register(self, username: str) -> str:
+        """Register the user on the Bonnet server.
+
+        Uses the registrar from the server's discovery origin.
+        """
+        if self._http._server_origin is None:
+            raise BonnetHTTPError(500, "Not connected — call connect() first")
+        registrar = self._http._server_origin
+        result = await self._http.register(username, registrar)
+        self.identity_store.mark_registered(username)
+        return result
+
+    @property
+    def _identity(self) -> Optional[Identity]:
+        return self._http._identity
+
+    @property
+    def is_connected(self) -> bool:
+        return self._http.is_connected
+
+    @property
+    def is_anonymous(self) -> bool:
+        return self._http.is_anonymous
+
+    @property
+    def server_public_key(self) -> Optional[bytes]:
+        return self._http.server_public_key
+
+    def __getattr__(self, name: str):
+        """Delegate all other methods/attributes to the underlying BonnetHTTPClient."""
+        return getattr(self._http, name)

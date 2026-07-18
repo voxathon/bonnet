@@ -11,7 +11,7 @@ from .models import (
     Peer,
 )
 from .identity import IdentityStore
-from .http import BonnetHTTPClient as BonnetClient, BonnetHTTPError as BonnetError
+from .http import BonnetHTTPClient as BonnetClient, BonnetMCPClient, BonnetHTTPError as BonnetError
 from .protocol import ProtocolError, ResponseStatus, ErrorCode
 from .server import run
 from .simple import run as run_simple
@@ -29,6 +29,7 @@ __all__ = [
     "Peer",
     "IdentityStore",
     "BonnetClient",
+    "BonnetMCPClient",
     "BonnetError",
     "ProtocolError",
     "ResponseStatus",

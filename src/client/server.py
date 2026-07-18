@@ -1,3 +1,5 @@
+import os
+
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_http_request
@@ -52,7 +54,19 @@ mcp.add_middleware(AuthMiddleware())
 
 
 def run():
-    mcp.run(transport="http", host="0.0.0.0", port=8080)
+    port = int(os.environ.get("MCP_PORT", "8080"))
+    ssl_certfile = os.environ.get("MCP_TLS_CERT")
+    ssl_keyfile = os.environ.get("MCP_TLS_KEY")
+
+    uvicorn_config: dict = {}
+    if ssl_certfile and ssl_keyfile:
+        uvicorn_config["ssl_certfile"] = ssl_certfile
+        uvicorn_config["ssl_keyfile"] = ssl_keyfile
+        print(f"MCP server TLS enabled: cert={ssl_certfile}")
+    elif ssl_certfile or ssl_keyfile:
+        print("WARNING: Both MCP_TLS_CERT and MCP_TLS_KEY must be set for TLS; ignoring partial config")
+
+    mcp.run(transport="http", host="0.0.0.0", port=port, uvicorn_config=uvicorn_config or None)
 
 
 if __name__ == "__main__":
