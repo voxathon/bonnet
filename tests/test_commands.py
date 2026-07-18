@@ -22,6 +22,7 @@ from engine.keibatsu import Keibatsu
 from core.crypto import Identity
 from core.config import Config, Matcher, ACLEntry
 from core.orm import Database
+from tests.helpers import default_test_acls
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +39,7 @@ def _make_config(temp_dir, origin="local.test"):
         reports_db_path=os.path.join(temp_dir, "reports.db"),
         punishments_db_path=os.path.join(temp_dir, "punishments.db"),
         log_dir=os.path.join(temp_dir, "logs"),
-        acls=[],  # tests set ACLs explicitly
+        acls=default_test_acls(origin),
         anonymous_read=True,
     )
 
@@ -225,7 +226,7 @@ class TestReportOriginServerBound:
         req = _build_report_create(rule.rule_num, culprit, reporter, "x")
         resp = handler.handle(req, conn)
         code, _ = _decode_error(resp)
-        assert code == 401
+        assert code == 403  # command ACL denies write for anonymous
 
 
 # ---------------------------------------------------------------------------
@@ -285,14 +286,15 @@ class TestRemoteBoardRedirectAuthGated:
     @pytest.mark.asyncio
     async def test_anonymous_post_get_no_sync(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
-        # default config has no ACLs => nobody has read on remote board
+        # Explicitly remove all ACLs => command gate denies, no sync triggered.
+        config.acls = []
         _seed_remote_board(ame, "remoteboard", "peer.example.com", "peer.example.com")
         conn = _anonymous_conn(ident, origin_header="localhost")
         fake = _install_fake_sync_mgr(handler)
 
         resp = handler.handle(_build_post_get("remoteboard"), conn)
         code, _ = _decode_error(resp)
-        assert code == 403  # anonymous fails read ACL; no redirect/sync
+        assert code == 403  # command ACL denied; no redirect/sync
         # let any scheduled tasks finish
         await asyncio.sleep(0)
         fake.queue_sync.assert_not_called()
@@ -303,8 +305,9 @@ class TestRemoteBoardRedirectAuthGated:
         _seed_remote_board(ame, "remoteboard", "peer.example.com", "peer.example.com")
         reporter = Identity.generate().public_key
         # registered user whose record_origin is NOT local.test => fails an
-        # origin=localhost-style ACL.
-        config.acls = [ACLEntry("local", Matcher(origin_pattern="localhost"), ["*"], True, False)]
+        # origin=localhost-style ACL. No command ACL for this origin either.
+        config.acls = [ACLEntry("local", Matcher(origin_pattern="localhost"), ["*"], True, False,
+                                 command_patterns=["*"])]
         user = ume.put("bob", config.origin, reporter, record_origin="remote.test")
         conn = _auth_conn(ident, user=user, peer_pubkey=reporter, origin_header="localhost")
         fake = _install_fake_sync_mgr(handler)
@@ -318,8 +321,9 @@ class TestRemoteBoardRedirectAuthGated:
     @pytest.mark.asyncio
     async def test_authorized_post_get_redirects_and_syncs(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
-        # Grant local.test origin read on all boards.
-        config.acls = [ACLEntry("local", Matcher(origin_pattern="local.test"), ["*"], True, False)]
+        # Grant local.test origin read on all boards + all commands.
+        config.acls = [ACLEntry("local", Matcher(origin_pattern="local.test"), ["*"], True, False,
+                                 command_patterns=["*"])]
         _seed_remote_board(ame, "remoteboard", "peer.example.com", "peer.example.com")
         reporter = Identity.generate().public_key
         user = ume.put("alice", config.origin, reporter, record_origin="local.test")
@@ -339,15 +343,18 @@ class TestRemoteBoardRedirectAuthGated:
         fake = _install_fake_sync_mgr(handler)
 
         resp = handler.handle(_build_post_create("remoteboard"), conn)
-        # POST_CREATE is not a public command => 401 at the handle() gate.
+        # POST_CREATE is a write command; anonymous-read ACL is read-only =>
+        # command ACL gate denies with 403.
         code, _ = _decode_error(resp)
-        assert code == 401
+        assert code == 403
         await asyncio.sleep(0)
         fake.queue_sync.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_anonymous_post_list_no_sync(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
+        # Explicitly remove all ACLs => command gate denies, no sync triggered.
+        config.acls = []
         _seed_remote_board(ame, "remoteboard", "peer.example.com", "peer.example.com")
         conn = _anonymous_conn(ident, origin_header="localhost")
         fake = _install_fake_sync_mgr(handler)
@@ -363,7 +370,8 @@ class TestRemoteBoardRedirectAuthGated:
         """Even an authorized caller must not queue a sync to a non-dialable
         relay (defensive #2/#6 guard)."""
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
-        config.acls = [ACLEntry("local", Matcher(origin_pattern="local.test"), ["*"], True, False)]
+        config.acls = [ACLEntry("local", Matcher(origin_pattern="local.test"), ["*"], True, False,
+                                 command_patterns=["*"])]
         # remote board with a poisoned (private-IP) relay
         _seed_remote_board(ame, "remoteboard", "peer.example.com", "127.0.0.1")
         reporter = Identity.generate().public_key
@@ -380,7 +388,8 @@ class TestRemoteBoardRedirectAuthGated:
     @pytest.mark.asyncio
     async def test_authorized_post_create_redirects_and_syncs(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
-        config.acls = [ACLEntry("local", Matcher(origin_pattern="local.test"), ["*"], True, True)]
+        config.acls = [ACLEntry("local", Matcher(origin_pattern="local.test"), ["*"], True, True,
+                                 command_patterns=["*"])]
         _seed_remote_board(ame, "remoteboard", "peer.example.com", "peer.example.com")
         reporter = Identity.generate().public_key
         user = ume.put("alice", config.origin, reporter, record_origin="local.test")

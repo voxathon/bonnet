@@ -12,6 +12,18 @@ In protocol v2, peer_public_key is always present (never None):
   - Authenticated users: their registered Ed25519 key
   - Anonymous users: the server's shared anonymous key
   - Local REPL: the server identity key
+
+Three signed-request principal classes (per PEERED_MODERATION plan §3.5):
+  1. Anonymous: is_anonymous=True, is_unknown=False, user=None
+     (key equals the server's published shared anonymous key)
+  2. Unknown: is_anonymous=False, is_unknown=True, user=None
+     (signature valid, key not the anonymous key, no UME user matches)
+  3. Known: is_anonymous=False, is_unknown=False, user is not None
+     (signature valid and a UME user matches the key)
+
+is_unknown semantics (§4.1): is_unknown = not is_anonymous and user is None.
+A request only reaches CommandContext after successful RFC 9421 verification,
+so an invalid signature never becomes an unknown principal.
 """
 
 from __future__ import annotations
@@ -29,6 +41,7 @@ class CommandContext:
     request_id: str = ""
     is_anonymous: bool = False
     origin: str = "unknown"
+    is_unknown: bool = False
 
     @property
     def is_registered(self) -> bool:

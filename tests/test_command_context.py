@@ -104,6 +104,35 @@ class TestCommandContextPermissions:
         assert len(anon.peer_public_key) == 32
 
 
+class TestPrincipalClassification:
+    """Three signed-request principal classes (§4.1, §17.1):
+    anonymous, unknown, known.
+    """
+
+    def test_anonymous_not_unknown(self):
+        ctx = CommandContext(peer_public_key=b"\x00" * 32, is_anonymous=True)
+        assert ctx.is_anonymous is True
+        assert ctx.is_unknown is False
+        assert ctx.is_registered is False
+
+    def test_unknown_not_anonymous(self):
+        ctx = CommandContext(peer_public_key=b"\x01" * 32, is_unknown=True)
+        assert ctx.is_anonymous is False
+        assert ctx.is_unknown is True
+        assert ctx.is_registered is False
+
+    def test_known_neither_anonymous_nor_unknown(self):
+        user = _mock_user("alice")
+        ctx = CommandContext(peer_public_key=b"\x11" * 32, user=user, username="alice")
+        assert ctx.is_anonymous is False
+        assert ctx.is_unknown is False
+        assert ctx.is_registered is True
+
+    def test_is_unknown_defaults_false(self):
+        ctx = CommandContext(peer_public_key=b"\x00" * 32)
+        assert ctx.is_unknown is False
+
+
 class TestLocalConnectionToContext:
     """LocalConnection.to_context() produces a CommandContext for the REPL."""
 

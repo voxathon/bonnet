@@ -1,4 +1,5 @@
 from net.context import CommandContext
+from core.commands import CommandSpec
 
 
 class BonnetEngine:
@@ -27,13 +28,52 @@ class BonnetEngine:
         is_admin = ctx.is_administrator()
         is_mod = ctx.is_moderator()
         is_anonymous = ctx.is_anonymous
+        is_unknown = ctx.is_unknown
         origin = self._resolve_origin(ctx)
         board_owner = None
 
         if board:
             board_owner = self.ame.get_board_owner(board)
 
-        return self.config.check_permission(action, board, peer_pubkey, origin, is_admin, is_mod, board_owner, is_anonymous)
+        creation_time = None
+        record_origin = None
+        if ctx.user is not None:
+            creation_time = getattr(ctx.user, 'creation_time', None)
+            record_origin = getattr(ctx.user, 'record_origin', None)
+
+        return self.config.check_permission(action, board, peer_pubkey, origin, is_admin, is_mod, board_owner, is_anonymous, creation_time, record_origin, is_unknown)
+
+    def check_command_permission(self, spec: CommandSpec, ctx: CommandContext) -> bool:
+        """Command ACL check (§5.4). No admin/owner/mod bypass. Default-deny."""
+        peer_pubkey = ctx.peer_public_key if ctx.peer_public_key else None
+        is_anonymous = ctx.is_anonymous
+        is_unknown = ctx.is_unknown
+        origin = self._resolve_origin(ctx)
+        creation_time = None
+        record_origin = None
+        if ctx.user is not None:
+            creation_time = getattr(ctx.user, 'creation_time', None)
+            record_origin = getattr(ctx.user, 'record_origin', None)
+        return self.config.check_command_permission(
+            spec.name, spec.action, peer_pubkey, origin,
+            is_anonymous, is_unknown, creation_time, record_origin,
+        )
+
+    def check_object_permission(self, action: str, object_name: str, ctx: CommandContext) -> bool:
+        """Object ACL check (§5.5). No admin bypass. Default-deny."""
+        peer_pubkey = ctx.peer_public_key if ctx.peer_public_key else None
+        is_anonymous = ctx.is_anonymous
+        is_unknown = ctx.is_unknown
+        origin = self._resolve_origin(ctx)
+        creation_time = None
+        record_origin = None
+        if ctx.user is not None:
+            creation_time = getattr(ctx.user, 'creation_time', None)
+            record_origin = getattr(ctx.user, 'record_origin', None)
+        return self.config.check_object_permission(
+            action, object_name, peer_pubkey, origin,
+            is_anonymous, is_unknown, creation_time, record_origin,
+        )
 
     def _resolve_origin(self, ctx: CommandContext) -> str:
         """
