@@ -164,6 +164,7 @@ COMMANDS = {
     "PUNISHMENT_GET": 0x61,
     "PUNISHMENT_LIST_ACTIVE": 0x62,
     "IS_BANNED": 0x63,
+    "PUNISHMENT_LIST_BY_PUBKEY": 0x64,
 }
 
 
@@ -452,12 +453,16 @@ def build_punishment_create(
     )
 
 
-def build_punishment_get(pubkey: bytes) -> bytes:
-    return struct.pack(">B", COMMANDS["PUNISHMENT_GET"]) + encode_bytes(pubkey)
+def build_punishment_get(punishment_id: int) -> bytes:
+    return struct.pack(">B", COMMANDS["PUNISHMENT_GET"]) + struct.pack(">Q", punishment_id)
 
 
 def build_punishment_list_active() -> bytes:
     return struct.pack(">B", COMMANDS["PUNISHMENT_LIST_ACTIVE"])
+
+
+def build_punishment_list_by_pubkey(pubkey: bytes) -> bytes:
+    return struct.pack(">B", COMMANDS["PUNISHMENT_LIST_BY_PUBKEY"]) + encode_bytes(pubkey)
 
 
 def build_is_banned(pubkey: bytes) -> bytes:
@@ -785,6 +790,8 @@ def parse_report_list_resp(payload: bytes) -> list[Report]:
 
 def parse_punishment_resp(payload: bytes) -> Punishment:
     offset = 0
+    punishment_id = struct.unpack(">Q", payload[offset : offset + 8])[0]
+    offset += 8
     pubkey, offset = decode_bytes(payload, offset)
     id_count = payload[offset]
     offset += 1
@@ -798,9 +805,18 @@ def parse_punishment_resp(payload: bytes) -> Punishment:
     expires_at = struct.unpack(">q", payload[offset : offset + 8])[0]
     offset += 8
     notes, offset = decode_string(payload, offset)
+    issued_by, offset = decode_bytes(payload, offset)
+    created_at = struct.unpack(">q", payload[offset : offset + 8])[0]
+    offset += 8
 
     return Punishment(
-        pubkey=pubkey.hex(), report_ids=report_ids, expires_at=expires_at, notes=notes
+        punishment_id=punishment_id,
+        pubkey=pubkey.hex(),
+        report_ids=report_ids,
+        expires_at=expires_at,
+        notes=notes,
+        issued_by=issued_by.hex() if issued_by else None,
+        created_at=created_at,
     )
 
 
@@ -811,6 +827,8 @@ def parse_punishment_list_resp(payload: bytes) -> list[Punishment]:
 
     punishments = []
     for _ in range(count):
+        punishment_id = struct.unpack(">Q", payload[offset : offset + 8])[0]
+        offset += 8
         pubkey, offset = decode_bytes(payload, offset)
         id_count = payload[offset]
         offset += 1
@@ -824,13 +842,19 @@ def parse_punishment_list_resp(payload: bytes) -> list[Punishment]:
         expires_at = struct.unpack(">q", payload[offset : offset + 8])[0]
         offset += 8
         notes, offset = decode_string(payload, offset)
+        issued_by, offset = decode_bytes(payload, offset)
+        created_at = struct.unpack(">q", payload[offset : offset + 8])[0]
+        offset += 8
 
         punishments.append(
             Punishment(
+                punishment_id=punishment_id,
                 pubkey=pubkey.hex(),
                 report_ids=report_ids,
                 expires_at=expires_at,
                 notes=notes,
+                issued_by=issued_by.hex() if issued_by else None,
+                created_at=created_at,
             )
         )
 

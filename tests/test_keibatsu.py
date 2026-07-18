@@ -70,20 +70,27 @@ def test_keibatsu_reports(keibatsu_setup):
 def test_keibatsu_punishments(keibatsu_setup):
     k, ident = keibatsu_setup
     pubkey = Identity.generate().public_key
+    issuer = ident.public_key
 
     punish = k.create_punishment(
         pubkey=pubkey,
         report_ids=[1, 2],
         expires_at=int(time.time()) + 3600,
-        ban_notes="Banned for spam"
+        ban_notes="Banned for spam",
+        issued_by=issuer,
     ).result(timeout=5)
 
     assert punish is not None
+    assert punish.punishment_id >= 1
     assert punish.punished_pubkey == pubkey
     assert punish.get_report_ids() == [1, 2]
     assert punish.ban_notes == "Banned for spam"
+    assert punish.issued_by == issuer
+    assert punish.created_at > 0
 
-    fetched = k.get_punishment(pubkey).result(timeout=5)
+    fetched = k.get_punishment(punish.punishment_id).result(timeout=5)
+    assert fetched is not None
+    assert fetched.punishment_id == punish.punishment_id
     assert fetched.get_report_ids() == [1, 2]
 
     # test warning vs temporary vs permanent
@@ -97,3 +104,81 @@ def test_keibatsu_punishments(keibatsu_setup):
 
     active_punishments = k.list_active_punishments().result(timeout=5)
     assert len(active_punishments) >= 1 # temporary and permanent
+
+    # append-only: a second punishment for the same pubkey must NOT overwrite
+    punish2 = k.create_punishment(
+        pubkey=pubkey,
+        report_ids=[5],
+        expires_at=-1,
+        ban_notes="Second offense",
+        issued_by=issuer,
+    ).result(timeout=5)
+
+    assert punish2.punishment_id > punish.punishment_id
+    assert punish2.punished_pubkey == pubkey
+
+    all_for_pubkey = k.list_punishments_by_pubkey(pubkey).result(timeout=5)
+    assert len(all_for_pubkey) == 2
+    assert all_for_pubkey[0].punishment_id == punish.punishment_id
+    assert all_for_pubkey[1].punishment_id == punish2.punishment_id
+    # original row preserved (not overwritten)
+    assert all_for_pubkey[0].get_report_ids() == [1, 2]
+    assert all_for_pubkey[0].ban_notes == "Banned for spam"
+    assert all_for_pubkey[1].get_report_ids() == [5]
+    assert all_for_pubkey[1].ban_notes == "Second offense"
+
+    # still banned (any active row)
+    is_banned, notes = k.is_banned(pubkey).result(timeout=5)
+    assert is_banned is True
+
+
+def test_keibatsu_punishment_migration(temp_dir):
+    """Old single-row-per-pubkey punishments schema migrates to append-only schema."""
+    reports_path = os.path.join(temp_dir, 'reports.db')
+    punishments_path = os.path.join(temp_dir, 'punishments.db')
+    origin = "test_origin"
+    ident = Identity.generate()
+
+    # Pre-create the OLD schema with a single row keyed by pubkey (PRIMARY KEY).
+    pubkey = Identity.generate().public_key
+    with Database(punishments_path).open() as ctx:
+        ctx.execute("""
+            CREATE TABLE punishments (
+                punished_pubkey  BLOB PRIMARY KEY,
+                report_ids       TEXT NOT NULL,
+                expires_at       INTEGER NOT NULL,
+                ban_notes        TEXT
+            )
+        """)
+        ctx.execute(
+            "INSERT INTO punishments (punished_pubkey, report_ids, expires_at, ban_notes) VALUES (?, ?, ?, ?)",
+            [pubkey, "[7]", -1, "legacy ban"],
+        )
+
+    # Instantiating Keibatsu triggers the migration block.
+    k = Keibatsu(reports_path, punishments_path, signing_key=ident.signing_key, origin=origin)
+    try:
+        # The migrated row should be retrievable by its new monotonic ID.
+        by_pubkey = k.list_punishments_by_pubkey(pubkey).result(timeout=5)
+        assert len(by_pubkey) == 1
+        migrated = by_pubkey[0]
+        assert migrated.punishment_id >= 1
+        assert migrated.punished_pubkey == pubkey
+        assert migrated.get_report_ids() == [7]
+        assert migrated.expires_at == -1
+        assert migrated.ban_notes == "legacy ban"
+        # Audit fields unknown for legacy rows.
+        assert migrated.issued_by == b''
+        assert migrated.created_at == 0
+
+        # And retrievable by ID.
+        by_id = k.get_punishment(migrated.punishment_id).result(timeout=5)
+        assert by_id is not None
+        assert by_id.punishment_id == migrated.punishment_id
+
+        # The legacy ban is still active (expires_at=-1).
+        is_banned, notes = k.is_banned(pubkey).result(timeout=5)
+        assert is_banned is True
+        assert notes == "legacy ban"
+    finally:
+        k.shutdown()

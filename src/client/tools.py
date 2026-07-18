@@ -523,14 +523,12 @@ async def create_punishment(
 
 
 @mcp.tool
-async def get_punishment(pubkey: str, auth: str | None = None) -> Punishment | None:
-    """Get active punishment for a user."""
-    validate_pubkey(pubkey)
-
+async def get_punishment(punishment_id: int, auth: str | None = None) -> Punishment | None:
+    """Get a punishment by its monotonic ID."""
     client = get_client()
     async with client:
         await _connect(client, auth)
-        return await client.punishment_get(pubkey)
+        return await client.punishment_get(punishment_id)
 
 
 @mcp.tool
@@ -540,6 +538,17 @@ async def list_active_punishments(auth: str | None = None) -> list[Punishment]:
     async with client:
         await _connect(client, auth)
         return await client.punishment_list_active()
+
+
+@mcp.tool
+async def list_punishments_by_pubkey(pubkey: str, auth: str | None = None) -> list[Punishment]:
+    """List all punishments (active and historical) for a user by public key."""
+    validate_pubkey(pubkey)
+
+    client = get_client()
+    async with client:
+        await _connect(client, auth)
+        return await client.punishment_list_by_pubkey(pubkey)
 
 
 @mcp.tool

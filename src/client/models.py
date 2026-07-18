@@ -78,12 +78,15 @@ class Report(BaseModel):
 
 
 class Punishment(BaseModel):
+    punishment_id: int = Field(..., description="Monotonic punishment ID")
     pubkey: str = Field(..., description="Hex-encoded Ed25519 public key")
     report_ids: list[int]
     expires_at: int = Field(
         ..., description="0=warning, -1=permanent, >0=unix timestamp"
     )
     notes: str
+    issued_by: Optional[str] = Field(None, description="Hex-encoded Ed25519 public key of the issuing moderator")
+    created_at: int = Field(0, description="Unix timestamp when the punishment was issued")
 
 
 class BannedStatus(BaseModel):

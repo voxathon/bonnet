@@ -99,6 +99,7 @@ OPCODES = {
     "PUNISHMENT_GET": 0x61,
     "PUNISHMENT_LIST_ACTIVE": 0x62,
     "IS_BANNED": 0x63,
+    "PUNISHMENT_LIST_BY_PUBKEY": 0x64,
 }
 
 # ---------------------------------------------------------------------------
@@ -159,9 +160,10 @@ _r("REPORT_LIST_BY_CULPRIT", bytes([0x52]) + _s(TEST_PUBLIC_KEY.hex()))
 _r("REPORT_SIGN", bytes([0x53]) + _s("localhost") + struct.pack(">Q", 1) + _s("b" * 128))
 _r("REPORT_LIST_SINCE", bytes([0x54]) + struct.pack(">q", 0))
 _r("PUNISHMENT_CREATE", bytes([0x60]) + _b(TEST_PUBLIC_KEY) + struct.pack(">B", 1) + struct.pack(">Q", 1) + struct.pack(">q", 9999999999) + _s("banned for spam"))
-_r("PUNISHMENT_GET", bytes([0x61]) + _b(TEST_PUBLIC_KEY))
+_r("PUNISHMENT_GET", bytes([0x61]) + struct.pack(">Q", 1))
 _r("PUNISHMENT_LIST_ACTIVE", bytes([0x62]))
 _r("IS_BANNED", bytes([0x63]) + _b(TEST_PUBLIC_KEY))
+_r("PUNISHMENT_LIST_BY_PUBKEY", bytes([0x64]) + _b(TEST_PUBLIC_KEY))
 
 # ---------------------------------------------------------------------------
 # Response wire formats

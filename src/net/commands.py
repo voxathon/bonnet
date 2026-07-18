@@ -82,6 +82,7 @@ class CommandHandler:
             0x53: 'REPORT_SIGN', 0x54: 'REPORT_LIST_SINCE',
             0x60: 'PUNISHMENT_CREATE', 0x61: 'PUNISHMENT_GET',
             0x62: 'PUNISHMENT_LIST_ACTIVE', 0x63: 'IS_BANNED',
+            0x64: 'PUNISHMENT_LIST_BY_PUBKEY',
             0x70: 'PEER_KEY_ROTATE', 0x71: 'PEER_KEY_LIST'
         }
         cmd_name = cmd_names.get(cmd, f'UNKNOWN_{cmd:02x}')
@@ -175,6 +176,8 @@ class CommandHandler:
             return self._cmd_punishment_list_active(data, ctx)
         elif cmd == 0x63:
             return self._cmd_is_banned(data, ctx)
+        elif cmd == 0x64:
+            return self._cmd_punishment_list_by_pubkey(data, ctx)
         elif cmd == 0x70:
             return self._cmd_peer_key_rotate(data, ctx)
         elif cmd == 0x71:
@@ -1532,7 +1535,8 @@ class CommandHandler:
             idx += 1
             notes = data[idx:idx+notes_len].decode('utf-8') if notes_len > 0 else ""
 
-            result = self._keibatsu.create_punishment(pubkey, report_ids, expires_at, notes)
+            issued_by = ctx.peer_public_key or b''
+            result = self._keibatsu.create_punishment(pubkey, report_ids, expires_at, notes, issued_by)
             punishment = result.result()
 
             return struct.pack('>B', 0x00) + self._encode_punishment(punishment)
@@ -1544,8 +1548,10 @@ class CommandHandler:
         pubkey_bytes = punishment.punished_pubkey
         notes_bytes = (punishment.ban_notes or "").encode('utf-8')
         report_ids_list = punishment.get_report_ids()
+        issued_by_bytes = punishment.issued_by or b''
 
-        payload = struct.pack('>B', len(pubkey_bytes)) + pubkey_bytes + \
+        payload = struct.pack('>Q', punishment.punishment_id) + \
+                  struct.pack('>B', len(pubkey_bytes)) + pubkey_bytes + \
                   struct.pack('>B', len(report_ids_list))
 
         for report_id in report_ids_list:
@@ -1553,19 +1559,20 @@ class CommandHandler:
 
         payload += struct.pack('>q', punishment.expires_at)
         payload += struct.pack('>B', len(notes_bytes)) + notes_bytes
+        payload += struct.pack('>B', len(issued_by_bytes)) + issued_by_bytes
+        payload += struct.pack('>q', punishment.created_at)
 
         return payload
 
     def _cmd_punishment_get(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
-            pubkey_len = data[0]
-            pubkey = data[1:1+pubkey_len]
+            punishment_id = struct.unpack('>Q', data[0:8])[0]
 
-            result = self._keibatsu.get_punishment(pubkey)
+            result = self._keibatsu.get_punishment(punishment_id)
             punishment = result.result()
 
             if punishment is None:
-                return self._build_error(404, "No punishment found for pubkey")
+                return self._build_error(404, "No punishment found for id")
 
             return struct.pack('>B', 0x00) + self._encode_punishment(punishment)
 
@@ -1575,6 +1582,23 @@ class CommandHandler:
     def _cmd_punishment_list_active(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
             result = self._keibatsu.list_active_punishments()
+            punishments = result.result()
+
+            payload = struct.pack('>B', 0x00) + struct.pack('>H', len(punishments))
+            for punishment in punishments:
+                payload += self._encode_punishment(punishment)
+
+            return payload
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_punishment_list_by_pubkey(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            pubkey_len = data[0]
+            pubkey = data[1:1+pubkey_len]
+
+            result = self._keibatsu.list_punishments_by_pubkey(pubkey)
             punishments = result.result()
 
             payload = struct.pack('>B', 0x00) + struct.pack('>H', len(punishments))

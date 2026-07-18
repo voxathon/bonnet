@@ -623,7 +623,7 @@ class TestPostContentSearchHandler:
         # other handler tests; here we exercise the unmodified default)
         config.public_commands = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19,
                                   0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54,
-                                  0x61, 0x62, 0x63, 0x71}
+                                  0x61, 0x62, 0x63, 0x64, 0x71}
         assert 0x1A not in config.public_commands
         ame.create_board("localboard", owner_pubkey=ident.public_key)
         conn = _anonymous_conn(ident)
