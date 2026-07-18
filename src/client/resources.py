@@ -1,7 +1,7 @@
 from fastmcp import FastMCP
 
 from .tools import mcp, get_client, get_username
-from .models import Board, Post, PostSummary, User, Rule, Report
+from .models import Board, Post, PostSummary, User, Rule, Report, Punishment
 
 
 @mcp.resource("bonnet://boards")
@@ -101,3 +101,13 @@ async def list_reports_by_culprit_resource(pubkey: str) -> list[Report]:
     async with client:
         await client.connect(username, require_auth=False)
         return await client.report_list_by_culprit(pubkey)
+
+
+@mcp.resource("bonnet://punishments/pubkey/{pubkey}")
+async def list_punishments_by_pubkey_resource(pubkey: str) -> list[Punishment]:
+    """List all punishments (active and historical) for a user by public key."""
+    client = get_client()
+    username = get_username()
+    async with client:
+        await client.connect(username, require_auth=False)
+        return await client.punishment_list_by_pubkey(pubkey)

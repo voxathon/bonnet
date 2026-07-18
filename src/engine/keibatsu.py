@@ -67,10 +67,13 @@ class Report:
 class Punishment:
 
     def __init__(self):
+        self.punishment_id = 0
         self.punished_pubkey = b''
         self.report_ids = "[]"
         self.expires_at = 0
         self.ban_notes = ""
+        self.issued_by = b''
+        self.created_at = 0
 
     def get_report_ids(self) -> list:
         try:
@@ -202,15 +205,53 @@ class Keibatsu:
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_rule ON reports(rule_num)")
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_time ON reports(report_time)")
 
+        # Check if punishments table has the new append-only schema; migrate if not.
+        needs_pun_migration = False
         with self._punishments_db.open() as ctx:
-            ctx.execute("""
-            CREATE TABLE IF NOT EXISTS punishments (
-                punished_pubkey  BLOB PRIMARY KEY,
-                report_ids       TEXT NOT NULL,
-                expires_at       INTEGER NOT NULL,
-                ban_notes        TEXT
-            )
-            """)
+            try:
+                ctx.execute("SELECT punishment_id FROM punishments LIMIT 1")
+            except Exception:
+                try:
+                    ctx.execute("SELECT punished_pubkey FROM punishments LIMIT 1")
+                    needs_pun_migration = True
+                except Exception:
+                    pass
+
+            if needs_pun_migration:
+                # Old schema used (punished_pubkey BLOB PRIMARY KEY, report_ids, expires_at, ban_notes)
+                # and INSERT OR REPLACE, so there was at most one row per pubkey. Migrate to the
+                # append-only schema: monotonic punishment_id PK, audit fields issued_by/created_at.
+                ctx.execute("""
+                CREATE TABLE punishments_v2 (
+                    punishment_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    punished_pubkey BLOB NOT NULL,
+                    report_ids      TEXT NOT NULL,
+                    expires_at      INTEGER NOT NULL,
+                    ban_notes       TEXT,
+                    issued_by       BLOB,
+                    created_at      INTEGER NOT NULL
+                )
+                """)
+                ctx.execute("""
+                INSERT INTO punishments_v2 (punished_pubkey, report_ids, expires_at, ban_notes, issued_by, created_at)
+                SELECT punished_pubkey, report_ids, expires_at, ban_notes, NULL, 0 FROM punishments
+                """)
+                ctx.execute("DROP TABLE punishments")
+                ctx.execute("ALTER TABLE punishments_v2 RENAME TO punishments")
+            else:
+                ctx.execute("""
+                CREATE TABLE IF NOT EXISTS punishments (
+                    punishment_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    punished_pubkey BLOB NOT NULL,
+                    report_ids      TEXT NOT NULL,
+                    expires_at      INTEGER NOT NULL,
+                    ban_notes       TEXT,
+                    issued_by       BLOB,
+                    created_at      INTEGER NOT NULL
+                )
+                """)
+
+            ctx.execute("CREATE INDEX IF NOT EXISTS idx_punishments_pubkey ON punishments(punished_pubkey)")
 
         self._rules_table = self._reports_db.add_table(
             'rules',
@@ -228,9 +269,9 @@ class Keibatsu:
 
         self._punishments_table = self._punishments_db.add_table(
             'punishments',
-            'punished_pubkey report_ids expires_at ban_notes',
+            'punishment_id punished_pubkey report_ids expires_at ban_notes issued_by created_at',
             proto=Punishment,
-            id_cols=['punished_pubkey']
+            id_cols=['punishment_id']
         )
 
     def _rule_exists(self, rule_num) -> bool:
@@ -467,22 +508,57 @@ class Keibatsu:
         report.reporter_sig = reporter_sig
         return report
 
-    def _get_punishment(self, pubkey) -> Punishment:
+    def _get_punishment_by_id(self, punishment_id) -> Punishment:
         with self._punishments_db.open() as ctx:
             punishment = self._punishments_table.select_single(
-                where="punished_pubkey=?", values=[pubkey], ctx=ctx
+                where="punishment_id=?", values=[punishment_id], ctx=ctx
             )
+        if punishment is not None:
+            if punishment.issued_by is None:
+                punishment.issued_by = b''
+            if punishment.created_at is None:
+                punishment.created_at = 0
+        return punishment
+
+    def _list_punishments_by_pubkey(self, pubkey) -> list:
+        with self._punishments_db.open() as ctx:
+            punishments = list(self._punishments_table.select_iter(
+                where="punished_pubkey=?", values=[pubkey],
+                orderby="punishment_id ASC", ctx=ctx
+            ))
+        for p in punishments:
+            if p.issued_by is None:
+                p.issued_by = b''
+            if p.created_at is None:
+                p.created_at = 0
+        return punishments
+
+    def _get_latest_active_punishment(self, pubkey) -> Punishment:
+        now = int(time.time())
+        with self._punishments_db.open() as ctx:
+            punishment = self._punishments_table.select_single(
+                where="punished_pubkey=? AND (expires_at < 0 OR expires_at > ?)",
+                values=[pubkey, now],
+                orderby="created_at DESC", limit=1, ctx=ctx
+            )
+        if punishment is not None:
+            if punishment.issued_by is None:
+                punishment.issued_by = b''
+            if punishment.created_at is None:
+                punishment.created_at = 0
         return punishment
 
     def _create_punishment(self, pubkey, report_ids,
                                         expires_at, ban_notes="",
-                                        sync_ume=True) -> Punishment:
+                                        issued_by=b'', sync_ume=True) -> Punishment:
         report_ids_json = json.dumps(report_ids)
+        created_at = int(time.time())
 
         with self._punishments_db.open() as ctx:
-            ctx.execute(
-                "INSERT OR REPLACE INTO punishments (punished_pubkey, report_ids, expires_at, ban_notes) VALUES (?, ?, ?, ?)",
-                [pubkey, report_ids_json, expires_at, ban_notes]
+            punishment_id = ctx.insert_record(
+                self._punishments_table,
+                (pubkey, report_ids_json, expires_at, ban_notes, issued_by, created_at),
+                columns=['punished_pubkey', 'report_ids', 'expires_at', 'ban_notes', 'issued_by', 'created_at']
             )
 
         if sync_ume and self._ume is not None:
@@ -491,24 +567,31 @@ class Keibatsu:
             for user in users:
                 self._ume.upd(username=user.username, new_banned=is_active)
 
-        return self._get_punishment(pubkey)
+        return self._get_punishment_by_id(punishment_id)
 
     def _is_banned(self, pubkey) -> tuple:
-        punishment = self._get_punishment(pubkey)
+        punishment = self._get_latest_active_punishment(pubkey)
         if punishment is None:
-            return (False, None)
-        if not punishment.is_active():
             return (False, None)
         return (True, punishment.ban_notes if punishment.ban_notes else "No reason given")
 
     def _check_expiry(self, pubkey) -> bool:
-        punishment = self._get_punishment(pubkey)
+        punishment = self._get_latest_active_punishment(pubkey)
         if punishment is None:
             return False
         if punishment.is_active():
             return False
 
-        if punishment.expires_at > 0 and self._ume is not None:
+        # The latest row expired; only clear the UME ban flag when no other
+        # active punishment remains for this pubkey.
+        now = int(time.time())
+        with self._punishments_db.open() as ctx:
+            remaining = ctx.execute(
+                "SELECT COUNT(*) FROM punishments WHERE punished_pubkey=? AND (expires_at < 0 OR expires_at > ?)",
+                [pubkey, now]
+            ).fetchone()[0]
+
+        if remaining == 0 and self._ume is not None:
             users = self._ume.get_all_by_publickey(pubkey)
             for user in users:
                 self._ume.upd(username=user.username, new_banned=False)
@@ -520,15 +603,18 @@ class Keibatsu:
         results = []
         with self._punishments_db.open() as ctx:
             rows = ctx.execute(
-                "SELECT punished_pubkey, report_ids, expires_at, ban_notes FROM punishments WHERE expires_at < 0 OR expires_at > ?",
+                "SELECT punishment_id, punished_pubkey, report_ids, expires_at, ban_notes, issued_by, created_at FROM punishments WHERE expires_at < 0 OR expires_at > ?",
                 [now]
             ).fetchall()
         for row in rows:
             p = Punishment()
-            p.punished_pubkey = bytes(row[0])
-            p.report_ids = row[1] if row[1] else "[]"
-            p.expires_at = row[2]
-            p.ban_notes = row[3] if row[3] else ""
+            p.punishment_id = row[0]
+            p.punished_pubkey = bytes(row[1])
+            p.report_ids = row[2] if row[2] else "[]"
+            p.expires_at = row[3]
+            p.ban_notes = row[4] if row[4] else ""
+            p.issued_by = bytes(row[5]) if row[5] is not None else b''
+            p.created_at = row[6] if row[6] is not None else 0
             results.append(p)
         return results
 
@@ -595,16 +681,21 @@ class Keibatsu:
             return self._sign_report(origin, report_num, signature)
         return AsyncResult(self._executor.submit(task))
 
-    def get_punishment(self, pubkey: bytes):
+    def get_punishment(self, punishment_id: int):
         def task():
-            return self._get_punishment(pubkey)
+            return self._get_punishment_by_id(punishment_id)
+        return AsyncResult(self._executor.submit(task))
+
+    def list_punishments_by_pubkey(self, pubkey: bytes):
+        def task():
+            return self._list_punishments_by_pubkey(pubkey)
         return AsyncResult(self._executor.submit(task))
 
     def create_punishment(self, pubkey: bytes, report_ids: list,
                           expires_at: int, ban_notes: str = "",
-                          sync_ume: bool = True):
+                          issued_by: bytes = b'', sync_ume: bool = True):
         def task():
-            return self._create_punishment(pubkey, report_ids, expires_at, ban_notes, sync_ume)
+            return self._create_punishment(pubkey, report_ids, expires_at, ban_notes, issued_by, sync_ume)
         return AsyncResult(self._executor.submit(task))
 
     def is_banned(self, pubkey: bytes):

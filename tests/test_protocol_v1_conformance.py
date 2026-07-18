@@ -25,7 +25,7 @@ from client.protocol import (
     build_rule_update, build_report_create, build_report_get,
     build_report_list_by_culprit, build_report_sign, build_report_list_since,
     build_punishment_create, build_punishment_get, build_punishment_list_active,
-    build_is_banned,
+    build_punishment_list_by_pubkey, build_is_banned,
     build_post_update,
     encode_frame, decode_frame, encode_string, encode_long_string, encode_bytes,
     parse_response, parse_error_response, decode_redirect,
@@ -197,10 +197,13 @@ class TestRequestFixtures:
         assert build_punishment_create(TEST_PUBLIC_KEY, [1], 9999999999, "banned for spam") == REQUESTS["PUNISHMENT_CREATE"]
 
     def test_punishment_get(self):
-        assert build_punishment_get(TEST_PUBLIC_KEY) == REQUESTS["PUNISHMENT_GET"]
+        assert build_punishment_get(1) == REQUESTS["PUNISHMENT_GET"]
 
     def test_punishment_list_active(self):
         assert build_punishment_list_active() == REQUESTS["PUNISHMENT_LIST_ACTIVE"]
+
+    def test_punishment_list_by_pubkey(self):
+        assert build_punishment_list_by_pubkey(TEST_PUBLIC_KEY) == REQUESTS["PUNISHMENT_LIST_BY_PUBKEY"]
 
     def test_is_banned(self):
         assert build_is_banned(TEST_PUBLIC_KEY) == REQUESTS["IS_BANNED"]

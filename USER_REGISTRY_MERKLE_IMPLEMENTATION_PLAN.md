@@ -231,6 +231,14 @@ UME using these rules:
 | `is_moderator` | Do not federate; set false for new remote users |
 | `is_banned` | Do not federate; preserve local punishment state |
 
+> **Note (punishment audit fields):** Punishments are now append-only with a
+> monotonic `punishment_id` (uint64 `INTEGER PRIMARY KEY AUTOINCREMENT`) as the
+> key, plus `issued_by` (the moderator's Ed25519 pubkey) and `created_at` (unix
+> timestamp) audit columns. Re-bans create a new row rather than overwriting;
+> consumers read the monotonic sequence to determine current state. This is
+> still local-only enforcement state — `is_banned` is never accepted from a
+> peer and punishments are not federated.
+
 The original 1079 attested bytes must be retained in the registry sidecar so the
 receiver can relay the origin proof later. The normalized local UME record will
 not hash to the origin root because its local sequence, relay metadata, and flags

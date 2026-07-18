@@ -88,7 +88,7 @@ class Config:
         self.anonymous_read = anonymous_read
 
         if public_commands is None:
-            public_commands = {0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x71}
+            public_commands = {0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x64, 0x71}
         self.public_commands = public_commands
 
         if data_dir is None:
@@ -192,9 +192,10 @@ class Config:
             'RULE_GET': 0x41, 'RULE_GET_BY_NAME': 0x42, 'RULE_LIST': 0x43,
             'REPORT_GET': 0x51, 'REPORT_LIST_BY_CULPRIT': 0x52, 'REPORT_LIST_SINCE': 0x54,
             'PUNISHMENT_GET': 0x61, 'PUNISHMENT_LIST_ACTIVE': 0x62, 'IS_BANNED': 0x63,
+            'PUNISHMENT_LIST_BY_PUBKEY': 0x64,
             'PEER_KEY_LIST': 0x71, 'REGISTER': 0x01
         }
-        default_public = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x71}
+        default_public = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x64, 0x71}
 
         public_commands_raw = server.get('public_commands', None)
         if public_commands_raw is not None:
@@ -291,7 +292,7 @@ data_dir = "./data"
 log_dir = "./logs"
 port_standard = 2272
 port_privileged = 272
-# public_commands = ["REGISTER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PEER_KEY_LIST"]
+# public_commands = ["REGISTER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "PUNISHMENT_LIST_BY_PUBKEY", "IS_BANNED", "PEER_KEY_LIST"]
 # Content search (POST_CONTENT_SEARCH) is default-deny for anonymous callers;
 # opt in by adding it to public_commands above if anonymous search is desired.
 
