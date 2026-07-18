@@ -318,14 +318,12 @@ class BonnetHTTPServer:
                         await self._send_protocol_error(send, 403, "Username not associated with key",
                                                         remote_addr, scope, request_nonce=request_nonce_for_response)
                         return
-            else:
-                # Unknown key — not anonymous, not in UME.
-                # Allow REGISTER (0x01) to proceed for unregistered keys.
-                # Allow public commands to proceed as an unregistered principal.
-                if body[0] != 0x01 and body[0] not in self._config.public_commands:
-                    await self._send_protocol_error(send, 403, "Unknown key; register first",
-                                                    remote_addr, scope, request_nonce=request_nonce_for_response)
-                    return
+            # Unknown key — not anonymous, not in UME. No preauthorization
+            # gate here (§4.2): command ACL evaluation decides whether the
+            # opcode is allowed for an unknown principal.
+
+        # Classify principal: anonymous, unknown, or known (§4.1).
+        is_unknown = not is_anonymous and user is None
 
         # 12. Build CommandContext
         ctx = CommandContext(
@@ -335,6 +333,7 @@ class BonnetHTTPServer:
             remote_addr=remote_addr,
             request_id=str(id(scope)),
             is_anonymous=is_anonymous,
+            is_unknown=is_unknown,
             origin=self._config.origin,
         )
 

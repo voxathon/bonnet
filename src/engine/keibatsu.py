@@ -114,13 +114,14 @@ class Keibatsu:
     def __init__(self, reports_path: str = "./data/reports.db",
                  punishments_path: str = "./data/punishments.db",
                  ume: object = None, signing_key: object = None, origin: str = "localhost",
-                 num_workers: int = 2):
+                 num_workers: int = 2, record_in_window=None):
         needs_migration = False
         self._reports_path = reports_path
         self._punishments_path = punishments_path
         self._ume = ume
         self._signing_key = signing_key
         self._origin = origin
+        self._record_in_window = record_in_window
         self._executor = ThreadPoolExecutor(max_workers=num_workers)
         self._lock = threading.Lock()
 
@@ -533,19 +534,28 @@ class Keibatsu:
                 p.created_at = 0
         return punishments
 
+    def _in_window(self, creation_time: int) -> bool:
+        if self._record_in_window is None:
+            return True
+        return self._record_in_window(self._origin, creation_time)
+
     def _get_latest_active_punishment(self, pubkey) -> Punishment:
         now = int(time.time())
         with self._punishments_db.open() as ctx:
-            punishment = self._punishments_table.select_single(
+            punishments = list(self._punishments_table.select_iter(
                 where="punished_pubkey=? AND (expires_at < 0 OR expires_at > ?)",
                 values=[pubkey, now],
-                orderby="created_at DESC", limit=1, ctx=ctx
-            )
-        if punishment is not None:
-            if punishment.issued_by is None:
-                punishment.issued_by = b''
-            if punishment.created_at is None:
-                punishment.created_at = 0
+                orderby="created_at DESC", ctx=ctx
+            ))
+        punishment = None
+        for p in punishments:
+            if p.issued_by is None:
+                p.issued_by = b''
+            if p.created_at is None:
+                p.created_at = 0
+            if self._in_window(p.created_at):
+                punishment = p
+                break
         return punishment
 
     def _create_punishment(self, pubkey, report_ids,
@@ -582,16 +592,22 @@ class Keibatsu:
         if punishment.is_active():
             return False
 
-        # The latest row expired; only clear the UME ban flag when no other
-        # active punishment remains for this pubkey.
+        # The latest in-window row expired; only clear the UME ban flag when
+        # no other active in-window punishment remains for this pubkey.
         now = int(time.time())
         with self._punishments_db.open() as ctx:
-            remaining = ctx.execute(
-                "SELECT COUNT(*) FROM punishments WHERE punished_pubkey=? AND (expires_at < 0 OR expires_at > ?)",
+            rows = ctx.execute(
+                "SELECT created_at FROM punishments WHERE punished_pubkey=? AND (expires_at < 0 OR expires_at > ?)",
                 [pubkey, now]
-            ).fetchone()[0]
+            ).fetchall()
 
-        if remaining == 0 and self._ume is not None:
+        remaining_in_window = 0
+        for row in rows:
+            created_at = row[0] if row[0] is not None else 0
+            if self._in_window(created_at):
+                remaining_in_window += 1
+
+        if remaining_in_window == 0 and self._ume is not None:
             users = self._ume.get_all_by_publickey(pubkey)
             for user in users:
                 self._ume.upd(username=user.username, new_banned=False)
@@ -607,6 +623,9 @@ class Keibatsu:
                 [now]
             ).fetchall()
         for row in rows:
+            created_at = row[6] if row[6] is not None else 0
+            if not self._in_window(created_at):
+                continue
             p = Punishment()
             p.punishment_id = row[0]
             p.punished_pubkey = bytes(row[1])
@@ -614,7 +633,7 @@ class Keibatsu:
             p.expires_at = row[3]
             p.ban_notes = row[4] if row[4] else ""
             p.issued_by = bytes(row[5]) if row[5] is not None else b''
-            p.created_at = row[6] if row[6] is not None else 0
+            p.created_at = created_at
             results.append(p)
         return results
 

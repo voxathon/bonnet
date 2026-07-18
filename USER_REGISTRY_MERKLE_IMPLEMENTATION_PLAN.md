@@ -239,6 +239,22 @@ UME using these rules:
 > still local-only enforcement state — `is_banned` is never accepted from a
 > peer and punishments are not federated.
 
+> **Note (temporal filter):** A per-origin eval-time creation-date window can
+> be configured via `[[filter]]` entries in `config.toml`. Each entry specifies
+> an `origin`, an optional `created_after` (min timestamp), and an optional
+> `created_before` (max timestamp). Multiple entries sharing an origin are
+> OR'd. `origin = "*"` is a wildcard fallback used only when no specific entry
+> matches; unconfigured origins default-allow. The filter is **eval-time only**
+> — records are always ingested (the registry chain stays provable); the filter
+> decides which records are *considered* at read time. It applies to: (1) user
+> ACL permissions — an out-of-window user fails `origin`, `wildcard`, and
+> `anonymous` ACL buckets but keeps `pubkey` ACL matches; role bypasses
+> (`admin_bypass_acl`, mod write) remain in effect for out-of-window
+> role-holders; (2) punishment eval — `is_banned`, `list_active_punishments`,
+> and `check_expiry` only consider in-window punishment rows. Audit reads
+> (`get_punishment`, `list_punishments_by_pubkey`) are unfiltered. The window
+> is config-file only (reload on restart).
+
 The original 1079 attested bytes must be retained in the registry sidecar so the
 receiver can relay the origin proof later. The normalized local UME record will
 not hash to the origin root because its local sequence, relay metadata, and flags

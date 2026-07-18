@@ -7,13 +7,13 @@ data_dir = "./data"
 log_dir = "./logs"
 port_standard = 2272
 port_privileged = 272
-# public_commands = ["REGISTER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "PUNISHMENT_LIST_BY_PUBKEY", "IS_BANNED", "PEER_KEY_LIST"]
-# Content search (POST_CONTENT_SEARCH) is default-deny for anonymous callers;
-# opt in by adding it to public_commands above if anonymous search is desired.
+# public_commands is obsolete and silently ignored. Command access is now
+# governed by command and object ACLs below. Authorization is default-deny.
 
 [[acl]]
 name = "local-full-access"
 match.origin = "knolastna.me"
+commands = ["*"]
 boards = ["*"]
 read = true
 write = true
@@ -21,9 +21,22 @@ write = true
 [[acl]]
 name = "anonymous-read"
 match.anonymous = true
-boards = ["*"]
+commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN"]
 read = true
 write = false
+
+[[acl]]
+name = "unknown-read"
+match.unknown = true
+commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN"]
+read = true
+write = false
+
+[[acl]]
+name = "unknown-registration"
+match.unknown = true
+commands = ["REGISTER"]
+write = true
 
 [limits]
 timeout_seconds = 30

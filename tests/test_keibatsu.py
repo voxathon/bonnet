@@ -182,3 +182,78 @@ def test_keibatsu_punishment_migration(temp_dir):
         assert notes == "legacy ban"
     finally:
         k.shutdown()
+
+
+def test_keibatsu_punishment_temporal_filter(keibatsu_setup):
+    """Punishment eval methods filter by created_at against record_in_window."""
+    k, ident = keibatsu_setup
+    pubkey = Identity.generate().public_key
+
+    # Create two punishments; manually set the first one's created_at to the past.
+    old = k.create_punishment(pubkey, [1], expires_at=-1, ban_notes="old ban").result(timeout=5)
+    old_ts = 1000
+    with k._punishments_db.open() as ctx:
+        ctx.execute("UPDATE punishments SET created_at=? WHERE punishment_id=?", [old_ts, old.punishment_id])
+
+    new = k.create_punishment(pubkey, [2], expires_at=-1, ban_notes="new ban").result(timeout=5)
+
+    assert old.punishment_id < new.punishment_id
+
+    # Predicate: only consider records created after old_ts (excludes old, includes new).
+    k._record_in_window = lambda origin, t: t > old_ts
+
+    # is_banned: only the new punishment is in-window -> still banned
+    is_banned, notes = k.is_banned(pubkey).result(timeout=5)
+    assert is_banned is True
+    assert notes == "new ban"
+
+    # list_active_punishments: only the new one appears
+    active = k.list_active_punishments().result(timeout=5)
+    ids = [p.punishment_id for p in active if p.punished_pubkey == pubkey]
+    assert old.punishment_id not in ids
+    assert new.punishment_id in ids
+
+    # audit reads unfiltered: list_punishments_by_pubkey returns both
+    all_puns = k.list_punishments_by_pubkey(pubkey).result(timeout=5)
+    assert len(all_puns) == 2
+
+    # audit reads unfiltered: get_punishment returns the old one
+    fetched_old = k.get_punishment(old.punishment_id).result(timeout=5)
+    assert fetched_old is not None
+    assert fetched_old.ban_notes == "old ban"
+
+
+def test_keibatsu_punishment_temporal_filter_excludes_all(keibatsu_setup):
+    """When all punishments are out-of-window, is_banned returns False."""
+    k, ident = keibatsu_setup
+    pubkey = Identity.generate().public_key
+
+    pun = k.create_punishment(pubkey, [1], expires_at=-1, ban_notes="perm ban").result(timeout=5)
+
+    # Predicate: nothing is in-window
+    k._record_in_window = lambda origin, t: False
+
+    is_banned, notes = k.is_banned(pubkey).result(timeout=5)
+    assert is_banned is False
+
+    active = k.list_active_punishments().result(timeout=5)
+    assert len(active) == 0
+
+    # audit reads still work
+    all_puns = k.list_punishments_by_pubkey(pubkey).result(timeout=5)
+    assert len(all_puns) == 1
+
+
+def test_keibatsu_punishment_no_filter_backward_compat(keibatsu_setup):
+    """None predicate = no filtering (backward compat)."""
+    k, ident = keibatsu_setup
+    assert k._record_in_window is None
+
+    pubkey = Identity.generate().public_key
+    k.create_punishment(pubkey, [1], expires_at=-1, ban_notes="ban").result(timeout=5)
+
+    is_banned, notes = k.is_banned(pubkey).result(timeout=5)
+    assert is_banned is True
+
+    active = k.list_active_punishments().result(timeout=5)
+    assert any(p.punished_pubkey == pubkey for p in active)

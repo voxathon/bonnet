@@ -7,7 +7,7 @@
 * protocol round-trip for ``POST_CONTENT_SEARCH`` (0x1A).
 * command-handler integration (ACL gate, 404 for unknown/remote boards, 503
   when rg is missing, 429 when the limiter denies, anonymous-acceptance via
-  ``public_commands``).
+  command ACL grants).
 """
 
 import os
@@ -195,11 +195,13 @@ def _init_rules(reports_path):
 async def engine_setup(temp_dir):
     ident = Identity.generate()
     config = _make_config(temp_dir, origin="local.test")
-    # Handler-level tests exercise logic past the anonymous gate, so opt
-    # POST_CONTENT_SEARCH into the public set here. (Content search is
-    # default-deny for anonymous callers; the dedicated
-    # test_anonymous_content_search_denied_by_default covers the default.)
-    config.public_commands = config.public_commands | {0x1A}
+    # Handler-level tests exercise logic past the command ACL gate, so grant
+    # POST_CONTENT_SEARCH to anonymous here. Tests that need to exercise
+    # denial override config.acls themselves.
+    config.acls = [
+        ACLEntry("anon-search", Matcher(anonymous=True), ["*"], True, False,
+                 command_patterns=["POST_CONTENT_SEARCH"]),
+    ]
     userfile = os.path.join(temp_dir, "userfile")
     ume = Ume(userfile)
     ame = Ame(config.ame_path, origin=config.origin, signing_key=ident.signing_key,
@@ -510,10 +512,10 @@ class TestProtocolRoundTrip:
         assert results[1].post_num == 2
         assert results[1].root == 1
 
-    def test_read_only_command_set_includes_0x1a(self):
-        from core.config import Config
-        config = Config()
-        assert 0x1A not in config.public_commands  # POST_CONTENT_SEARCH is default-deny
+    def test_post_content_search_default_deny_for_anonymous(self):
+        """POST_CONTENT_SEARCH is not in the default anonymous-read command ACL."""
+        from tests.helpers import anonymous_read_command_names
+        assert "POST_CONTENT_SEARCH" not in anonymous_read_command_names()
 
 
 # ===========================================================================
@@ -527,7 +529,8 @@ class TestPostContentSearchHandler:
     async def test_search_success(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
         # grant anonymous read on all boards
-        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False)]
+        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False,
+                                 command_patterns=["POST_CONTENT_SEARCH"])]
         board = ame.create_board("localboard", owner_pubkey=ident.public_key)
         board.create_post(subject="S1", content="findme here", author="alice", author_registrar=config.origin).result(timeout=5)
         board.create_post(subject="S2", content="nothing", author="bob", author_registrar=config.origin).result(timeout=5)
@@ -543,7 +546,8 @@ class TestPostContentSearchHandler:
     @pytest.mark.asyncio
     async def test_search_403_when_permission_denied(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
-        # no ACLs => anonymous cannot read
+        # Explicitly remove all ACLs => command gate denies, 403.
+        config.acls = []
         ame.create_board("localboard", owner_pubkey=ident.public_key)
         conn = _anonymous_conn(ident)
         resp = handler.handle(_build_content_search("localboard", "x", 10), conn)
@@ -553,7 +557,8 @@ class TestPostContentSearchHandler:
     @pytest.mark.asyncio
     async def test_search_404_for_unknown_board(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
-        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False)]
+        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False,
+                                 command_patterns=["POST_CONTENT_SEARCH"])]
         conn = _anonymous_conn(ident)
         resp = handler.handle(_build_content_search("nosuchboard", "x", 10), conn)
         code, _ = _decode_error(resp)
@@ -563,7 +568,8 @@ class TestPostContentSearchHandler:
     async def test_search_404_for_remote_board(self, engine_setup):
         # remote boards have no local content files -> 404, not a redirect
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
-        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False)]
+        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False,
+                                 command_patterns=["POST_CONTENT_SEARCH"])]
         _seed_remote_board(ame, "remoteboard", "peer.example.com", "peer.example.com")
         conn = _anonymous_conn(ident)
         resp = handler.handle(_build_content_search("remoteboard", "x", 10), conn)
@@ -573,7 +579,8 @@ class TestPostContentSearchHandler:
     @pytest.mark.asyncio
     async def test_search_503_when_rg_missing(self, engine_setup, monkeypatch):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
-        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False)]
+        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False,
+                                 command_patterns=["POST_CONTENT_SEARCH"])]
         ame.create_board("localboard", owner_pubkey=ident.public_key)
         monkeypatch.setattr(binutil, "_rg_path", None)
         monkeypatch.setattr(binutil, "_rg_checked", True)
@@ -585,7 +592,8 @@ class TestPostContentSearchHandler:
     @pytest.mark.asyncio
     async def test_search_429_when_limiter_denies(self, engine_setup, monkeypatch):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
-        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False)]
+        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False,
+                                 command_patterns=["POST_CONTENT_SEARCH"])]
         board = ame.create_board("localboard", owner_pubkey=ident.public_key)
         board.create_post(subject="S1", content="findme", author="alice", author_registrar=config.origin).result(timeout=5)
         # replace the limiter with one that always denies (rate tokens exhausted)
@@ -600,52 +608,45 @@ class TestPostContentSearchHandler:
         fake_lim.release.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_anonymous_accepted_when_public(self, engine_setup):
+    async def test_anonymous_accepted_when_command_acl_grants(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
-        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False)]
-        # explicitly opt POST_CONTENT_SEARCH into the public set
-        config.public_commands = config.public_commands | {0x1A}
+        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False,
+                                 command_patterns=["POST_CONTENT_SEARCH"])]
         board = ame.create_board("localboard", owner_pubkey=ident.public_key)
         board.create_post(subject="S1", content="findme", author="alice", author_registrar=config.origin).result(timeout=5)
         conn = _anonymous_conn(ident)
         resp = handler.handle(_build_content_search("localboard", "findme", 10), conn)
-        # should NOT be a 401 auth gate; either success or downstream error
+        # should NOT be a 403 command gate; either success or downstream error
         err = _decode_error(resp)
-        assert err is None or err[0] != 401
+        assert err is None or err[0] != 403
 
     @pytest.mark.asyncio
-    async def test_anonymous_content_search_denied_by_default(self, engine_setup):
-        # Default config does NOT include 0x1A in public_commands, so an
-        # anonymous caller must get 401 even with read ACL granted.
+    async def test_anonymous_content_search_denied_without_command_acl(self, engine_setup):
+        # Without a command ACL for POST_CONTENT_SEARCH, the command ACL gate
+        # denies anonymous callers with 403.
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
         config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False)]
-        # restore the default public set (the fixture opts 0x1A in for the
-        # other handler tests; here we exercise the unmodified default)
-        config.public_commands = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19,
-                                  0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54,
-                                  0x61, 0x62, 0x63, 0x64, 0x71}
-        assert 0x1A not in config.public_commands
         ame.create_board("localboard", owner_pubkey=ident.public_key)
         conn = _anonymous_conn(ident)
         resp = handler.handle(_build_content_search("localboard", "findme", 10), conn)
         code, _ = _decode_error(resp)
-        assert code == 401
+        assert code == 403
 
     @pytest.mark.asyncio
-    async def test_anonymous_rejected_401_when_not_public(self, engine_setup):
+    async def test_anonymous_rejected_403_when_no_command_acl(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
         config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False)]
-        config.public_commands = set()  # remove 0x1A from public set
         ame.create_board("localboard", owner_pubkey=ident.public_key)
         conn = _anonymous_conn(ident)
         resp = handler.handle(_build_content_search("localboard", "findme", 10), conn)
         code, _ = _decode_error(resp)
-        assert code == 401
+        assert code == 403
 
     @pytest.mark.asyncio
     async def test_search_releases_slot_on_success(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup
-        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False)]
+        config.acls = [ACLEntry("anon", Matcher(anonymous=True), ["*"], True, False,
+                                 command_patterns=["POST_CONTENT_SEARCH"])]
         board = ame.create_board("localboard", owner_pubkey=ident.public_key)
         board.create_post(subject="S1", content="findme", author="alice", author_registrar=config.origin).result(timeout=5)
         fake_lim = MagicMock()

@@ -4,7 +4,7 @@ import pytest
 import tempfile
 import os
 
-from core.config import Config
+from core.config import Config, Filter
 
 
 class TestConfigPaths:
@@ -211,10 +211,10 @@ class TestConfigSearch:
         assert config.search_rate_limit == 10
         assert config.search_rate_window_seconds == 60
 
-    def test_public_commands_default_denies_content_search(self):
+    def test_public_commands_obsolete_empty_by_default(self):
+        """public_commands is obsolete and empty by default (§5.7)."""
         config = Config(data_dir="./tmp_x")
-        assert 0x19 in config.public_commands   # QUERY_POSTS stays public
-        assert 0x1A not in config.public_commands   # POST_CONTENT_SEARCH default-deny
+        assert config.public_commands == set()
 
     def test_load_search_section_from_toml(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
@@ -240,13 +240,11 @@ rate_window_seconds = 30
             assert config.search_per_identity_concurrency == 2
             assert config.search_rate_limit == 3
             assert config.search_rate_window_seconds == 30
-            # no public_commands specified -> default set, which denies 0x1A
-            assert 0x1A not in config.public_commands
         finally:
             os.unlink(path)
 
-    def test_load_public_commands_by_name_includes_content_search(self):
-        # Operators can opt content search in via TOML using the cmd_map name.
+    def test_load_public_commands_silently_ignored(self):
+        """public_commands in TOML is silently ignored — no authorization effect (§5.7)."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
             f.write("""
 [server]
@@ -257,6 +255,120 @@ public_commands = ["POST_CONTENT_SEARCH", "QUERY_POSTS"]
             path = f.name
         try:
             config = Config.load(path)
-            assert config.public_commands == {0x19, 0x1A}
+            # public_commands is silently ignored — remains empty
+            assert config.public_commands == set()
+        finally:
+            os.unlink(path)
+
+
+class TestFilter:
+    def test_filter_contains_both_bounds(self):
+        f = Filter("evil.example", created_after=100, created_before=200)
+        assert f.contains(100) is True
+        assert f.contains(150) is True
+        assert f.contains(200) is True
+        assert f.contains(99) is False
+        assert f.contains(201) is False
+
+    def test_filter_contains_only_after(self):
+        f = Filter("evil.example", created_after=100)
+        assert f.contains(100) is True
+        assert f.contains(999999) is True
+        assert f.contains(99) is False
+
+    def test_filter_contains_only_before(self):
+        f = Filter("evil.example", created_before=200)
+        assert f.contains(0) is True
+        assert f.contains(200) is True
+        assert f.contains(201) is False
+
+    def test_filter_contains_neither_bound(self):
+        f = Filter("evil.example")
+        assert f.contains(0) is True
+        assert f.contains(999999) is True
+
+
+class TestRecordInWindow:
+    def test_no_filters_default_allow(self):
+        config = Config()
+        assert config.record_in_window("any.origin", 0) is True
+        assert config.record_in_window("any.origin", 999999) is True
+
+    def test_exact_origin_matches(self):
+        config = Config(filters=[Filter("evil.example", created_after=100, created_before=200)])
+        assert config.record_in_window("evil.example", 150) is True
+        assert config.record_in_window("evil.example", 50) is False
+        assert config.record_in_window("evil.example", 250) is False
+
+    def test_unconfigured_origin_default_allow(self):
+        config = Config(filters=[Filter("evil.example", created_after=100)])
+        assert config.record_in_window("other.example", 50) is True
+
+    def test_wildcard_fallback_only_when_no_exact(self):
+        config = Config(filters=[Filter("*", created_after=100)])
+        assert config.record_in_window("other.example", 50) is False
+        assert config.record_in_window("other.example", 150) is True
+        # exact origin takes precedence over wildcard
+        config2 = Config(filters=[
+            Filter("*", created_after=100),
+            Filter("evil.example", created_after=300),
+        ])
+        assert config2.record_in_window("evil.example", 150) is False
+        assert config2.record_in_window("evil.example", 350) is True
+        # other origins still use wildcard
+        assert config2.record_in_window("other.example", 150) is True
+
+    def test_multiple_windows_same_origin_ored(self):
+        config = Config(filters=[
+            Filter("evil.example", created_after=100, created_before=200),
+            Filter("evil.example", created_after=300, created_before=400),
+        ])
+        assert config.record_in_window("evil.example", 150) is True
+        assert config.record_in_window("evil.example", 350) is True
+        assert config.record_in_window("evil.example", 250) is False
+        assert config.record_in_window("evil.example", 450) is False
+
+
+class TestFilterParsing:
+    def test_load_filter_section(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
+            f.write("""
+[server]
+origin = "localhost"
+
+[[filter]]
+origin = "evil.example"
+created_after = 100
+created_before = 200
+
+[[filter]]
+origin = "*"
+created_after = 50
+""")
+            f.flush()
+            path = f.name
+        try:
+            config = Config.load(path)
+            assert len(config.filters) == 2
+            assert config.filters[0].origin == "evil.example"
+            assert config.filters[0].created_after == 100
+            assert config.filters[0].created_before == 200
+            assert config.filters[1].origin == "*"
+            assert config.filters[1].created_after == 50
+            assert config.filters[1].created_before is None
+        finally:
+            os.unlink(path)
+
+    def test_load_no_filter_section(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
+            f.write("""
+[server]
+origin = "localhost"
+""")
+            f.flush()
+            path = f.name
+        try:
+            config = Config.load(path)
+            assert config.filters == []
         finally:
             os.unlink(path)

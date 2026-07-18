@@ -5,16 +5,21 @@ from typing import Dict, List, Any
 
 
 class Matcher:
-    def __init__(self, pubkey: bytes = None, origin_pattern: str = None, wildcard: bool = False, anonymous: bool = False):
+    def __init__(self, pubkey: bytes = None, origin_pattern: str = None, wildcard: bool = False, anonymous: bool = False, unknown: bool = False):
         self.pubkey = pubkey
         self.origin_pattern = origin_pattern
         self.wildcard = wildcard
         self.anonymous = anonymous
+        self.unknown = unknown
 
-    def matches(self, peer_pubkey: bytes, origin: str, is_anonymous: bool = False) -> bool:
+    def matches(self, peer_pubkey: bytes, origin: str, is_anonymous: bool = False, is_unknown: bool = False) -> bool:
         if self.anonymous and is_anonymous:
             return True
         if self.anonymous and not is_anonymous:
+            return False
+        if self.unknown and is_unknown:
+            return True
+        if self.unknown and not is_unknown:
             return False
         if self.pubkey is not None:
             return peer_pubkey == self.pubkey
@@ -37,24 +42,49 @@ class Matcher:
             return Matcher(origin_pattern=data['origin'])
         if 'anonymous' in data and data['anonymous']:
             return Matcher(anonymous=True)
+        if 'unknown' in data and data['unknown']:
+            return Matcher(unknown=True)
         if 'wildcard' in data and data['wildcard']:
             return Matcher(wildcard=True)
         return Matcher(wildcard=True)
 
 
 class ACLEntry:
-    def __init__(self, name: str, matcher: Matcher, board_patterns: list, read_perm: bool, write_perm: bool):
+    def __init__(self, name: str, matcher: Matcher, board_patterns: list, read_perm: bool, write_perm: bool,
+                 command_patterns: list = None, object_patterns: list = None):
         self.name = name
         self.matcher = matcher
         self.board_patterns = board_patterns
         self.read_perm = read_perm
         self.write_perm = write_perm
+        self.command_patterns = command_patterns
+        self.object_patterns = object_patterns
 
     def board_matches(self, board_name: str) -> bool:
         if board_name is None:
             return False
         for pattern in self.board_patterns:
             if fnmatch.fnmatch(board_name, pattern):
+                return True
+        return False
+
+    def command_matches(self, command_name: str) -> bool:
+        if self.command_patterns is None:
+            return False
+        if command_name is None:
+            return False
+        for pattern in self.command_patterns:
+            if pattern == "*" or fnmatch.fnmatch(command_name, pattern):
+                return True
+        return False
+
+    def object_matches(self, object_name: str) -> bool:
+        if self.object_patterns is None:
+            return False
+        if object_name is None:
+            return False
+        for pattern in self.object_patterns:
+            if pattern == "*" or fnmatch.fnmatch(object_name, pattern):
                 return True
         return False
 
@@ -67,14 +97,52 @@ class ACLEntry:
         if isinstance(boards, str):
             boards = [boards]
 
+        commands = data.get('commands', None)
+        if isinstance(commands, str):
+            commands = [commands]
+
+        objects = data.get('objects', None)
+        if isinstance(objects, str):
+            objects = [objects]
+
         read_perm = data.get('read', False)
         write_perm = data.get('write', False)
 
-        return ACLEntry(name, matcher, boards, read_perm, write_perm)
+        return ACLEntry(name, matcher, boards, read_perm, write_perm,
+                        command_patterns=commands, object_patterns=objects)
+
+
+class Filter:
+    """Per-origin eval-time creation-date window.
+
+    A record is in-window if its creation_time falls within [created_after,
+    created_before]. Either bound is optional. Multiple Filter entries sharing
+    an origin are OR'd. `origin = "*"` is a wildcard fallback used only when no
+    specific entry matches a record's origin. Unconfigured origins default
+    allow.
+    """
+    def __init__(self, origin: str, created_after: int = None, created_before: int = None):
+        self.origin = origin
+        self.created_after = created_after
+        self.created_before = created_before
+
+    def contains(self, creation_time: int) -> bool:
+        if self.created_after is not None and creation_time < self.created_after:
+            return False
+        if self.created_before is not None and creation_time > self.created_before:
+            return False
+        return True
+
+    @staticmethod
+    def from_dict(data: dict) -> 'Filter':
+        origin = data.get('origin', '*')
+        created_after = data.get('created_after', None)
+        created_before = data.get('created_before', None)
+        return Filter(origin, created_after, created_before)
 
 
 class Config:
-    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None, tls_ca_bundle: bool | str = True, search_max_count: int = 1000, search_timeout_seconds: int = 10, search_result_limit: int = 100, search_per_identity_concurrency: int = 1, search_rate_limit: int = 10, search_rate_window_seconds: int = 60, rg_path: str = None, http_port: int = 2272, http_host: str = "0.0.0.0", signature_lifetime_seconds: int = 60, clock_skew_seconds: int = 30, replay_db_path: str = None, max_concurrent_requests: int = 100, keepalive_seconds: int = 15, allow_cleartext_loopback: bool = False, trusted_proxies: list = None, max_creation_time_correction: int = 86400, allow_legacy_unsigned_user_sync: bool = False):
+    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None, tls_ca_bundle: bool | str = True, search_max_count: int = 1000, search_timeout_seconds: int = 10, search_result_limit: int = 100, search_per_identity_concurrency: int = 1, search_rate_limit: int = 10, search_rate_window_seconds: int = 60, rg_path: str = None, http_port: int = 2272, http_host: str = "0.0.0.0", signature_lifetime_seconds: int = 60, clock_skew_seconds: int = 30, replay_db_path: str = None, max_concurrent_requests: int = 100, keepalive_seconds: int = 15, allow_cleartext_loopback: bool = False, trusted_proxies: list = None, max_creation_time_correction: int = 86400, allow_legacy_unsigned_user_sync: bool = False, filters: List['Filter'] = None):
         if registrars is None:
             registrars = ["knolastna.me"]
         self.registrars = [r.lower() for r in registrars]
@@ -88,7 +156,7 @@ class Config:
         self.anonymous_read = anonymous_read
 
         if public_commands is None:
-            public_commands = {0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x64, 0x71}
+            public_commands = set()
         self.public_commands = public_commands
 
         if data_dir is None:
@@ -137,6 +205,7 @@ class Config:
             acls = []
         self.acls = acls
         self.admin_bypass_acl = admin_bypass_acl
+        self.filters = filters or []
 
     def _resolve_paths(self, identity_path: str, userfile_path: str, nav_db_path: str, reports_db_path: str, punishments_db_path: str, log_dir: str) -> None:
         """
@@ -185,31 +254,10 @@ class Config:
         anonymous_read = server.get('anonymous_read', True)
         admin_bypass_acl = server.get('admin_bypass_acl', True)
 
-        cmd_map = {
-            'GET_USER': 0x02, 'LIST_USERS': 0x03, 'LIST_PEERS': 0x04,
-            'BOARD_LIST': 0x11, 'POST_GET': 0x13, 'POST_LIST': 0x14,
-            'QUERY_POSTS': 0x19, 'POST_CONTENT_SEARCH': 0x1A, 'GET_PUBKEY': 0x30,
-            'RULE_GET': 0x41, 'RULE_GET_BY_NAME': 0x42, 'RULE_LIST': 0x43,
-            'REPORT_GET': 0x51, 'REPORT_LIST_BY_CULPRIT': 0x52, 'REPORT_LIST_SINCE': 0x54,
-            'PUNISHMENT_GET': 0x61, 'PUNISHMENT_LIST_ACTIVE': 0x62, 'IS_BANNED': 0x63,
-            'PUNISHMENT_LIST_BY_PUBKEY': 0x64,
-            'PEER_KEY_LIST': 0x71, 'REGISTER': 0x01
-        }
-        default_public = {0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19, 0x30, 0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x64, 0x71}
-
-        public_commands_raw = server.get('public_commands', None)
-        if public_commands_raw is not None:
-            public_commands = set()
-            for cmd in public_commands_raw:
-                if isinstance(cmd, int):
-                    public_commands.add(cmd)
-                elif isinstance(cmd, str):
-                    if cmd.upper() in cmd_map:
-                        public_commands.add(cmd_map[cmd.upper()])
-                    elif cmd.startswith('0x'):
-                        public_commands.add(int(cmd, 16))
-        else:
-            public_commands = default_public
+        # public_commands is obsolete and silently ignored (§5.7). It may
+        # remain in TOML for backward compatibility but has no authorization
+        # effect. Command access is now governed by command/object ACLs.
+        # No cmd_map parsing is needed.
 
         data_dir = server.get('data_dir', "./data")
         identity_path = server.get('identity_path', None)
@@ -246,6 +294,11 @@ class Config:
                 name = acl_data.get('name', f'acl-{len(acls)}')
                 acls.append(ACLEntry.from_dict(name, acl_data))
 
+        filters = []
+        if 'filter' in data:
+            for filter_data in data['filter']:
+                filters.append(Filter.from_dict(filter_data))
+
         return Config(
             registrars=registrars,
             timeout_seconds=timeout_seconds,
@@ -258,7 +311,6 @@ class Config:
             log_dir=log_dir,
             acls=acls,
             admin_bypass_acl=admin_bypass_acl,
-            public_commands=public_commands,
             data_dir=data_dir,
             identity_path=identity_path,
             userfile_path=userfile_path,
@@ -278,7 +330,8 @@ class Config:
             search_per_identity_concurrency=search_per_identity_concurrency,
             search_rate_limit=search_rate_limit,
             search_rate_window_seconds=search_rate_window_seconds,
-            rg_path=rg_path
+            rg_path=rg_path,
+            filters=filters
         )
 
     @staticmethod
@@ -292,15 +345,36 @@ data_dir = "./data"
 log_dir = "./logs"
 port_standard = 2272
 port_privileged = 272
-# public_commands = ["REGISTER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "PUNISHMENT_LIST_BY_PUBKEY", "IS_BANNED", "PEER_KEY_LIST"]
-# Content search (POST_CONTENT_SEARCH) is default-deny for anonymous callers;
-# opt in by adding it to public_commands above if anonymous search is desired.
+# public_commands is obsolete and silently ignored. Command access is now
+# governed by command and object ACLs below. Authorization is default-deny:
+# every command requires an explicit ACL grant.
 
 [[acl]]
 name = "local-full-access"
 match.origin = "localhost"
+commands = ["*"]
 boards = ["*"]
 read = true
+write = true
+
+[[acl]]
+name = "anonymous-read"
+match.anonymous = true
+commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN"]
+read = true
+write = false
+
+[[acl]]
+name = "unknown-read"
+match.unknown = true
+commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN"]
+read = true
+write = false
+
+[[acl]]
+name = "unknown-registration"
+match.unknown = true
+commands = ["REGISTER"]
 write = true
 
 [limits]
@@ -348,12 +422,41 @@ key_path = "./certs/bonnet.key"
 
         os.chmod(path, 0o600)
 
-        default_acl = ACLEntry(
+        local_acl = ACLEntry(
             "local-full-access",
             Matcher(origin_pattern="localhost"),
-            ["*"],
-            True,
-            True
+            ["*"], True, True,
+            command_patterns=["*"],
+        )
+
+        anonymous_read_commands = [
+            "GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET",
+            "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME",
+            "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE",
+            "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED",
+            "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST",
+            "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS",
+            "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN",
+        ]
+        anonymous_acl = ACLEntry(
+            "anonymous-read",
+            Matcher(anonymous=True),
+            ["*"], True, False,
+            command_patterns=anonymous_read_commands,
+        )
+
+        unknown_read_acl = ACLEntry(
+            "unknown-read",
+            Matcher(unknown=True),
+            ["*"], True, False,
+            command_patterns=anonymous_read_commands,
+        )
+
+        unknown_acl = ACLEntry(
+            "unknown-registration",
+            Matcher(unknown=True),
+            ["*"], False, True,
+            command_patterns=["REGISTER"],
         )
 
         return Config(
@@ -366,9 +469,8 @@ key_path = "./certs/bonnet.key"
             reports_db_path=None,
             punishments_db_path=None,
             log_dir="./logs",
-            acls=[default_acl],
+            acls=[local_acl, anonymous_acl, unknown_read_acl, unknown_acl],
             admin_bypass_acl=True,
-            public_commands=None,
             data_dir="./data",
             identity_path=None,
             userfile_path=None,
@@ -388,7 +490,25 @@ key_path = "./certs/bonnet.key"
             return False
         return registrar.lower() in self.registrars
 
-    def check_permission(self, action: str, board: str, peer_pubkey: bytes, origin: str, is_admin: bool, is_mod: bool, board_owner: object, is_anonymous: bool = False) -> bool:
+    def record_in_window(self, origin: str, creation_time: int) -> bool:
+        """Eval-time creation-date window for a record's origin.
+
+        Returns True if `creation_time` falls within any configured Filter for
+        `origin`. Exact-origin entries are consulted first (OR'd); if none
+        exist, wildcard ("*") entries are consulted; if neither exist, the
+        record is allowed (default).
+        """
+        if not self.filters:
+            return True
+        exact = [f for f in self.filters if f.origin == origin]
+        if exact:
+            return any(f.contains(creation_time) for f in exact)
+        wildcard = [f for f in self.filters if f.origin == '*']
+        if wildcard:
+            return any(f.contains(creation_time) for f in wildcard)
+        return True
+
+    def check_permission(self, action: str, board: str, peer_pubkey: bytes, origin: str, is_admin: bool, is_mod: bool, board_owner: object, is_anonymous: bool = False, creation_time: int = None, record_origin: str = None, is_unknown: bool = False) -> bool:
         if self.admin_bypass_acl and is_admin:
             return True
 
@@ -398,45 +518,78 @@ key_path = "./certs/bonnet.key"
         if action == "write" and is_mod:
             return True
 
+        return self._eval_buckets(
+            action,
+            lambda acl: acl.board_matches(board),
+            peer_pubkey, origin, is_anonymous, is_unknown,
+            creation_time, record_origin,
+        )
+
+    def check_command_permission(self, command_name: str, action: str, peer_pubkey: bytes, origin: str, is_anonymous: bool = False, is_unknown: bool = False, creation_time: int = None, record_origin: str = None) -> bool:
+        """Command ACL check (§5.4). No admin/owner/mod bypass. Default-deny."""
+        return self._eval_buckets(
+            action,
+            lambda acl: acl.command_matches(command_name),
+            peer_pubkey, origin, is_anonymous, is_unknown,
+            creation_time, record_origin,
+        )
+
+    def check_object_permission(self, action: str, object_name: str, peer_pubkey: bytes, origin: str, is_anonymous: bool = False, is_unknown: bool = False, creation_time: int = None, record_origin: str = None) -> bool:
+        """Object ACL check (§5.5). No admin bypass. Default-deny."""
+        return self._eval_buckets(
+            action,
+            lambda acl: acl.object_matches(object_name),
+            peer_pubkey, origin, is_anonymous, is_unknown,
+            creation_time, record_origin,
+        )
+
+    def _eval_buckets(self, action: str, acl_filter, peer_pubkey: bytes, origin: str, is_anonymous: bool, is_unknown: bool, creation_time, record_origin) -> bool:
+        """Shared 5-bucket ACL precedence scan with temporal filter.
+
+        Precedence (§3.5): anonymous → pubkey → unknown → origin → wildcard.
+        First-match-wins within each bucket. Temporal filter (out_of_window)
+        applies to anonymous, origin, and wildcard buckets; pubkey and unknown
+        buckets are always admitted (they have no creation_time to filter).
+
+        acl_filter: callable(acl) -> bool selecting which ACLs participate
+        (board_matches, command_matches, or object_matches).
+        """
+        out_of_window = (
+            creation_time is not None
+            and record_origin is not None
+            and not self.record_in_window(record_origin, creation_time)
+        )
+
         anonymous_matches = []
         pubkey_matches = []
+        unknown_matches = []
         origin_matches = []
         wildcard_matches = []
 
         for acl in self.acls:
-            if acl.matcher.matches(peer_pubkey, origin, is_anonymous):
-                if acl.board_matches(board):
-                    if acl.matcher.anonymous:
-                        anonymous_matches.append(acl)
-                    elif acl.matcher.pubkey is not None:
-                        pubkey_matches.append(acl)
-                    elif acl.matcher.origin_pattern is not None:
-                        origin_matches.append(acl)
-                    else:
-                        wildcard_matches.append(acl)
+            if not acl_filter(acl):
+                continue
+            if not acl.matcher.matches(peer_pubkey, origin, is_anonymous, is_unknown):
+                continue
+            if acl.matcher.anonymous:
+                if not out_of_window:
+                    anonymous_matches.append(acl)
+            elif acl.matcher.pubkey is not None:
+                pubkey_matches.append(acl)
+            elif acl.matcher.unknown:
+                unknown_matches.append(acl)
+            elif acl.matcher.origin_pattern is not None:
+                if not out_of_window:
+                    origin_matches.append(acl)
+            else:
+                if not out_of_window:
+                    wildcard_matches.append(acl)
 
-        for acl in anonymous_matches:
-            if action == "read":
-                return acl.read_perm
-            if action == "write":
-                return acl.write_perm
-
-        for acl in pubkey_matches:
-            if action == "read":
-                return acl.read_perm
-            if action == "write":
-                return acl.write_perm
-
-        for acl in origin_matches:
-            if action == "read":
-                return acl.read_perm
-            if action == "write":
-                return acl.write_perm
-
-        for acl in wildcard_matches:
-            if action == "read":
-                return acl.read_perm
-            if action == "write":
-                return acl.write_perm
+        for bucket in (anonymous_matches, pubkey_matches, unknown_matches, origin_matches, wildcard_matches):
+            for acl in bucket:
+                if action == "read":
+                    return acl.read_perm
+                if action == "write":
+                    return acl.write_perm
 
         return False

@@ -43,7 +43,8 @@ class Bonnet:
             punishments_path=config.punishments_db_path,
             ume=self.ume,
             signing_key=self.server_identity.signing_key,
-            origin=config.origin
+            origin=config.origin,
+            record_in_window=config.record_in_window
         )
         log_msg(f"INIT: Keibatsu initialized, reports={config.reports_db_path}, punishments={config.punishments_db_path}")
         self.config = config
