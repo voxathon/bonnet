@@ -153,6 +153,7 @@ class SyncManager:
         self._inflight_syncs = set()
         self._sync_queue = asyncio.Queue()
         self._worker_task = asyncio.create_task(self._sync_worker())
+        self._loop = asyncio.get_running_loop()
 
         sync_db_path = "./data/sync.db"
         if hasattr(engine.config, "data_dir") and engine.config.data_dir:
@@ -194,6 +195,16 @@ class SyncManager:
             return
         self._inflight_syncs.add(peer_hostname)
         await self._sync_queue.put(peer_hostname)
+
+    def queue_sync_threadsafe(self, peer_hostname):
+        """Schedule a federation sync from any thread (sync or asyncio worker).
+
+        Safe to call from CommandHandler running inside asyncio.to_thread,
+        as well as from direct sync callers (CLI/tests). Delegates to the
+        async queue_sync on the SyncManager's event loop, preserving the
+        inflight dedup logic.
+        """
+        asyncio.run_coroutine_threadsafe(self.queue_sync(peer_hostname), self._loop)
 
     async def _do_sync_from_peer(self, peer_hostname):
         # SSRF dial-site gate: require BOTH the cheap string check AND a DNS
