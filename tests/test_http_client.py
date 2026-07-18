@@ -42,6 +42,7 @@ from net.rate_limiter import RateLimiter
 from client.http import BonnetHTTPClient, BonnetHTTPError
 
 from tests.fixtures.protocol_v1.wire_fixtures import TEST_SEED
+from tests.helpers import default_test_acls
 
 
 # ---------------------------------------------------------------------------
@@ -63,13 +64,11 @@ class ServerSetup:
             log_dir=os.path.join(temp_dir, "logs"),
             identity_path=os.path.join(temp_dir, "identity"),
             userfile_path=os.path.join(temp_dir, "userfile"),
-            acls=[],
+            acls=default_test_acls("bbs.test"),
             anonymous_read=True,
             max_request_size=10 * 1024 * 1024,
             rate_limit_requests=100,
             rate_limit_window=1,
-            public_commands={0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19, 0x30,
-                             0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x64, 0x71},
             signature_lifetime_seconds=60,
             clock_skew_seconds=30,
             search_per_identity_concurrency=1,
@@ -180,7 +179,7 @@ class TestAnonymousClient:
             await client.connect_anonymous(anonymous_private_key=setup.anonymous_identity.private_key)
             with pytest.raises(BonnetHTTPError) as exc:
                 await client.board_create("test")
-            assert exc.value.code == 401
+            assert exc.value.code == 403  # command ACL denies write for anonymous
 
 
 # ---------------------------------------------------------------------------

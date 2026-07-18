@@ -57,6 +57,9 @@ def temp_dir(tmp_path):
     return str(tmp_path)
 
 
+from tests.helpers import default_test_acls
+
+
 class ServerSetup:
     """Reusable server setup for integration tests."""
 
@@ -74,13 +77,11 @@ class ServerSetup:
             log_dir=os.path.join(temp_dir, "logs"),
             identity_path=os.path.join(temp_dir, "identity"),
             userfile_path=os.path.join(temp_dir, "userfile"),
-            acls=[],
+            acls=default_test_acls("bbs.test"),
             anonymous_read=True,
             max_request_size=10 * 1024 * 1024,
             rate_limit_requests=100,
             rate_limit_window=1,
-            public_commands={0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x11, 0x13, 0x14, 0x19, 0x30,
-                             0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x64, 0x71},
             signature_lifetime_seconds=60,
             clock_skew_seconds=30,
             search_per_identity_concurrency=1,
@@ -282,7 +283,7 @@ class TestAnonymousCommand:
 
     @pytest.mark.asyncio
     async def test_anonymous_rejected_for_private_command(self, setup):
-        """Anonymous cannot run BOARD_CREATE (not in public_commands)."""
+        """Anonymous cannot run BOARD_CREATE (write command, denied by command ACL)."""
         body = b"\x10" + bytes([7]) + b"general"  # BOARD_CREATE
         headers = await _sign_request(
             None, "https://bbs.test/v2/command", body,
@@ -295,7 +296,7 @@ class TestAnonymousCommand:
         assert resp.status_code == 200
         assert resp.content[0] == 0x01  # ERROR
         code = struct.unpack(">H", resp.content[1:3])[0]
-        assert code == 401
+        assert code == 403  # command ACL denies write for anonymous
 
 
 # ---------------------------------------------------------------------------
@@ -341,9 +342,10 @@ class TestAuthenticatedCommand:
 
     @pytest.mark.asyncio
     async def test_unknown_key_rejected(self, setup):
-        """An unknown (non-anonymous, non-registered) key is rejected for non-public commands."""
+        """An unknown (non-anonymous, non-registered) key is rejected for write
+        commands by the command ACL gate (protocol-level 403 error)."""
         client_ident = Identity.generate()
-        body = b"\x10" + bytes([7]) + b"general"  # BOARD_CREATE (not in public_commands)
+        body = b"\x10" + bytes([7]) + b"general"  # BOARD_CREATE
         headers = await _sign_request(
             client_ident, "https://bbs.test/v2/command", body
         )
@@ -351,8 +353,10 @@ class TestAuthenticatedCommand:
         async with setup.make_client() as client:
             resp = await client.post("/v2/command", content=body, headers=headers)
 
-        assert resp.status_code == 403
-        assert b"Unknown key" in resp.content or b"register" in resp.content
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x01  # ERROR
+        code = struct.unpack(">H", resp.content[1:3])[0]
+        assert code == 403  # command ACL denies BOARD_CREATE for unknown
 
 
 # ---------------------------------------------------------------------------
@@ -630,27 +634,20 @@ class TestRateLimiting:
 
 
 # ---------------------------------------------------------------------------
-# Phase 0: Public-command access defects (failing tests)
+# Command ACL: unknown-signer and anonymous access behavior (Phase 1)
 # ---------------------------------------------------------------------------
 
 
-class TestPublicCommandForUnknownSigner:
-    """Phase 0: Demonstrate that an unregistered but validly-signed identity
-    cannot execute public commands because http_server.py:320-326 rejects every
-    unknown key except REGISTER.
-
-    The correct behavior (per the implementation plan) is:
-    - Verify the request signature normally.
-    - Permit an unknown but valid signer to execute commands in
-      config.public_commands as an unregistered principal.
-    - Continue rejecting unknown signers for non-public commands other than
-      REGISTER.
+class TestUnknownSignerCommandACL:
+    """Phase 1: Unknown (validly-signed but unregistered) signers are subject
+    to command ACL evaluation. Under default ACLs, unknown principals can
+    call read commands (unknown-read ACL) and REGISTER (unknown-registration
+    ACL), but are denied all other write commands.
     """
 
     @pytest.mark.asyncio
-    async def test_unknown_valid_signer_can_call_board_list(self, setup):
-        """BOARD_LIST (0x11) is in public_commands; an unknown but valid
-        signer should receive a SUCCESS response, not 403."""
+    async def test_unknown_signer_can_call_board_list(self, setup):
+        """BOARD_LIST is a read command granted by the unknown-read ACL."""
         unknown_ident = Identity.generate()
         body = b"\x11"  # BOARD_LIST
         headers = await _sign_request(
@@ -664,9 +661,8 @@ class TestPublicCommandForUnknownSigner:
         assert resp.content[0] == 0x00  # SUCCESS
 
     @pytest.mark.asyncio
-    async def test_unknown_valid_signer_can_call_list_users(self, setup):
-        """LIST_USERS (0x03) is in public_commands; an unknown but valid
-        signer should receive a SUCCESS response, not 403."""
+    async def test_unknown_signer_can_call_list_users(self, setup):
+        """LIST_USERS is a read command granted by the unknown-read ACL."""
         unknown_ident = Identity.generate()
         body = struct.pack(">BII", 0x03, 0, 100)  # LIST_USERS offset=0 limit=100
         headers = await _sign_request(
@@ -680,9 +676,25 @@ class TestPublicCommandForUnknownSigner:
         assert resp.content[0] == 0x00  # SUCCESS
 
     @pytest.mark.asyncio
-    async def test_unknown_valid_signer_rejected_for_private_command(self, setup):
-        """An unknown signer should still be rejected for non-public commands.
-        BOARD_CREATE (0x10) is not in public_commands."""
+    async def test_unknown_signer_can_register(self, setup):
+        """REGISTER is granted to unknown signers by the unknown-registration
+        ACL (match.unknown=true, commands=["REGISTER"], write=true)."""
+        from client.protocol import build_register
+        unknown_ident = Identity.generate()
+        body = build_register("newuser", "bbs.test")
+        headers = await _sign_request(
+            unknown_ident, "https://bbs.test/v2/command", body
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00  # SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_unknown_signer_denied_for_write_command(self, setup):
+        """BOARD_CREATE is a write command — no unknown ACL grants it."""
         unknown_ident = Identity.generate()
         body = b"\x10" + bytes([7]) + b"general"  # BOARD_CREATE
         headers = await _sign_request(
@@ -692,26 +704,21 @@ class TestPublicCommandForUnknownSigner:
         async with setup.make_client() as client:
             resp = await client.post("/v2/command", content=body, headers=headers)
 
-        # Should be rejected — either at HTTP level (403) or protocol level (401/403)
-        assert resp.status_code in (200, 403)
-        if resp.status_code == 200:
-            assert resp.content[0] == 0x01  # ERROR
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x01  # ERROR
+        code = struct.unpack(">H", resp.content[1:3])[0]
+        assert code == 403  # command ACL denies write for unknown
 
 
-class TestReportListSincePublic:
-    """Phase 0: Demonstrate that REPORT_LIST_SINCE (0x54) rejects the
-    anonymous/public principal despite being in the default public_commands set.
-
-    0x54 is in config.public_commands (src/core/config.py:91), but
-    _cmd_report_list_since requires ctx.is_registered at
-    src/net/commands.py:1480-1483, which contradicts the public-command gate.
+class TestAnonymousCommandACL:
+    """Phase 1: Anonymous (shared-key) signers are subject to command ACL
+    evaluation. Under default ACLs, anonymous can run read commands but not
+    writes or POST_CONTENT_SEARCH.
     """
 
     @pytest.mark.asyncio
     async def test_anonymous_can_call_report_list_since(self, setup):
-        """An anonymous request signed with the shared key should be able to
-        execute REPORT_LIST_SINCE (0x54) because it is in public_commands.
-        An empty result list is a valid SUCCESS response."""
+        """REPORT_LIST_SINCE is in the anonymous-read ACL — granted."""
         body = b"\x54" + struct.pack(">q", 0)  # REPORT_LIST_SINCE since=0
         headers = await _sign_request(
             None, "https://bbs.test/v2/command", body,
@@ -725,20 +732,34 @@ class TestReportListSincePublic:
         assert resp.content[0] == 0x00  # SUCCESS
 
     @pytest.mark.asyncio
-    async def test_unknown_valid_signer_can_call_report_list_since(self, setup):
-        """An unknown but validly-signed identity should be able to execute
-        REPORT_LIST_SINCE (0x54) because it is in public_commands."""
-        unknown_ident = Identity.generate()
-        body = b"\x54" + struct.pack(">q", 0)
+    async def test_anonymous_denied_for_content_search(self, setup):
+        """POST_CONTENT_SEARCH is NOT in the anonymous-read default ACL — denied."""
+        body = struct.pack(">B", 0x1A) + struct.pack(">B", 3) + b"foo" + struct.pack(">I", 100) + struct.pack(">I", 0)
         headers = await _sign_request(
-            unknown_ident, "https://bbs.test/v2/command", body
+            None, "https://bbs.test/v2/command", body,
+            anonymous_identity=setup.anonymous_identity
         )
 
         async with setup.make_client() as client:
             resp = await client.post("/v2/command", content=body, headers=headers)
 
         assert resp.status_code == 200
-        assert resp.content[0] == 0x00  # SUCCESS
+        assert resp.content[0] == 0x01  # ERROR
+
+    @pytest.mark.asyncio
+    async def test_anonymous_denied_for_write(self, setup):
+        """BOARD_CREATE is a write — denied for anonymous."""
+        body = b"\x10" + bytes([7]) + b"general"
+        headers = await _sign_request(
+            None, "https://bbs.test/v2/command", body,
+            anonymous_identity=setup.anonymous_identity
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x01  # ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -935,7 +956,7 @@ class TestRegistryCommands:
 
     @pytest.mark.asyncio
     async def test_registry_head_unknown_valid_signer_access(self, setup):
-        """Unknown valid signer can call registry commands (public)."""
+        """Unknown valid signer can call registry read commands (unknown-read ACL)."""
         from client.protocol import build_user_registry_head
 
         unknown_ident = Identity.generate()
@@ -948,4 +969,4 @@ class TestRegistryCommands:
             resp = await client.post("/v2/command", content=body, headers=headers)
 
         assert resp.status_code == 200
-        assert resp.content[0] == 0x00
+        assert resp.content[0] == 0x00  # SUCCESS

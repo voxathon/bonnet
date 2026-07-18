@@ -51,6 +51,7 @@ from client.protocol import (
     build_user_registry_records, parse_user_registry_records_resp,
 )
 from client.http import BonnetHTTPClient
+from tests.helpers import default_test_acls
 
 
 # ---------------------------------------------------------------------------
@@ -76,15 +77,11 @@ class RegistryTestServer:
             log_dir=os.path.join(temp_dir, origin, "logs"),
             identity_path=os.path.join(temp_dir, origin, "identity"),
             userfile_path=os.path.join(temp_dir, origin, "userfile"),
-            acls=[],
+            acls=default_test_acls(origin),
             anonymous_read=True,
             max_request_size=10 * 1024 * 1024,
             rate_limit_requests=100,
             rate_limit_window=1,
-            public_commands={0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
-                             0x11, 0x13, 0x14, 0x19, 0x30,
-                             0x41, 0x42, 0x43, 0x51, 0x52, 0x54,
-                             0x61, 0x62, 0x63, 0x64, 0x71},
             signature_lifetime_seconds=60,
             clock_skew_seconds=30,
             search_per_identity_concurrency=1,

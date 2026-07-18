@@ -6,6 +6,7 @@ from net.context import CommandContext
 from net.rate_limiter import RateLimiter
 from core.crypto import Identity
 from core.binutil import resolve_rg
+from core.commands import COMMAND_SPECS, get_spec
 from engine.facade import BonnetEngine
 from engine.ame import SearchUnavailable, SearchTimedOut
 from core.logging import log_msg, log_hex, log_dict
@@ -66,38 +67,35 @@ class CommandHandler:
         cmd = request[0]
         data = request[1:]
 
-        cmd_names = {
-            0x01: 'REGISTER', 0x02: 'GET_USER', 0x03: 'LIST_USERS', 0x04: 'LIST_PEERS',
-            0x05: 'USER_REGISTRY_HEAD', 0x06: 'USER_REGISTRY_NODES',
-            0x07: 'USER_REGISTRY_RECORDS', 0x08: 'USER_REGISTRY_HEADS',
-            0x09: 'USER_REGISTRY_HEAD_CHAIN',
-            0x10: 'BOARD_CREATE', 0x11: 'BOARD_LIST', 0x12: 'POST_CREATE',
-            0x13: 'POST_GET', 0x14: 'POST_LIST', 0x15: 'POST_UPDATE',
-            0x16: 'POST_DELETE', 0x17: 'BOARD_CLOSE', 0x18: 'BOARD_DELETE',
-            0x19: 'QUERY_POSTS', 0x1A: 'POST_CONTENT_SEARCH', 0x20: 'USER_PROMOTE', 0x21: 'USER_DEMOTE',
-            0x22: 'POST_SIGN', 0x30: 'GET_PUBKEY',
-            0x40: 'RULE_CREATE', 0x41: 'RULE_GET', 0x42: 'RULE_GET_BY_NAME',
-            0x43: 'RULE_LIST', 0x44: 'RULE_UPDATE',
-            0x50: 'REPORT_CREATE', 0x51: 'REPORT_GET', 0x52: 'REPORT_LIST_BY_CULPRIT',
-            0x53: 'REPORT_SIGN', 0x54: 'REPORT_LIST_SINCE',
-            0x60: 'PUNISHMENT_CREATE', 0x61: 'PUNISHMENT_GET',
-            0x62: 'PUNISHMENT_LIST_ACTIVE', 0x63: 'IS_BANNED',
-            0x64: 'PUNISHMENT_LIST_BY_PUBKEY',
-            0x70: 'PEER_KEY_ROTATE', 0x71: 'PEER_KEY_LIST'
-        }
-        cmd_name = cmd_names.get(cmd, f'UNKNOWN_{cmd:02x}')
+        spec = get_spec(cmd)
+        cmd_name = spec.name if spec else f'UNKNOWN_{cmd:02x}'
 
         username = ctx.user.username if ctx.user else 'anonymous'
         log_msg(f"HANDLE: cmd=0x{cmd:02x} ({cmd_name}), user={username}")
         log_hex(f"HANDLE: request", request)
 
-        if ctx.is_anonymous and cmd not in self._config.public_commands:
-            log_msg(f"HANDLE: rejected - anonymous user cannot run cmd=0x{cmd:02x}")
-            return self._build_error(401, "Authentication required for this command")
+        if spec is None:
+            return self._build_error(400, f"Unknown command 0x{cmd:02x}")
 
-        if not ctx.is_anonymous and ctx.user is not None and ctx.user.is_banned:
-            if cmd not in self._config.public_commands:
-                log_msg(f"HANDLE: rejected - banned user '{ctx.user.username}' attempted cmd=0x{cmd:02x}")
+        # Command ACL gate (§5.4): default-deny, no admin/owner/mod bypass.
+        if not self._engine.check_command_permission(spec, ctx):
+            log_msg(f"HANDLE: rejected - command ACL denied cmd=0x{cmd:02x} ({cmd_name}) for user={username}")
+            return self._build_error(403, "Command not permitted")
+
+        # Object ACL gate (§5.5): conjunctive with command ACL. Dormant in
+        # Phase 1 — no existing command has object_name set.
+        if spec.object_name is not None:
+            if not self._engine.check_object_permission(spec.action, spec.object_name, ctx):
+                log_msg(f"HANDLE: rejected - object ACL denied object={spec.object_name} for cmd=0x{cmd:02x}")
+                return self._build_error(403, "Object not permitted")
+
+        # Banned-write gate (§6.2): effectively banned known users may read
+        # but must be denied every write command. Uses Keibatsu as the
+        # authoritative evaluator (§6.1), not the UME is_banned flag.
+        if ctx.user is not None and spec.action == "write":
+            ban_result = self._keibatsu.is_banned(ctx.user.publickey).result()
+            if ban_result[0]:
+                log_msg(f"HANDLE: rejected - banned user '{ctx.user.username}' attempted write cmd=0x{cmd:02x}")
                 return self._build_error(403, "You are banned from performing this action")
 
         if cmd == 0x01:

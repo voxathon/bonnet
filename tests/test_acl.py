@@ -5,7 +5,7 @@ import tempfile
 import os
 from unittest.mock import MagicMock
 
-from core.config import Config, Matcher, ACLEntry
+from core.config import Config, Matcher, ACLEntry, Filter
 from engine.ume import User
 from engine.facade import BonnetEngine
 from core.crypto import Identity
@@ -803,3 +803,128 @@ class TestACLOriginLocalOnly:
         user = self._user("local.test", pubkey)
         conn = self._conn(ident, user, peer_pubkey=pubkey)
         assert engine.check_permission("write", "anyboard", conn) is False
+
+
+class TestACLTemporalFilter:
+    """Eval-time creation-date window: an out-of-window user fails origin,
+    wildcard, and anonymous ACL buckets but keeps pubkey ACL matches.
+    Role bypasses (admin_bypass_acl, mod write) remain in effect.
+    """
+
+    def _engine(self, origin, acls, filters=None):
+        config = Config(origin=origin, acls=acls, admin_bypass_acl=False, filters=filters or [])
+        ame = MagicMock()
+        ame.get_board_owner.return_value = None
+        return BonnetEngine(MagicMock(), ame, MagicMock(), config, Identity.generate()), Identity.generate(), config
+
+    def _conn(self, ident, user, peer_pubkey=None):
+        from net.context import CommandContext
+        return CommandContext(
+            peer_public_key=peer_pubkey or b"\x44" * 32,
+            user=user,
+            username=user.username if user else None,
+            remote_addr="203.0.113.9",
+            is_anonymous=user is None,
+            origin="evil.example",
+        )
+
+    def _user(self, record_origin, pubkey, creation_time=0, is_admin=False, is_mod=False):
+        u = MagicMock()
+        u.record_origin = record_origin
+        u.creation_time = creation_time
+        u.is_administrator = is_admin
+        u.is_moderator = is_mod
+        return u
+
+    def test_out_of_window_user_origin_acl_denied(self):
+        """An out-of-window user does not match an origin-pattern ACL."""
+        engine, ident, config = self._engine(
+            origin="local.test",
+            acls=[ACLEntry("local", Matcher(origin_pattern="local.test"), ["*"], True, True)],
+            filters=[Filter("local.test", created_after=200)],
+        )
+        pubkey = Identity.generate().public_key
+        user = self._user("local.test", pubkey, creation_time=100)  # before 200
+        conn = self._conn(ident, user, peer_pubkey=pubkey)
+        assert engine.check_permission("read", "anyboard", conn) is False
+        assert engine.check_permission("write", "anyboard", conn) is False
+
+    def test_in_window_user_origin_acl_granted(self):
+        """An in-window user matches an origin-pattern ACL normally."""
+        engine, ident, config = self._engine(
+            origin="local.test",
+            acls=[ACLEntry("local", Matcher(origin_pattern="local.test"), ["*"], True, True)],
+            filters=[Filter("local.test", created_after=200)],
+        )
+        pubkey = Identity.generate().public_key
+        user = self._user("local.test", pubkey, creation_time=300)
+        conn = self._conn(ident, user, peer_pubkey=pubkey)
+        assert engine.check_permission("read", "anyboard", conn) is True
+        assert engine.check_permission("write", "anyboard", conn) is True
+
+    def test_out_of_window_user_wildcard_acl_denied(self):
+        """An out-of-window user does not match a wildcard ACL."""
+        engine, ident, config = self._engine(
+            origin="local.test",
+            acls=[ACLEntry("all", Matcher(wildcard=True), ["*"], True, True)],
+            filters=[Filter("local.test", created_after=200)],
+        )
+        pubkey = Identity.generate().public_key
+        user = self._user("local.test", pubkey, creation_time=100)
+        conn = self._conn(ident, user, peer_pubkey=pubkey)
+        assert engine.check_permission("read", "anyboard", conn) is False
+
+    def test_out_of_window_user_pubkey_acl_still_grants(self):
+        """An out-of-window user still matches a pubkey-based ACL."""
+        pubkey = Identity.generate().public_key
+        engine, ident, config = self._engine(
+            origin="local.test",
+            acls=[ACLEntry("pinned", Matcher(pubkey=pubkey), ["*"], True, True)],
+            filters=[Filter("local.test", created_after=200)],
+        )
+        user = self._user("local.test", pubkey, creation_time=100)  # out of window
+        conn = self._conn(ident, user, peer_pubkey=pubkey)
+        assert engine.check_permission("read", "anyboard", conn) is True
+        assert engine.check_permission("write", "anyboard", conn) is True
+
+    def test_no_filters_all_users_allowed(self):
+        """Without any configured filters, all users match ACLs normally."""
+        engine, ident, config = self._engine(
+            origin="local.test",
+            acls=[ACLEntry("local", Matcher(origin_pattern="local.test"), ["*"], True, True)],
+        )
+        pubkey = Identity.generate().public_key
+        user = self._user("local.test", pubkey, creation_time=0)
+        conn = self._conn(ident, user, peer_pubkey=pubkey)
+        assert engine.check_permission("write", "anyboard", conn) is True
+
+    def test_out_of_window_admin_still_bypasses(self):
+        """An out-of-window admin still bypasses ACLs via admin_bypass_acl."""
+        pubkey = Identity.generate().public_key
+        config = Config(
+            origin="local.test",
+            acls=[ACLEntry("local", Matcher(origin_pattern="local.test"), ["*"], True, True)],
+            admin_bypass_acl=True,
+            filters=[Filter("local.test", created_after=200)],
+        )
+        ame = MagicMock()
+        ame.get_board_owner.return_value = None
+        engine = BonnetEngine(MagicMock(), ame, MagicMock(), config, Identity.generate())
+        ident = Identity.generate()
+        user = self._user("local.test", pubkey, creation_time=100, is_admin=True)
+        conn = self._conn(ident, user, peer_pubkey=pubkey)
+        assert engine.check_permission("write", "anyboard", conn) is True
+
+    def test_out_of_window_mod_still_gets_write(self):
+        """An out-of-window mod still gets the write override."""
+        pubkey = Identity.generate().public_key
+        engine, ident, config = self._engine(
+            origin="local.test",
+            acls=[ACLEntry("local", Matcher(origin_pattern="local.test"), ["*"], True, True)],
+            filters=[Filter("local.test", created_after=200)],
+        )
+        user = self._user("local.test", pubkey, creation_time=100, is_mod=True)
+        conn = self._conn(ident, user, peer_pubkey=pubkey)
+        assert engine.check_permission("write", "anyboard", conn) is True
+        # read still goes through the filtered ACL buckets -> denied
+        assert engine.check_permission("read", "anyboard", conn) is False
