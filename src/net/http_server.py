@@ -340,7 +340,7 @@ class BonnetHTTPServer:
 
         # 13. Dispatch
         try:
-            response_body = self._handler.handle(body, ctx)
+            response_body = await asyncio.to_thread(self._handler.handle, body, ctx)
         except Exception as e:
             import traceback
             log_msg(f"HTTP_COMMAND: dispatch error: {type(e).__name__}: {e}")
