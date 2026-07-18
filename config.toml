@@ -43,7 +43,7 @@ punishments_path = "punishments.db"
 # Content search via ripgrep. rg is resolved at runtime (bundled in frozen
 # builds via _MEIPASS, otherwise via PATH); the server returns 503 if missing.
 # Override the binary location explicitly:
-# rg_path = "/usr/local/bin/rg"
+# rg_path = "C:\Users\jaybe\ripgrep\rg"
 max_count = 1000
 timeout_seconds = 10
 result_limit = 100
@@ -52,6 +52,6 @@ rate_limit = 10
 rate_window_seconds = 60
 
 [tls]
-enabled = false
-cert_path = "./certs/bonnet.crt"
-key_path = "./certs/bonnet.key"
+enabled = true
+cert_path = "./knolastna.me.pem"
+key_path = "./knolastna.me.key"

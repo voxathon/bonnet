@@ -34,6 +34,7 @@ from engine.ume import Ume
 from engine.ame import Ame
 from engine.keibatsu import Keibatsu
 from engine.facade import BonnetEngine
+from core.user_registry import UserRegistryStore, RegistryService
 from net.commands import CommandHandler
 from net.http_server import BonnetHTTPServer
 from net.http_auth import (
@@ -78,7 +79,7 @@ class ServerSetup:
             max_request_size=10 * 1024 * 1024,
             rate_limit_requests=100,
             rate_limit_window=1,
-            public_commands={0x02, 0x03, 0x04, 0x11, 0x13, 0x14, 0x19, 0x30,
+            public_commands={0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x11, 0x13, 0x14, 0x19, 0x30,
                              0x41, 0x42, 0x43, 0x51, 0x52, 0x54, 0x61, 0x62, 0x63, 0x71},
             signature_lifetime_seconds=60,
             clock_skew_seconds=30,
@@ -104,6 +105,15 @@ class ServerSetup:
                                   origin="bbs.test")
 
         self.engine = BonnetEngine(self.ume, self.ame, self.keibatsu, self.config, self.server_identity)
+
+        self.registry_store = UserRegistryStore(os.path.join(temp_dir, "user_registry.db"))
+        self.registry_service = RegistryService(
+            self.registry_store, self.ume, self.server_identity, "bbs.test"
+        )
+        self.ume.register_mutation_callback(self.registry_service.mark_dirty)
+        self.engine.registry_store = self.registry_store
+        self.engine.registry_service = self.registry_service
+
         self.handler = CommandHandler(self.engine)
 
         # Cancel sync worker to avoid lingering tasks
@@ -133,6 +143,7 @@ class ServerSetup:
         self.ame.shutdown()
         self.keibatsu.shutdown()
         self.replay_ledger.close()
+        self.registry_store.close()
 
     def make_client(self):
         transport = ASGITransport(app=self.app)
@@ -205,6 +216,8 @@ class TestDiscovery:
         assert data["command_endpoint"] == "/v2/command"
         assert "anonymous_key" in data
         assert data["anonymous_key"] == setup.anonymous_identity.public_key.hex()
+        assert "capabilities" in data
+        assert "user-registry-merkle-v1" in data["capabilities"]
 
     @pytest.mark.asyncio
     async def test_discovery_response_signed(self, setup):
@@ -328,9 +341,9 @@ class TestAuthenticatedCommand:
 
     @pytest.mark.asyncio
     async def test_unknown_key_rejected(self, setup):
-        """An unknown (non-anonymous, non-registered) key is rejected for non-REGISTER commands."""
+        """An unknown (non-anonymous, non-registered) key is rejected for non-public commands."""
         client_ident = Identity.generate()
-        body = b"\x11"  # BOARD_LIST
+        body = b"\x10" + bytes([7]) + b"general"  # BOARD_CREATE (not in public_commands)
         headers = await _sign_request(
             client_ident, "https://bbs.test/v2/command", body
         )
@@ -614,3 +627,325 @@ class TestRateLimiting:
         assert responses[0] == 200
         assert responses[1] == 200
         assert responses[2] == 429
+
+
+# ---------------------------------------------------------------------------
+# Phase 0: Public-command access defects (failing tests)
+# ---------------------------------------------------------------------------
+
+
+class TestPublicCommandForUnknownSigner:
+    """Phase 0: Demonstrate that an unregistered but validly-signed identity
+    cannot execute public commands because http_server.py:320-326 rejects every
+    unknown key except REGISTER.
+
+    The correct behavior (per the implementation plan) is:
+    - Verify the request signature normally.
+    - Permit an unknown but valid signer to execute commands in
+      config.public_commands as an unregistered principal.
+    - Continue rejecting unknown signers for non-public commands other than
+      REGISTER.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unknown_valid_signer_can_call_board_list(self, setup):
+        """BOARD_LIST (0x11) is in public_commands; an unknown but valid
+        signer should receive a SUCCESS response, not 403."""
+        unknown_ident = Identity.generate()
+        body = b"\x11"  # BOARD_LIST
+        headers = await _sign_request(
+            unknown_ident, "https://bbs.test/v2/command", body
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00  # SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_unknown_valid_signer_can_call_list_users(self, setup):
+        """LIST_USERS (0x03) is in public_commands; an unknown but valid
+        signer should receive a SUCCESS response, not 403."""
+        unknown_ident = Identity.generate()
+        body = struct.pack(">BII", 0x03, 0, 100)  # LIST_USERS offset=0 limit=100
+        headers = await _sign_request(
+            unknown_ident, "https://bbs.test/v2/command", body
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00  # SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_unknown_valid_signer_rejected_for_private_command(self, setup):
+        """An unknown signer should still be rejected for non-public commands.
+        BOARD_CREATE (0x10) is not in public_commands."""
+        unknown_ident = Identity.generate()
+        body = b"\x10" + bytes([7]) + b"general"  # BOARD_CREATE
+        headers = await _sign_request(
+            unknown_ident, "https://bbs.test/v2/command", body
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        # Should be rejected — either at HTTP level (403) or protocol level (401/403)
+        assert resp.status_code in (200, 403)
+        if resp.status_code == 200:
+            assert resp.content[0] == 0x01  # ERROR
+
+
+class TestReportListSincePublic:
+    """Phase 0: Demonstrate that REPORT_LIST_SINCE (0x54) rejects the
+    anonymous/public principal despite being in the default public_commands set.
+
+    0x54 is in config.public_commands (src/core/config.py:91), but
+    _cmd_report_list_since requires ctx.is_registered at
+    src/net/commands.py:1480-1483, which contradicts the public-command gate.
+    """
+
+    @pytest.mark.asyncio
+    async def test_anonymous_can_call_report_list_since(self, setup):
+        """An anonymous request signed with the shared key should be able to
+        execute REPORT_LIST_SINCE (0x54) because it is in public_commands.
+        An empty result list is a valid SUCCESS response."""
+        body = b"\x54" + struct.pack(">q", 0)  # REPORT_LIST_SINCE since=0
+        headers = await _sign_request(
+            None, "https://bbs.test/v2/command", body,
+            anonymous_identity=setup.anonymous_identity
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00  # SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_unknown_valid_signer_can_call_report_list_since(self, setup):
+        """An unknown but validly-signed identity should be able to execute
+        REPORT_LIST_SINCE (0x54) because it is in public_commands."""
+        unknown_ident = Identity.generate()
+        body = b"\x54" + struct.pack(">q", 0)
+        headers = await _sign_request(
+            unknown_ident, "https://bbs.test/v2/command", body
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00  # SUCCESS
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Registry command round-trip tests (opcodes 0x05–0x09)
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryCommands:
+
+    @pytest.mark.asyncio
+    async def test_registry_head_returns_signed_head(self, setup):
+        """USER_REGISTRY_HEAD (0x05) returns a signed head for the local origin."""
+        from client.protocol import build_user_registry_head, parse_user_registry_head_resp
+        from core.user_registry import decode_head, verify_head
+
+        body = build_user_registry_head("bbs.test")
+        headers = await _sign_request(
+            None, "https://bbs.test/v2/command", body,
+            anonymous_identity=setup.anonymous_identity
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00
+        encoded = parse_user_registry_head_resp(resp.content[1:])
+        head = decode_head(encoded)
+        assert head.origin == "bbs.test"
+        assert head.registry_seq >= 1
+        assert verify_head(head, setup.server_identity.public_key)
+
+    @pytest.mark.asyncio
+    async def test_registry_head_unknown_origin_returns_404(self, setup):
+        from client.protocol import build_user_registry_head
+
+        body = build_user_registry_head("nonexistent.test")
+        headers = await _sign_request(
+            None, "https://bbs.test/v2/command", body,
+            anonymous_identity=setup.anonymous_identity
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x01  # ERROR
+        code = struct.unpack(">H", resp.content[1:3])[0]
+        assert code == 404
+
+    @pytest.mark.asyncio
+    async def test_registry_heads_lists_cached_heads(self, setup):
+        """USER_REGISTRY_HEADS (0x08) lists cached heads."""
+        from client.protocol import build_user_registry_heads, parse_user_registry_heads_resp
+        from core.user_registry import decode_head
+
+        setup.registry_service.build_snapshot()
+
+        body = build_user_registry_heads(offset=0, limit=10)
+        headers = await _sign_request(
+            None, "https://bbs.test/v2/command", body,
+            anonymous_identity=setup.anonymous_identity
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00
+        encoded_heads = parse_user_registry_heads_resp(resp.content[1:])
+        assert len(encoded_heads) >= 1
+        head = decode_head(encoded_heads[0])
+        assert head.origin == "bbs.test"
+
+    @pytest.mark.asyncio
+    async def test_registry_records_returns_raw_record(self, setup):
+        """USER_REGISTRY_RECORDS (0x07) returns exact raw records."""
+        from client.protocol import (
+            build_user_registry_records, parse_user_registry_records_resp,
+        )
+        from core.user_registry import compute_registry_key
+        from engine.ume import RECORD_SIZE
+
+        setup.ume.put("testuser", "bbs.test", Identity.generate().public_key,
+                      record_origin="bbs.test", relay="bbs.test")
+        head = setup.registry_service.build_snapshot()
+
+        key = compute_registry_key("bbs.test", "testuser")
+        body = build_user_registry_records("bbs.test", head.registry_seq, [key])
+        headers = await _sign_request(
+            None, "https://bbs.test/v2/command", body,
+            anonymous_identity=setup.anonymous_identity
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00
+        records = parse_user_registry_records_resp(resp.content[1:])
+        assert len(records) == 1
+        assert records[0]["present"] == 1
+        assert len(records[0]["raw_record"]) == RECORD_SIZE
+
+    @pytest.mark.asyncio
+    async def test_registry_records_absent_key(self, setup):
+        """USER_REGISTRY_RECORDS returns present=0 for absent keys."""
+        from client.protocol import build_user_registry_records, parse_user_registry_records_resp
+
+        setup.registry_service.build_snapshot()
+        absent_key = b"\xFF" * 32
+        body = build_user_registry_records("bbs.test", 0, [absent_key])
+        headers = await _sign_request(
+            None, "https://bbs.test/v2/command", body,
+            anonymous_identity=setup.anonymous_identity
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00
+        records = parse_user_registry_records_resp(resp.content[1:])
+        assert records[0]["present"] == 0
+
+    @pytest.mark.asyncio
+    async def test_registry_nodes_returns_root_children(self, setup):
+        """USER_REGISTRY_NODES (0x06) returns node hashes for requested prefixes."""
+        from client.protocol import build_user_registry_nodes, parse_user_registry_nodes_resp
+
+        setup.registry_service.build_snapshot()
+        body = build_user_registry_nodes("bbs.test", 0, [(0, b"")])
+        headers = await _sign_request(
+            None, "https://bbs.test/v2/command", body,
+            anonymous_identity=setup.anonymous_identity
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00
+        nodes = parse_user_registry_nodes_resp(resp.content[1:])
+        assert len(nodes) == 1
+        assert nodes[0]["prefix_bit_length"] == 0
+        assert len(nodes[0]["node_hash"]) == 32
+
+    @pytest.mark.asyncio
+    async def test_registry_head_chain_returns_linkage(self, setup):
+        """USER_REGISTRY_HEAD_CHAIN (0x09) returns descending heads."""
+        from client.protocol import build_user_registry_head_chain, parse_user_registry_heads_resp
+        from core.user_registry import decode_head
+
+        h1 = setup.registry_service.build_snapshot()
+        setup.ume.put("chainuser", "bbs.test", Identity.generate().public_key,
+                      record_origin="bbs.test", relay="bbs.test")
+        h2 = setup.registry_service.build_snapshot()
+
+        body = build_user_registry_head_chain("bbs.test", h2.registry_seq, 10)
+        headers = await _sign_request(
+            None, "https://bbs.test/v2/command", body,
+            anonymous_identity=setup.anonymous_identity
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00
+        encoded_heads = parse_user_registry_heads_resp(resp.content[1:])
+        assert len(encoded_heads) >= 2
+        head2 = decode_head(encoded_heads[0])
+        head1 = decode_head(encoded_heads[1])
+        assert head2.registry_seq == h2.registry_seq
+        assert head1.registry_seq == h1.registry_seq
+        assert head2.previous_head_hash == head1.head_hash
+
+    @pytest.mark.asyncio
+    async def test_registry_head_anonymous_access(self, setup):
+        """Registry commands are public — anonymous can call USER_REGISTRY_HEAD."""
+        from client.protocol import build_user_registry_head
+
+        body = build_user_registry_head("bbs.test")
+        headers = await _sign_request(
+            None, "https://bbs.test/v2/command", body,
+            anonymous_identity=setup.anonymous_identity
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00
+
+    @pytest.mark.asyncio
+    async def test_registry_head_unknown_valid_signer_access(self, setup):
+        """Unknown valid signer can call registry commands (public)."""
+        from client.protocol import build_user_registry_head
+
+        unknown_ident = Identity.generate()
+        body = build_user_registry_head("bbs.test")
+        headers = await _sign_request(
+            unknown_ident, "https://bbs.test/v2/command", body
+        )
+
+        async with setup.make_client() as client:
+            resp = await client.post("/v2/command", content=body, headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.content[0] == 0x00

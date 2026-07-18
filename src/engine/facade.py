@@ -8,6 +8,8 @@ class BonnetEngine:
         self.keibatsu = keibatsu
         self.config = config
         self.server_identity = server_identity
+        self.registry_store = None
+        self.registry_service = None
 
     def check_permission(self, action: str, board: str, ctx: CommandContext) -> bool:
         """

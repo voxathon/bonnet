@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tests for federation trust hardening: board-signature verification (#1),
-relay/origin hostname validation / SSRF guard (#2)."""
+relay/origin hostname validation / SSRF guard (#2), and user/report sync
+parser defects (Phase 0 failing tests)."""
 
 import asyncio
 import os
@@ -19,6 +20,7 @@ from net.sync import (
     _build_board_signature_payload,
 )
 from engine.ame import Ame, NavDB
+from engine.ume import Ume
 from core.crypto import Identity
 
 
@@ -390,3 +392,176 @@ class TestSyncBoardsSignatureVerification:
         nav = ame.get_nav()
         assert nav.get(good) is not None
         assert nav.get(tampered) is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 0: _sync_users / _sync_reports parser defects (failing tests)
+# ---------------------------------------------------------------------------
+
+
+def _build_engine_with_real_ume(temp_dir):
+    """Like _build_engine but with a real Ume for testing user ingestion."""
+    ident = Identity.generate()
+    ame_path = os.path.join(temp_dir, "ame")
+    nav_db_path = os.path.join(temp_dir, "nav.db")
+    ame = Ame(ame_path, origin="local.test", signing_key=ident.signing_key, nav_db_path=nav_db_path)
+
+    ume = Ume(os.path.join(temp_dir, "userfile"))
+
+    config = MagicMock()
+    config.origin = "local.test"
+    config.data_dir = temp_dir
+
+    engine = MagicMock()
+    engine.ume = ume
+    engine.ame = ame
+    engine.keibatsu = MagicMock()
+    engine.config = config
+    engine.server_identity = ident
+    return engine, ident, ame, ume
+
+
+def _encode_user_list(users):
+    """Encode a LIST_USERS response payload (after status byte, as returned
+    by _send_command). Mirrors _cmd_list output format."""
+    payload = struct.pack(">H", len(users))
+    for u in users:
+        name_b = u["username"].encode("utf-8")
+        reg_b = u["registrar"].encode("utf-8")
+        origin_b = u["record_origin"].encode("utf-8")
+        relay_b = u["relay"].encode("utf-8")
+        pubkey = u["publickey"]
+        payload += struct.pack("B", len(name_b)) + name_b
+        payload += struct.pack("B", len(reg_b)) + reg_b
+        payload += struct.pack("B", len(origin_b)) + origin_b
+        payload += struct.pack("B", len(relay_b)) + relay_b
+        payload += struct.pack("B", len(pubkey)) + pubkey
+    return payload
+
+
+def _encode_report_list(reports):
+    """Encode a REPORT_LIST_SINCE response payload (after status byte, as
+    returned by _send_command). Mirrors _cmd_report_list_since output format."""
+    payload = struct.pack(">H", len(reports))
+    for r in reports:
+        payload += struct.pack(">Q", r["report_num"])
+        payload += struct.pack(">Q", r["rule_num"])
+        culprit = r["culprit_pubkey"]
+        payload += struct.pack("B", len(culprit)) + culprit
+        board_b = (r.get("board") or "").encode("utf-8")
+        payload += struct.pack("B", len(board_b)) + board_b
+        payload += struct.pack(">Q", r.get("post_num", 0))
+        reporter = r["reporter_pubkey"]
+        payload += struct.pack("B", len(reporter)) + reporter
+        payload += struct.pack(">q", r["report_time"])
+        origin_b = r["origin"].encode("utf-8")
+        payload += struct.pack("B", len(origin_b)) + origin_b
+        relay_b = r["relay"].encode("utf-8")
+        payload += struct.pack("B", len(relay_b)) + relay_b
+        desc_b = r["description"].encode("utf-8")
+        payload += struct.pack("B", len(desc_b)) + desc_b
+        origin_sig_b = (r.get("origin_sig") or "").encode("utf-8")
+        payload += struct.pack("B", len(origin_sig_b)) + origin_sig_b
+        reporter_sig_b = (r.get("reporter_sig") or "").encode("utf-8")
+        payload += struct.pack("B", len(reporter_sig_b)) + reporter_sig_b
+    return payload
+
+
+class FakeSyncClient:
+    """Fake HTTP client for sync tests. Returns payloads in order, then
+    returns an empty list (count=0) to terminate pagination loops."""
+
+    def __init__(self, payloads):
+        self._payloads = list(payloads)
+        self._call_count = 0
+        self.server_public_key = b"\x00" * 32
+
+    async def _send_command(self, cmd):
+        self._call_count += 1
+        if self._call_count <= len(self._payloads):
+            return self._payloads[self._call_count - 1]
+        return struct.pack(">H", 0)
+
+    async def connect(self, ident):
+        pass
+
+    async def close(self):
+        pass
+
+
+@pytest_asyncio.fixture
+async def sync_setup_real_ume(temp_dir):
+    engine, ident, ame, ume = _build_engine_with_real_ume(temp_dir)
+    mgr = SyncManager(engine)
+    yield mgr, ident, ame, engine, ume
+    task = mgr._worker_task
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+
+class TestSyncUsersParsing:
+    """Phase 0: Demonstrate that _sync_users raises NameError on non-empty
+    responses because it reads an undefined variable `response` instead of
+    `payload` (src/net/sync.py:337-360)."""
+
+    @pytest.mark.asyncio
+    async def test_nonempty_user_list_ingests_without_nameerror(self, sync_setup_real_ume):
+        mgr, ident, ame, engine, ume = sync_setup_real_ume
+        peer_hostname = "peer.example.com"
+
+        pubkey = Identity.generate().public_key
+        payload = _encode_user_list([{
+            "username": "remote_alice",
+            "registrar": "peer.example.com",
+            "record_origin": "peer.example.com",
+            "relay": "peer.example.com",
+            "publickey": pubkey,
+        }])
+        client = FakeSyncClient([payload])
+
+        await mgr._sync_users(client, peer_hostname)
+
+        user = ume.get(username="remote_alice")
+        assert user is not None
+        assert user.record_origin == "peer.example.com"
+        assert user.publickey == pubkey
+
+
+class TestSyncReportsParsing:
+    """Phase 0: Demonstrate that _sync_reports raises NameError on non-empty
+    responses because it reads an undefined variable `response` instead of
+    `payload` (src/net/sync.py:391-441)."""
+
+    @pytest.mark.asyncio
+    async def test_nonempty_report_list_ingests_without_nameerror(self, sync_setup):
+        mgr, ident, ame, engine = sync_setup
+        peer_hostname = "peer.example.com"
+
+        pubkey = Identity.generate().public_key
+        payload = _encode_report_list([{
+            "report_num": 1,
+            "rule_num": 1,
+            "culprit_pubkey": pubkey,
+            "board": "general",
+            "post_num": 42,
+            "reporter_pubkey": pubkey,
+            "report_time": 1700000000,
+            "origin": "peer.example.com",
+            "relay": "peer.example.com",
+            "description": "spam",
+            "origin_sig": "",
+            "reporter_sig": "",
+        }])
+        client = FakeSyncClient([payload])
+
+        engine.keibatsu.upsert_remote_report = MagicMock(
+            return_value=MagicMock(result=MagicMock(return_value=True))
+        )
+
+        await mgr._sync_reports(client, peer_hostname)
+
+        engine.keibatsu.upsert_remote_report.assert_called_once()

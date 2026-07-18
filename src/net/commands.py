@@ -69,6 +69,9 @@ class CommandHandler:
 
         cmd_names = {
             0x01: 'REGISTER', 0x02: 'GET_USER', 0x03: 'LIST_USERS', 0x04: 'LIST_PEERS',
+            0x05: 'USER_REGISTRY_HEAD', 0x06: 'USER_REGISTRY_NODES',
+            0x07: 'USER_REGISTRY_RECORDS', 0x08: 'USER_REGISTRY_HEADS',
+            0x09: 'USER_REGISTRY_HEAD_CHAIN',
             0x10: 'BOARD_CREATE', 0x11: 'BOARD_LIST', 0x12: 'POST_CREATE',
             0x13: 'POST_GET', 0x14: 'POST_LIST', 0x15: 'POST_UPDATE',
             0x16: 'POST_DELETE', 0x17: 'BOARD_CLOSE', 0x18: 'BOARD_DELETE',
@@ -105,6 +108,16 @@ class CommandHandler:
             return self._cmd_list(data, ctx)
         elif cmd == 0x04:
             return self._cmd_list_peers(data, ctx)
+        elif cmd == 0x05:
+            return self._cmd_user_registry_head(data, ctx)
+        elif cmd == 0x06:
+            return self._cmd_user_registry_nodes(data, ctx)
+        elif cmd == 0x07:
+            return self._cmd_user_registry_records(data, ctx)
+        elif cmd == 0x08:
+            return self._cmd_user_registry_heads(data, ctx)
+        elif cmd == 0x09:
+            return self._cmd_user_registry_head_chain(data, ctx)
         elif cmd == 0x10:
             return self._cmd_board_create(data, ctx)
         elif cmd == 0x11:
@@ -1478,9 +1491,6 @@ class CommandHandler:
             return self._build_error(400, str(e))
 
     def _cmd_report_list_since(self, data: bytes, ctx: CommandContext) -> bytes:
-        if not ctx.is_registered:
-            return self._build_error(401, "Authentication required")
-
         try:
             since_timestamp = struct.unpack('>q', data[:8])[0]
 
@@ -1592,6 +1602,294 @@ class CommandHandler:
             return struct.pack('>B', 0x00) + \
                    struct.pack('>B', 1 if banned else 0) + \
                    struct.pack('>B', len(reason_bytes)) + reason_bytes
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    # ------------------------------------------------------------------
+    # Registry commands (opcodes 0x05–0x09)
+    # ------------------------------------------------------------------
+
+    def _get_registry_service(self):
+        svc = getattr(self._engine, 'registry_service', None)
+        if svc is None:
+            return None
+        return svc
+
+    def _get_registry_store(self):
+        store = getattr(self._engine, 'registry_store', None)
+        if store is None:
+            return None
+        return store
+
+    def _cmd_user_registry_head(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            requested_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            if offset != len(data):
+                return self._build_error(400, "Trailing data in request")
+
+            svc = self._get_registry_service()
+            store = self._get_registry_store()
+
+            if svc is not None and origin == self._config.origin:
+                head = svc.build_snapshot()
+            elif store is not None:
+                head = store.get_head(origin, requested_seq)
+            else:
+                head = None
+
+            if head is None:
+                return self._build_error(404, f"No registry head for origin '{origin}'")
+
+            from core.user_registry import encode_head
+            encoded = encode_head(head)
+            return struct.pack(">B", 0x00) + struct.pack(">H", len(encoded)) + encoded
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_user_registry_nodes(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 + 2 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            registry_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            prefix_count = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if prefix_count > 256:
+                return self._build_error(400, "Too many prefixes")
+
+            prefixes = []
+            for _ in range(prefix_count):
+                if offset + 3 > len(data):
+                    return self._build_error(400, "Truncated prefix header")
+                bit_len = struct.unpack(">H", data[offset:offset + 2])[0]
+                offset += 2
+                byte_len = data[offset]
+                offset += 1
+                if bit_len > 256 or offset + byte_len > len(data):
+                    return self._build_error(400, "Invalid prefix or truncated data")
+                prefix = data[offset:offset + byte_len]
+                offset += byte_len
+                prefixes.append((bit_len, prefix))
+            if offset != len(data):
+                return self._build_error(400, "Trailing data in request")
+
+            store = self._get_registry_store()
+            if store is None:
+                return self._build_error(503, "Registry not available")
+
+            from core.user_registry import DEFAULT_HASHES, TREE_DEPTH
+
+            state = store.get_state(origin)
+            if state is None or (registry_seq != 0 and registry_seq > state["highest_accepted_seq"]):
+                return self._build_error(404, f"No head at seq {registry_seq} for origin '{origin}'")
+            actual_seq = registry_seq if registry_seq != 0 else state["highest_accepted_seq"]
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(prefixes))
+            for bit_len, prefix in prefixes:
+                level = bit_len
+                prefix_int = int.from_bytes(prefix, "big") if prefix else 0
+                norm_prefix = prefix_int.to_bytes((level + 7) // 8 or 1, "big")
+                node_hash = store.get_node(origin, actual_seq, level, norm_prefix)
+
+                if node_hash is None:
+                    if level <= TREE_DEPTH:
+                        node_hash = DEFAULT_HASHES[level]
+                    else:
+                        node_hash = b"\x00" * 32
+
+                from core.user_registry import EMPTY_LEAF, _leaf_hash
+                is_leaf = (level == TREE_DEPTH)
+                is_default = (node_hash == DEFAULT_HASHES[level])
+
+                if is_default:
+                    node_kind = 0
+                elif is_leaf:
+                    node_kind = 2
+                else:
+                    node_kind = 1
+
+                response += struct.pack(">H", bit_len)
+                response += struct.pack(">B", len(prefix)) + prefix
+                response += struct.pack(">B", node_kind)
+                response += node_hash
+
+                if node_kind == 1:
+                    left_prefix = (prefix_int << 1)
+                    right_prefix = (prefix_int << 1) | 1
+                    child_byte_len = ((level + 1) + 7) // 8 or 1
+                    left_hash = store.get_node(origin, actual_seq, level + 1,
+                                               left_prefix.to_bytes(child_byte_len, "big"))
+                    right_hash = store.get_node(origin, actual_seq, level + 1,
+                                                right_prefix.to_bytes(child_byte_len, "big"))
+                    if left_hash is None:
+                        left_hash = DEFAULT_HASHES[level + 1]
+                    if right_hash is None:
+                        right_hash = DEFAULT_HASHES[level + 1]
+                    response += left_hash + right_hash
+                elif node_kind == 2:
+                    record = store.get_record(origin, prefix_int.to_bytes(32, "big"))
+                    if record is not None:
+                        from core.user_registry import compute_value_hash, compute_registry_key
+                        from engine.ume import User
+                        user = User.decode(record)
+                        key = compute_registry_key(origin, user.username)
+                        vh = compute_value_hash(record)
+                        response += key + vh
+                    else:
+                        response += b"\x00" * 64
+
+            return response
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_user_registry_records(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 + 2 + 1 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            registry_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            record_count = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if record_count > 64:
+                return self._build_error(400, "Too many records requested")
+            include_proofs = data[offset]
+            offset += 1
+
+            store = self._get_registry_store()
+            if store is None:
+                return self._build_error(503, "Registry not available")
+
+            state = store.get_state(origin)
+            if state is None:
+                return self._build_error(404, f"No registry for origin '{origin}'")
+            actual_seq = registry_seq if registry_seq != 0 else state["highest_accepted_seq"]
+
+            if record_count == 0:
+                all_records = store.get_all_records(origin)
+                record_entries = [(r[0], r[1]) for r in all_records]
+            else:
+                expected_len = offset + record_count * 32
+                if len(data) != expected_len:
+                    return self._build_error(400, "Truncated or trailing key data")
+                keys = []
+                for _ in range(record_count):
+                    keys.append(data[offset:offset + 32])
+                    offset += 32
+                record_entries = []
+                for key in keys:
+                    raw = store.get_record(origin, key)
+                    if raw is not None:
+                        record_entries.append((key, raw))
+                    else:
+                        record_entries.append((key, None))
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(record_entries))
+            for key, raw in record_entries:
+                if raw is None:
+                    response += key + struct.pack(">B", 0)
+                else:
+                    response += key + struct.pack(">B", 1)
+                    response += struct.pack(">H", len(raw)) + raw
+                    response += struct.pack(">H", 0)
+            return response
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_user_registry_heads(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            if len(data) < 6:
+                return self._build_error(400, "Request too short")
+            offset_val = struct.unpack(">I", data[:4])[0]
+            limit = struct.unpack(">H", data[4:6])[0]
+            if limit > 100:
+                limit = 100
+
+            store = self._get_registry_store()
+            if store is None:
+                return self._build_error(503, "Registry not available")
+
+            heads = store.list_heads(offset=offset_val, limit=limit)
+            from core.user_registry import encode_head
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(heads))
+            for head in heads:
+                encoded = encode_head(head)
+                response += struct.pack(">H", len(encoded)) + encoded
+            return response
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_user_registry_head_chain(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 + 2 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            start_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            max_count = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if max_count > 100:
+                max_count = 100
+            if offset != len(data):
+                return self._build_error(400, "Trailing data in request")
+
+            store = self._get_registry_store()
+            if store is None:
+                return self._build_error(503, "Registry not available")
+
+            state = store.get_state(origin)
+            if state is None:
+                return self._build_error(404, f"No registry for origin '{origin}'")
+
+            from core.user_registry import encode_head
+
+            end_seq = max(1, start_seq - max_count + 1)
+            heads = []
+            for seq in range(start_seq, end_seq - 1, -1):
+                head = store.get_head(origin, seq)
+                if head is not None:
+                    heads.append(head)
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(heads))
+            for head in heads:
+                encoded = encode_head(head)
+                response += struct.pack(">H", len(encoded)) + encoded
+            return response
 
         except Exception as e:
             return self._build_error(400, str(e))
