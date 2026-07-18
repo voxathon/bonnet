@@ -46,7 +46,7 @@ from .protocol import (
     build_rule_update, build_report_create, build_report_get,
     build_report_list_by_culprit, build_report_sign, build_report_list_since,
     build_punishment_create, build_punishment_get, build_punishment_list_active,
-    build_is_banned,
+    build_punishment_list_by_pubkey, build_is_banned,
     parse_response, parse_error_response, decode_redirect,
     parse_register_resp, parse_list_users_resp, parse_list_peers_resp,
     parse_board_list_resp, parse_post_create_resp, parse_post_get_resp,
@@ -530,8 +530,8 @@ class BonnetHTTPClient:
         payload = await self._send_command(cmd)
         return parse_punishment_resp(payload)
 
-    async def punishment_get(self, pubkey: str) -> Punishment | None:
-        cmd = build_punishment_get(bytes.fromhex(pubkey))
+    async def punishment_get(self, punishment_id: int) -> Punishment | None:
+        cmd = build_punishment_get(punishment_id)
         try:
             payload = await self._send_command(cmd)
         except BonnetHTTPError:
@@ -540,6 +540,11 @@ class BonnetHTTPClient:
 
     async def punishment_list_active(self) -> list[Punishment]:
         cmd = build_punishment_list_active()
+        payload = await self._send_command(cmd)
+        return parse_punishment_list_resp(payload)
+
+    async def punishment_list_by_pubkey(self, pubkey: str) -> list[Punishment]:
+        cmd = build_punishment_list_by_pubkey(bytes.fromhex(pubkey))
         payload = await self._send_command(cmd)
         return parse_punishment_list_resp(payload)
 
