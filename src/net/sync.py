@@ -12,6 +12,10 @@ from core.logging import log_msg
 
 from client.protocol import (
     build_board_list, build_list_users, build_report_list_since,
+    build_user_registry_head, build_user_registry_nodes,
+    build_user_registry_records,
+    parse_user_registry_head_resp, parse_user_registry_nodes_resp,
+    parse_user_registry_records_resp,
     parse_response, ResponseStatus,
 )
 
@@ -144,6 +148,8 @@ class SyncManager:
         self._keibatsu = engine.keibatsu
         self._config = engine.config
         self._server_identity = engine.server_identity
+        self._registry_store = getattr(engine, 'registry_store', None)
+        self._registry_service = getattr(engine, 'registry_service', None)
         self._inflight_syncs = set()
         self._sync_queue = asyncio.Queue()
         self._worker_task = asyncio.create_task(self._sync_worker())
@@ -228,6 +234,7 @@ class SyncManager:
             await self._sync_boards(client, peer_hostname)
             await self._sync_users(client, peer_hostname)
             await self._sync_reports(client, peer_hostname)
+            await self._sync_registry(client, peer_hostname)
 
         except Exception as e:
             log_msg(f"SYNC: failed to sync with {peer_hostname}: {e}")
@@ -334,29 +341,29 @@ class SyncManager:
                 break
 
             for _ in range(count):
-                u_len = response[idx]
+                u_len = payload[idx]
                 idx += 1
-                username = response[idx:idx+u_len].decode('utf-8')
+                username = payload[idx:idx+u_len].decode('utf-8')
                 idx += u_len
 
-                r_len = response[idx]
+                r_len = payload[idx]
                 idx += 1
-                registrar = response[idx:idx+r_len].decode('utf-8')
+                registrar = payload[idx:idx+r_len].decode('utf-8')
                 idx += r_len
 
-                o_len = response[idx]
+                o_len = payload[idx]
                 idx += 1
-                record_origin = response[idx:idx+o_len].decode('utf-8')
+                record_origin = payload[idx:idx+o_len].decode('utf-8')
                 idx += o_len
 
-                rel_len = response[idx]
+                rel_len = payload[idx]
                 idx += 1
-                relay = response[idx:idx+rel_len].decode('utf-8')
+                relay = payload[idx:idx+rel_len].decode('utf-8')
                 idx += rel_len
 
-                pk_len = response[idx]
+                pk_len = payload[idx]
                 idx += 1
-                publickey = response[idx:idx+pk_len]
+                publickey = payload[idx:idx+pk_len]
                 idx += pk_len
 
                 result = self._ume.upsert_remote_user(username, registrar, publickey,
@@ -388,56 +395,56 @@ class SyncManager:
             return
 
         for _ in range(count):
-            report_num = struct.unpack('>Q', response[idx:idx+8])[0]
+            report_num = struct.unpack('>Q', payload[idx:idx+8])[0]
             idx += 8
 
-            rule_num = struct.unpack('>Q', response[idx:idx+8])[0]
+            rule_num = struct.unpack('>Q', payload[idx:idx+8])[0]
             idx += 8
 
-            culprit_len = response[idx]
+            culprit_len = payload[idx]
             idx += 1
-            culprit_pubkey = response[idx:idx+culprit_len]
+            culprit_pubkey = payload[idx:idx+culprit_len]
             idx += culprit_len
 
-            board_len = response[idx]
+            board_len = payload[idx]
             idx += 1
-            culprit_board = response[idx:idx+board_len].decode('utf-8') if board_len > 0 else None
+            culprit_board = payload[idx:idx+board_len].decode('utf-8') if board_len > 0 else None
             idx += board_len if board_len > 0 else 0
 
-            culprit_post_num = struct.unpack('>Q', response[idx:idx+8])[0]
+            culprit_post_num = struct.unpack('>Q', payload[idx:idx+8])[0]
             idx += 8
 
-            reporter_len = response[idx]
+            reporter_len = payload[idx]
             idx += 1
-            reporter_pubkey = response[idx:idx+reporter_len]
+            reporter_pubkey = payload[idx:idx+reporter_len]
             idx += reporter_len
 
-            report_time = struct.unpack('>q', response[idx:idx+8])[0]
+            report_time = struct.unpack('>q', payload[idx:idx+8])[0]
             idx += 8
 
-            origin_len = response[idx]
+            origin_len = payload[idx]
             idx += 1
-            origin = response[idx:idx+origin_len].decode('utf-8')
+            origin = payload[idx:idx+origin_len].decode('utf-8')
             idx += origin_len
 
-            relay_len = response[idx]
+            relay_len = payload[idx]
             idx += 1
-            relay = response[idx:idx+relay_len].decode('utf-8')
+            relay = payload[idx:idx+relay_len].decode('utf-8')
             idx += relay_len
 
-            desc_len = response[idx]
+            desc_len = payload[idx]
             idx += 1
-            description = response[idx:idx+desc_len].decode('utf-8')
+            description = payload[idx:idx+desc_len].decode('utf-8')
             idx += desc_len
 
-            origin_sig_len = response[idx]
+            origin_sig_len = payload[idx]
             idx += 1
-            origin_sig = response[idx:idx+origin_sig_len].decode('utf-8') if origin_sig_len > 0 else None
+            origin_sig = payload[idx:idx+origin_sig_len].decode('utf-8') if origin_sig_len > 0 else None
             idx += origin_sig_len if origin_sig_len > 0 else 0
 
-            reporter_sig_len = response[idx]
+            reporter_sig_len = payload[idx]
             idx += 1
-            reporter_sig = response[idx:idx+reporter_sig_len].decode('utf-8') if reporter_sig_len > 0 else None
+            reporter_sig = payload[idx:idx+reporter_sig_len].decode('utf-8') if reporter_sig_len > 0 else None
             idx += reporter_sig_len if reporter_sig_len > 0 else 0
 
             if origin == self._config.origin:
@@ -452,3 +459,151 @@ class SyncManager:
                 total += 1
 
         log_msg(f"SYNC: synced {total} reports from {peer_hostname}")
+
+    # ------------------------------------------------------------------
+    # Registry sync (Phase 5)
+    # ------------------------------------------------------------------
+
+    async def _sync_registry(self, client, peer_hostname):
+        """Fetch and verify the peer's origin registry head, compare subtrees,
+        fetch changed records, accept atomically, and normalize into UME."""
+        await self._sync_registry_inner(client, peer_hostname)
+
+    async def _sync_registry_inner(self, client, peer_hostname):
+
+        if self._registry_store is None:
+            log_msg("SYNC: registry store not available, skipping registry sync")
+            return
+
+        peer_origin = getattr(client, '_server_origin', None)
+        if not peer_origin:
+            log_msg("SYNC: cannot determine peer origin for registry sync")
+            return
+
+        if peer_origin == self._config.origin:
+            log_msg("SYNC: skipping registry sync for own origin")
+            return
+
+        origin_pubkey = self._sync_db.get_peer_pubkey(peer_origin)
+        if origin_pubkey is None:
+            log_msg(f"SYNC: no pinned key for origin '{peer_origin}', skipping registry sync")
+            return
+
+        log_msg(f"SYNC: starting registry sync for origin '{peer_origin}'")
+
+        from core.user_registry import (
+            decode_head, verify_head, compute_registry_key, compute_value_hash,
+            CSMT, DEFAULT_HASHES, TREE_DEPTH, verify_node_children,
+            AcceptResult,
+        )
+        from engine.ume import User, RECORD_SIZE
+
+        # 1. Fetch the peer's origin head
+        try:
+            cmd = build_user_registry_head(peer_origin, 0)
+            payload = await client._send_command(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: USER_REGISTRY_HEAD failed for {peer_origin}: {e}")
+            return
+
+        try:
+            encoded_head = parse_user_registry_head_resp(payload)
+            head = decode_head(encoded_head)
+        except Exception as e:
+            log_msg(f"SYNC: failed to decode registry head from {peer_origin}: {e}")
+            return
+
+        # 2. Verify head signature
+        if not verify_head(head, origin_pubkey):
+            log_msg(f"SYNC: registry head signature verification failed for {peer_origin}")
+            return
+
+        if head.origin != peer_origin:
+            log_msg(f"SYNC: head origin '{head.origin}' != requested '{peer_origin}'")
+            return
+
+        # 3. Check if we already have this root
+        state = self._registry_store.get_state(peer_origin)
+        if state is not None and state["current_merkle_root"] == head.merkle_root:
+            return
+
+        # 4. Fetch records and build store entries
+        records_for_store: list[tuple[bytes, str, bytes, bytes]] = []
+        nodes_for_store: list[tuple[int, bytes, bytes]] = []
+        actual_seq = head.registry_seq
+
+        # Fetch all records from the peer — simple and correct for both
+        # first sync and subsequent syncs.  The subtree comparison optimization
+        # can be added later once the 256-level traversal is batched.
+        try:
+            cmd = build_user_registry_records(peer_origin, actual_seq, [], include_proofs=False)
+            payload = await client._send_command(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: USER_REGISTRY_RECORDS (all) failed for {peer_origin}: {e}")
+            return
+
+        try:
+            record_entries = parse_user_registry_records_resp(payload)
+        except Exception as e:
+            log_msg(f"SYNC: failed to parse records response from {peer_origin}: {e}")
+            return
+
+        for entry in record_entries:
+            if entry["present"] != 1:
+                continue
+            raw_record = entry["raw_record"]
+            if len(raw_record) != RECORD_SIZE:
+                continue
+            try:
+                user = User.decode(raw_record)
+            except Exception:
+                continue
+            if user.record_origin != peer_origin:
+                continue
+            if len(user.publickey) != 32:
+                continue
+            key = compute_registry_key(peer_origin, user.username)
+            vh = compute_value_hash(raw_record)
+            if key != entry["registry_key"]:
+                continue
+            records_for_store.append((key, user.username, raw_record, vh))
+
+        log_msg(f"SYNC: fetched {len(records_for_store)} records for {peer_origin}")
+
+        # 6. Atomically accept the remote head
+        result = self._registry_store.accept_remote_head(
+            origin=peer_origin,
+            head=head,
+            origin_pubkey=origin_pubkey,
+            records=records_for_store,
+            nodes=nodes_for_store,
+        )
+
+        if not result.accepted:
+            log_msg(f"SYNC: registry head rejected for {peer_origin}: {result.reason}")
+            return
+
+        log_msg(f"SYNC: registry head accepted for {peer_origin} seq {head.registry_seq}")
+
+        # 7. Normalize records into UME
+        total_normalized = 0
+        max_creation_time_correction = getattr(self._config, 'max_creation_time_correction', 86400)
+
+        for key, username, raw_record, vh in records_for_store:
+            user = User.decode(raw_record)
+            try:
+                status = self._ume.upsert_remote_user(
+                    username=user.username,
+                    registrar=user.registrar,
+                    publickey=user.publickey,
+                    record_origin=user.record_origin,
+                    relay=peer_hostname,
+                    creation_time=user.creation_time,
+                    max_creation_time_correction=max_creation_time_correction,
+                )
+                if status > 0:
+                    total_normalized += 1
+            except ValueError as e:
+                log_msg(f"SYNC: upsert_remote_user failed for '{user.username}': {e}")
+
+        log_msg(f"SYNC: normalized {total_normalized} users into UME from {peer_origin} registry")
