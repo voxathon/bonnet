@@ -466,6 +466,9 @@ class ExecutionContext:
             self.conn = source
         else:
             self.conn = sqlite3.connect(str(source))
+            self.conn.execute("PRAGMA journal_mode = WAL")
+            self.conn.execute("PRAGMA synchronous = NORMAL")
+            self.conn.execute("PRAGMA busy_timeout = 5000")
         if row_factory is not None:
             self.conn.row_factory = row_factory
         self.cur = self.conn.cursor()

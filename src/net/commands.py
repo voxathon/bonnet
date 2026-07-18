@@ -1,5 +1,4 @@
 import struct
-import asyncio
 import time
 from net.sync import SyncManager, _is_dialable_host
 from net.search_limiter import SearchLimiter
@@ -401,7 +400,7 @@ class CommandHandler:
             nav_entry = self._ame.get_nav().get(board_name)
             if nav_entry is not None and nav_entry['origin'] != self._config.origin:
                 if _is_dialable_host(nav_entry['relay']):
-                    asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
+                    self._sync_mgr.queue_sync_threadsafe(nav_entry['relay'])
                 else:
                     log_msg(f"POST_CREATE: not queuing sync for remote board '{board_name}': non-dialable relay '{nav_entry['relay']}'")
                 origin_bytes = nav_entry['origin'].encode('utf-8')
@@ -495,7 +494,7 @@ class CommandHandler:
             nav_entry = self._ame.get_nav().get(board_name)
             if nav_entry is not None and nav_entry['origin'] != self._config.origin:
                 if _is_dialable_host(nav_entry['relay']):
-                    asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
+                    self._sync_mgr.queue_sync_threadsafe(nav_entry['relay'])
                 else:
                     log_msg(f"POST_GET: not queuing sync for remote board '{board_name}': non-dialable relay '{nav_entry['relay']}'")
                 origin_bytes = nav_entry['origin'].encode('utf-8')
@@ -564,7 +563,7 @@ class CommandHandler:
                     return self._build_error(404, f"Board '{board_name}' not found")
             elif nav_entry['origin'] != self._config.origin:
                 if _is_dialable_host(nav_entry['relay']):
-                    asyncio.create_task(self._sync_mgr.queue_sync(nav_entry['relay']))
+                    self._sync_mgr.queue_sync_threadsafe(nav_entry['relay'])
                 else:
                     log_msg(f"POST_LIST: not queuing sync for remote board '{board_name}': non-dialable relay '{nav_entry['relay']}'")
                 origin_bytes = nav_entry['origin'].encode('utf-8')

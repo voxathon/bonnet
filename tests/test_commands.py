@@ -272,6 +272,11 @@ def _install_fake_sync_mgr(handler):
     fake = MagicMock()
     fake.queue_sync = AsyncMock()
     fake._worker_task = None
+    fake._loop = asyncio.get_running_loop()
+
+    def _threadsafe(peer_hostname):
+        fake._loop.create_task(fake.queue_sync(peer_hostname))
+    fake.queue_sync_threadsafe = _threadsafe
     handler._sync_mgr = fake
     return fake
 

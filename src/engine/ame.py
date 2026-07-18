@@ -110,7 +110,7 @@ class NavDB:
         Batch upsert multiple nav entries in a single transaction.
         entries: list of tuples (board_name, board_path, origin, signature, relay, closed)
         """
-        with self._db.open() as ctx:
+        with self._db.open(auto_commit=False) as ctx:
             for entry in entries:
                 if len(entry) == 6:
                     board_name, board_path, origin, signature, relay, closed = entry
@@ -121,6 +121,7 @@ class NavDB:
                     "INSERT OR REPLACE INTO nav (board_name, board_path, origin, signature, relay, owner_pubkey, closed) VALUES (?, ?, ?, ?, ?, NULL, ?)",
                     [board_name, board_path, origin, signature, relay, closed]
                 )
+            ctx.commit()
 
     def delete_by_origin_batch(self, origin: str, board_names_to_keep: list) -> None:
         """
@@ -310,15 +311,14 @@ class Board:
         if self._closed:
             raise RuntimeError("Board is closed")
         try:
-            with self._db.open() as ctx:
-                post_num_obj = ctx.insert_record(self._table, (
+            with self._db.open(auto_commit=False) as ctx:
+                post_num = ctx.insert_record(self._table, (
                     last_modified, creation_date, last_bumped, closed, sticky, tags, subject, options, root, author, author_registrar, signature
                 ), columns=['last_modified', 'creation_date', 'last_bumped', 'closed', 'sticky', 'tags', 'subject', 'options', 'root', 'author', 'author_registrar', 'signature'])
-
-            post_num = post_num_obj
+                if root != 0:
+                    ctx.update(self._table, set_expr="last_bumped=?", where="post_num=?", values=[creation_date, root])
+                ctx.commit()
             self._write_content(post_num, content)
-            if root != 0:
-                self._update_post(root, {'last_bumped': creation_date})
             return post_num
         except Exception as e:
             raise RuntimeError(f"Post creation failed: {e}")
