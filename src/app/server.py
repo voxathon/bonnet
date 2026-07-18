@@ -80,7 +80,7 @@ class Bonnet:
         )
         log_msg("INIT: complete")
 
-    async def run(self, port, ssl_context):
+    async def run(self, port, ssl_certfile=None, ssl_keyfile=None):
         print(f"Bonnet server listening on port {port}")
         print(f"Server public key: {self.server_identity.public_key.hex()}")
         print(f"Root user: root@{self.config.origin}")
@@ -91,7 +91,8 @@ class Bonnet:
             self.http_server,
             host=self.config.http_host,
             port=port,
-            ssl=ssl_context if ssl_context else None,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile,
             log_level="info",
         )
         server = uvicorn.Server(config)
@@ -1205,15 +1206,15 @@ async def main_async():
 
     server = Bonnet(userfile_path, identity_path, config)
 
-    ssl_context = None
+    ssl_certfile = None
+    ssl_keyfile = None
     if tls_enabled and tls_cert and tls_key:
-        import ssl
-        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_context.load_cert_chain(tls_cert, tls_key)
+        ssl_certfile = tls_cert
+        ssl_keyfile = tls_key
         log_msg("MAIN: SSL enabled")
 
     log_msg("MAIN: starting server")
-    await server.run(port, ssl_context)
+    await server.run(port, ssl_certfile, ssl_keyfile)
 
 
 def main():

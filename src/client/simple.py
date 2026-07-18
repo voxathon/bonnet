@@ -2,14 +2,15 @@ import os
 import time
 from fastmcp import FastMCP
 
-from .http import BonnetHTTPClient as BonnetClient
+from .http import BonnetMCPClient as BonnetClient
 from .identity import IdentityStore
 from .models import Board, Post, PostSummary, User
 
 simple_mcp = FastMCP("Bonnet Simple")
 
 identity_store: IdentityStore | None = None
-bonnet_url: str = "https://localhost:2272"
+bonnet_url: str = os.environ.get("BONNET_URL", "https://localhost:2272")
+bonnet_verify: bool | str = os.environ.get("BONNET_VERIFY_TLS", "true").lower() not in ("false", "0", "no")
 
 auth_tokens: dict[str, dict] = {}
 TOKEN_EXPIRY_SECONDS = 24 * 60 * 60
@@ -19,7 +20,7 @@ def get_client() -> BonnetClient:
     global identity_store
     if identity_store is None:
         identity_store = IdentityStore()
-    return BonnetClient(identity_store, bonnet_url)
+    return BonnetClient(identity_store, bonnet_url, verify=bonnet_verify)
 
 
 def resolve_auth(auth: str) -> tuple[str, str]:
@@ -58,6 +59,15 @@ def resolve_username(auth: str) -> str:
         raise ValueError("Auth token has expired")
 
     return token_data["username"]
+
+
+async def _connect(client: BonnetClient, auth: str | None) -> None:
+    """Connect the client, authenticating if auth is provided, anonymous otherwise."""
+    if auth is not None:
+        username, password = resolve_auth(auth)
+        await client.connect(username, password, require_auth=True)
+    else:
+        await client.connect("anonymous", require_auth=False)
 
 
 @simple_mcp.tool
@@ -246,7 +256,19 @@ async def delete_post(board: str, post_num: int, auth: str) -> None:
 
 
 def run():
-    simple_mcp.run(transport="http", host="0.0.0.0", port=8080)
+    port = int(os.environ.get("MCP_PORT", "8080"))
+    ssl_certfile = os.environ.get("MCP_TLS_CERT")
+    ssl_keyfile = os.environ.get("MCP_TLS_KEY")
+
+    uvicorn_config: dict = {}
+    if ssl_certfile and ssl_keyfile:
+        uvicorn_config["ssl_certfile"] = ssl_certfile
+        uvicorn_config["ssl_keyfile"] = ssl_keyfile
+        print(f"MCP server TLS enabled: cert={ssl_certfile}")
+    elif ssl_certfile or ssl_keyfile:
+        print("WARNING: Both MCP_TLS_CERT and MCP_TLS_KEY must be set for TLS; ignoring partial config")
+
+    simple_mcp.run(transport="http", host="0.0.0.0", port=port, uvicorn_config=uvicorn_config or None)
 
 
 if __name__ == "__main__":

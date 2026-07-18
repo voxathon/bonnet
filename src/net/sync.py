@@ -153,6 +153,15 @@ class SyncManager:
             sync_db_path = os.path.join(engine.config.data_dir, "sync.db")
         self._sync_db = SyncDB(sync_db_path)
 
+        # Outbound federation TLS verification.  Defaults to real cert
+        # verification (True) for remote peers; a CA-bundle path (str) may be
+        # configured, or False for dev/test with self-signed certs.
+        self._federation_verify = True
+        if hasattr(engine.config, "federation_tls_ca_bundle"):
+            self._federation_verify = engine.config.federation_tls_ca_bundle
+        elif hasattr(engine.config, "tls_ca_bundle"):
+            self._federation_verify = engine.config.tls_ca_bundle
+
     def get_peer_pubkey(self, origin) -> bytes:
         return self._sync_db.get_peer_pubkey(origin)
 
@@ -193,7 +202,7 @@ class SyncManager:
 
             # Try standard port first, then privileged
             base_url = f"https://{peer_hostname}:2272"
-            client = BonnetHTTPClient(base_url=base_url, timeout=30.0)
+            client = BonnetHTTPClient(base_url=base_url, timeout=30.0, verify=self._federation_verify)
 
             try:
                 await client.connect(self._server_identity)
@@ -201,7 +210,7 @@ class SyncManager:
                 log_msg(f"SYNC: port 2272 failed for {peer_hostname}: {e}, trying 272")
                 await client.close()
                 base_url = f"https://{peer_hostname}:272"
-                client = BonnetHTTPClient(base_url=base_url, timeout=30.0)
+                client = BonnetHTTPClient(base_url=base_url, timeout=30.0, verify=self._federation_verify)
                 try:
                     await client.connect(self._server_identity)
                 except Exception as e2:

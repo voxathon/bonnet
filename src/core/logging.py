@@ -32,7 +32,7 @@ def init_logging(log_dir: str = None) -> None:
 
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     _log_file_path = os.path.join(log_dir, f'bonnet-{ts}.log')
-    _log_file = open(_log_file_path, 'w')
+    _log_file = open(_log_file_path, 'w', encoding='utf-8', errors='replace')
 
     handler = logging.StreamHandler(_log_file)
     handler.setFormatter(TimestampFormatter())

@@ -1,0 +1,57 @@
+[server]
+registrars = ["knolastna.me"]
+origin = "knolastna.me"
+anonymous_read = true
+admin_bypass_acl = true
+data_dir = "./data"
+log_dir = "./logs"
+port_standard = 2272
+port_privileged = 272
+# public_commands = ["REGISTER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PEER_KEY_LIST"]
+# Content search (POST_CONTENT_SEARCH) is default-deny for anonymous callers;
+# opt in by adding it to public_commands above if anonymous search is desired.
+
+[[acl]]
+name = "local-full-access"
+match.origin = "knolastna.me"
+boards = ["*"]
+read = true
+write = true
+
+[[acl]]
+name = "anonymous-read"
+match.anonymous = true
+boards = ["*"]
+read = true
+write = false
+
+[limits]
+timeout_seconds = 30
+max_connections = 100
+max_request_size = 10485760
+rate_limit_requests = 100
+rate_limit_window = 1
+
+[boards]
+path = "./boards"
+
+[keibatsu]
+reports_path = "reports.db"
+punishments_path = "punishments.db"
+
+[search]
+# Content search via ripgrep. rg is resolved at runtime (bundled in frozen
+# builds via _MEIPASS, otherwise via PATH); the server returns 503 if missing.
+# Override the binary location explicitly:
+# rg_path = "/usr/local/bin/rg"
+max_count = 1000
+timeout_seconds = 10
+result_limit = 100
+per_identity_concurrency = 1
+rate_limit = 10
+rate_window_seconds = 60
+
+[tls]
+enabled = false
+cert_path = "./certs/bonnet.crt"
+key_path = "./certs/bonnet.key"

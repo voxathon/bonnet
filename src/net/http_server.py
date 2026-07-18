@@ -155,6 +155,7 @@ class BonnetHTTPServer:
             "origin": self._config.origin,
             "public_key": self._server_identity.public_key.hex(),
             "anonymous_key": self._anonymous_public_key.hex(),
+            "anonymous_private_key": self._anonymous_identity.private_key.hex(),
             "command_endpoint": "/v2/command",
         }).encode("utf-8")
 

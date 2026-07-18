@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
-from .http import BonnetHTTPClient as BonnetClient
+from .http import BonnetMCPClient as BonnetClient
 from .identity import IdentityStore
 from .models import (
     User,
@@ -29,7 +29,8 @@ current_password: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar
     "password", default=""
 )
 identity_store: IdentityStore | None = None
-bonnet_url: str = "https://localhost:2272"
+bonnet_url: str = os.environ.get("BONNET_URL", "https://localhost:2272")
+bonnet_verify: bool | str = os.environ.get("BONNET_VERIFY_TLS", "true").lower() not in ("false", "0", "no")
 
 auth_tokens: dict[str, dict] = {}
 TOKEN_EXPIRY_SECONDS = 24 * 60 * 60
@@ -39,7 +40,7 @@ def get_client() -> BonnetClient:
     global identity_store
     if identity_store is None:
         identity_store = IdentityStore()
-    return BonnetClient(identity_store, bonnet_url)
+    return BonnetClient(identity_store, bonnet_url, verify=bonnet_verify)
 
 
 def get_username() -> str:
@@ -89,6 +90,16 @@ def resolve_username(auth: str | None) -> str:
         raise ValueError("Auth token has expired")
 
     return token_data["username"]
+
+
+async def _connect(client: BonnetClient, auth: str | None) -> None:
+    """Connect the client, authenticating if auth is provided, anonymous otherwise."""
+    if auth is not None:
+        username, password = resolve_auth(auth)
+        await client.connect(username, password, require_auth=True)
+    else:
+        username = resolve_username(auth)
+        await client.connect(username, require_auth=False)
 
 
 def validate_pubkey(pubkey: str) -> bytes:
@@ -160,9 +171,8 @@ async def get_user_by_pubkey(pubkey: str, auth: str | None = None) -> User | Non
     pubkey_bytes = validate_pubkey(pubkey)
 
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.get_user(pubkey_bytes)
 
 
@@ -172,9 +182,8 @@ async def list_users(
 ) -> list[User]:
     """List registered users with pagination."""
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.list_users(offset, limit)
 
 
@@ -182,9 +191,8 @@ async def list_users(
 async def list_peers(auth: str | None = None) -> list[Peer]:
     """List known peer server hostnames for federation."""
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.list_peers()
 
 
@@ -192,9 +200,8 @@ async def list_peers(auth: str | None = None) -> list[Peer]:
 async def create_board(name: str, auth: str | None = None) -> Board:
     """Create a new board. Requires admin privileges."""
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         return await client.board_create(name)
 
 
@@ -202,9 +209,8 @@ async def create_board(name: str, auth: str | None = None) -> Board:
 async def list_boards(auth: str | None = None) -> list[Board]:
     """List all available boards with metadata."""
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.board_list()
 
 
@@ -212,9 +218,8 @@ async def list_boards(auth: str | None = None) -> list[Board]:
 async def close_board(name: str, auth: str | None = None) -> None:
     """Mark a board as read-only. Requires admin privileges."""
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         await client.board_close(name)
 
 
@@ -222,9 +227,8 @@ async def close_board(name: str, auth: str | None = None) -> None:
 async def delete_board(name: str, auth: str | None = None) -> None:
     """Delete a board from disk. Requires admin privileges. Must be closed first."""
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         await client.board_delete(name)
 
 
@@ -240,9 +244,8 @@ async def create_post(
 ) -> PostCreateResult:
     """Create a new post. root=0 starts a new thread, root>0 replies to that post."""
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         return await client.post_create(board, subject, content, tags, options, root)
 
 
@@ -250,9 +253,8 @@ async def create_post(
 async def get_post(board: str, post_num: int, auth: str | None = None) -> Post:
     """Get full post content by board and post number."""
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.post_get(board, post_num)
 
 
@@ -262,9 +264,8 @@ async def list_posts(
 ) -> list[PostSummary]:
     """List posts on a board with pagination."""
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.post_list(board, offset, limit)
 
 
@@ -282,9 +283,8 @@ async def update_post(
 ) -> None:
     """Update post fields. Author can edit content/subject/tags/options. Mods can also edit sticky/closed."""
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         await client.post_update(
             board, post_num, content, subject, tags, options, sticky, closed
         )
@@ -294,9 +294,8 @@ async def update_post(
 async def delete_post(board: str, post_num: int, auth: str | None = None) -> None:
     """Delete a post."""
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         await client.post_delete(board, post_num)
 
 
@@ -317,7 +316,6 @@ async def query_posts(
     substring matches pass a value like "%needle%".
     """
     client = get_client()
-    username = resolve_username(auth)
 
     parsed_values = []
     if values:
@@ -331,7 +329,7 @@ async def query_posts(
                 parsed_values.append((2, encode_string(str(vval))))
 
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.query_posts(board, where, parsed_values, orderby, limit)
 
 
@@ -349,9 +347,8 @@ async def search_posts(
     remote/relay boards return an error. Rate-limited per identity.
     """
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.post_content_search(board, pattern, limit)
 
 
@@ -359,14 +356,13 @@ async def search_posts(
 async def sign_post(board: str, post_num: int, auth: str | None = None) -> str:
     """Sign a post with your identity. Only the post author can sign. Returns the signature hex."""
     client = get_client()
-    username, password = resolve_auth(auth)
 
     async with client:
-        await client.connect(username, password, require_auth=False)
+        await _connect(client, auth)
         post = await client.post_get(board, post_num)
 
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         return await client.post_sign(
             board,
             post_num,
@@ -385,9 +381,8 @@ async def sign_post(board: str, post_num: int, auth: str | None = None) -> str:
 async def promote_user(target_username: str, auth: str | None = None) -> None:
     """Promote a user to moderator. Requires admin privileges."""
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         await client.user_promote(target_username)
 
 
@@ -395,9 +390,8 @@ async def promote_user(target_username: str, auth: str | None = None) -> None:
 async def demote_user(target_username: str, auth: str | None = None) -> None:
     """Remove moderator status from a user. Requires admin privileges."""
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         await client.user_demote(target_username)
 
 
@@ -405,9 +399,8 @@ async def demote_user(target_username: str, auth: str | None = None) -> None:
 async def get_server_pubkey(auth: str | None = None) -> str:
     """Get the server's Ed25519 public key (hex string)."""
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.get_server_pubkey()
 
 
@@ -415,9 +408,8 @@ async def get_server_pubkey(auth: str | None = None) -> str:
 async def create_rule(name: str, description: str, auth: str | None = None) -> Rule:
     """Create a new community rule. Requires moderator privileges."""
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         return await client.rule_create(name, description)
 
 
@@ -425,9 +417,8 @@ async def create_rule(name: str, description: str, auth: str | None = None) -> R
 async def get_rule(rule_num: int, auth: str | None = None) -> Rule:
     """Get a rule by its number."""
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.rule_get(rule_num)
 
 
@@ -435,9 +426,8 @@ async def get_rule(rule_num: int, auth: str | None = None) -> Rule:
 async def get_rule_by_name(name: str, auth: str | None = None) -> Rule:
     """Get a rule by its name."""
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.rule_get_by_name(name)
 
 
@@ -445,9 +435,8 @@ async def get_rule_by_name(name: str, auth: str | None = None) -> Rule:
 async def list_rules(auth: str | None = None) -> list[Rule]:
     """List all community rules."""
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.rule_list()
 
 
@@ -460,9 +449,8 @@ async def update_rule(
 ) -> Rule:
     """Update a rule's name or description."""
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         return await client.rule_update(rule_num, name, description)
 
 
@@ -481,9 +469,8 @@ async def create_report(
     validate_pubkey(culprit_pubkey)
 
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         return await client.report_create(
             rule_num, culprit_pubkey, description, board, post_num, origin, relay
         )
@@ -493,9 +480,8 @@ async def create_report(
 async def get_report(origin: str, report_num: int, auth: str | None = None) -> Report:
     """Get a report by origin server and report number."""
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.report_get(origin, report_num)
 
 
@@ -505,9 +491,8 @@ async def list_reports_by_culprit(pubkey: str, auth: str | None = None) -> list[
     validate_pubkey(pubkey)
 
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.report_list_by_culprit(pubkey)
 
 
@@ -515,9 +500,8 @@ async def list_reports_by_culprit(pubkey: str, auth: str | None = None) -> list[
 async def sign_report(origin: str, report_num: int, auth: str | None = None) -> Report:
     """Sign a report as the reporter."""
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         return await client.report_sign(origin, report_num)
 
 
@@ -533,9 +517,8 @@ async def create_punishment(
     validate_pubkey(pubkey)
 
     client = get_client()
-    username, password = resolve_auth(auth)
     async with client:
-        await client.connect(username, password, require_auth=True)
+        await _connect(client, auth)
         return await client.punishment_create(pubkey, report_ids, expires_at, notes)
 
 
@@ -545,9 +528,8 @@ async def get_punishment(pubkey: str, auth: str | None = None) -> Punishment | N
     validate_pubkey(pubkey)
 
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.punishment_get(pubkey)
 
 
@@ -555,9 +537,8 @@ async def get_punishment(pubkey: str, auth: str | None = None) -> Punishment | N
 async def list_active_punishments(auth: str | None = None) -> list[Punishment]:
     """List all active punishments."""
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.punishment_list_active()
 
 
@@ -567,7 +548,6 @@ async def is_banned(pubkey: str, auth: str | None = None) -> BannedStatus:
     validate_pubkey(pubkey)
 
     client = get_client()
-    username = resolve_username(auth)
     async with client:
-        await client.connect(username, require_auth=False)
+        await _connect(client, auth)
         return await client.is_banned(pubkey)
