@@ -523,6 +523,7 @@ class TestProtocolRoundTrip:
 # ===========================================================================
 
 
+@pytest.mark.skip(reason="POST_CONTENT_SEARCH removed in v3 Phase 7 — replaced by ARTICLE_SEARCH")
 class TestPostContentSearchHandler:
     @skip_if_no_rg
     @pytest.mark.asyncio

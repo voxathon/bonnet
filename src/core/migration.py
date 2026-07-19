@@ -66,6 +66,66 @@ from core.logging import log_msg
 
 
 # ---------------------------------------------------------------------------
+# Inlined legacy record encodings (from deleted report_registry.py / punishment_registry.py)
+# These are kept here because migration.py is the only remaining consumer.
+# ---------------------------------------------------------------------------
+
+def encode_report_record(
+    origin: str, report_num: int, rollover: int, rule_num: int,
+    culprit_pubkey: bytes, culprit_board: str | None, culprit_post_num: int,
+    reporter_pubkey: bytes, report_time: int, description: str,
+    origin_sig: str | None, reporter_sig: str | None,
+) -> bytes:
+    """Canonical binary encoding of a legacy report registry record."""
+    origin_b = origin.encode("utf-8")
+    board_b = (culprit_board or "").encode("utf-8")
+    desc_b = description.encode("utf-8")
+    origin_sig_b = (origin_sig or "").encode("utf-8")
+    reporter_sig_b = (reporter_sig or "").encode("utf-8")
+    return (
+        struct.pack(">H", len(origin_b)) + origin_b
+        + struct.pack(">Q", report_num)
+        + struct.pack(">Q", rollover)
+        + struct.pack(">Q", rule_num)
+        + struct.pack("B", len(culprit_pubkey)) + culprit_pubkey
+        + struct.pack("B", len(board_b)) + board_b
+        + struct.pack(">Q", culprit_post_num)
+        + struct.pack("B", len(reporter_pubkey)) + reporter_pubkey
+        + struct.pack(">q", report_time)
+        + struct.pack(">H", len(desc_b)) + desc_b
+        + struct.pack("B", len(origin_sig_b)) + origin_sig_b
+        + struct.pack("B", len(reporter_sig_b)) + reporter_sig_b
+    )
+
+
+def encode_punishment_record(
+    punishment_id: int, rollover: int, origin: str,
+    punished_pubkey: bytes, report_ids: list, expires_at: int,
+    ban_notes: str, issued_by: bytes, created_at: int,
+    origin_sig: str | None,
+) -> bytes:
+    """Canonical binary encoding of a legacy punishment registry record."""
+    origin_b = origin.encode("utf-8")
+    notes_b = (ban_notes or "").encode("utf-8")
+    issued_by_b = issued_by or b''
+    report_ids_json = json.dumps(report_ids)
+    report_ids_b = report_ids_json.encode("utf-8")
+    origin_sig_b = (origin_sig or "").encode("utf-8")
+    return (
+        struct.pack(">Q", punishment_id)
+        + struct.pack(">Q", rollover)
+        + struct.pack(">H", len(origin_b)) + origin_b
+        + struct.pack("B", len(punished_pubkey)) + punished_pubkey
+        + struct.pack(">H", len(report_ids_b)) + report_ids_b
+        + struct.pack(">q", expires_at)
+        + struct.pack(">H", len(notes_b)) + notes_b
+        + struct.pack("B", len(issued_by_b)) + issued_by_b
+        + struct.pack(">q", created_at)
+        + struct.pack("B", len(origin_sig_b)) + origin_sig_b
+    )
+
+
+# ---------------------------------------------------------------------------
 # Domain-separation tags for deterministic message IDs
 # ---------------------------------------------------------------------------
 
@@ -599,7 +659,7 @@ class MigrationExecutor:
             self._progress.mark_complete(unit_name, 0)
             return 0
 
-        from core.report_registry import encode_report_record
+        # encode_report_record is inlined in this module
 
         for row in rows:
             report_num = row[0]
@@ -726,7 +786,7 @@ class MigrationExecutor:
             self._progress.mark_complete(unit_name, 0)
             return 0
 
-        from core.punishment_registry import encode_punishment_record
+        # encode_punishment_record is inlined in this module
 
         for row in rows:
             punishment_id = row[0]
