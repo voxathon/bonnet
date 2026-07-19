@@ -68,8 +68,8 @@ def _engine(acls, origin="local.test", admin_bypass_acl=True):
 # ---------------------------------------------------------------------------
 
 class TestCommandSpecTable:
-    def test_all_41_commands_present(self):
-        assert len(COMMAND_SPECS) == 41
+    def test_all_51_commands_present(self):
+        assert len(COMMAND_SPECS) == 51
 
     def test_get_spec_by_opcode(self):
         spec = get_spec(0x01)
@@ -101,10 +101,27 @@ class TestCommandSpecTable:
         assert "PUNISHMENT_CREATE" in writes
         assert "PEER_KEY_ROTATE" in writes
 
-    def test_no_object_name_in_phase1(self):
-        """All existing commands have object_name=None in Phase 1."""
-        for spec in COMMAND_SPECS.values():
-            assert spec.object_name is None
+    def test_report_registry_commands_have_object_name(self):
+        """Report registry commands (0x55-0x59) have object_name='reports'."""
+        for opcode in (0x55, 0x56, 0x57, 0x58, 0x59):
+            spec = COMMAND_SPECS[opcode]
+            assert spec.object_name == "reports", f"{spec.name} should have object_name='reports'"
+            assert spec.action == "read"
+
+    def test_punishment_registry_commands_have_object_name(self):
+        """Punishment registry commands (0x65-0x69) have object_name='punishments'."""
+        for opcode in (0x65, 0x66, 0x67, 0x68, 0x69):
+            spec = COMMAND_SPECS[opcode]
+            assert spec.object_name == "punishments", f"{spec.name} should have object_name='punishments'"
+            assert spec.action == "read"
+
+    def test_non_registry_commands_have_no_object_name(self):
+        """All commands except report/punishment registry have object_name=None."""
+        registry_opcodes = {0x55, 0x56, 0x57, 0x58, 0x59, 0x65, 0x66, 0x67, 0x68, 0x69}
+        for opcode, spec in COMMAND_SPECS.items():
+            if opcode in registry_opcodes:
+                continue
+            assert spec.object_name is None, f"{spec.name} (0x{opcode:02x}) should have object_name=None"
 
 
 # ---------------------------------------------------------------------------

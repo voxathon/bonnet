@@ -11,6 +11,10 @@ class BonnetEngine:
         self.server_identity = server_identity
         self.registry_store = None
         self.registry_service = None
+        self.report_registry_store = None
+        self.report_registry_service = None
+        self.punishment_registry_store = None
+        self.punishment_registry_service = None
 
     def check_permission(self, action: str, board: str, ctx: CommandContext) -> bool:
         """

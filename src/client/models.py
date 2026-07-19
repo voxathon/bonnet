@@ -78,7 +78,9 @@ class Report(BaseModel):
 
 
 class Punishment(BaseModel):
-    punishment_id: int = Field(..., description="Monotonic punishment ID")
+    punishment_id: int = Field(..., description="Per-origin punishment ID")
+    origin: str = Field("", description="Origin that issued the punishment")
+    rollover: int = Field(0, description="Rollover variant for conflicts")
     pubkey: str = Field(..., description="Hex-encoded Ed25519 public key")
     report_ids: list[int]
     expires_at: int = Field(
@@ -87,6 +89,7 @@ class Punishment(BaseModel):
     notes: str
     issued_by: Optional[str] = Field(None, description="Hex-encoded Ed25519 public key of the issuing moderator")
     created_at: int = Field(0, description="Unix timestamp when the punishment was issued")
+    origin_sig: Optional[str] = Field(None, description="Hex-encoded origin signature")
 
 
 class BannedStatus(BaseModel):

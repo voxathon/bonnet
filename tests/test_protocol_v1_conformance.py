@@ -197,7 +197,7 @@ class TestRequestFixtures:
         assert build_punishment_create(TEST_PUBLIC_KEY, [1], 9999999999, "banned for spam") == REQUESTS["PUNISHMENT_CREATE"]
 
     def test_punishment_get(self):
-        assert build_punishment_get(1) == REQUESTS["PUNISHMENT_GET"]
+        assert build_punishment_get("localhost", 1) == REQUESTS["PUNISHMENT_GET"]
 
     def test_punishment_list_active(self):
         assert build_punishment_list_active() == REQUESTS["PUNISHMENT_LIST_ACTIVE"]

@@ -30,6 +30,8 @@ from core.user_registry import (
     UserRegistryStore, RegistryService, decode_head, verify_head,
     compute_registry_key, compute_value_hash, encode_head,
 )
+from core.report_registry import ReportRegistryStore, ReportRegistryService
+from core.punishment_registry import PunishmentRegistryStore, PunishmentRegistryService
 from engine.ume import Ume, User, RECORD_SIZE
 from engine.ame import Ame
 from engine.keibatsu import Keibatsu
@@ -61,10 +63,26 @@ from tests.helpers import default_test_acls
 class RegistryTestServer:
     """A minimal Bonnet server with registry support for federation tests."""
 
+    # All origins used across the sync test suite. Each server's import
+    # allowlist includes these so federation sync works without per-test
+    # configuration. Tests that exercise allowlist denial override the
+    # config's import_allowlist explicitly.
+    _TEST_ORIGINS = [
+        "origin-a.test", "node-b.test", "relay-b.test",
+        "node-c.test", "origin-d.test",
+    ]
+
     def __init__(self, temp_dir, origin="origin-a.test"):
         self.temp_dir = temp_dir
         self.origin = origin
         self.server_identity = Identity.generate()
+
+        _import_allowlist = {
+            "boards": list(self._TEST_ORIGINS),
+            "users": list(self._TEST_ORIGINS),
+            "reports": list(self._TEST_ORIGINS),
+            "punishments": list(self._TEST_ORIGINS),
+        }
 
         self.config = Config(
             origin=origin,
@@ -88,6 +106,7 @@ class RegistryTestServer:
             search_rate_limit=10,
             search_rate_window_seconds=60,
             max_creation_time_correction=86400,
+            import_allowlist=_import_allowlist,
         )
 
         os.makedirs(os.path.join(temp_dir, origin), exist_ok=True)
@@ -119,6 +138,22 @@ class RegistryTestServer:
         self.engine.registry_store = self.registry_store
         self.engine.registry_service = self.registry_service
 
+        self.report_registry_store = ReportRegistryStore(os.path.join(temp_dir, origin, "report_registry.db"))
+        self.report_registry_service = ReportRegistryService(
+            self.report_registry_store, self.keibatsu, self.server_identity, origin
+        )
+        self.engine.report_registry_store = self.report_registry_store
+        self.engine.report_registry_service = self.report_registry_service
+        self.keibatsu.register_mutation_callback(self.report_registry_service.mark_dirty)
+
+        self.punishment_registry_store = PunishmentRegistryStore(os.path.join(temp_dir, origin, "punishment_registry.db"))
+        self.punishment_registry_service = PunishmentRegistryService(
+            self.punishment_registry_store, self.keibatsu, self.server_identity, origin
+        )
+        self.engine.punishment_registry_store = self.punishment_registry_store
+        self.engine.punishment_registry_service = self.punishment_registry_service
+        self.keibatsu.register_punishment_mutation_callback(self.punishment_registry_service.mark_dirty)
+
         self.handler = CommandHandler(self.engine)
         task = self.handler._sync_mgr._worker_task
         if task and not task.done():
@@ -145,6 +180,8 @@ class RegistryTestServer:
         self.keibatsu.shutdown()
         self.replay_ledger.close()
         self.registry_store.close()
+        self.report_registry_store.close()
+        self.punishment_registry_store.close()
 
     def make_client(self):
         transport = ASGITransport(app=self.app)
