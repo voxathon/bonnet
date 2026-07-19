@@ -154,21 +154,18 @@ class BonnetHTTPServer:
     async def _handle_discovery(self, scope, receive, send):
         capabilities = [
             "user-registry-merkle-v1",
-            "report-registry-merkle-v1",
-            "punishment-registry-merkle-v1",
             "command-object-acl-v1",
             "immutable-article-feed-v1",
             "article-control-messages-v1",
             "article-body-by-hash-v1",
         ]
         body = json.dumps({
-            "protocol_versions": [2, 3],
+            "protocol_versions": [3],
             "origin": self._config.origin,
             "public_key": self._server_identity.public_key.hex(),
             "anonymous_key": self._anonymous_public_key.hex(),
             "anonymous_private_key": self._anonymous_identity.private_key.hex(),
-            "command_endpoint": "/v2/command",
-            "v3_command_endpoint": "/v3/command",
+            "command_endpoint": "/v3/command",
             "capabilities": capabilities,
         }).encode("utf-8")
 
