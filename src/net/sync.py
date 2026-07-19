@@ -20,8 +20,6 @@ from client.protocol import (
     parse_response, ResponseStatus,
     build_feed_heads, parse_feed_heads_resp,
     build_feed_events, parse_feed_events_resp,
-    build_article_body, parse_article_body_resp,
-    build_feed_head, parse_feed_head_resp,
 )
 
 # Strict hostname regex: dot-separated labels of [a-zA-Z0-9-], each label 1-63
@@ -179,6 +177,8 @@ class SyncManager:
         self._sync_interval = sync_interval if isinstance(sync_interval, (int, float)) else 300
         backoff_max = getattr(engine.config, 'sync_backoff_max_seconds', 3600)
         self._backoff_max = backoff_max if isinstance(backoff_max, (int, float)) else 3600
+        max_events = getattr(engine.config, 'sync_max_events_per_cycle', 5000)
+        self._sync_max_events_per_cycle = max_events if isinstance(max_events, (int, float)) else 5000
         self._peer_backoff: dict = {}  # peer -> current backoff seconds (0 = no backoff)
         self._peer_last_success: dict = {}
         self._peer_last_failure: dict = {}
@@ -249,7 +249,9 @@ class SyncManager:
         self._peer_last_failure[peer_hostname] = time.time()
         current = self._peer_backoff.get(peer_hostname, 0)
         if current == 0:
-            new_backoff = self._sync_interval
+            # In lazy-only mode (interval=0), seed from a small constant so
+            # on-demand requests don't hammer a dead peer on every call.
+            new_backoff = self._sync_interval if self._sync_interval > 0 else 30
         else:
             new_backoff = min(current * 2, self._backoff_max)
         self._peer_backoff[peer_hostname] = new_backoff
@@ -771,7 +773,7 @@ class SyncManager:
         Per §16.1: fetch FEED_HEADS, for each advertised (origin, board):
         skip local authoritative feeds, check feed subscription, require pinned
         origin key, verify signed head, fetch missing FEED_EVENTS range,
-        validate and atomically accept, fetch bodies per body_policy.
+        validate and atomically accept.
         """
         article_service = getattr(self._engine, 'article_service', None)
         if article_service is None:
@@ -815,8 +817,7 @@ class SyncManager:
                 continue
 
             await self._sync_single_feed(client, origin, board, head_bytes,
-                                         origin_pubkey, peer_hostname,
-                                         sub.body_policy, store)
+                                         origin_pubkey, peer_hostname, store)
 
     async def _sync_relayed_article_feeds(self, client, peer_hostname):
         """Sync article feeds for relayed origins (not the peer's own).
@@ -863,19 +864,16 @@ class SyncManager:
                 continue
 
             await self._sync_single_feed(client, origin, board, head_bytes,
-                                         origin_pubkey, peer_hostname,
-                                         sub.body_policy, store)
+                                         origin_pubkey, peer_hostname, store)
 
     async def _sync_single_feed(self, client, origin, board, head_bytes,
-                                origin_pubkey, peer_hostname, body_policy,
-                                store):
+                                origin_pubkey, peer_hostname, store):
         """Sync a single (origin, board) feed from a peer.
 
         1. Decode and verify the signed head
         2. Compare with local feed_state
-        3. Fetch the missing FEED_EVENTS range
+        3. Fetch the missing FEED_EVENTS range (bounded by max_events_per_cycle)
         4. Validate and atomically accept via accept_remote_range
-        5. Fetch bodies per body_policy
         """
         from core.article_feed import (
             decode_head, verify_head_signature, decode_event,
@@ -904,11 +902,16 @@ class SyncManager:
         if head.latest_feed_seq <= highest_seq:
             return  # already up to date or rollback
 
-        # Fetch the missing event range
+        # Fetch the missing event range (bounded by max_events_per_cycle)
         start_seq = highest_seq + 1
         total_accepted = 0
+        max_events = getattr(self, '_sync_max_events_per_cycle', 5000)
 
         while start_seq <= head.latest_feed_seq:
+            if max_events > 0 and total_accepted >= max_events:
+                log_msg(f"SYNC: hit max_events_per_cycle cap ({max_events}) for ({origin}, {board}), continuing next cycle")
+                break
+
             try:
                 cmd = build_feed_events(board, start_seq, max_count=50)
                 payload = await client._send_command_v3(cmd)
@@ -951,39 +954,3 @@ class SyncManager:
                 break
 
         log_msg(f"SYNC: accepted {total_accepted} events for feed ({origin}, {board}) from {peer_hostname}")
-
-        # Fetch bodies per body_policy
-        if body_policy == "eager":
-            await self._fetch_feed_bodies(client, origin, board, store,
-                                          peer_hostname, start_fetch=highest_seq + 1)
-        elif body_policy == "on-demand":
-            # Bodies are fetched lazily when locally requested
-            pass
-        # body_policy == "none": no body fetch
-
-    async def _fetch_feed_bodies(self, client, origin, board, store,
-                                 peer_hostname, start_fetch=1):
-        """Eagerly fetch bodies for articles in a feed that we don't have."""
-        from core.article_feed import EVENT_ARTICLE
-
-        events = store.get_events_range(origin, board, start_fetch, max_count=100)
-        fetched = 0
-        for ev in events:
-            if ev.event_type != EVENT_ARTICLE:
-                continue
-            if ev.body_size == 0:
-                continue
-            if store.has_body(ev.body_hash):
-                continue
-            try:
-                cmd = build_article_body(board, ev.message_id, ev.body_hash)
-                payload = await client._send_command_v3(cmd)
-                body = parse_article_body_resp(payload)
-                # Store the body — the store will verify the hash
-                store._store_body_bytes(body)
-                fetched += 1
-            except Exception as e:
-                log_msg(f"SYNC: body fetch failed for {ev.message_id.hex()[:16]}...: {e}")
-                continue
-        if fetched > 0:
-            log_msg(f"SYNC: fetched {fetched} bodies for ({origin}, {board}) from {peer_hostname}")

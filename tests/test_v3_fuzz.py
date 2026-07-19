@@ -148,12 +148,12 @@ class TestEventDecoderFuzz:
             decode_event(bytes(tampered))
 
     def test_reserved_event_type_allowed_with_flag(self):
-        """Reserved event types (0x10-0x1F) decode with allow_unknown_types=True."""
+        """Reserved event types (0x12-0x1F) decode with allow_unknown_types=True."""
         # Build a minimal valid event with a reserved type
         # Use empty headers (no ARTICLE headers)
         from core.article_feed import Event, ZERO_HASH, ZERO_MESSAGE_ID, SCHEME_NONE
         ev = Event(
-            event_type=0x10,  # reserved type
+            event_type=0x12,  # reserved type
             origin="x", board="y",
             feed_seq=1, message_id=b"\x01" * 32,
             created_at=1, actor_pubkey=b"\x00" * 32,
@@ -166,7 +166,7 @@ class TestEventDecoderFuzz:
         ev.origin_signature = sign_origin(ev, Identity.generate())
         encoded = encode_event(ev)
         decoded = decode_event(encoded, allow_unknown_types=True)
-        assert decoded.event_type == 0x10
+        assert decoded.event_type == 0x12
 
     def test_overflow_origin_length(self):
         """Origin length > MAX_ORIGIN_LEN should be rejected."""

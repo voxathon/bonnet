@@ -62,9 +62,11 @@ EVENT_ARTICLE_PIN = 0x0C
 EVENT_ARTICLE_UNPIN = 0x0D
 EVENT_THREAD_CLOSE = 0x0E
 EVENT_THREAD_REOPEN = 0x0F
+EVENT_USER_REGISTER = 0x10
+EVENT_USER_REVOKE = 0x11
 
-VALID_EVENT_TYPES = frozenset(range(0x01, 0x10))
-RESERVED_EVENT_TYPES = frozenset(range(0x10, 0x20))
+VALID_EVENT_TYPES = frozenset(range(0x01, 0x12))
+RESERVED_EVENT_TYPES = frozenset(range(0x12, 0x20))
 
 # Signature schemes (§8.4)
 SCHEME_NONE = 0          # migration-only, no durable author signature
@@ -248,6 +250,15 @@ class PunishmentHeaders:
 @dataclass
 class PinHeaders:
     priority: int = 0
+
+
+@dataclass
+class UserHeaders:
+    username: str = ""
+    publickey: bytes = b"\x00" * 32
+    flags: int = 0
+    seq_numbr: int = 0
+    creation_time: int = 0
 
 
 # Events with empty headers: CANCEL, RESTORE, PURGE, RULE_REVOKE,
@@ -474,6 +485,8 @@ def _encode_headers(event_type: int, headers) -> bytes:
         return _encode_punishment_headers(headers)
     if event_type == EVENT_ARTICLE_PIN:
         return _encode_pin_headers(headers)
+    if event_type == EVENT_USER_REGISTER:
+        return _encode_user_headers(headers)
     # Empty-headers types
     if headers is not None:
         raise DecodeError(f"event_type {event_type:#04x} must have empty headers")
@@ -554,6 +567,20 @@ def _encode_pin_headers(headers) -> bytes:
     return _pack_i32(headers.priority)
 
 
+def _encode_user_headers(headers) -> bytes:
+    if not isinstance(headers, UserHeaders):
+        raise DecodeError("USER_REGISTER requires UserHeaders")
+    if len(headers.publickey) != 32:
+        raise DecodeError("publickey must be 32 bytes")
+    return (
+        _pack_str_u16(headers.username)
+        + headers.publickey
+        + struct.pack(">B", headers.flags)
+        + struct.pack(">Q", headers.seq_numbr)
+        + struct.pack(">q", headers.creation_time)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Type-specific header decoders (§8.1)
 # ---------------------------------------------------------------------------
@@ -569,6 +596,8 @@ def _decode_headers(event_type: int, data: bytes) -> tuple[object, int]:
         return _decode_punishment_headers(data)
     if event_type == EVENT_ARTICLE_PIN:
         return _decode_pin_headers(data)
+    if event_type == EVENT_USER_REGISTER:
+        return _decode_user_headers(data)
     if len(data) != 0:
         raise DecodeError(f"event_type {event_type:#04x} must have empty headers")
     return None, len(data)
@@ -645,6 +674,20 @@ def _decode_pin_headers(data: bytes) -> tuple[PinHeaders, int]:
     if offset != len(data):
         raise DecodeError("trailing bytes in ARTICLE_PIN headers")
     return PinHeaders(priority=priority), offset
+
+
+def _decode_user_headers(data: bytes) -> tuple[UserHeaders, int]:
+    offset = 0
+    username, offset = _read_str_u16(data, offset, MAX_ORIGIN_LEN)
+    publickey, offset = _read_fixed(data, offset, 32)
+    flags, offset = _read_u8(data, offset)
+    seq_numbr, offset = _read_u64(data, offset)
+    creation_time, offset = _read_i64(data, offset)
+    if offset != len(data):
+        raise DecodeError("trailing bytes in USER_REGISTER headers")
+    return UserHeaders(username=username, publickey=publickey,
+                       flags=flags, seq_numbr=seq_numbr,
+                       creation_time=creation_time), offset
 
 
 # ---------------------------------------------------------------------------
@@ -1252,6 +1295,23 @@ class ArticleFeedStore:
                 revoked_by          BLOB
             );
 
+            CREATE TABLE IF NOT EXISTS user_projection (
+                message_id      BLOB PRIMARY KEY,
+                origin          TEXT NOT NULL,
+                board           TEXT NOT NULL,
+                feed_seq        INTEGER NOT NULL,
+                username        TEXT NOT NULL,
+                publickey       BLOB NOT NULL,
+                flags           INTEGER NOT NULL,
+                seq_numbr       INTEGER NOT NULL,
+                creation_time   INTEGER NOT NULL,
+                revoked         INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS user_projection_pubkey
+                ON user_projection(publickey);
+            CREATE INDEX IF NOT EXISTS user_projection_origin_username
+                ON user_projection(origin, username);
+
             CREATE TABLE IF NOT EXISTS article_bodies (
                 body_hash       BLOB PRIMARY KEY,
                 body_size       INTEGER NOT NULL,
@@ -1706,6 +1766,28 @@ class ArticleFeedStore:
                 (event.message_id, event.target_message_id),
             )
 
+    def _update_user_projection(self, event: Event) -> None:
+        """Insert/update user_projection for USER_REGISTER and REVOKE events."""
+        if event.event_type == EVENT_USER_REGISTER:
+            headers = event.headers
+            if not isinstance(headers, UserHeaders):
+                return
+            self._conn.execute(
+                "INSERT OR REPLACE INTO user_projection "
+                "(message_id, origin, board, feed_seq, username, "
+                " publickey, flags, seq_numbr, creation_time, revoked) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (event.message_id, event.origin, event.board, event.feed_seq,
+                 headers.username, headers.publickey, headers.flags,
+                 headers.seq_numbr, headers.creation_time),
+            )
+        elif event.event_type == EVENT_USER_REVOKE:
+            self._conn.execute(
+                "UPDATE user_projection SET revoked=1 "
+                "WHERE message_id=?",
+                (event.target_message_id,),
+            )
+
     def rebuild_article_projection(self, origin: str, board: str) -> int:
         """Truncate and reconstruct article_projection from accepted events.
 
@@ -1750,10 +1832,74 @@ class ArticleFeedStore:
             for r in rows:
                 event = decode_event(bytes(r[0]))
                 self._update_punishment_projection(event)
+                self._update_user_projection(event)
                 if event.event_type == EVENT_PUNISHMENT:
                     count += 1
             self._conn.commit()
             return count
+
+    def rebuild_user_projection(self, origin: str, board: str) -> int:
+        """Truncate and reconstruct user_projection from accepted events."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM user_projection WHERE origin=? AND board=?",
+                (origin, board),
+            )
+            rows = self._conn.execute(
+                "SELECT encoded_event FROM feed_events "
+                "WHERE origin=? AND board=? "
+                "AND event_type IN (?, ?) "
+                "ORDER BY feed_seq ASC",
+                (origin, board, EVENT_USER_REGISTER, EVENT_USER_REVOKE),
+            ).fetchall()
+            count = 0
+            for r in rows:
+                event = decode_event(bytes(r[0]))
+                self._update_user_projection(event)
+                if event.event_type == EVENT_USER_REGISTER:
+                    count += 1
+            self._conn.commit()
+            return count
+
+    def get_user_by_pubkey(self, pubkey: bytes) -> Optional[dict]:
+        """Return the latest non-revoked user projection for a pubkey."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT message_id, origin, username, publickey, flags, "
+                "       seq_numbr, creation_time, revoked "
+                "FROM user_projection "
+                "WHERE publickey=? AND revoked=0 "
+                "ORDER BY creation_time DESC, origin ASC, seq_numbr DESC LIMIT 1",
+                (pubkey,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "message_id": bytes(row[0]),
+                "origin": row[1],
+                "username": row[2],
+                "publickey": bytes(row[3]),
+                "flags": row[4],
+                "seq_numbr": row[5],
+                "creation_time": row[6],
+                "revoked": row[7],
+            }
+
+    def list_users_by_origin(self, origin: str) -> list:
+        """Return all non-revoked user projections for an origin."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT username, publickey, flags, seq_numbr, creation_time "
+                "FROM user_projection "
+                "WHERE origin=? AND revoked=0 "
+                "ORDER BY username ASC",
+                (origin,),
+            ).fetchall()
+            return [
+                {"username": r[0], "publickey": bytes(r[1]), "flags": r[2],
+                 "seq_numbr": r[3], "creation_time": r[4]}
+                for r in rows
+            ]
 
     # --- Authoritative local append (normal publication) ---
 
@@ -1982,6 +2128,7 @@ class ArticleFeedStore:
             # Update projections
             self._update_article_projection(event)
             self._update_punishment_projection(event)
+            self._update_user_projection(event)
 
             # Build and store new head
             new_article_count = state["current_article_count"]
@@ -2181,6 +2328,7 @@ class ArticleFeedStore:
                 self._add_body_ref(ev.body_hash, ev.message_id, origin, board)
                 self._update_article_projection(ev)
                 self._update_punishment_projection(ev)
+                self._update_user_projection(ev)
                 if ev.event_type == EVENT_ARTICLE:
                     article_count += 1
 
@@ -2395,6 +2543,7 @@ class ArticleFeedStore:
                 self._add_body_ref(ev.body_hash, ev.message_id, origin, board)
                 self._update_article_projection(ev)
                 self._update_punishment_projection(ev)
+                self._update_user_projection(ev)
                 if ev.event_type == EVENT_ARTICLE:
                     article_count += 1
 
