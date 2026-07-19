@@ -142,7 +142,7 @@ class Filter:
 
 
 class Config:
-    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None, tls_ca_bundle: bool | str = True, search_max_count: int = 1000, search_timeout_seconds: int = 10, search_result_limit: int = 100, search_per_identity_concurrency: int = 1, search_rate_limit: int = 10, search_rate_window_seconds: int = 60, rg_path: str = None, http_port: int = 2272, http_host: str = "0.0.0.0", signature_lifetime_seconds: int = 60, clock_skew_seconds: int = 30, replay_db_path: str = None, max_concurrent_requests: int = 100, keepalive_seconds: int = 15, allow_cleartext_loopback: bool = False, trusted_proxies: list = None, max_creation_time_correction: int = 86400, allow_legacy_unsigned_user_sync: bool = False, filters: List['Filter'] = None):
+    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None, tls_ca_bundle: bool | str = True, search_max_count: int = 1000, search_timeout_seconds: int = 10, search_result_limit: int = 100, search_per_identity_concurrency: int = 1, search_rate_limit: int = 10, search_rate_window_seconds: int = 60, rg_path: str = None, http_port: int = 2272, http_host: str = "0.0.0.0", signature_lifetime_seconds: int = 60, clock_skew_seconds: int = 30, replay_db_path: str = None, max_concurrent_requests: int = 100, keepalive_seconds: int = 15, allow_cleartext_loopback: bool = False, trusted_proxies: list = None, max_creation_time_correction: int = 86400, allow_legacy_unsigned_user_sync: bool = False, filters: List['Filter'] = None, import_allowlist: dict = None):
         if registrars is None:
             registrars = ["knolastna.me"]
         self.registrars = [r.lower() for r in registrars]
@@ -200,6 +200,16 @@ class Config:
         self.trusted_proxies = trusted_proxies or []
         self.max_creation_time_correction = max_creation_time_correction
         self.allow_legacy_unsigned_user_sync = allow_legacy_unsigned_user_sync
+
+        # Import allowlist (§13): per-object-type origin allowlists, default-deny.
+        # import_allowlist is a dict like {"boards": ["origin.example"], ...}.
+        # Origins are normalized to lowercase. Empty/missing lists deny all.
+        self._import_allowlist: Dict[str, set] = {}
+        if import_allowlist:
+            for obj_type, origins in import_allowlist.items():
+                if isinstance(origins, str):
+                    origins = [origins]
+                self._import_allowlist[obj_type] = {o.lower() for o in origins if o}
 
         if acls is None:
             acls = []
@@ -299,6 +309,16 @@ class Config:
             for filter_data in data['filter']:
                 filters.append(Filter.from_dict(filter_data))
 
+        import_allowlist = {}
+        if 'import_allowlist' in data:
+            ia = data['import_allowlist']
+            if isinstance(ia, dict):
+                for obj_type, origins in ia.items():
+                    if isinstance(origins, str):
+                        origins = [origins]
+                    if isinstance(origins, list):
+                        import_allowlist[obj_type] = [o for o in origins if isinstance(o, str) and o]
+
         return Config(
             registrars=registrars,
             timeout_seconds=timeout_seconds,
@@ -331,7 +351,8 @@ class Config:
             search_rate_limit=search_rate_limit,
             search_rate_window_seconds=search_rate_window_seconds,
             rg_path=rg_path,
-            filters=filters
+            filters=filters,
+            import_allowlist=import_allowlist
         )
 
     @staticmethod
@@ -353,6 +374,7 @@ port_privileged = 272
 name = "local-full-access"
 match.origin = "localhost"
 commands = ["*"]
+objects = ["*"]
 boards = ["*"]
 read = true
 write = true
@@ -360,14 +382,16 @@ write = true
 [[acl]]
 name = "anonymous-read"
 match.anonymous = true
-commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN"]
+commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN", "REPORT_REGISTRY_HEAD", "REPORT_REGISTRY_NODES", "REPORT_REGISTRY_RECORDS", "REPORT_REGISTRY_HEADS", "REPORT_REGISTRY_HEAD_CHAIN", "PUNISHMENT_REGISTRY_HEAD", "PUNISHMENT_REGISTRY_NODES", "PUNISHMENT_REGISTRY_RECORDS", "PUNISHMENT_REGISTRY_HEADS", "PUNISHMENT_REGISTRY_HEAD_CHAIN"]
+objects = ["reports", "punishments"]
 read = true
 write = false
 
 [[acl]]
 name = "unknown-read"
 match.unknown = true
-commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN"]
+commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN", "REPORT_REGISTRY_HEAD", "REPORT_REGISTRY_NODES", "REPORT_REGISTRY_RECORDS", "REPORT_REGISTRY_HEADS", "REPORT_REGISTRY_HEAD_CHAIN", "PUNISHMENT_REGISTRY_HEAD", "PUNISHMENT_REGISTRY_NODES", "PUNISHMENT_REGISTRY_RECORDS", "PUNISHMENT_REGISTRY_HEADS", "PUNISHMENT_REGISTRY_HEAD_CHAIN"]
+objects = ["reports", "punishments"]
 read = true
 write = false
 
@@ -412,6 +436,18 @@ key_path = "./certs/bonnet.key"
 #   "/path/to/ca"   use a specific CA bundle file
 #   false           disable verification (dev/test only — insecure)
 # ca_bundle = true
+
+# Import allowlists (§13): per-object-type origin allowlists, default-deny.
+# Only origins listed here are imported during federation sync. Missing or
+# empty lists deny all imports for that object type. Trust pinning and
+# signatures remain mandatory — an allowlist entry says "we bother to copy
+# this origin", it does not establish cryptographic trust.
+# This never affects exports; export visibility is controlled by ACLs.
+[import_allowlist]
+# boards = ["boards.example"]
+# users = ["identity.example"]
+# reports = ["moderation.example"]
+# punishments = ["moderation.example"]
 """
         config_dir = os.path.dirname(path)
         if config_dir:
@@ -427,6 +463,7 @@ key_path = "./certs/bonnet.key"
             Matcher(origin_pattern="localhost"),
             ["*"], True, True,
             command_patterns=["*"],
+            object_patterns=["*"],
         )
 
         anonymous_read_commands = [
@@ -437,12 +474,19 @@ key_path = "./certs/bonnet.key"
             "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST",
             "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS",
             "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN",
+            "REPORT_REGISTRY_HEAD", "REPORT_REGISTRY_NODES",
+            "REPORT_REGISTRY_RECORDS", "REPORT_REGISTRY_HEADS",
+            "REPORT_REGISTRY_HEAD_CHAIN",
+            "PUNISHMENT_REGISTRY_HEAD", "PUNISHMENT_REGISTRY_NODES",
+            "PUNISHMENT_REGISTRY_RECORDS", "PUNISHMENT_REGISTRY_HEADS",
+            "PUNISHMENT_REGISTRY_HEAD_CHAIN",
         ]
         anonymous_acl = ACLEntry(
             "anonymous-read",
             Matcher(anonymous=True),
             ["*"], True, False,
             command_patterns=anonymous_read_commands,
+            object_patterns=["reports", "punishments"],
         )
 
         unknown_read_acl = ACLEntry(
@@ -450,6 +494,7 @@ key_path = "./certs/bonnet.key"
             Matcher(unknown=True),
             ["*"], True, False,
             command_patterns=anonymous_read_commands,
+            object_patterns=["reports", "punishments"],
         )
 
         unknown_acl = ACLEntry(
@@ -489,6 +534,24 @@ key_path = "./certs/bonnet.key"
         if not registrar:
             return False
         return registrar.lower() in self.registrars
+
+    def is_import_origin_allowed(self, object_type: str, origin: str) -> bool:
+        """Import allowlist check (§13.2).
+
+        Returns True only if `origin` is in the configured allowlist for the
+        given object_type. Default-deny: unknown object type, missing object
+        list, or empty list all deny. Origin comparison is case-insensitive.
+
+        This check is for importing/copying remote data only (§13.5). It must
+        never be used in command handlers or registry export services — export
+        visibility is controlled solely by ACLs.
+        """
+        if not object_type or not origin:
+            return False
+        allowed = self._import_allowlist.get(object_type)
+        if not allowed:
+            return False
+        return origin.lower() in allowed
 
     def record_in_window(self, origin: str, creation_time: int) -> bool:
         """Eval-time creation-date window for a record's origin.

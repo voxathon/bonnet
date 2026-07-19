@@ -165,6 +165,16 @@ COMMANDS = {
     "PUNISHMENT_LIST_ACTIVE": 0x62,
     "IS_BANNED": 0x63,
     "PUNISHMENT_LIST_BY_PUBKEY": 0x64,
+    "REPORT_REGISTRY_HEAD": 0x55,
+    "REPORT_REGISTRY_NODES": 0x56,
+    "REPORT_REGISTRY_RECORDS": 0x57,
+    "REPORT_REGISTRY_HEADS": 0x58,
+    "REPORT_REGISTRY_HEAD_CHAIN": 0x59,
+    "PUNISHMENT_REGISTRY_HEAD": 0x65,
+    "PUNISHMENT_REGISTRY_NODES": 0x66,
+    "PUNISHMENT_REGISTRY_RECORDS": 0x67,
+    "PUNISHMENT_REGISTRY_HEADS": 0x68,
+    "PUNISHMENT_REGISTRY_HEAD_CHAIN": 0x69,
 }
 
 
@@ -453,8 +463,14 @@ def build_punishment_create(
     )
 
 
-def build_punishment_get(punishment_id: int) -> bytes:
-    return struct.pack(">B", COMMANDS["PUNISHMENT_GET"]) + struct.pack(">Q", punishment_id)
+def build_punishment_get(origin: str, punishment_id: int) -> bytes:
+    """§12.4: PUNISHMENT_GET takes (origin: u8-length UTF-8, punishment_id: u64be)."""
+    origin_b = origin.encode("utf-8")
+    return (
+        struct.pack(">B", COMMANDS["PUNISHMENT_GET"])
+        + struct.pack(">B", len(origin_b)) + origin_b
+        + struct.pack(">Q", punishment_id)
+    )
 
 
 def build_punishment_list_active() -> bytes:
@@ -792,6 +808,9 @@ def parse_punishment_resp(payload: bytes) -> Punishment:
     offset = 0
     punishment_id = struct.unpack(">Q", payload[offset : offset + 8])[0]
     offset += 8
+    origin, offset = decode_string(payload, offset)
+    rollover = struct.unpack(">Q", payload[offset : offset + 8])[0]
+    offset += 8
     pubkey, offset = decode_bytes(payload, offset)
     id_count = payload[offset]
     offset += 1
@@ -808,15 +827,19 @@ def parse_punishment_resp(payload: bytes) -> Punishment:
     issued_by, offset = decode_bytes(payload, offset)
     created_at = struct.unpack(">q", payload[offset : offset + 8])[0]
     offset += 8
+    origin_sig, offset = decode_string(payload, offset)
 
     return Punishment(
         punishment_id=punishment_id,
+        origin=origin,
+        rollover=rollover,
         pubkey=pubkey.hex(),
         report_ids=report_ids,
         expires_at=expires_at,
         notes=notes,
         issued_by=issued_by.hex() if issued_by else None,
         created_at=created_at,
+        origin_sig=origin_sig if origin_sig else None,
     )
 
 
@@ -828,6 +851,9 @@ def parse_punishment_list_resp(payload: bytes) -> list[Punishment]:
     punishments = []
     for _ in range(count):
         punishment_id = struct.unpack(">Q", payload[offset : offset + 8])[0]
+        offset += 8
+        origin, offset = decode_string(payload, offset)
+        rollover = struct.unpack(">Q", payload[offset : offset + 8])[0]
         offset += 8
         pubkey, offset = decode_bytes(payload, offset)
         id_count = payload[offset]
@@ -845,16 +871,20 @@ def parse_punishment_list_resp(payload: bytes) -> list[Punishment]:
         issued_by, offset = decode_bytes(payload, offset)
         created_at = struct.unpack(">q", payload[offset : offset + 8])[0]
         offset += 8
+        origin_sig, offset = decode_string(payload, offset)
 
         punishments.append(
             Punishment(
                 punishment_id=punishment_id,
+                origin=origin,
+                rollover=rollover,
                 pubkey=pubkey.hex(),
                 report_ids=report_ids,
                 expires_at=expires_at,
                 notes=notes,
                 issued_by=issued_by.hex() if issued_by else None,
                 created_at=created_at,
+                origin_sig=origin_sig if origin_sig else None,
             )
         )
 
@@ -1086,6 +1116,215 @@ def build_user_registry_head_chain(origin: str, start_seq: int,
         max_count = _MAX_HEADS_PER_RESPONSE
     return (
         struct.pack(">B", COMMANDS["USER_REGISTRY_HEAD_CHAIN"])
+        + struct.pack(">H", len(origin_b)) + origin_b
+        + struct.pack(">Q", start_seq)
+        + struct.pack(">H", max_count)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Report registry protocol commands (opcodes 0x55–0x59)
+# Mirrors the user registry protocol but with report registry opcodes.
+# ---------------------------------------------------------------------------
+
+def build_report_registry_head(origin: str, requested_seq: int = 0) -> bytes:
+    origin_b = origin.encode("utf-8")
+    if len(origin_b) > _MAX_ORIGIN_LEN:
+        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
+    return (
+        struct.pack(">B", COMMANDS["REPORT_REGISTRY_HEAD"])
+        + struct.pack(">H", len(origin_b)) + origin_b
+        + struct.pack(">Q", requested_seq)
+    )
+
+
+def parse_report_registry_head_resp(payload: bytes) -> bytes:
+    if len(payload) < 3:
+        raise ProtocolError("Response too short for registry head")
+    head_len = struct.unpack(">H", payload[:2])[0]
+    if len(payload) != 2 + head_len:
+        raise ProtocolError(f"Trailing/truncated head: expected {2 + head_len}, got {len(payload)}")
+    return payload[2:2 + head_len]
+
+
+def build_report_registry_nodes(origin: str, registry_seq: int,
+                                prefixes: list[tuple[int, bytes]]) -> bytes:
+    origin_b = origin.encode("utf-8")
+    if len(origin_b) > _MAX_ORIGIN_LEN:
+        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
+    if len(prefixes) > _MAX_NODES_PER_REQUEST:
+        raise ProtocolError(f"Too many prefixes: {len(prefixes)} > {_MAX_NODES_PER_REQUEST}")
+    data = (
+        struct.pack(">B", COMMANDS["REPORT_REGISTRY_NODES"])
+        + struct.pack(">H", len(origin_b)) + origin_b
+        + struct.pack(">Q", registry_seq)
+        + struct.pack(">H", len(prefixes))
+    )
+    for bit_len, prefix_bytes in prefixes:
+        if bit_len > _MAX_PREFIX_BITS:
+            raise ProtocolError(f"Prefix bit length {bit_len} exceeds {_MAX_PREFIX_BITS}")
+        byte_len = (bit_len + 7) // 8
+        if len(prefix_bytes) != byte_len:
+            raise ProtocolError(f"Prefix byte length mismatch: {len(prefix_bytes)} != {byte_len}")
+        data += struct.pack(">H", bit_len) + struct.pack(">B", byte_len) + prefix_bytes
+    return data
+
+
+def parse_report_registry_nodes_resp(payload: bytes) -> list[dict]:
+    return parse_user_registry_nodes_resp(payload)
+
+
+def build_report_registry_records(origin: str, registry_seq: int,
+                                  keys: list[bytes],
+                                  include_proofs: bool = False) -> bytes:
+    origin_b = origin.encode("utf-8")
+    if len(origin_b) > _MAX_ORIGIN_LEN:
+        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
+    if len(keys) > _MAX_RECORDS_PER_REQUEST:
+        raise ProtocolError(f"Too many keys: {len(keys)} > {_MAX_RECORDS_PER_REQUEST}")
+    data = (
+        struct.pack(">B", COMMANDS["REPORT_REGISTRY_RECORDS"])
+        + struct.pack(">H", len(origin_b)) + origin_b
+        + struct.pack(">Q", registry_seq)
+        + struct.pack(">H", len(keys))
+        + struct.pack(">B", 1 if include_proofs else 0)
+    )
+    for key in keys:
+        if len(key) != 32:
+            raise ProtocolError(f"Registry key must be 32 bytes, got {len(key)}")
+        data += key
+    return data
+
+
+def parse_report_registry_records_resp(payload: bytes) -> list[dict]:
+    return parse_user_registry_records_resp(payload)
+
+
+def build_report_registry_heads(offset: int = 0, limit: int = 100) -> bytes:
+    if limit > _MAX_HEADS_PER_RESPONSE:
+        limit = _MAX_HEADS_PER_RESPONSE
+    return (
+        struct.pack(">B", COMMANDS["REPORT_REGISTRY_HEADS"])
+        + struct.pack(">I", offset)
+        + struct.pack(">H", limit)
+    )
+
+
+def parse_report_registry_heads_resp(payload: bytes) -> list[bytes]:
+    return parse_user_registry_heads_resp(payload)
+
+
+def build_report_registry_head_chain(origin: str, start_seq: int,
+                                     max_count: int = 10) -> bytes:
+    origin_b = origin.encode("utf-8")
+    if len(origin_b) > _MAX_ORIGIN_LEN:
+        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
+    if max_count > _MAX_HEADS_PER_RESPONSE:
+        max_count = _MAX_HEADS_PER_RESPONSE
+    return (
+        struct.pack(">B", COMMANDS["REPORT_REGISTRY_HEAD_CHAIN"])
+        + struct.pack(">H", len(origin_b)) + origin_b
+        + struct.pack(">Q", start_seq)
+        + struct.pack(">H", max_count)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Punishment registry protocol commands (opcodes 0x65–0x69)
+# Mirrors the report registry protocol but with punishment registry opcodes.
+# ---------------------------------------------------------------------------
+
+def build_punishment_registry_head(origin: str, requested_seq: int = 0) -> bytes:
+    origin_b = origin.encode("utf-8")
+    if len(origin_b) > _MAX_ORIGIN_LEN:
+        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
+    return (
+        struct.pack(">B", COMMANDS["PUNISHMENT_REGISTRY_HEAD"])
+        + struct.pack(">H", len(origin_b)) + origin_b
+        + struct.pack(">Q", requested_seq)
+    )
+
+
+def parse_punishment_registry_head_resp(payload: bytes) -> bytes:
+    return parse_report_registry_head_resp(payload)
+
+
+def build_punishment_registry_nodes(origin: str, registry_seq: int,
+                                    prefixes: list[tuple[int, bytes]]) -> bytes:
+    origin_b = origin.encode("utf-8")
+    if len(origin_b) > _MAX_ORIGIN_LEN:
+        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
+    if len(prefixes) > _MAX_NODES_PER_REQUEST:
+        raise ProtocolError(f"Too many prefixes: {len(prefixes)} > {_MAX_NODES_PER_REQUEST}")
+    data = (
+        struct.pack(">B", COMMANDS["PUNISHMENT_REGISTRY_NODES"])
+        + struct.pack(">H", len(origin_b)) + origin_b
+        + struct.pack(">Q", registry_seq)
+        + struct.pack(">H", len(prefixes))
+    )
+    for bit_len, prefix_bytes in prefixes:
+        if bit_len > _MAX_PREFIX_BITS:
+            raise ProtocolError(f"Prefix bit length {bit_len} exceeds {_MAX_PREFIX_BITS}")
+        byte_len = (bit_len + 7) // 8
+        if len(prefix_bytes) != byte_len:
+            raise ProtocolError(f"Prefix byte length mismatch: {len(prefix_bytes)} != {byte_len}")
+        data += struct.pack(">H", bit_len) + struct.pack(">B", byte_len) + prefix_bytes
+    return data
+
+
+def parse_punishment_registry_nodes_resp(payload: bytes) -> list[dict]:
+    return parse_user_registry_nodes_resp(payload)
+
+
+def build_punishment_registry_records(origin: str, registry_seq: int,
+                                      keys: list[bytes],
+                                      include_proofs: bool = False) -> bytes:
+    origin_b = origin.encode("utf-8")
+    if len(origin_b) > _MAX_ORIGIN_LEN:
+        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
+    if len(keys) > _MAX_RECORDS_PER_REQUEST:
+        raise ProtocolError(f"Too many keys: {len(keys)} > {_MAX_RECORDS_PER_REQUEST}")
+    data = (
+        struct.pack(">B", COMMANDS["PUNISHMENT_REGISTRY_RECORDS"])
+        + struct.pack(">H", len(origin_b)) + origin_b
+        + struct.pack(">Q", registry_seq)
+        + struct.pack(">H", len(keys))
+        + struct.pack(">B", 1 if include_proofs else 0)
+    )
+    for key in keys:
+        if len(key) != 32:
+            raise ProtocolError(f"Registry key must be 32 bytes, got {len(key)}")
+        data += key
+    return data
+
+
+def parse_punishment_registry_records_resp(payload: bytes) -> list[dict]:
+    return parse_user_registry_records_resp(payload)
+
+
+def build_punishment_registry_heads(offset: int = 0, limit: int = 100) -> bytes:
+    if limit > _MAX_HEADS_PER_RESPONSE:
+        limit = _MAX_HEADS_PER_RESPONSE
+    return (
+        struct.pack(">B", COMMANDS["PUNISHMENT_REGISTRY_HEADS"])
+        + struct.pack(">I", offset)
+        + struct.pack(">H", limit)
+    )
+
+
+def parse_punishment_registry_heads_resp(payload: bytes) -> list[bytes]:
+    return parse_user_registry_heads_resp(payload)
+
+
+def build_punishment_registry_head_chain(origin: str, start_seq: int,
+                                         max_count: int = 10) -> bytes:
+    origin_b = origin.encode("utf-8")
+    if len(origin_b) > _MAX_ORIGIN_LEN:
+        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
+    if max_count > _MAX_HEADS_PER_RESPONSE:
+        max_count = _MAX_HEADS_PER_RESPONSE
+    return (
+        struct.pack(">B", COMMANDS["PUNISHMENT_REGISTRY_HEAD_CHAIN"])
         + struct.pack(">H", len(origin_b)) + origin_b
         + struct.pack(">Q", start_seq)
         + struct.pack(">H", max_count)
