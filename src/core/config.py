@@ -3,6 +3,8 @@ import tomllib
 import fnmatch
 from typing import Dict, List, Any
 
+from core.article_feed import normalize_origin
+
 
 class Matcher:
     def __init__(self, pubkey: bytes = None, origin_pattern: str = None, wildcard: bool = False, anonymous: bool = False, unknown: bool = False):
@@ -150,7 +152,7 @@ class FeedSubscription:
     """
     def __init__(self, origin: str, boards: list, relays: list,
                  body_policy: str = "on-demand"):
-        self.origin = origin
+        self.origin = normalize_origin(origin) if origin else origin
         self.boards = boards  # list of board names, or ["*"] for all
         self.relays = relays
         self.body_policy = body_policy  # "none", "on-demand", "eager"
@@ -182,7 +184,7 @@ class ControlPolicy:
     Evaluated only over already accepted events.
     """
     def __init__(self, origin: str, board: str, apply: list):
-        self.origin = origin
+        self.origin = normalize_origin(origin) if origin else origin
         self.board = board
         self.apply = apply  # e.g. ["punishment", "punishment-revoke"]
 
@@ -225,7 +227,7 @@ class Config:
         self.ame_path = ame_path
         if origin is None:
             origin = "localhost"
-        self.origin = origin
+        self.origin = normalize_origin(origin)
         self.anonymous_read = anonymous_read
 
         if public_commands is None:
@@ -490,16 +492,16 @@ write = true
 [[acl]]
 name = "anonymous-read"
 match.anonymous = true
-commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN", "REPORT_REGISTRY_HEAD", "REPORT_REGISTRY_NODES", "REPORT_REGISTRY_RECORDS", "REPORT_REGISTRY_HEADS", "REPORT_REGISTRY_HEAD_CHAIN", "PUNISHMENT_REGISTRY_HEAD", "PUNISHMENT_REGISTRY_NODES", "PUNISHMENT_REGISTRY_RECORDS", "PUNISHMENT_REGISTRY_HEADS", "PUNISHMENT_REGISTRY_HEAD_CHAIN"]
-objects = ["reports", "punishments"]
+commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "GET_PUBKEY", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "BAN_STATUS", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN"]
+objects = ["articles"]
 read = true
 write = false
 
 [[acl]]
 name = "unknown-read"
 match.unknown = true
-commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME", "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE", "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED", "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN", "REPORT_REGISTRY_HEAD", "REPORT_REGISTRY_NODES", "REPORT_REGISTRY_RECORDS", "REPORT_REGISTRY_HEADS", "REPORT_REGISTRY_HEAD_CHAIN", "PUNISHMENT_REGISTRY_HEAD", "PUNISHMENT_REGISTRY_NODES", "PUNISHMENT_REGISTRY_RECORDS", "PUNISHMENT_REGISTRY_HEADS", "PUNISHMENT_REGISTRY_HEAD_CHAIN"]
-objects = ["reports", "punishments"]
+commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "GET_PUBKEY", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "BAN_STATUS", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN"]
+objects = ["articles"]
 read = true
 write = false
 

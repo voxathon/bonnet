@@ -300,13 +300,54 @@ class CommandHandler:
             if ctx.peer_public_key != submission.actor_pubkey:
                 return self._build_error(403, "Actor pubkey does not match authenticated key")
 
+            from core.article_feed import (
+                EVENT_ARTICLE, EVENT_CANCEL, EVENT_RESTORE, EVENT_PURGE,
+                EVENT_RULE, EVENT_RULE_REVOKE, EVENT_REPORT,
+                EVENT_PUNISHMENT, EVENT_PUNISHMENT_REVOKE,
+                EVENT_BOARD_CLOSE, EVENT_BOARD_REOPEN,
+                EVENT_ARTICLE_PIN, EVENT_ARTICLE_UNPIN,
+                EVENT_THREAD_CLOSE, EVENT_THREAD_REOPEN,
+            )
+            et = submission.event_type
+
+            # --- Role checks (§14.1) ---
+            # PURGE, PUNISHMENT, PUNISHMENT_REVOKE require moderator/admin
+            # RULE, RULE_REVOKE require administrator
+            # ARTICLE_PIN, ARTICLE_UNPIN, THREAD_CLOSE, THREAD_REOPEN require moderator/admin
+            mod_admin_events = {
+                EVENT_PURGE, EVENT_PUNISHMENT, EVENT_PUNISHMENT_REVOKE,
+                EVENT_ARTICLE_PIN, EVENT_ARTICLE_UNPIN,
+                EVENT_THREAD_CLOSE, EVENT_THREAD_REOPEN,
+            }
+            admin_only_events = {
+                EVENT_RULE, EVENT_RULE_REVOKE,
+            }
+            if et in mod_admin_events:
+                if not (ctx.is_moderator() or ctx.is_administrator()):
+                    return self._build_error(403, "Moderator or administrator authority required for this event type")
+            if et in admin_only_events:
+                if not ctx.is_administrator():
+                    return self._build_error(403, "Administrator authority required for this event type")
+
+            # --- Closed-board publication enforcement (§14.1 lines 1374-1383) ---
+            # When a board is closed, reject ARTICLE, CANCEL, RESTORE, REPORT,
+            # RULE, PUNISHMENT, ARTICLE_PIN, ARTICLE_UNPIN, THREAD_CLOSE/REOPEN.
+            # Permit PURGE, RULE_REVOKE, PUNISHMENT_REVOKE (retracting dangerous policy).
+            # BOARD_CLOSE/BOARD_REOPEN go through BOARD_SET_STATE, not here.
+            nav_entry = self._ame.get_nav().get(submission.board)
+            board_closed = nav_entry['closed'] if nav_entry else False
+            if board_closed:
+                permitted_when_closed = {
+                    EVENT_PURGE, EVENT_RULE_REVOKE, EVENT_PUNISHMENT_REVOKE,
+                }
+                if et not in permitted_when_closed:
+                    return self._build_error(409, "Board is closed")
+
             # Dispatch to ArticleService
             service = self._engine.article_service
             if service is None:
                 return self._build_error(500, "Article service not configured")
 
-            from core.article_feed import EVENT_ARTICLE, EVENT_CANCEL, EVENT_RESTORE, EVENT_PURGE
-            et = submission.event_type
             if et == EVENT_ARTICLE:
                 event, head = service.publish_article(submission, body, author_sig)
             elif et == EVENT_CANCEL:
@@ -507,10 +548,11 @@ class CommandHandler:
 
             head = service.store.get_head(origin, board)
             if head is None:
-                # Return an empty head for an empty feed
+                # Board exists but no stored head (e.g., pre-v3 board not yet
+                # migrated). Create and store one now as a fallback.
                 from core.article_feed import make_empty_head, sign_head
-                head = make_empty_head(origin, board)
-                sign_head(head, self._server_identity)
+                head = service.store.create_empty_feed(
+                    origin, board, self._server_identity)
 
             encoded = encode_head(head)
             return struct.pack(">B", 0x00) + struct.pack(">H", len(encoded)) + encoded
@@ -653,9 +695,19 @@ class CommandHandler:
             if not self._engine.check_permission("read", board, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
-            # Skip event_type_mask (u32), actor_pubkey (32), subject_pubkey (32),
-            # target_message_id (32), created_after (i64), created_before (i64)
-            idx += 4 + 32 + 32 + 32 + 8 + 8
+            # Parse structured filters (§13.4)
+            event_type_mask = struct.unpack(">I", data[idx:idx + 4])[0]
+            idx += 4
+            actor_pubkey_filter = data[idx:idx + 32]
+            idx += 32
+            subject_pubkey_filter = data[idx:idx + 32]
+            idx += 32
+            target_message_id_filter = data[idx:idx + 32]
+            idx += 32
+            created_after = struct.unpack(">q", data[idx:idx + 8])[0]
+            idx += 8
+            created_before = struct.unpack(">q", data[idx:idx + 8])[0]
+            idx += 8
 
             # text_query (u16 string)
             tq_len = struct.unpack(">H", data[idx:idx + 2])[0]
@@ -673,6 +725,11 @@ class CommandHandler:
             include_superseded = bool(flags & FLAG_INCLUDE_SUPERSEDED)
             include_purged = bool(flags & FLAG_INCLUDE_PURGED)
 
+            # Normalize zero-valued filters to None for the service
+            actor_pubkey = actor_pubkey_filter if actor_pubkey_filter != b"\x00" * 32 else None
+            subject_pubkey = subject_pubkey_filter if subject_pubkey_filter != b"\x00" * 32 else None
+            target_msg_id = target_message_id_filter if target_message_id_filter != b"\x00" * 32 else None
+
             service = self._engine.article_service
             if service is None:
                 return self._build_error(500, "Article service not configured")
@@ -683,6 +740,10 @@ class CommandHandler:
                 include_cancelled=include_cancelled,
                 include_superseded=include_superseded,
                 include_purged=include_purged,
+                actor_pubkey=actor_pubkey,
+                subject_pubkey=subject_pubkey,
+                created_after=created_after if created_after != 0 else 0,
+                created_before=created_before if created_before != 0 else 0,
             )
 
             state_map = {
@@ -708,10 +769,144 @@ class CommandHandler:
             return self._build_error(400, str(e))
 
     def _cmd_v3_board_set_state(self, data: bytes, ctx: CommandContext) -> bytes:
-        """BOARD_SET_STATE — publish BOARD_CLOSE or BOARD_REOPEN via the feed."""
+        """BOARD_SET_STATE — publish BOARD_CLOSE or BOARD_REOPEN via the feed.
+
+        Uses the same request and success framing as ARTICLE_PUBLISH (§13.4),
+        but accepts only BOARD_CLOSE (0x0A) or BOARD_REOPEN (0x0B) submissions
+        and applies the privileged board-state handler. The submitted event
+        remains author-signed.
+
+        Per §14.1:
+        - Reject BOARD_CLOSE when already closed and BOARD_REOPEN when already
+          open as idempotent conflict errors, unless the identical message ID
+          was already accepted.
+        - Requires administrator authority (not just ACL grant).
+        """
         if not ctx.is_registered:
             return self._build_error(401, "Authentication required")
-        return self._build_error(501, "BOARD_SET_STATE not yet implemented")
+
+        if not ctx.is_administrator():
+            return self._build_error(403, "Administrator authority required for board state changes")
+
+        try:
+            from core.article_feed import (
+                decode_submission, validate_submission, verify_author_signature,
+                SCHEME_V3, EVENT_BOARD_CLOSE, EVENT_BOARD_REOPEN,
+                encode_event, encode_head, compute_body_hash,
+            )
+
+            idx = 0
+            sub_len = struct.unpack(">I", data[idx:idx + 4])[0]
+            idx += 4
+            encoded_sub = data[idx:idx + sub_len]
+            idx += sub_len
+            body_len = struct.unpack(">I", data[idx:idx + 4])[0]
+            idx += 4
+            body = data[idx:idx + body_len]
+            idx += body_len
+            author_scheme = data[idx]
+            idx += 1
+            sig_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            author_sig = data[idx:idx + sig_len]
+
+            submission = decode_submission(encoded_sub)
+            validate_submission(submission)
+
+            # Only BOARD_CLOSE or BOARD_REOPEN are accepted
+            if submission.event_type not in (EVENT_BOARD_CLOSE, EVENT_BOARD_REOPEN):
+                return self._build_error(400, "BOARD_SET_STATE accepts only BOARD_CLOSE or BOARD_REOPEN")
+
+            # Verify the submission origin matches local origin
+            if submission.origin != self._config.origin:
+                return self._build_error(403, "Submission origin does not match server origin")
+
+            # Check board write permission
+            if not self._engine.check_permission("write", submission.board, ctx):
+                return self._build_error(403, "Permission denied for this board")
+
+            # Verify author signature for scheme 1
+            if author_scheme == SCHEME_V3:
+                if not verify_author_signature(submission, author_sig, submission.actor_pubkey):
+                    return self._build_error(403, "Author signature verification failed")
+            else:
+                return self._build_error(400, "Only scheme 1 is supported for board state changes")
+
+            # Verify body hash
+            actual_hash = compute_body_hash(body)
+            if actual_hash != submission.body_hash:
+                return self._build_error(400, "body_hash does not match supplied body")
+            if len(body) != submission.body_size:
+                return self._build_error(400, "body_size does not match supplied body")
+
+            # Check that the actor pubkey matches the authenticated user
+            if ctx.peer_public_key != submission.actor_pubkey:
+                return self._build_error(403, "Actor pubkey does not match authenticated key")
+
+            # Check current board closed state for idempotent conflict rules
+            nav_entry = self._ame.get_nav().get(submission.board)
+            currently_closed = nav_entry['closed'] if nav_entry else False
+
+            if submission.event_type == EVENT_BOARD_CLOSE and currently_closed:
+                # Idempotent: if same message_id already accepted, return success
+                existing = self._engine.article_service.store.get_event_by_message_id(
+                    submission.message_id)
+                if existing is not None:
+                    event = existing
+                    head = self._engine.article_service.store.get_head(
+                        submission.origin, submission.board)
+                    encoded_event = encode_event(event)
+                    encoded_head_bytes = encode_head(head) if head else b""
+                    return (
+                        struct.pack(">B", 0x00)
+                        + struct.pack(">I", len(encoded_event)) + encoded_event
+                        + struct.pack(">H", len(encoded_head_bytes)) + encoded_head_bytes
+                    )
+                return self._build_error(409, "Board is already closed")
+
+            if submission.event_type == EVENT_BOARD_REOPEN and not currently_closed:
+                existing = self._engine.article_service.store.get_event_by_message_id(
+                    submission.message_id)
+                if existing is not None:
+                    event = existing
+                    head = self._engine.article_service.store.get_head(
+                        submission.origin, submission.board)
+                    encoded_event = encode_event(event)
+                    encoded_head_bytes = encode_head(head) if head else b""
+                    return (
+                        struct.pack(">B", 0x00)
+                        + struct.pack(">I", len(encoded_event)) + encoded_event
+                        + struct.pack(">H", len(encoded_head_bytes)) + encoded_head_bytes
+                    )
+                return self._build_error(409, "Board is already open")
+
+            # Dispatch to ArticleService
+            service = self._engine.article_service
+            if service is None:
+                return self._build_error(500, "Article service not configured")
+
+            event, head = service.publish_article_raw(
+                submission.event_type, submission, body, author_sig)
+
+            # Update nav closed state (derived read optimization, §6.9)
+            if submission.event_type == EVENT_BOARD_CLOSE:
+                self._ame.get_nav()._set_board_closed(submission.board)
+            elif submission.event_type == EVENT_BOARD_REOPEN:
+                with self._ame.get_nav()._db.open() as nav_ctx:
+                    nav_ctx.execute(
+                        "UPDATE nav SET closed = 0 WHERE board_name = ?",
+                        [submission.board])
+
+            # Build response: same framing as ARTICLE_PUBLISH
+            encoded_event = encode_event(event)
+            encoded_head_bytes = encode_head(head)
+            return (
+                struct.pack(">B", 0x00)
+                + struct.pack(">I", len(encoded_event)) + encoded_event
+                + struct.pack(">H", len(encoded_head_bytes)) + encoded_head_bytes
+            )
+        except Exception as e:
+            return self._build_error(400, str(e))
 
     def _cmd_v3_ban_status(self, data: bytes, ctx: CommandContext) -> bytes:
         """BAN_STATUS — check effective ban status for a public key.
@@ -920,6 +1115,16 @@ class CommandHandler:
                 return self._build_error(409, f"Board '{board_name}' already exists")
 
             board = self._ame.create_board(board_name, owner_pubkey=ctx.peer_public_key)
+
+            # Create and store a signed empty feed head (§9: BOARD_CREATE
+            # creates and stores the signed empty head before making the board
+            # visible in nav.db or BOARD_LIST)
+            article_service = getattr(self._engine, 'article_service', None)
+            if article_service is not None:
+                from core.article_feed import make_empty_head, sign_head, encode_head, compute_head_hash
+                article_service.store.create_empty_feed(
+                    self._config.origin, board_name, self._server_identity)
+
             b_bytes = board_name.encode('utf-8')
             return struct.pack('>B', 0x00) + b_bytes
 
