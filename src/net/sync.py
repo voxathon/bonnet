@@ -8,6 +8,7 @@ import ipaddress
 from engine.facade import BonnetEngine
 from core.crypto import Identity
 from core.trust import TrustStore
+from core.article_feed import normalize_origin
 from core.logging import log_msg
 
 from client.protocol import (
@@ -129,13 +130,13 @@ class SyncDB:
         self._trust = TrustStore(db_path)
 
     def get_peer_pubkey(self, origin) -> bytes:
-        return self._trust.get_pin(origin)
+        return self._trust.get_pin(normalize_origin(origin) if origin else origin)
 
     def set_peer_pubkey_tofu(self, origin, publickey) -> bool:
-        return self._trust.tofu_pin(origin, publickey)
+        return self._trust.tofu_pin(normalize_origin(origin) if origin else origin, publickey)
 
     def rotate_peer_pubkey(self, origin, old_publickey, new_publickey, signature) -> bool:
-        return self._trust.verify_rotation(origin, old_publickey, new_publickey, signature)
+        return self._trust.verify_rotation(normalize_origin(origin) if origin else origin, old_publickey, new_publickey, signature)
 
     def list_peer_keys(self) -> list:
         return self._trust.list_pins()
@@ -327,6 +328,22 @@ class SyncManager:
                 log_msg(f"SYNC: aborting sync with {peer_hostname} - public key mismatch (TOFU failed)")
                 await client.close()
                 return
+
+            # Capability check (§16.1): require protocol version 3 and
+            # immutable-article-feed-v1. If absent, stop without issuing v3
+            # commands. Capability mismatch must not alter pins or accepted data.
+            peer_info = None
+            try:
+                peer_info = await client.discover()
+            except Exception:
+                pass
+            if peer_info:
+                peer_versions = peer_info.get("protocol_versions", [])
+                peer_caps = peer_info.get("capabilities", [])
+                if 3 not in peer_versions or "immutable-article-feed-v1" not in peer_caps:
+                    log_msg(f"SYNC: peer {peer_hostname} does not support v3 article feed (versions={peer_versions}, caps missing 'immutable-article-feed-v1'), skipping v3 sync")
+                    await client.close()
+                    return
 
             # Sync using multiple commands over one HTTP client (fixes v1 lifecycle mismatch)
             await self._sync_boards(client, peer_hostname)

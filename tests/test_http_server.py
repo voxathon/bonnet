@@ -220,6 +220,10 @@ class TestDiscovery:
         assert "capabilities" in data
         assert "user-registry-merkle-v1" in data["capabilities"]
         assert "immutable-article-feed-v1" in data["capabilities"]
+        assert "moderation_boards" in data
+        assert "rules" in data["moderation_boards"]
+        assert "reports" in data["moderation_boards"]
+        assert "punishments" in data["moderation_boards"]
 
     @pytest.mark.asyncio
     async def test_discovery_response_signed(self, setup):

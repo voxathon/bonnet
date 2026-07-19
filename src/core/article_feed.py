@@ -1301,6 +1301,46 @@ class ArticleFeedStore:
             (origin, board, ZERO_HASH, ZERO_HASH),
         )
 
+    def create_empty_feed(self, origin: str, board: str,
+                          identity: Identity) -> FeedHead:
+        """Create and store a signed empty feed head for a new board.
+
+        Per §9: BOARD_CREATE creates and stores the signed empty head before
+        making the board visible. For an empty feed, sequence and counts are
+        zero and the event hash is 32 zero bytes.
+
+        This is idempotent: if a head already exists for (origin, board) at
+        seq 0, it returns the existing head without creating a duplicate.
+        """
+        with self._lock:
+            # Check if an empty head already exists
+            existing = self._conn.execute(
+                "SELECT encoded_head FROM feed_heads "
+                "WHERE origin=? AND board=? AND latest_feed_seq=0 "
+                "ORDER BY accepted_at DESC LIMIT 1",
+                (origin, board),
+            ).fetchone()
+            if existing:
+                return decode_head(bytes(existing[0]))
+
+            # Create the empty head
+            head = make_empty_head(origin, board, int(time.time()))
+            sign_head(head, identity)
+            encoded = encode_head(head)
+            head_hash = compute_head_hash(encoded)
+
+            self._ensure_state(origin, board)
+            now = int(time.time())
+            self._conn.execute(
+                "INSERT OR REPLACE INTO feed_heads "
+                "(origin, board, latest_feed_seq, head_hash, latest_event_hash, "
+                " encoded_head, is_authoritative, accepted_at) "
+                "VALUES (?, ?, 0, ?, ?, ?, 1, ?)",
+                (origin, board, head_hash, ZERO_HASH, encoded, now),
+            )
+            self._conn.commit()
+            return head
+
     def get_head(self, origin: str, board: str) -> Optional[FeedHead]:
         with self._lock:
             state = self.get_feed_state(origin, board)

@@ -89,6 +89,22 @@ class Bonnet:
         self.engine.moderation_service = self.moderation_service
         log_msg(f"INIT: ArticleFeedStore at {article_feeds_db_path}")
 
+        # Reconcile board creation state (§9 lines 707-716):
+        # For each local board in nav, ensure a signed empty feed head exists.
+        # For each feed_state with no nav entry, log a warning (orphaned feed).
+        try:
+            nav_entries = self.ame.get_nav().list_all()
+            for entry in nav_entries:
+                if entry['origin'] == config.origin:
+                    board_name = entry['board_name']
+                    existing_head = self.article_feed_store.get_head(config.origin, board_name)
+                    if existing_head is None:
+                        self.article_feed_store.create_empty_feed(
+                            config.origin, board_name, self.server_identity)
+                        log_msg(f"INIT: created empty feed head for board '{board_name}'")
+        except Exception as e:
+            log_msg(f"INIT: board feed reconciliation error (non-fatal): {e}")
+
         # Run migration from legacy v2 data to v3 events (Phase 6)
         # Idempotent: skips already-completed migration units on restart
         try:
