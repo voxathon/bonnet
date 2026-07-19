@@ -478,6 +478,67 @@ class TestV3FeedHeads:
             assert BOARD in boards
             assert "another" in boards
 
+    @pytest.mark.asyncio
+    async def test_empty_board_visible_in_feed_heads(self, setup):
+        """BOARD_CREATE creates a stored empty feed head, so an empty board
+        is visible in FEED_HEADS immediately (§9 lines 707-716)."""
+        async with setup.make_client() as client:
+            # Create a board via the v3 command endpoint
+            from client.protocol import build_board_create
+            cmd = build_board_create("emptyboard")
+            headers = await _sign_v3_request(setup.server_identity, cmd)
+            resp = await client.post("/v3/command", content=cmd, headers=headers)
+            assert resp.status_code == 200
+            assert resp.content[0] == 0x00  # success
+
+            # The empty board should appear in FEED_HEADS
+            from client.protocol import build_feed_heads, parse_feed_heads_resp
+            cmd2 = build_feed_heads()
+            headers2 = await _sign_v3_request(setup.server_identity, cmd2)
+            resp2 = await client.post("/v3/command", content=cmd2, headers=headers2)
+            assert resp2.status_code == 200
+            assert resp2.content[0] == 0x00
+            entries = parse_feed_heads_resp(resp2.content[1:])
+            boards = {e["board"] for e in entries}
+            assert "emptyboard" in boards
+
+            # The head should report seq=0, article_count=0
+            from client.protocol import build_feed_head, parse_feed_head_resp
+            cmd3 = build_feed_head("emptyboard")
+            headers3 = await _sign_v3_request(setup.server_identity, cmd3)
+            resp3 = await client.post("/v3/command", content=cmd3, headers=headers3)
+            assert resp3.status_code == 200
+            assert resp3.content[0] == 0x00
+            head_bytes = parse_feed_head_resp(resp3.content[1:])
+            head = decode_head(head_bytes)
+            assert head.latest_feed_seq == 0
+            assert head.article_count == 0
+            assert head.origin == ORIGIN
+            assert head.board == "emptyboard"
+
+    @pytest.mark.asyncio
+    async def test_feed_head_stable_across_requests(self, setup):
+        """The stored empty head is stable — same bytes on repeated requests."""
+        async with setup.make_client() as client:
+            # Create a board
+            from client.protocol import build_board_create
+            cmd = build_board_create("stableboard")
+            headers = await _sign_v3_request(setup.server_identity, cmd)
+            await client.post("/v3/command", content=cmd, headers=headers)
+
+            # Request FEED_HEAD twice — should get the same encoded head
+            from client.protocol import build_feed_head, parse_feed_head_resp
+            cmd2 = build_feed_head("stableboard")
+            headers2 = await _sign_v3_request(setup.server_identity, cmd2)
+            resp1 = await client.post("/v3/command", content=cmd2, headers=headers2)
+            head_bytes_1 = parse_feed_head_resp(resp1.content[1:])
+
+            headers3 = await _sign_v3_request(setup.server_identity, cmd2)
+            resp2 = await client.post("/v3/command", content=cmd2, headers=headers3)
+            head_bytes_2 = parse_feed_head_resp(resp2.content[1:])
+
+            assert head_bytes_1 == head_bytes_2  # stable, not ephemeral
+
 
 class TestV3BanStatus:
 
@@ -514,3 +575,132 @@ class TestV3ArticleBody:
             assert resp.content[0] == 0x00
             fetched = parse_article_body_resp(resp.content[1:])
             assert fetched == body
+
+
+class TestV3BoardSetState:
+
+    def _make_board_state_submission(self, seed, event_type, board=BOARD,
+                                     origin=ORIGIN, author_identity=None,
+                                     body_text=b"closing the board"):
+        """Build a BOARD_CLOSE or BOARD_REOPEN submission."""
+        from core.article_feed import (
+            EVENT_BOARD_CLOSE, EVENT_BOARD_REOPEN, ZERO_MESSAGE_ID,
+        )
+        if author_identity is None:
+            author_identity = Identity.generate()
+        body_hash = compute_body_hash(body_text)
+        sub = Submission(
+            submission_version=SUBMISSION_VERSION,
+            event_type=event_type,
+            origin=origin, board=board,
+            message_id=_random_msgid(seed),
+            created_at=1700000000 + seed,
+            actor_pubkey=author_identity.public_key,
+            actor_username="admin",
+            actor_registrar=origin,
+            headers=None,
+            body_hash=body_hash,
+            body_size=len(body_text),
+        )
+        sig = sign_author(sub, author_identity)
+        return sub, body_text, sig, author_identity
+
+    def _build_board_set_state_cmd(self, encoded_sub, body, author_sig):
+        """Build a BOARD_SET_STATE command (opcode 0x1A) with ARTICLE_PUBLISH framing."""
+        from client.protocol import V3_COMMANDS
+        return (
+            struct.pack(">B", V3_COMMANDS["BOARD_SET_STATE"])
+            + struct.pack(">I", len(encoded_sub)) + encoded_sub
+            + struct.pack(">I", len(body)) + body
+            + struct.pack(">B", SCHEME_V3)
+            + struct.pack(">H", len(author_sig)) + author_sig
+        )
+
+    @pytest.mark.asyncio
+    async def test_board_close(self, setup):
+        """BOARD_SET_STATE with BOARD_CLOSE publishes a close event and updates nav."""
+        async with setup.make_client() as client:
+            # Create a board first
+            setup.ame.create_board(BOARD)
+
+            from client.protocol import parse_article_publish_resp
+            from core.article_feed import EVENT_BOARD_CLOSE
+            sub, body, sig, _ = self._make_board_state_submission(
+                1, EVENT_BOARD_CLOSE, author_identity=setup.server_identity)
+            encoded_sub = encode_submission(sub)
+            cmd = self._build_board_set_state_cmd(encoded_sub, body, sig)
+            headers = await _sign_v3_request(setup.server_identity, cmd)
+            resp = await client.post("/v3/command", content=cmd, headers=headers)
+            assert resp.status_code == 200
+            assert resp.content[0] == 0x00
+            result = parse_article_publish_resp(resp.content[1:])
+            event = decode_event(result["event_bytes"])
+            assert event.event_type == EVENT_BOARD_CLOSE
+            assert event.board == BOARD
+
+            # Verify nav closed flag is set
+            nav_entry = setup.ame.get_nav().get(BOARD)
+            assert nav_entry['closed'] is True
+
+    @pytest.mark.asyncio
+    async def test_board_reopen(self, setup):
+        """BOARD_SET_STATE with BOARD_REOPEN publishes a reopen event and clears nav."""
+        async with setup.make_client() as client:
+            setup.ame.create_board(BOARD)
+            # Close it first
+            setup.ame.close_board(BOARD)
+
+            from client.protocol import parse_article_publish_resp
+            from core.article_feed import EVENT_BOARD_REOPEN
+            sub, body, sig, _ = self._make_board_state_submission(
+                2, EVENT_BOARD_REOPEN, author_identity=setup.server_identity,
+                body_text=b"reopening")
+            encoded_sub = encode_submission(sub)
+            cmd = self._build_board_set_state_cmd(encoded_sub, body, sig)
+            headers = await _sign_v3_request(setup.server_identity, cmd)
+            resp = await client.post("/v3/command", content=cmd, headers=headers)
+            assert resp.status_code == 200
+            assert resp.content[0] == 0x00
+            result = parse_article_publish_resp(resp.content[1:])
+            event = decode_event(result["event_bytes"])
+            assert event.event_type == EVENT_BOARD_REOPEN
+
+            # Verify nav closed flag is cleared
+            nav_entry = setup.ame.get_nav().get(BOARD)
+            assert nav_entry['closed'] is False
+
+    @pytest.mark.asyncio
+    async def test_board_close_already_closed_returns_409(self, setup):
+        """BOARD_CLOSE on an already-closed board returns 409."""
+        async with setup.make_client() as client:
+            setup.ame.create_board(BOARD)
+            setup.ame.close_board(BOARD)
+
+            from core.article_feed import EVENT_BOARD_CLOSE
+            sub, body, sig, _ = self._make_board_state_submission(
+                3, EVENT_BOARD_CLOSE, author_identity=setup.server_identity)
+            encoded_sub = encode_submission(sub)
+            cmd = self._build_board_set_state_cmd(encoded_sub, body, sig)
+            headers = await _sign_v3_request(setup.server_identity, cmd)
+            resp = await client.post("/v3/command", content=cmd, headers=headers)
+            assert resp.status_code == 200
+            assert resp.content[0] == 0x01  # error
+            code = struct.unpack(">H", resp.content[1:3])[0]
+            assert code == 409
+
+    @pytest.mark.asyncio
+    async def test_board_set_state_rejects_wrong_event_type(self, setup):
+        """BOARD_SET_STATE rejects ARTICLE submissions with 400."""
+        async with setup.make_client() as client:
+            setup.ame.create_board(BOARD)
+
+            # Build an ARTICLE submission but send it via BOARD_SET_STATE opcode
+            sub, encoded_sub, body, sig, _ = _make_article_submission(
+                4, author_identity=setup.server_identity)
+            cmd = self._build_board_set_state_cmd(encoded_sub, body, sig)
+            headers = await _sign_v3_request(setup.server_identity, cmd)
+            resp = await client.post("/v3/command", content=cmd, headers=headers)
+            assert resp.status_code == 200
+            assert resp.content[0] == 0x01  # error
+            code = struct.unpack(">H", resp.content[1:3])[0]
+            assert code == 400

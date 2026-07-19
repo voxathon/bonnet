@@ -167,6 +167,11 @@ class BonnetHTTPServer:
             "anonymous_private_key": self._anonymous_identity.private_key.hex(),
             "command_endpoint": "/v3/command",
             "capabilities": capabilities,
+            "moderation_boards": {
+                "rules": self._config.moderation_boards.rules,
+                "reports": self._config.moderation_boards.reports,
+                "punishments": self._config.moderation_boards.punishments,
+            },
         }).encode("utf-8")
 
         msg = HTTPMessage(
