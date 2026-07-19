@@ -211,7 +211,7 @@ class TestDiscovery:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["protocol_versions"] == [2]
+        assert data["protocol_versions"] == [2, 3]
         assert data["origin"] == "bbs.test"
         assert data["public_key"] == setup.server_identity.public_key.hex()
         assert data["command_endpoint"] == "/v2/command"
@@ -219,6 +219,7 @@ class TestDiscovery:
         assert data["anonymous_key"] == setup.anonymous_identity.public_key.hex()
         assert "capabilities" in data
         assert "user-registry-merkle-v1" in data["capabilities"]
+        assert "immutable-article-feed-v1" in data["capabilities"]
 
     @pytest.mark.asyncio
     async def test_discovery_response_signed(self, setup):
