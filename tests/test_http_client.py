@@ -233,17 +233,6 @@ class TestAuthenticatedClient:
             assert len(posts) == 2
 
     @pytest.mark.asyncio
-    async def test_post_delete(self, setup):
-        async with _make_client(setup) as client:
-            await client.connect(setup.server_identity)
-            await client.board_create("general")
-            result = await client.post_create("general", "To delete", "body")
-            await client.post_delete("general", result.post_num)
-
-            posts = await client.post_list("general")
-            assert len(posts) == 0
-
-    @pytest.mark.asyncio
     async def test_user_promote_demote(self, setup):
         ident = Identity.generate()
         async with _make_client(setup) as client:
@@ -399,8 +388,8 @@ class TestDiscovery:
     async def test_discover_returns_correct_info(self, setup):
         async with _make_client(setup) as client:
             info = await client.discover()
-            assert info["protocol_versions"] == [2, 3]
+            assert info["protocol_versions"] == [3]
             assert info["origin"] == "bbs.test"
             assert info["public_key"] == setup.server_identity.public_key.hex()
             assert "anonymous_key" in info
-            assert info["command_endpoint"] == "/v2/command"
+            assert info["command_endpoint"] == "/v3/command"

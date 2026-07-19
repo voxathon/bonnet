@@ -126,76 +126,12 @@ class CommandHandler:
             return self._cmd_post_get(data, ctx)
         elif cmd == 0x14:
             return self._cmd_post_list(data, ctx)
-        elif cmd == 0x15:
-            return self._cmd_post_update(data, ctx)
-        elif cmd == 0x16:
-            return self._cmd_post_delete(data, ctx)
-        elif cmd == 0x17:
-            return self._cmd_board_close(data, ctx)
-        elif cmd == 0x18:
-            return self._cmd_board_delete(data, ctx)
-        elif cmd == 0x19:
-            return self._cmd_post_query(data, ctx)
-        elif cmd == 0x1A:
-            return self._cmd_post_content_search(data, ctx)
         elif cmd == 0x20:
             return self._cmd_user_promote(data, ctx)
         elif cmd == 0x21:
             return self._cmd_user_demote(data, ctx)
-        elif cmd == 0x22:
-            return self._cmd_post_sign(data, ctx)
         elif cmd == 0x30:
             return self._cmd_get_pubkey(data, ctx)
-        elif cmd == 0x40:
-            return self._cmd_rule_create(data, ctx)
-        elif cmd == 0x41:
-            return self._cmd_rule_get(data, ctx)
-        elif cmd == 0x42:
-            return self._cmd_rule_get_by_name(data, ctx)
-        elif cmd == 0x43:
-            return self._cmd_rule_list(data, ctx)
-        elif cmd == 0x44:
-            return self._cmd_rule_update(data, ctx)
-        elif cmd == 0x50:
-            return self._cmd_report_create(data, ctx)
-        elif cmd == 0x51:
-            return self._cmd_report_get(data, ctx)
-        elif cmd == 0x52:
-            return self._cmd_report_list_by_culprit(data, ctx)
-        elif cmd == 0x53:
-            return self._cmd_report_sign(data, ctx)
-        elif cmd == 0x54:
-            return self._cmd_report_list_since(data, ctx)
-        elif cmd == 0x55:
-            return self._cmd_report_registry_head(data, ctx)
-        elif cmd == 0x56:
-            return self._cmd_report_registry_nodes(data, ctx)
-        elif cmd == 0x57:
-            return self._cmd_report_registry_records(data, ctx)
-        elif cmd == 0x58:
-            return self._cmd_report_registry_heads(data, ctx)
-        elif cmd == 0x59:
-            return self._cmd_report_registry_head_chain(data, ctx)
-        elif cmd == 0x60:
-            return self._cmd_punishment_create(data, ctx)
-        elif cmd == 0x61:
-            return self._cmd_punishment_get(data, ctx)
-        elif cmd == 0x62:
-            return self._cmd_punishment_list_active(data, ctx)
-        elif cmd == 0x63:
-            return self._cmd_is_banned(data, ctx)
-        elif cmd == 0x64:
-            return self._cmd_punishment_list_by_pubkey(data, ctx)
-        elif cmd == 0x65:
-            return self._cmd_punishment_registry_head(data, ctx)
-        elif cmd == 0x66:
-            return self._cmd_punishment_registry_nodes(data, ctx)
-        elif cmd == 0x67:
-            return self._cmd_punishment_registry_records(data, ctx)
-        elif cmd == 0x68:
-            return self._cmd_punishment_registry_heads(data, ctx)
-        elif cmd == 0x69:
-            return self._cmd_punishment_registry_head_chain(data, ctx)
         elif cmd == 0x70:
             return self._cmd_peer_key_rotate(data, ctx)
         elif cmd == 0x71:

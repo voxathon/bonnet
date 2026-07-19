@@ -169,6 +169,7 @@ def _build_report_create(rule_num, culprit_pubkey, reporter_pubkey, description,
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(reason="REPORT_CREATE removed in v3 Phase 7 — reports are now v3 feed events")
 class TestReportOriginServerBound:
     def test_client_origin_ignored(self, engine_setup):
         handler, engine, ident, config, ume, ame, keibatsu = engine_setup

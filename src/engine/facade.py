@@ -11,10 +11,6 @@ class BonnetEngine:
         self.server_identity = server_identity
         self.registry_store = None
         self.registry_service = None
-        self.report_registry_store = None
-        self.report_registry_service = None
-        self.punishment_registry_store = None
-        self.punishment_registry_service = None
         self.article_service = None
         self.moderation_service = None
 

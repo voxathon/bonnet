@@ -211,10 +211,10 @@ class TestDiscovery:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["protocol_versions"] == [2, 3]
+        assert data["protocol_versions"] == [3]
         assert data["origin"] == "bbs.test"
         assert data["public_key"] == setup.server_identity.public_key.hex()
-        assert data["command_endpoint"] == "/v2/command"
+        assert data["command_endpoint"] == "/v3/command"
         assert "anonymous_key" in data
         assert data["anonymous_key"] == setup.anonymous_identity.public_key.hex()
         assert "capabilities" in data
@@ -716,21 +716,6 @@ class TestAnonymousCommandACL:
     evaluation. Under default ACLs, anonymous can run read commands but not
     writes or POST_CONTENT_SEARCH.
     """
-
-    @pytest.mark.asyncio
-    async def test_anonymous_can_call_report_list_since(self, setup):
-        """REPORT_LIST_SINCE is in the anonymous-read ACL — granted."""
-        body = b"\x54" + struct.pack(">q", 0)  # REPORT_LIST_SINCE since=0
-        headers = await _sign_request(
-            None, "https://bbs.test/v2/command", body,
-            anonymous_identity=setup.anonymous_identity
-        )
-
-        async with setup.make_client() as client:
-            resp = await client.post("/v2/command", content=body, headers=headers)
-
-        assert resp.status_code == 200
-        assert resp.content[0] == 0x00  # SUCCESS
 
     @pytest.mark.asyncio
     async def test_anonymous_denied_for_content_search(self, setup):

@@ -30,8 +30,7 @@ from core.user_registry import (
     UserRegistryStore, RegistryService, decode_head, verify_head,
     compute_registry_key, compute_value_hash, encode_head,
 )
-from core.report_registry import ReportRegistryStore, ReportRegistryService
-from core.punishment_registry import PunishmentRegistryStore, PunishmentRegistryService
+from core.user_registry import UserRegistryStore, RegistryService
 from engine.ume import Ume, User, RECORD_SIZE
 from engine.ame import Ame
 from engine.keibatsu import Keibatsu
@@ -138,22 +137,6 @@ class RegistryTestServer:
         self.engine.registry_store = self.registry_store
         self.engine.registry_service = self.registry_service
 
-        self.report_registry_store = ReportRegistryStore(os.path.join(temp_dir, origin, "report_registry.db"))
-        self.report_registry_service = ReportRegistryService(
-            self.report_registry_store, self.keibatsu, self.server_identity, origin
-        )
-        self.engine.report_registry_store = self.report_registry_store
-        self.engine.report_registry_service = self.report_registry_service
-        self.keibatsu.register_mutation_callback(self.report_registry_service.mark_dirty)
-
-        self.punishment_registry_store = PunishmentRegistryStore(os.path.join(temp_dir, origin, "punishment_registry.db"))
-        self.punishment_registry_service = PunishmentRegistryService(
-            self.punishment_registry_store, self.keibatsu, self.server_identity, origin
-        )
-        self.engine.punishment_registry_store = self.punishment_registry_store
-        self.engine.punishment_registry_service = self.punishment_registry_service
-        self.keibatsu.register_punishment_mutation_callback(self.punishment_registry_service.mark_dirty)
-
         self.handler = CommandHandler(self.engine)
         task = self.handler._sync_mgr._worker_task
         if task and not task.done():
@@ -180,8 +163,7 @@ class RegistryTestServer:
         self.keibatsu.shutdown()
         self.replay_ledger.close()
         self.registry_store.close()
-        self.report_registry_store.close()
-        self.punishment_registry_store.close()
+        self.registry_store.close()
 
     def make_client(self):
         transport = ASGITransport(app=self.app)

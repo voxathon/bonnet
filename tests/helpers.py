@@ -24,23 +24,13 @@ def all_write_command_names():
 
 
 def anonymous_read_command_names():
-    """Read commands granted to anonymous by default (excludes
-    POST_CONTENT_SEARCH, which remains default-deny for anonymous).
-    Includes report and punishment registry export commands with object ACLs."""
+    """Read commands granted to anonymous by default.
+    Excludes removed v2-only commands (report/punishment registry, content search, etc.)."""
     return [
         "GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET",
-        "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME",
-        "RULE_LIST", "REPORT_GET", "REPORT_LIST_BY_CULPRIT", "REPORT_LIST_SINCE",
-        "PUNISHMENT_GET", "PUNISHMENT_LIST_ACTIVE", "IS_BANNED",
-        "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST",
+        "POST_LIST", "GET_PUBKEY", "PEER_KEY_LIST",
         "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS",
         "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN",
-        "REPORT_REGISTRY_HEAD", "REPORT_REGISTRY_NODES",
-        "REPORT_REGISTRY_RECORDS", "REPORT_REGISTRY_HEADS",
-        "REPORT_REGISTRY_HEAD_CHAIN",
-        "PUNISHMENT_REGISTRY_HEAD", "PUNISHMENT_REGISTRY_NODES",
-        "PUNISHMENT_REGISTRY_RECORDS", "PUNISHMENT_REGISTRY_HEADS",
-        "PUNISHMENT_REGISTRY_HEAD_CHAIN",
     ]
 
 
@@ -68,7 +58,7 @@ def default_test_acls(origin="local.test"):
         Matcher(anonymous=True),
         ["*"], True, False,
         command_patterns=anonymous_read_command_names(),
-        object_patterns=["reports", "punishments"],
+        object_patterns=["articles"],
     )
 
     unknown_read_acl = ACLEntry(
@@ -76,7 +66,7 @@ def default_test_acls(origin="local.test"):
         Matcher(unknown=True),
         ["*"], True, False,
         command_patterns=anonymous_read_command_names(),
-        object_patterns=["reports", "punishments"],
+        object_patterns=["articles"],
     )
 
     unknown_acl = ACLEntry(

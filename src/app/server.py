@@ -17,8 +17,6 @@ from core.crypto import Identity
 from core.config import Config
 from core.binutil import set_rg_path
 from core.user_registry import UserRegistryStore, RegistryService
-from core.report_registry import ReportRegistryStore, ReportRegistryService
-from core.punishment_registry import PunishmentRegistryStore, PunishmentRegistryService
 from engine.keibatsu import Keibatsu
 from app.cli import LocalConnection
 from engine.facade import BonnetEngine
@@ -73,24 +71,6 @@ class Bonnet:
         self.ume.register_mutation_callback(self.registry_service.mark_dirty)
         self.engine.registry_store = self.registry_store
         self.engine.registry_service = self.registry_service
-
-        report_registry_db_path = os.path.join(config.data_dir, "report_registry.db")
-        self.report_registry_store = ReportRegistryStore(report_registry_db_path)
-        self.report_registry_service = ReportRegistryService(
-            self.report_registry_store, self.keibatsu, self.server_identity, config.origin
-        )
-        self.engine.report_registry_store = self.report_registry_store
-        self.engine.report_registry_service = self.report_registry_service
-        self.keibatsu.register_mutation_callback(self.report_registry_service.mark_dirty)
-
-        punishment_registry_db_path = os.path.join(config.data_dir, "punishment_registry.db")
-        self.punishment_registry_store = PunishmentRegistryStore(punishment_registry_db_path)
-        self.punishment_registry_service = PunishmentRegistryService(
-            self.punishment_registry_store, self.keibatsu, self.server_identity, config.origin
-        )
-        self.engine.punishment_registry_store = self.punishment_registry_store
-        self.engine.punishment_registry_service = self.punishment_registry_service
-        self.keibatsu.register_punishment_mutation_callback(self.punishment_registry_service.mark_dirty)
 
         # Article feed store + service (protocol v3)
         article_feeds_db_path = os.path.join(config.data_dir, "article_feeds.db")

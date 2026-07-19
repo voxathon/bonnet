@@ -68,8 +68,8 @@ def _engine(acls, origin="local.test", admin_bypass_acl=True):
 # ---------------------------------------------------------------------------
 
 class TestCommandSpecTable:
-    def test_all_51_commands_present(self):
-        assert len(COMMAND_SPECS) == 51
+    def test_all_19_commands_present(self):
+        assert len(COMMAND_SPECS) == 19
 
     def test_get_spec_by_opcode(self):
         spec = get_spec(0x01)
@@ -89,7 +89,6 @@ class TestCommandSpecTable:
         assert "GET_USER" in reads
         assert "BOARD_LIST" in reads
         assert "POST_GET" in reads
-        assert "IS_BANNED" in reads
         assert "USER_REGISTRY_HEAD" in reads
         assert "PEER_KEY_LIST" in reads
 
@@ -98,22 +97,7 @@ class TestCommandSpecTable:
         assert "REGISTER" in writes
         assert "BOARD_CREATE" in writes
         assert "POST_CREATE" in writes
-        assert "PUNISHMENT_CREATE" in writes
         assert "PEER_KEY_ROTATE" in writes
-
-    def test_report_registry_commands_have_object_name(self):
-        """Report registry commands (0x55-0x59) have object_name='reports'."""
-        for opcode in (0x55, 0x56, 0x57, 0x58, 0x59):
-            spec = COMMAND_SPECS[opcode]
-            assert spec.object_name == "reports", f"{spec.name} should have object_name='reports'"
-            assert spec.action == "read"
-
-    def test_punishment_registry_commands_have_object_name(self):
-        """Punishment registry commands (0x65-0x69) have object_name='punishments'."""
-        for opcode in (0x65, 0x66, 0x67, 0x68, 0x69):
-            spec = COMMAND_SPECS[opcode]
-            assert spec.object_name == "punishments", f"{spec.name} should have object_name='punishments'"
-            assert spec.action == "read"
 
     def test_non_registry_commands_have_no_object_name(self):
         """All commands except report/punishment registry have object_name=None."""
