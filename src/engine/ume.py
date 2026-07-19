@@ -106,10 +106,10 @@ class Ume:
     def register_mutation_callback(self, callback) -> None:
         self._mutation_callbacks.append(callback)
 
-    def _notify_mutation(self) -> None:
+    def _notify_mutation(self, action: str = "", user=None) -> None:
         for cb in self._mutation_callbacks:
             try:
-                cb()
+                cb(action, user)
             except Exception:
                 pass
 
@@ -269,7 +269,7 @@ class Ume:
                         raise IOError(f"Failed to write user record: {e}")
                 finally:
                     _flock_unlock(lockfile.fileno())
-        self._notify_mutation()
+        self._notify_mutation("put", user)
         return user
 
     def upd(self, username: str = None, seq_numbr: int = 0, new_registrar: str = None, new_record_origin: str = None, new_relay: str = None, new_publickey: bytes = None, new_administrator=None, new_moderator=None, new_banned=None, new_creation_time=None, new_relay_time=None) -> bool:
@@ -320,7 +320,7 @@ class Ume:
                         raise IOError(f"Failed to update user record: {e}")
                 finally:
                     _flock_unlock(lockfile.fileno())
-        self._notify_mutation()
+        self._notify_mutation("upd", user)
         return True
 
     def delete(self, username: str = None, seq_numbr: int = 0) -> bool:
@@ -339,7 +339,15 @@ class Ume:
                     if pos == -1:
                         return False
 
+                    deleted_user = None
                     try:
+                        lockfile.seek(pos * RECORD_SIZE)
+                        raw = lockfile.read(RECORD_SIZE)
+                        if len(raw) == RECORD_SIZE and raw != empty_record:
+                            try:
+                                deleted_user = User.decode(raw)
+                            except Exception:
+                                pass
                         lockfile.seek(pos * RECORD_SIZE)
                         lockfile.write(empty_record)
                         lockfile.flush()
@@ -347,7 +355,7 @@ class Ume:
                         raise IOError(f"Failed to delete user record: {e}")
                 finally:
                     _flock_unlock(lockfile.fileno())
-        self._notify_mutation()
+        self._notify_mutation("delete", deleted_user)
         return True
 
     def export(self, export_path: str = "./users") -> None:

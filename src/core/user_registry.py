@@ -250,7 +250,7 @@ class RegistryService:
         self._origin = origin
         self._snapshot_lock = threading.Lock()
 
-    def mark_dirty(self) -> None:
+    def mark_dirty(self, *args, **kwargs) -> None:
         self._store.mark_dirty(self._origin)
 
     def get_current_head(self) -> SignedHead | None:
