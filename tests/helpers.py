@@ -25,7 +25,8 @@ def all_write_command_names():
 
 def anonymous_read_command_names():
     """Read commands granted to anonymous by default (excludes
-    POST_CONTENT_SEARCH, which remains default-deny for anonymous)."""
+    POST_CONTENT_SEARCH, which remains default-deny for anonymous).
+    Includes report and punishment registry export commands with object ACLs."""
     return [
         "GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET",
         "POST_LIST", "QUERY_POSTS", "GET_PUBKEY", "RULE_GET", "RULE_GET_BY_NAME",
@@ -34,6 +35,12 @@ def anonymous_read_command_names():
         "PUNISHMENT_LIST_BY_PUBKEY", "PEER_KEY_LIST",
         "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS",
         "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN",
+        "REPORT_REGISTRY_HEAD", "REPORT_REGISTRY_NODES",
+        "REPORT_REGISTRY_RECORDS", "REPORT_REGISTRY_HEADS",
+        "REPORT_REGISTRY_HEAD_CHAIN",
+        "PUNISHMENT_REGISTRY_HEAD", "PUNISHMENT_REGISTRY_NODES",
+        "PUNISHMENT_REGISTRY_RECORDS", "PUNISHMENT_REGISTRY_HEADS",
+        "PUNISHMENT_REGISTRY_HEAD_CHAIN",
     ]
 
 
@@ -42,8 +49,10 @@ def default_test_acls(origin="local.test"):
 
     Returns:
         local-full-access: origin match, all commands, all boards, read+write
-        anonymous-read: anonymous match, read commands (no search), read only
-        unknown-read: unknown match, read commands (no search), read only
+        anonymous-read: anonymous match, read commands (no search), read only,
+            with objects=["reports"] for report registry export
+        unknown-read: unknown match, read commands (no search), read only,
+            with objects=["reports"] for report registry export
         unknown-registration: unknown match, REGISTER only, write only
     """
     local_acl = ACLEntry(
@@ -51,6 +60,7 @@ def default_test_acls(origin="local.test"):
         Matcher(origin_pattern=origin),
         ["*"], True, True,
         command_patterns=["*"],
+        object_patterns=["*"],
     )
 
     anon_acl = ACLEntry(
@@ -58,6 +68,7 @@ def default_test_acls(origin="local.test"):
         Matcher(anonymous=True),
         ["*"], True, False,
         command_patterns=anonymous_read_command_names(),
+        object_patterns=["reports", "punishments"],
     )
 
     unknown_read_acl = ACLEntry(
@@ -65,6 +76,7 @@ def default_test_acls(origin="local.test"):
         Matcher(unknown=True),
         ["*"], True, False,
         command_patterns=anonymous_read_command_names(),
+        object_patterns=["reports", "punishments"],
     )
 
     unknown_acl = ACLEntry(
@@ -77,10 +89,30 @@ def default_test_acls(origin="local.test"):
     return [local_acl, anon_acl, unknown_read_acl, unknown_acl]
 
 
+def permissive_import_allowlist(origins=None):
+    """An import allowlist that allows specified origins for all object types.
+
+    Used by test fixtures that need federation sync to work. Since the import
+    allowlist uses exact origin matching (no globs per §13.1), callers must
+    provide the specific origins to allow. If origins is None, returns an
+    empty dict (denies all — use this for non-sync tests).
+    """
+    if origins is None:
+        return {}
+    return {
+        "boards": list(origins),
+        "users": list(origins),
+        "reports": list(origins),
+        "punishments": list(origins),
+    }
+
+
 def make_test_config(temp_dir, origin="local.test", acls=None, **kwargs):
     """Build a Config with default test ACLs (or custom ACLs) for command tests.
 
     Replaces the old pattern of acls=[] + public_commands={...}.
+    Does not include an import allowlist by default (denies all imports);
+    sync tests must pass import_allowlist=... in **kwargs.
     """
     if acls is None:
         acls = default_test_acls(origin)

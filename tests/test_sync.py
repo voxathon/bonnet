@@ -503,196 +503,28 @@ async def sync_setup_real_ume(temp_dir):
             pass
 
 
-class TestSyncUsersParsing:
-    """Phase 0: Demonstrate that _sync_users raises NameError on non-empty
-    responses because it reads an undefined variable `response` instead of
-    `payload` (src/net/sync.py:337-360)."""
-
-    @pytest.mark.asyncio
-    async def test_nonempty_user_list_ingests_without_nameerror(self, sync_setup_real_ume):
-        mgr, ident, ame, engine, ume = sync_setup_real_ume
-        peer_hostname = "peer.example.com"
-
-        pubkey = Identity.generate().public_key
-        payload = _encode_user_list([{
-            "username": "remote_alice",
-            "registrar": "peer.example.com",
-            "record_origin": "peer.example.com",
-            "relay": "peer.example.com",
-            "publickey": pubkey,
-        }])
-        client = FakeSyncClient([payload])
-
-        await mgr._sync_users(client, peer_hostname)
-
-        user = ume.get(username="remote_alice")
-        assert user is not None
-        assert user.record_origin == "peer.example.com"
-        assert user.publickey == pubkey
-
-
-class TestSyncReportsParsing:
-    """Phase 0: Demonstrate that _sync_reports raises NameError on non-empty
-    responses because it reads an undefined variable `response` instead of
-    `payload` (src/net/sync.py:391-441)."""
-
-    @pytest.mark.asyncio
-    async def test_nonempty_report_list_ingests_without_nameerror(self, sync_setup):
-        mgr, ident, ame, engine = sync_setup
-        peer_hostname = "peer.example.com"
-
-        pubkey = Identity.generate().public_key
-        payload = _encode_report_list([{
-            "report_num": 1,
-            "rule_num": 1,
-            "culprit_pubkey": pubkey,
-            "board": "general",
-            "post_num": 42,
-            "reporter_pubkey": pubkey,
-            "report_time": 1700000000,
-            "origin": "peer.example.com",
-            "relay": "peer.example.com",
-            "description": "spam",
-            "origin_sig": "",
-            "reporter_sig": "",
-        }])
-        client = FakeSyncClient([payload])
-
-        engine.keibatsu.upsert_remote_report = MagicMock(
-            return_value=MagicMock(result=MagicMock(return_value=True))
-        )
-
-        await mgr._sync_reports(client, peer_hostname)
-
-        engine.keibatsu.upsert_remote_report.assert_called_once()
-
-
 # ---------------------------------------------------------------------------
-# Phase 7: Legacy unsigned sync fallback disabled by default
+# Phase 7: Legacy sync paths removed — _sync_users and _sync_reports are gone
 # ---------------------------------------------------------------------------
 
 
-class TestLegacySyncDisabled:
-    """When allow_legacy_unsigned_user_sync is False (the default), the legacy
-    LIST_USERS and REPORT_LIST_SINCE sync paths are skipped entirely."""
+class TestLegacySyncRemoved:
+    """The legacy _sync_users and _sync_reports methods have been removed
+    entirely. User sync is handled by the user registry; report sync is
+    handled by the report registry."""
 
-    @pytest.mark.asyncio
-    async def test_sync_users_skipped_when_disabled(self, sync_setup_real_ume):
-        mgr, ident, ame, engine, ume = sync_setup_real_ume
-        engine.config.allow_legacy_unsigned_user_sync = False
-        peer_hostname = "peer.example.com"
+    def test_sync_users_method_removed(self):
+        from net.sync import SyncManager
+        assert not hasattr(SyncManager, "_sync_users")
 
-        pubkey = Identity.generate().public_key
-        payload = _encode_user_list([{
-            "username": "should_not_appear",
-            "registrar": "peer.example.com",
-            "record_origin": "peer.example.com",
-            "relay": "peer.example.com",
-            "publickey": pubkey,
-        }])
-        client = FakeSyncClient([payload])
+    def test_sync_reports_method_removed(self):
+        from net.sync import SyncManager
+        assert not hasattr(SyncManager, "_sync_reports")
 
-        await mgr._sync_users(client, peer_hostname)
+    def test_build_list_users_not_imported_in_sync(self):
+        import net.sync as sync_module
+        assert not hasattr(sync_module, "build_list_users")
 
-        assert ume.get(username="should_not_appear") is None
-
-    @pytest.mark.asyncio
-    async def test_sync_reports_skipped_when_disabled(self, sync_setup):
-        mgr, ident, ame, engine = sync_setup
-        engine.config.allow_legacy_unsigned_user_sync = False
-        peer_hostname = "peer.example.com"
-
-        pubkey = Identity.generate().public_key
-        payload = _encode_report_list([{
-            "report_num": 1,
-            "rule_num": 1,
-            "culprit_pubkey": pubkey,
-            "board": "general",
-            "post_num": 42,
-            "reporter_pubkey": pubkey,
-            "report_time": 1700000000,
-            "origin": "peer.example.com",
-            "relay": "peer.example.com",
-            "description": "spam",
-            "origin_sig": "",
-            "reporter_sig": "",
-        }])
-        client = FakeSyncClient([payload])
-
-        engine.keibatsu.upsert_remote_report = MagicMock(
-            return_value=MagicMock(result=MagicMock(return_value=True))
-        )
-
-        await mgr._sync_reports(client, peer_hostname)
-
-        engine.keibatsu.upsert_remote_report.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_sync_users_runs_when_enabled(self, sync_setup_real_ume):
-        mgr, ident, ame, engine, ume = sync_setup_real_ume
-        engine.config.allow_legacy_unsigned_user_sync = True
-        peer_hostname = "peer.example.com"
-
-        pubkey = Identity.generate().public_key
-        payload = _encode_user_list([{
-            "username": "legacy_user",
-            "registrar": "peer.example.com",
-            "record_origin": "peer.example.com",
-            "relay": "peer.example.com",
-            "publickey": pubkey,
-        }])
-        client = FakeSyncClient([payload])
-
-        await mgr._sync_users(client, peer_hostname)
-
-        user = ume.get(username="legacy_user")
-        assert user is not None
-        assert user.record_origin == "peer.example.com"
-
-    @pytest.mark.asyncio
-    async def test_sync_reports_runs_when_enabled(self, sync_setup):
-        mgr, ident, ame, engine = sync_setup
-        engine.config.allow_legacy_unsigned_user_sync = True
-        peer_hostname = "peer.example.com"
-
-        pubkey = Identity.generate().public_key
-        payload = _encode_report_list([{
-            "report_num": 1,
-            "rule_num": 1,
-            "culprit_pubkey": pubkey,
-            "board": "general",
-            "post_num": 42,
-            "reporter_pubkey": pubkey,
-            "report_time": 1700000000,
-            "origin": "peer.example.com",
-            "relay": "peer.example.com",
-            "description": "spam",
-            "origin_sig": "",
-            "reporter_sig": "",
-        }])
-        client = FakeSyncClient([payload])
-
-        engine.keibatsu.upsert_remote_report = MagicMock(
-            return_value=MagicMock(result=MagicMock(return_value=True))
-        )
-
-        await mgr._sync_reports(client, peer_hostname)
-
-        engine.keibatsu.upsert_remote_report.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_default_config_has_flag_false(self, temp_dir):
-        from core.config import Config
-        import os
-        config = Config(
-            origin="test.local",
-            data_dir=temp_dir,
-            ame_path=os.path.join(temp_dir, "ame"),
-            nav_db_path=os.path.join(temp_dir, "nav.db"),
-            reports_db_path=os.path.join(temp_dir, "reports.db"),
-            punishments_db_path=os.path.join(temp_dir, "pun.db"),
-            log_dir=os.path.join(temp_dir, "logs"),
-            identity_path=os.path.join(temp_dir, "id"),
-            userfile_path=os.path.join(temp_dir, "uf"),
-        )
-        assert config.allow_legacy_unsigned_user_sync is False
+    def test_build_report_list_since_not_imported_in_sync(self):
+        import net.sync as sync_module
+        assert not hasattr(sync_module, "build_report_list_since")

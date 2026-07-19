@@ -106,16 +106,15 @@ def _sha256(*chunks: bytes) -> bytes:
     return h.digest()
 
 
-def compute_registry_key(registry_type: str, origin: str, name: str) -> bytes:
+def compute_registry_key(registry_type: str, origin: str, name) -> bytes:
     """Compute a 32-byte registry key from (registry_type, origin, name).
 
-    For users, name is the username. For reports, name encodes
-    (origin, report_num, rollover). For punishments, name encodes
-    (origin, punishment_id, rollover). Callers are responsible for building
-    the name string deterministically.
+    For users, name is the username (str). For reports, name encodes
+    (report_num, rollover) as bytes. For punishments, name encodes
+    (punishment_id, rollover) as bytes. Accepts both str and bytes.
     """
     origin_b = origin.encode("utf-8")
-    name_b = name.encode("utf-8")
+    name_b = name if isinstance(name, bytes) else name.encode("utf-8")
     return _sha256(
         _domain_key(registry_type),
         struct.pack(">H", len(origin_b)), origin_b,

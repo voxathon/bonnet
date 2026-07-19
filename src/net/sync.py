@@ -11,11 +11,19 @@ from core.trust import TrustStore
 from core.logging import log_msg
 
 from client.protocol import (
-    build_board_list, build_list_users, build_report_list_since,
+    build_board_list,
     build_user_registry_head, build_user_registry_nodes,
     build_user_registry_records, build_user_registry_heads,
     parse_user_registry_head_resp, parse_user_registry_nodes_resp,
     parse_user_registry_records_resp, parse_user_registry_heads_resp,
+    build_report_registry_head, build_report_registry_nodes,
+    build_report_registry_records, build_report_registry_heads,
+    parse_report_registry_head_resp, parse_report_registry_nodes_resp,
+    parse_report_registry_records_resp, parse_report_registry_heads_resp,
+    build_punishment_registry_head, build_punishment_registry_nodes,
+    build_punishment_registry_records, build_punishment_registry_heads,
+    parse_punishment_registry_head_resp, parse_punishment_registry_nodes_resp,
+    parse_punishment_registry_records_resp, parse_punishment_registry_heads_resp,
     parse_response, ResponseStatus,
 )
 
@@ -243,10 +251,12 @@ class SyncManager:
 
             # Sync using multiple commands over one HTTP client (fixes v1 lifecycle mismatch)
             await self._sync_boards(client, peer_hostname)
-            await self._sync_users(client, peer_hostname)
-            await self._sync_reports(client, peer_hostname)
             await self._sync_registry(client, peer_hostname)
+            await self._sync_report_registry(client, peer_hostname)
+            await self._sync_punishment_registry(client, peer_hostname)
             await self._sync_relayed_origins(client, peer_hostname)
+            await self._sync_report_relayed_origins(client, peer_hostname)
+            await self._sync_punishment_relayed_origins(client, peer_hostname)
 
         except Exception as e:
             log_msg(f"SYNC: failed to sync with {peer_hostname}: {e}")
@@ -299,6 +309,13 @@ class SyncManager:
                 skipped += 1
                 continue
 
+            # Import allowlist (§13): skip origins not in the boards allowlist
+            # before expensive pin/signature work. Default-deny.
+            if not self._config.is_import_origin_allowed("boards", origin):
+                log_msg(f"SYNC: skipping board '{name}' from {peer_hostname}: origin '{origin}' not in boards import allowlist")
+                skipped += 1
+                continue
+
             # Trust guard: verify the board signature against the origin's
             # TOFU-pinned pubkey before storing, mirroring the report
             # verification path. Entries whose origin has no pinned key or
@@ -333,153 +350,6 @@ class SyncManager:
         nav.delete_by_origin_batch(peer_hostname, list(peer_native_boards))
         log_msg(f"SYNC: delta sync complete for {peer_hostname}, native boards: {len(peer_native_boards)}")
 
-    async def _sync_users(self, client, peer_hostname):
-        if not getattr(self._config, 'allow_legacy_unsigned_user_sync', False):
-            log_msg(f"SYNC: legacy unsigned user sync disabled, skipping LIST_USERS from {peer_hostname}")
-            return
-
-        offset = 0
-        limit = 100
-        total = 0
-
-        while True:
-            cmd = build_list_users(offset, limit)
-            try:
-                payload = await client._send_command(cmd)
-            except Exception:
-                break
-
-            idx = 0
-            count = struct.unpack('>H', payload[idx:idx+2])[0]
-            idx += 2
-
-            if count == 0:
-                break
-
-            for _ in range(count):
-                u_len = payload[idx]
-                idx += 1
-                username = payload[idx:idx+u_len].decode('utf-8')
-                idx += u_len
-
-                r_len = payload[idx]
-                idx += 1
-                registrar = payload[idx:idx+r_len].decode('utf-8')
-                idx += r_len
-
-                o_len = payload[idx]
-                idx += 1
-                record_origin = payload[idx:idx+o_len].decode('utf-8')
-                idx += o_len
-
-                rel_len = payload[idx]
-                idx += 1
-                relay = payload[idx:idx+rel_len].decode('utf-8')
-                idx += rel_len
-
-                pk_len = payload[idx]
-                idx += 1
-                publickey = payload[idx:idx+pk_len]
-                idx += pk_len
-
-                result = self._ume.upsert_remote_user(username, registrar, publickey,
-                                                        record_origin, peer_hostname)
-                if result > 0:
-                    total += 1
-
-            offset += limit
-
-        log_msg(f"SYNC: synced {total} users from {peer_hostname}")
-
-    async def _sync_reports(self, client, peer_hostname):
-        if not getattr(self._config, 'allow_legacy_unsigned_user_sync', False):
-            log_msg(f"SYNC: legacy unsigned report sync disabled, skipping REPORT_LIST_SINCE from {peer_hostname}")
-            return
-
-        since_timestamp = 0
-        total = 0
-
-        cmd = build_report_list_since(since_timestamp)
-        try:
-            payload = await client._send_command(cmd)
-        except Exception as e:
-            log_msg(f"SYNC: REPORT_LIST_SINCE failed for {peer_hostname}: {e}")
-            return
-
-        idx = 0
-        count = struct.unpack('>H', payload[idx:idx+2])[0]
-        idx += 2
-
-        if count == 0:
-            log_msg(f"SYNC: no reports from {peer_hostname}")
-            return
-
-        for _ in range(count):
-            report_num = struct.unpack('>Q', payload[idx:idx+8])[0]
-            idx += 8
-
-            rule_num = struct.unpack('>Q', payload[idx:idx+8])[0]
-            idx += 8
-
-            culprit_len = payload[idx]
-            idx += 1
-            culprit_pubkey = payload[idx:idx+culprit_len]
-            idx += culprit_len
-
-            board_len = payload[idx]
-            idx += 1
-            culprit_board = payload[idx:idx+board_len].decode('utf-8') if board_len > 0 else None
-            idx += board_len if board_len > 0 else 0
-
-            culprit_post_num = struct.unpack('>Q', payload[idx:idx+8])[0]
-            idx += 8
-
-            reporter_len = payload[idx]
-            idx += 1
-            reporter_pubkey = payload[idx:idx+reporter_len]
-            idx += reporter_len
-
-            report_time = struct.unpack('>q', payload[idx:idx+8])[0]
-            idx += 8
-
-            origin_len = payload[idx]
-            idx += 1
-            origin = payload[idx:idx+origin_len].decode('utf-8')
-            idx += origin_len
-
-            relay_len = payload[idx]
-            idx += 1
-            relay = payload[idx:idx+relay_len].decode('utf-8')
-            idx += relay_len
-
-            desc_len = payload[idx]
-            idx += 1
-            description = payload[idx:idx+desc_len].decode('utf-8')
-            idx += desc_len
-
-            origin_sig_len = payload[idx]
-            idx += 1
-            origin_sig = payload[idx:idx+origin_sig_len].decode('utf-8') if origin_sig_len > 0 else None
-            idx += origin_sig_len if origin_sig_len > 0 else 0
-
-            reporter_sig_len = payload[idx]
-            idx += 1
-            reporter_sig = payload[idx:idx+reporter_sig_len].decode('utf-8') if reporter_sig_len > 0 else None
-            idx += reporter_sig_len if reporter_sig_len > 0 else 0
-
-            if origin == self._config.origin:
-                continue
-
-            result = self._keibatsu.upsert_remote_report(
-                report_num, origin, rule_num, culprit_pubkey, culprit_board, culprit_post_num,
-                reporter_pubkey, report_time, peer_hostname, description, origin_sig, reporter_sig,
-                self._sync_db.get_peer_pubkey
-            )
-            if result.result():
-                total += 1
-
-        log_msg(f"SYNC: synced {total} reports from {peer_hostname}")
-
     # ------------------------------------------------------------------
     # Registry sync (Phase 5)
     # ------------------------------------------------------------------
@@ -502,6 +372,12 @@ class SyncManager:
 
         if peer_origin == self._config.origin:
             log_msg("SYNC: skipping registry sync for own origin")
+            return
+
+        # Import allowlist (§13): skip origins not in the users allowlist
+        # before expensive head/record fetches. Default-deny.
+        if not self._config.is_import_origin_allowed("users", peer_origin):
+            log_msg(f"SYNC: skipping registry sync for origin '{peer_origin}': not in users import allowlist")
             return
 
         origin_pubkey = self._sync_db.get_peer_pubkey(peer_origin)
@@ -679,6 +555,12 @@ class SyncManager:
             if head.origin == peer_origin:
                 continue
 
+            # Import allowlist (§13): skip advertised origins not in the users
+            # allowlist before expensive head/record fetches. Default-deny.
+            if not self._config.is_import_origin_allowed("users", head.origin):
+                log_msg(f"SYNC: relay advertises origin '{head.origin}' but not in users import allowlist, skipping")
+                continue
+
             # Only sync origins we already have a pinned key for
             origin_pubkey = self._sync_db.get_peer_pubkey(head.origin)
             if origin_pubkey is None:
@@ -784,3 +666,431 @@ class SyncManager:
                     )
                 except ValueError as e:
                     log_msg(f"SYNC: relayed upsert failed for '{user.username}': {e}")
+
+    # ------------------------------------------------------------------
+    # Report registry sync (Phase 4)
+    # ------------------------------------------------------------------
+
+    async def _sync_report_registry(self, client, peer_hostname):
+        """Fetch and verify the peer's report registry head, fetch records,
+        accept atomically into the report registry store."""
+        store = getattr(self._engine, 'report_registry_store', None)
+        if store is None:
+            log_msg("SYNC: report registry store not available, skipping report registry sync")
+            return
+
+        peer_origin = getattr(client, '_server_origin', None)
+        if not peer_origin:
+            log_msg("SYNC: cannot determine peer origin for report registry sync")
+            return
+
+        if peer_origin == self._config.origin:
+            log_msg("SYNC: skipping report registry sync for own origin")
+            return
+
+        # Import allowlist (§13): skip origins not in the reports allowlist
+        if not self._config.is_import_origin_allowed("reports", peer_origin):
+            log_msg(f"SYNC: skipping report registry sync for origin '{peer_origin}': not in reports import allowlist")
+            return
+
+        origin_pubkey = self._sync_db.get_peer_pubkey(peer_origin)
+        if origin_pubkey is None:
+            log_msg(f"SYNC: no pinned key for origin '{peer_origin}', skipping report registry sync")
+            return
+
+        log_msg(f"SYNC: starting report registry sync for origin '{peer_origin}'")
+
+        from core.report_registry import decode_report_head, verify_report_head
+
+        # 1. Fetch the peer's report registry head
+        try:
+            cmd = build_report_registry_head(peer_origin, 0)
+            payload = await client._send_command(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: REPORT_REGISTRY_HEAD failed for {peer_origin}: {e}")
+            return
+
+        try:
+            encoded_head = parse_report_registry_head_resp(payload)
+            head = decode_report_head(encoded_head)
+        except Exception as e:
+            log_msg(f"SYNC: failed to decode report registry head from {peer_origin}: {e}")
+            return
+
+        # 2. Verify head signature
+        if not verify_report_head(head, origin_pubkey):
+            log_msg(f"SYNC: report registry head signature verification failed for {peer_origin}")
+            return
+
+        if head.origin != peer_origin:
+            log_msg(f"SYNC: report head origin '{head.origin}' != requested '{peer_origin}'")
+            return
+
+        # 3. Check if we already have this root
+        state = store.get_state(peer_origin)
+        if state is not None and state["current_merkle_root"] == head.merkle_root:
+            return
+
+        # 4. Fetch all records
+        actual_seq = head.registry_seq
+        try:
+            cmd = build_report_registry_records(peer_origin, actual_seq, [], include_proofs=False)
+            payload = await client._send_command(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: REPORT_REGISTRY_RECORDS failed for {peer_origin}: {e}")
+            return
+
+        try:
+            record_entries = parse_report_registry_records_resp(payload)
+        except Exception as e:
+            log_msg(f"SYNC: failed to parse report records response from {peer_origin}: {e}")
+            return
+
+        from core.report_registry import report_registry_key, compute_report_value_hash
+
+        records_for_store: list[tuple[bytes, str, bytes, bytes]] = []
+        for entry in record_entries:
+            if entry["present"] != 1:
+                continue
+            raw_record = entry["raw_record"]
+            # Store the record as-is. The key in the registry is the
+            # report_registry_key, which the exporter includes in the
+            # records response. We trust the key from the response.
+            key = entry["registry_key"]
+            vh = compute_report_value_hash(raw_record)
+            records_for_store.append((key, "", raw_record, vh))
+
+        log_msg(f"SYNC: fetched {len(records_for_store)} report records for {peer_origin}")
+
+        # 6. Atomically accept the remote head
+        result = store.accept_remote_head(
+            origin=peer_origin,
+            head=head,
+            origin_pubkey=origin_pubkey,
+            records=records_for_store,
+            nodes=[],
+        )
+
+        if not result.accepted:
+            log_msg(f"SYNC: report registry head rejected for {peer_origin}: {result.reason}")
+            return
+
+        log_msg(f"SYNC: report registry head accepted for {peer_origin} seq {head.registry_seq}")
+
+    async def _sync_report_relayed_origins(self, client, peer_hostname):
+        """Discover cached report registry heads advertised by a relay and
+        sync any origins we already trust (have a pinned key for)."""
+        store = getattr(self._engine, 'report_registry_store', None)
+        if store is None:
+            return
+
+        peer_origin = getattr(client, '_server_origin', None)
+        if not peer_origin:
+            return
+
+        # Fetch the relay's advertised report head list
+        try:
+            cmd = build_report_registry_heads(offset=0, limit=100)
+            payload = await client._send_command(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: REPORT_REGISTRY_HEADS failed for {peer_hostname}: {e}")
+            return
+
+        try:
+            encoded_heads = parse_report_registry_heads_resp(payload)
+        except Exception as e:
+            log_msg(f"SYNC: failed to parse report heads list from {peer_hostname}: {e}")
+            return
+
+        if not encoded_heads:
+            return
+
+        from core.report_registry import decode_report_head, verify_report_head, compute_report_value_hash
+        from client.protocol import build_report_registry_records, parse_report_registry_records_resp
+
+        for encoded in encoded_heads:
+            try:
+                head = decode_report_head(encoded)
+            except Exception:
+                continue
+
+            # Skip our own origin and the peer's own origin (already synced)
+            if head.origin == self._config.origin:
+                continue
+            if head.origin == peer_origin:
+                continue
+
+            # Import allowlist (§13)
+            if not self._config.is_import_origin_allowed("reports", head.origin):
+                log_msg(f"SYNC: relay advertises report origin '{head.origin}' but not in reports import allowlist, skipping")
+                continue
+
+            # Only sync origins we already have a pinned key for
+            origin_pubkey = self._sync_db.get_peer_pubkey(head.origin)
+            if origin_pubkey is None:
+                log_msg(f"SYNC: relay advertises report origin '{head.origin}' but no pinned key, skipping")
+                continue
+
+            # Check if we already have this root
+            state = store.get_state(head.origin)
+            if state is not None and state["current_merkle_root"] == head.merkle_root:
+                continue
+
+            log_msg(f"SYNC: syncing relayed report origin '{head.origin}' from relay {peer_hostname}")
+
+            # Fetch the full head
+            try:
+                cmd = build_report_registry_head(head.origin, 0)
+                head_payload = await client._send_command(cmd)
+            except Exception as e:
+                log_msg(f"SYNC: relayed report HEAD fetch failed for {head.origin}: {e}")
+                continue
+
+            try:
+                full_encoded = parse_report_registry_head_resp(head_payload)
+                full_head = decode_report_head(full_encoded)
+            except Exception:
+                continue
+
+            if not verify_report_head(full_head, origin_pubkey):
+                log_msg(f"SYNC: relayed report head signature failed for {head.origin}")
+                continue
+
+            if full_head.origin != head.origin:
+                continue
+
+            # Fetch all records for this origin from the relay
+            actual_seq = full_head.registry_seq
+            try:
+                cmd = build_report_registry_records(head.origin, actual_seq, [], include_proofs=False)
+                rec_payload = await client._send_command(cmd)
+            except Exception as e:
+                log_msg(f"SYNC: relayed report records fetch failed for {head.origin}: {e}")
+                continue
+
+            try:
+                record_entries = parse_report_registry_records_resp(rec_payload)
+            except Exception:
+                continue
+
+            records_for_store: list[tuple[bytes, str, bytes, bytes]] = []
+            for entry in record_entries:
+                if entry["present"] != 1:
+                    continue
+                raw_record = entry["raw_record"]
+                key = entry["registry_key"]
+                vh = compute_report_value_hash(raw_record)
+                records_for_store.append((key, "", raw_record, vh))
+
+            # Accept atomically
+            result = store.accept_remote_head(
+                origin=head.origin,
+                head=full_head,
+                origin_pubkey=origin_pubkey,
+                records=records_for_store,
+                nodes=[],
+            )
+
+            if not result.accepted:
+                log_msg(f"SYNC: relayed report head rejected for {head.origin}: {result.reason}")
+                continue
+
+            log_msg(f"SYNC: relayed report head accepted for {head.origin} seq {full_head.registry_seq}")
+
+    # ------------------------------------------------------------------
+    # Punishment registry sync (Phase 5)
+    # ------------------------------------------------------------------
+
+    async def _sync_punishment_registry(self, client, peer_hostname):
+        """Fetch and verify the peer's punishment registry head, fetch records,
+        accept atomically into the punishment registry store."""
+        store = getattr(self._engine, 'punishment_registry_store', None)
+        if store is None:
+            return
+
+        peer_origin = getattr(client, '_server_origin', None)
+        if not peer_origin:
+            return
+
+        if peer_origin == self._config.origin:
+            return
+
+        if not self._config.is_import_origin_allowed("punishments", peer_origin):
+            log_msg(f"SYNC: skipping punishment registry sync for origin '{peer_origin}': not in punishments import allowlist")
+            return
+
+        origin_pubkey = self._sync_db.get_peer_pubkey(peer_origin)
+        if origin_pubkey is None:
+            return
+
+        from core.punishment_registry import decode_punishment_head, verify_punishment_head, compute_punishment_value_hash
+
+        try:
+            cmd = build_punishment_registry_head(peer_origin, 0)
+            payload = await client._send_command(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: PUNISHMENT_REGISTRY_HEAD failed for {peer_origin}: {e}")
+            return
+
+        try:
+            encoded_head = parse_punishment_registry_head_resp(payload)
+            head = decode_punishment_head(encoded_head)
+        except Exception as e:
+            log_msg(f"SYNC: failed to decode punishment registry head from {peer_origin}: {e}")
+            return
+
+        if not verify_punishment_head(head, origin_pubkey):
+            log_msg(f"SYNC: punishment registry head signature verification failed for {peer_origin}")
+            return
+
+        if head.origin != peer_origin:
+            return
+
+        state = store.get_state(peer_origin)
+        if state is not None and state["current_merkle_root"] == head.merkle_root:
+            return
+
+        actual_seq = head.registry_seq
+        try:
+            cmd = build_punishment_registry_records(peer_origin, actual_seq, [], include_proofs=False)
+            payload = await client._send_command(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: PUNISHMENT_REGISTRY_RECORDS failed for {peer_origin}: {e}")
+            return
+
+        try:
+            record_entries = parse_punishment_registry_records_resp(payload)
+        except Exception as e:
+            log_msg(f"SYNC: failed to parse punishment records response from {peer_origin}: {e}")
+            return
+
+        records_for_store: list[tuple[bytes, str, bytes, bytes]] = []
+        for entry in record_entries:
+            if entry["present"] != 1:
+                continue
+            raw_record = entry["raw_record"]
+            key = entry["registry_key"]
+            vh = compute_punishment_value_hash(raw_record)
+            records_for_store.append((key, "", raw_record, vh))
+
+        result = store.accept_remote_head(
+            origin=peer_origin,
+            head=head,
+            origin_pubkey=origin_pubkey,
+            records=records_for_store,
+            nodes=[],
+        )
+
+        if not result.accepted:
+            log_msg(f"SYNC: punishment registry head rejected for {peer_origin}: {result.reason}")
+            return
+
+        log_msg(f"SYNC: punishment registry head accepted for {peer_origin} seq {head.registry_seq}")
+
+    async def _sync_punishment_relayed_origins(self, client, peer_hostname):
+        """Discover cached punishment registry heads advertised by a relay."""
+        store = getattr(self._engine, 'punishment_registry_store', None)
+        if store is None:
+            return
+
+        peer_origin = getattr(client, '_server_origin', None)
+        if not peer_origin:
+            return
+
+        try:
+            cmd = build_punishment_registry_heads(offset=0, limit=100)
+            payload = await client._send_command(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: PUNISHMENT_REGISTRY_HEADS failed for {peer_hostname}: {e}")
+            return
+
+        try:
+            encoded_heads = parse_punishment_registry_heads_resp(payload)
+        except Exception as e:
+            log_msg(f"SYNC: failed to parse punishment heads list from {peer_hostname}: {e}")
+            return
+
+        if not encoded_heads:
+            return
+
+        from core.punishment_registry import decode_punishment_head, verify_punishment_head, compute_punishment_value_hash
+
+        for encoded in encoded_heads:
+            try:
+                head = decode_punishment_head(encoded)
+            except Exception:
+                continue
+
+            if head.origin == self._config.origin:
+                continue
+            if head.origin == peer_origin:
+                continue
+
+            if not self._config.is_import_origin_allowed("punishments", head.origin):
+                log_msg(f"SYNC: relay advertises punishment origin '{head.origin}' but not in punishments import allowlist, skipping")
+                continue
+
+            origin_pubkey = self._sync_db.get_peer_pubkey(head.origin)
+            if origin_pubkey is None:
+                continue
+
+            state = store.get_state(head.origin)
+            if state is not None and state["current_merkle_root"] == head.merkle_root:
+                continue
+
+            log_msg(f"SYNC: syncing relayed punishment origin '{head.origin}' from relay {peer_hostname}")
+
+            try:
+                cmd = build_punishment_registry_head(head.origin, 0)
+                head_payload = await client._send_command(cmd)
+            except Exception as e:
+                log_msg(f"SYNC: relayed punishment HEAD fetch failed for {head.origin}: {e}")
+                continue
+
+            try:
+                full_encoded = parse_punishment_registry_head_resp(head_payload)
+                full_head = decode_punishment_head(full_encoded)
+            except Exception:
+                continue
+
+            if not verify_punishment_head(full_head, origin_pubkey):
+                continue
+
+            if full_head.origin != head.origin:
+                continue
+
+            actual_seq = full_head.registry_seq
+            try:
+                cmd = build_punishment_registry_records(head.origin, actual_seq, [], include_proofs=False)
+                rec_payload = await client._send_command(cmd)
+            except Exception as e:
+                log_msg(f"SYNC: relayed punishment records fetch failed for {head.origin}: {e}")
+                continue
+
+            try:
+                record_entries = parse_punishment_registry_records_resp(rec_payload)
+            except Exception:
+                continue
+
+            records_for_store: list[tuple[bytes, str, bytes, bytes]] = []
+            for entry in record_entries:
+                if entry["present"] != 1:
+                    continue
+                raw_record = entry["raw_record"]
+                key = entry["registry_key"]
+                vh = compute_punishment_value_hash(raw_record)
+                records_for_store.append((key, "", raw_record, vh))
+
+            result = store.accept_remote_head(
+                origin=head.origin,
+                head=full_head,
+                origin_pubkey=origin_pubkey,
+                records=records_for_store,
+                nodes=[],
+            )
+
+            if not result.accepted:
+                log_msg(f"SYNC: relayed punishment head rejected for {head.origin}: {result.reason}")
+                continue
+
+            log_msg(f"SYNC: relayed punishment head accepted for {head.origin} seq {full_head.registry_seq}")

@@ -157,7 +157,12 @@ class BonnetHTTPServer:
             "anonymous_key": self._anonymous_public_key.hex(),
             "anonymous_private_key": self._anonymous_identity.private_key.hex(),
             "command_endpoint": "/v2/command",
-            "capabilities": ["user-registry-merkle-v1"],
+            "capabilities": [
+                "user-registry-merkle-v1",
+                "report-registry-merkle-v1",
+                "punishment-registry-merkle-v1",
+                "command-object-acl-v1",
+            ],
         }).encode("utf-8")
 
         msg = HTTPMessage(

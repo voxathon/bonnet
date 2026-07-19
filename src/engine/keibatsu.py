@@ -68,12 +68,16 @@ class Punishment:
 
     def __init__(self):
         self.punishment_id = 0
+        self.origin = ""
+        self.rollover = 0
         self.punished_pubkey = b''
         self.report_ids = "[]"
         self.expires_at = 0
         self.ban_notes = ""
         self.issued_by = b''
         self.created_at = 0
+        self.relay = ""
+        self.origin_sig = None
 
     def get_report_ids(self) -> list:
         try:
@@ -124,6 +128,8 @@ class Keibatsu:
         self._record_in_window = record_in_window
         self._executor = ThreadPoolExecutor(max_workers=num_workers)
         self._lock = threading.Lock()
+        self._mutation_callbacks = []
+        self._punishment_callbacks = []
 
         reports_dir = os.path.dirname(reports_path)
         if reports_dir:
@@ -206,53 +212,125 @@ class Keibatsu:
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_rule ON reports(rule_num)")
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_reports_time ON reports(report_time)")
 
-        # Check if punishments table has the new append-only schema; migrate if not.
-        needs_pun_migration = False
+        # Check if punishments table has the v3 schema (origin, rollover, origin_sig);
+        # migrate from v2 or v1 if needed.
+        needs_pun_v3_migration = False
+        needs_pun_v2_migration = False
         with self._punishments_db.open() as ctx:
+            # Detect v3 by presence of origin column
             try:
-                ctx.execute("SELECT punishment_id FROM punishments LIMIT 1")
+                ctx.execute("SELECT origin FROM punishments LIMIT 1")
             except Exception:
+                # Check if v2 schema exists (punishment_id AUTOINCREMENT)
                 try:
-                    ctx.execute("SELECT punished_pubkey FROM punishments LIMIT 1")
-                    needs_pun_migration = True
+                    ctx.execute("SELECT punishment_id FROM punishments LIMIT 1")
+                    needs_pun_v3_migration = True
                 except Exception:
-                    pass
+                    # Check if v1 schema exists (punished_pubkey PRIMARY KEY)
+                    try:
+                        ctx.execute("SELECT punished_pubkey FROM punishments LIMIT 1")
+                        needs_pun_v2_migration = True
+                    except Exception:
+                        pass
 
-            if needs_pun_migration:
-                # Old schema used (punished_pubkey BLOB PRIMARY KEY, report_ids, expires_at, ban_notes)
-                # and INSERT OR REPLACE, so there was at most one row per pubkey. Migrate to the
-                # append-only schema: monotonic punishment_id PK, audit fields issued_by/created_at.
+            if needs_pun_v2_migration:
+                # v1 -> v3: old schema used (punished_pubkey BLOB PRIMARY KEY, ...)
+                # Migrate directly to v3 with origin=config.origin, rollover=0
                 ctx.execute("""
-                CREATE TABLE punishments_v2 (
-                    punishment_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                CREATE TABLE punishments_v3 (
+                    punishment_id   INTEGER NOT NULL,
+                    origin          TEXT NOT NULL,
+                    rollover        INTEGER NOT NULL DEFAULT 0,
                     punished_pubkey BLOB NOT NULL,
                     report_ids      TEXT NOT NULL,
                     expires_at      INTEGER NOT NULL,
                     ban_notes       TEXT,
                     issued_by       BLOB,
-                    created_at      INTEGER NOT NULL
+                    created_at      INTEGER NOT NULL,
+                    relay           TEXT NOT NULL,
+                    origin_sig      TEXT,
+                    PRIMARY KEY (origin, punishment_id, rollover)
                 )
                 """)
-                ctx.execute("""
-                INSERT INTO punishments_v2 (punished_pubkey, report_ids, expires_at, ban_notes, issued_by, created_at)
-                SELECT punished_pubkey, report_ids, expires_at, ban_notes, NULL, 0 FROM punishments
-                """)
+                # Assign monotonic IDs starting from 1
+                rows = ctx.execute("SELECT punished_pubkey, report_ids, expires_at, ban_notes FROM punishments ORDER BY rowid").fetchall()
+                for i, row in enumerate(rows, 1):
+                    ctx.execute(
+                        "INSERT INTO punishments_v3 (punishment_id, origin, rollover, punished_pubkey, report_ids, expires_at, ban_notes, issued_by, created_at, relay, origin_sig) "
+                        "VALUES (?, ?, 0, ?, ?, ?, ?, NULL, 0, ?, NULL)",
+                        [i, self._origin, bytes(row[0]), row[1], row[2], row[3], self._origin]
+                    )
                 ctx.execute("DROP TABLE punishments")
-                ctx.execute("ALTER TABLE punishments_v2 RENAME TO punishments")
+                ctx.execute("ALTER TABLE punishments_v3 RENAME TO punishments")
+            elif needs_pun_v3_migration:
+                # v2 -> v3: add origin, rollover, relay, origin_sig columns
+                # and change PK from punishment_id AUTOINCREMENT to (origin, punishment_id, rollover)
+                ctx.execute("""
+                CREATE TABLE punishments_v3 (
+                    punishment_id   INTEGER NOT NULL,
+                    origin          TEXT NOT NULL,
+                    rollover        INTEGER NOT NULL DEFAULT 0,
+                    punished_pubkey BLOB NOT NULL,
+                    report_ids      TEXT NOT NULL,
+                    expires_at      INTEGER NOT NULL,
+                    ban_notes       TEXT,
+                    issued_by       BLOB,
+                    created_at      INTEGER NOT NULL,
+                    relay           TEXT NOT NULL,
+                    origin_sig      TEXT,
+                    PRIMARY KEY (origin, punishment_id, rollover)
+                )
+                """)
+                # Migrate existing rows: origin=config.origin, rollover=0, relay=config.origin
+                # Generate origin_sig for each row using the local signing key
+                rows = ctx.execute(
+                    "SELECT punishment_id, punished_pubkey, report_ids, expires_at, ban_notes, issued_by, created_at FROM punishments"
+                ).fetchall()
+                for row in rows:
+                    pun_id = row[0]
+                    pubkey = bytes(row[1])
+                    report_ids = row[2]
+                    expires_at = row[3]
+                    ban_notes = row[4]
+                    issued_by = bytes(row[5]) if row[5] is not None else None
+                    created_at = row[6] if row[6] is not None else 0
+                    origin_sig_hex = None
+                    if self._signing_key is not None:
+                        payload = self._build_punishment_signed_payload(
+                            pun_id, 0, self._origin, pubkey,
+                            json.loads(report_ids) if report_ids else [],
+                            expires_at, ban_notes or "", issued_by, created_at,
+                        )
+                        sig = bytes(self._signing_key.sign(payload).signature)
+                        origin_sig_hex = sig.hex()
+                    ctx.execute(
+                        "INSERT INTO punishments_v3 (punishment_id, origin, rollover, punished_pubkey, report_ids, expires_at, ban_notes, issued_by, created_at, relay, origin_sig) "
+                        "VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        [pun_id, self._origin, pubkey, report_ids, expires_at, ban_notes, issued_by, created_at, self._origin, origin_sig_hex]
+                    )
+                ctx.execute("DROP TABLE punishments")
+                ctx.execute("ALTER TABLE punishments_v3 RENAME TO punishments")
             else:
                 ctx.execute("""
                 CREATE TABLE IF NOT EXISTS punishments (
-                    punishment_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    punishment_id   INTEGER NOT NULL,
+                    origin          TEXT NOT NULL,
+                    rollover        INTEGER NOT NULL DEFAULT 0,
                     punished_pubkey BLOB NOT NULL,
                     report_ids      TEXT NOT NULL,
                     expires_at      INTEGER NOT NULL,
                     ban_notes       TEXT,
                     issued_by       BLOB,
-                    created_at      INTEGER NOT NULL
+                    created_at      INTEGER NOT NULL,
+                    relay           TEXT NOT NULL,
+                    origin_sig      TEXT,
+                    PRIMARY KEY (origin, punishment_id, rollover)
                 )
                 """)
 
             ctx.execute("CREATE INDEX IF NOT EXISTS idx_punishments_pubkey ON punishments(punished_pubkey)")
+            ctx.execute("CREATE INDEX IF NOT EXISTS idx_punishments_origin ON punishments(origin)")
+            ctx.execute("CREATE INDEX IF NOT EXISTS idx_punishments_created ON punishments(created_at)")
 
         self._rules_table = self._reports_db.add_table(
             'rules',
@@ -270,10 +348,36 @@ class Keibatsu:
 
         self._punishments_table = self._punishments_db.add_table(
             'punishments',
-            'punishment_id punished_pubkey report_ids expires_at ban_notes issued_by created_at',
+            'punishment_id origin rollover punished_pubkey report_ids expires_at ban_notes issued_by created_at relay origin_sig',
             proto=Punishment,
-            id_cols=['punishment_id']
+            id_cols=['origin', 'punishment_id', 'rollover']
         )
+
+    def register_mutation_callback(self, callback) -> None:
+        """Register a callback invoked after local report mutations.
+        The callback receives no arguments; it should mark the
+        report registry dirty."""
+        self._mutation_callbacks.append(callback)
+
+    def register_punishment_mutation_callback(self, callback) -> None:
+        """Register a callback invoked after local punishment mutations.
+        The callback receives no arguments; it should mark the
+        punishment registry dirty."""
+        self._punishment_callbacks.append(callback)
+
+    def _notify_report_mutation(self) -> None:
+        for cb in self._mutation_callbacks:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def _notify_punishment_mutation(self) -> None:
+        for cb in self._punishment_callbacks:
+            try:
+                cb()
+            except Exception:
+                pass
 
     def _rule_exists(self, rule_num) -> bool:
         with self._reports_db.open() as ctx:
@@ -491,29 +595,100 @@ class Keibatsu:
             
             report.origin_sig = origin_sig
         
+        self._notify_report_mutation()
         return report
 
     def _sign_report(self, origin, report_num, signature) -> Report:
-        report = self._get_report(origin, report_num)
-        if report is None:
-            raise ValueError(f"Report {origin}:{report_num} does not exist")
-        
-        reporter_sig = signature.hex()
-        
+        """Add a reporter signature as a new rollover version (§9.3).
+
+        Instead of mutating the existing report's reporter_sig in place,
+        create a new rollover leaf with the reporter signature. The old
+        version remains for audit history. This preserves the append-only
+        registry invariant.
+        """
+        # Get the current max rollover for this (origin, report_num)
         with self._reports_db.open() as ctx:
-            ctx.execute(
-                "UPDATE reports SET reporter_sig=? WHERE origin=? AND report_num=?",
-                [reporter_sig, origin, report_num]
+            max_ro = ctx.execute(
+                "SELECT MAX(rollover) FROM reports WHERE origin=? AND report_num=?",
+                [origin, report_num],
+            ).fetchone()[0]
+            if max_ro is None:
+                raise ValueError(f"Report {origin}:{report_num} does not exist")
+            new_rollover = max_ro + 1
+
+            # Fetch the current report (at max rollover) to copy its fields
+            existing = self._reports_table.select_single(
+                where="origin=? AND report_num=? AND rollover=?",
+                values=[origin, report_num, max_ro],
+                ctx=ctx,
             )
-        
-        report.reporter_sig = reporter_sig
+            if existing is None:
+                raise ValueError(f"Report {origin}:{report_num} rollover {max_ro} not found")
+
+            reporter_sig = signature.hex()
+
+            # Insert a new rollover row with the reporter signature added
+            ctx.insert_record(
+                self._reports_table,
+                (report_num, origin, new_rollover, existing.rule_num,
+                 existing.culprit_pubkey, existing.culprit_board, existing.culprit_post_num,
+                 existing.reporter_pubkey, existing.report_time, existing.relay,
+                 existing.description, existing.origin_sig, reporter_sig),
+                columns=['report_num', 'origin', 'rollover', 'rule_num',
+                         'culprit_pubkey', 'culprit_board', 'culprit_post_num',
+                         'reporter_pubkey', 'report_time', 'relay', 'description',
+                         'origin_sig', 'reporter_sig'],
+            )
+
+        report = self._get_report(origin, report_num, new_rollover)
+        self._notify_report_mutation()
+        return report
         return report
 
-    def _get_punishment_by_id(self, punishment_id) -> Punishment:
+    def _build_punishment_signed_payload(self, punishment_id, rollover, origin,
+                                          punished_pubkey, report_ids, expires_at,
+                                          ban_notes, issued_by, created_at) -> bytes:
+        """Canonical signed payload for a punishment (§10.4).
+
+        Includes: punishment_id, rollover, origin, punished_pubkey, ordered
+        report ID list, expires_at, ban_notes, issued_by, created_at.
+        Excludes relay (receiver-local) and origin_sig (the signature itself).
+        """
+        origin_b = origin.encode("utf-8")
+        notes_b = (ban_notes or "").encode("utf-8")
+        issued_by_b = issued_by or b''
+        report_ids_json = json.dumps(report_ids)
+
+        return (
+            struct.pack(">Q", punishment_id)
+            + struct.pack(">Q", rollover)
+            + struct.pack(">H", len(origin_b)) + origin_b
+            + struct.pack("B", len(punished_pubkey)) + punished_pubkey
+            + struct.pack(">H", len(report_ids_json)) + report_ids_json.encode("utf-8")
+            + struct.pack(">q", expires_at)
+            + struct.pack(">H", len(notes_b)) + notes_b
+            + struct.pack("B", len(issued_by_b)) + issued_by_b
+            + struct.pack(">q", created_at)
+        )
+
+    def _get_punishment_by_id(self, punishment_id, origin=None, rollover=0) -> Punishment:
         with self._punishments_db.open() as ctx:
-            punishment = self._punishments_table.select_single(
-                where="punishment_id=?", values=[punishment_id], ctx=ctx
-            )
+            if origin is not None:
+                punishment = self._punishments_table.select_single(
+                    where="origin=? AND punishment_id=? AND rollover=?",
+                    values=[origin, punishment_id, rollover], ctx=ctx
+                )
+            else:
+                # Fallback: return the first match by punishment_id (backward compat)
+                rows = ctx.execute(
+                    "SELECT punishment_id, origin, rollover, punished_pubkey, report_ids, "
+                    "expires_at, ban_notes, issued_by, created_at, relay, origin_sig "
+                    "FROM punishments WHERE punishment_id=? ORDER BY origin ASC, rollover ASC LIMIT 1",
+                    [punishment_id]
+                ).fetchone()
+                if rows is None:
+                    return None
+                punishment = self._row_to_punishment(rows)
         if punishment is not None:
             if punishment.issued_by is None:
                 punishment.issued_by = b''
@@ -521,54 +696,107 @@ class Keibatsu:
                 punishment.created_at = 0
         return punishment
 
+    @staticmethod
+    def _row_to_punishment(row) -> Punishment:
+        """Convert a raw DB row to a Punishment object."""
+        p = Punishment()
+        p.punishment_id = row[0]
+        p.origin = row[1] if row[1] else ""
+        p.rollover = row[2] if row[2] is not None else 0
+        p.punished_pubkey = bytes(row[3]) if row[3] else b''
+        p.report_ids = row[4] if row[4] else "[]"
+        p.expires_at = row[5]
+        p.ban_notes = row[6] if row[6] else ""
+        p.issued_by = bytes(row[7]) if row[7] is not None else b''
+        p.created_at = row[8] if row[8] is not None else 0
+        p.relay = row[9] if row[9] else ""
+        p.origin_sig = row[10]
+        return p
+
     def _list_punishments_by_pubkey(self, pubkey) -> list:
         with self._punishments_db.open() as ctx:
-            punishments = list(self._punishments_table.select_iter(
-                where="punished_pubkey=?", values=[pubkey],
-                orderby="punishment_id ASC", ctx=ctx
-            ))
-        for p in punishments:
-            if p.issued_by is None:
-                p.issued_by = b''
-            if p.created_at is None:
-                p.created_at = 0
-        return punishments
+            rows = ctx.execute(
+                "SELECT punishment_id, origin, rollover, punished_pubkey, report_ids, "
+                "expires_at, ban_notes, issued_by, created_at, relay, origin_sig "
+                "FROM punishments WHERE punished_pubkey=? "
+                "ORDER BY origin ASC, punishment_id ASC, rollover ASC",
+                [pubkey]
+            ).fetchall()
+        return [self._row_to_punishment(row) for row in rows]
 
-    def _in_window(self, creation_time: int) -> bool:
+    def _in_window(self, creation_time: int, origin: str = None) -> bool:
         if self._record_in_window is None:
             return True
-        return self._record_in_window(self._origin, creation_time)
+        # Use the row's origin for the temporal filter (§11.4)
+        record_origin = origin if origin is not None else self._origin
+        return self._record_in_window(record_origin, creation_time)
 
     def _get_latest_active_punishment(self, pubkey) -> Punishment:
+        """Multi-origin effective evaluation (§11.4).
+
+        Search active punishments across all origins, apply per-row temporal
+        filter using each row's origin, and return the latest according to
+        deterministic ordering: (created_at DESC, origin ASC, punishment_id DESC, rollover DESC).
+        """
         now = int(time.time())
         with self._punishments_db.open() as ctx:
-            punishments = list(self._punishments_table.select_iter(
-                where="punished_pubkey=? AND (expires_at < 0 OR expires_at > ?)",
-                values=[pubkey, now],
-                orderby="created_at DESC", ctx=ctx
-            ))
+            rows = ctx.execute(
+                "SELECT punishment_id, origin, rollover, punished_pubkey, report_ids, "
+                "expires_at, ban_notes, issued_by, created_at, relay, origin_sig "
+                "FROM punishments WHERE punished_pubkey=? AND (expires_at < 0 OR expires_at > ?) "
+                "ORDER BY created_at DESC, origin ASC, punishment_id DESC, rollover DESC",
+                [pubkey, now]
+            ).fetchall()
         punishment = None
-        for p in punishments:
-            if p.issued_by is None:
-                p.issued_by = b''
-            if p.created_at is None:
-                p.created_at = 0
-            if self._in_window(p.created_at):
+        for row in rows:
+            p = self._row_to_punishment(row)
+            if self._in_window(p.created_at, p.origin):
                 punishment = p
                 break
         return punishment
 
     def _create_punishment(self, pubkey, report_ids,
                                         expires_at, ban_notes="",
-                                        issued_by=b'', sync_ume=True) -> Punishment:
+                                        issued_by=b'', sync_ume=True,
+                                        origin=None) -> Punishment:
+        """Create a local punishment with per-origin ID allocation (§10.3).
+
+        IDs are allocated per origin: SELECT MAX(punishment_id) FROM punishments
+        WHERE origin=?, then max+1. Origin signature is generated using the
+        local signing key over the canonical payload (§10.4).
+        """
+        if origin is None:
+            origin = self._origin
         report_ids_json = json.dumps(report_ids)
         created_at = int(time.time())
+        relay = self._origin
 
         with self._punishments_db.open() as ctx:
-            punishment_id = ctx.insert_record(
+            max_id = ctx.execute(
+                "SELECT MAX(punishment_id) FROM punishments WHERE origin=?", [origin]
+            ).fetchone()[0]
+            if max_id is None:
+                punishment_id = 1
+            else:
+                punishment_id = max_id + 1
+
+            # Generate origin signature
+            origin_sig_hex = None
+            if self._signing_key is not None:
+                payload = self._build_punishment_signed_payload(
+                    punishment_id, 0, origin, pubkey,
+                    report_ids, expires_at, ban_notes, issued_by, created_at,
+                )
+                sig = bytes(self._signing_key.sign(payload).signature)
+                origin_sig_hex = sig.hex()
+
+            ctx.insert_record(
                 self._punishments_table,
-                (pubkey, report_ids_json, expires_at, ban_notes, issued_by, created_at),
-                columns=['punished_pubkey', 'report_ids', 'expires_at', 'ban_notes', 'issued_by', 'created_at']
+                (punishment_id, origin, 0, pubkey, report_ids_json, expires_at,
+                 ban_notes, issued_by, created_at, relay, origin_sig_hex),
+                columns=['punishment_id', 'origin', 'rollover', 'punished_pubkey',
+                         'report_ids', 'expires_at', 'ban_notes', 'issued_by',
+                         'created_at', 'relay', 'origin_sig']
             )
 
         if sync_ume and self._ume is not None:
@@ -577,7 +805,80 @@ class Keibatsu:
             for user in users:
                 self._ume.upd(username=user.username, new_banned=is_active)
 
-        return self._get_punishment_by_id(punishment_id)
+        self._notify_punishment_mutation()
+        return self._get_punishment_by_id(punishment_id, origin, 0)
+
+    def _upsert_remote_punishment(self, punishment_id, origin, rollover,
+                                   punished_pubkey, report_ids, expires_at,
+                                   ban_notes, issued_by, created_at, relay,
+                                   origin_sig, peer_pubkey_resolver) -> bool:
+        """Import a remote punishment with conflict rollover (§10.6)."""
+        # Verify origin signature
+        if origin_sig and peer_pubkey_resolver:
+            origin_pubkey = peer_pubkey_resolver(origin)
+            if not origin_pubkey:
+                return False
+            try:
+                payload = self._build_punishment_signed_payload(
+                    punishment_id, rollover, origin, punished_pubkey,
+                    report_ids, expires_at, ban_notes, issued_by, created_at,
+                )
+                from core.crypto import Identity
+                if not Identity.verify(origin_pubkey, payload, bytes.fromhex(origin_sig)):
+                    return False
+            except (ValueError, Exception):
+                return False
+
+        report_ids_json = json.dumps(report_ids)
+        issued_by_b = issued_by or b''
+
+        with self._punishments_db.open() as ctx:
+            # Check for exact duplicate (idempotent)
+            existings = ctx.execute(
+                "SELECT origin_sig, report_ids, ban_notes, expires_at, punished_pubkey, issued_by, created_at "
+                "FROM punishments WHERE origin=? AND punishment_id=?",
+                [origin, punishment_id]
+            ).fetchall()
+
+            max_rollover = -1
+            duplicate = False
+            for ext in existings:
+                ext_ro = ctx.execute(
+                    "SELECT rollover FROM punishments WHERE origin=? AND punishment_id=? AND origin_sig=? AND report_ids=? AND ban_notes=?",
+                    [origin, punishment_id, ext[0], ext[1], ext[2]]
+                ).fetchone()
+                # Simpler: check all fields
+                pass
+
+            # Check for exact duplicate by comparing all fields
+            all_existing = ctx.execute(
+                "SELECT rollover, origin_sig, report_ids, ban_notes, expires_at, punished_pubkey, issued_by, created_at "
+                "FROM punishments WHERE origin=? AND punishment_id=?",
+                [origin, punishment_id]
+            ).fetchall()
+
+            for ext in all_existing:
+                ext_ro = ext[0]
+                if ext_ro > max_rollover:
+                    max_rollover = ext_ro
+                if (ext[1] == origin_sig and ext[2] == report_ids_json
+                        and ext[3] == ban_notes and ext[4] == expires_at
+                        and bytes(ext[5]) == punished_pubkey
+                        and (bytes(ext[6]) if ext[6] else b'') == issued_by_b
+                        and ext[7] == created_at):
+                    duplicate = True
+                    break
+
+            if not duplicate:
+                new_rollover = max_rollover + 1
+                ctx.execute(
+                    "INSERT INTO punishments (punishment_id, origin, rollover, punished_pubkey, "
+                    "report_ids, expires_at, ban_notes, issued_by, created_at, relay, origin_sig) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [punishment_id, origin, new_rollover, punished_pubkey, report_ids_json,
+                     expires_at, ban_notes, issued_by_b, created_at, relay, origin_sig]
+                )
+        return not duplicate
 
     def _is_banned(self, pubkey) -> tuple:
         punishment = self._get_latest_active_punishment(pubkey)
@@ -593,18 +894,20 @@ class Keibatsu:
             return False
 
         # The latest in-window row expired; only clear the UME ban flag when
-        # no other active in-window punishment remains for this pubkey.
+        # no other active in-window punishment remains for this pubkey across
+        # all origins (§11.4).
         now = int(time.time())
         with self._punishments_db.open() as ctx:
             rows = ctx.execute(
-                "SELECT created_at FROM punishments WHERE punished_pubkey=? AND (expires_at < 0 OR expires_at > ?)",
+                "SELECT created_at, origin FROM punishments WHERE punished_pubkey=? AND (expires_at < 0 OR expires_at > ?)",
                 [pubkey, now]
             ).fetchall()
 
         remaining_in_window = 0
         for row in rows:
             created_at = row[0] if row[0] is not None else 0
-            if self._in_window(created_at):
+            origin = row[1] if row[1] else self._origin
+            if self._in_window(created_at, origin):
                 remaining_in_window += 1
 
         if remaining_in_window == 0 and self._ume is not None:
@@ -615,25 +918,20 @@ class Keibatsu:
         return True
 
     def _list_active_punishments(self) -> list:
+        """List active in-window punishments from all origins (§11.4)."""
         now = int(time.time())
         results = []
         with self._punishments_db.open() as ctx:
             rows = ctx.execute(
-                "SELECT punishment_id, punished_pubkey, report_ids, expires_at, ban_notes, issued_by, created_at FROM punishments WHERE expires_at < 0 OR expires_at > ?",
+                "SELECT punishment_id, origin, rollover, punished_pubkey, report_ids, "
+                "expires_at, ban_notes, issued_by, created_at, relay, origin_sig "
+                "FROM punishments WHERE expires_at < 0 OR expires_at > ?",
                 [now]
             ).fetchall()
         for row in rows:
-            created_at = row[6] if row[6] is not None else 0
-            if not self._in_window(created_at):
+            p = self._row_to_punishment(row)
+            if not self._in_window(p.created_at, p.origin):
                 continue
-            p = Punishment()
-            p.punishment_id = row[0]
-            p.punished_pubkey = bytes(row[1])
-            p.report_ids = row[2] if row[2] else "[]"
-            p.expires_at = row[3]
-            p.ban_notes = row[4] if row[4] else ""
-            p.issued_by = bytes(row[5]) if row[5] is not None else b''
-            p.created_at = created_at
             results.append(p)
         return results
 
@@ -700,9 +998,9 @@ class Keibatsu:
             return self._sign_report(origin, report_num, signature)
         return AsyncResult(self._executor.submit(task))
 
-    def get_punishment(self, punishment_id: int):
+    def get_punishment(self, punishment_id: int, origin: str = None, rollover: int = 0):
         def task():
-            return self._get_punishment_by_id(punishment_id)
+            return self._get_punishment_by_id(punishment_id, origin, rollover)
         return AsyncResult(self._executor.submit(task))
 
     def list_punishments_by_pubkey(self, pubkey: bytes):
@@ -712,9 +1010,29 @@ class Keibatsu:
 
     def create_punishment(self, pubkey: bytes, report_ids: list,
                           expires_at: int, ban_notes: str = "",
-                          issued_by: bytes = b'', sync_ume: bool = True):
+                          issued_by: bytes = b'', sync_ume: bool = True,
+                          origin: str = None):
         def task():
-            return self._create_punishment(pubkey, report_ids, expires_at, ban_notes, issued_by, sync_ume)
+            return self._create_punishment(pubkey, report_ids, expires_at, ban_notes, issued_by, sync_ume, origin)
+        return AsyncResult(self._executor.submit(task))
+
+    def upsert_remote_punishment(self, punishment_id: int, origin: str, rollover: int,
+                                  punished_pubkey: bytes, report_ids: list, expires_at: int,
+                                  ban_notes: str, issued_by: bytes, created_at: int,
+                                  relay: str, origin_sig: str,
+                                  origin_pubkey_resolver: object) -> bool:
+        """Import a remote punishment with conflict rollover (§10.6).
+
+        - Exact canonical duplicate: idempotent, skip.
+        - Distinct valid origin-signed content: store under max(rollover)+1.
+        - Invalid origin signature: reject.
+        """
+        def task():
+            return self._upsert_remote_punishment(
+                punishment_id, origin, rollover, punished_pubkey, report_ids,
+                expires_at, ban_notes, issued_by, created_at, relay, origin_sig,
+                origin_pubkey_resolver,
+            )
         return AsyncResult(self._executor.submit(task))
 
     def is_banned(self, pubkey: bytes):

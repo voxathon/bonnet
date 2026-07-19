@@ -166,6 +166,16 @@ class CommandHandler:
             return self._cmd_report_sign(data, ctx)
         elif cmd == 0x54:
             return self._cmd_report_list_since(data, ctx)
+        elif cmd == 0x55:
+            return self._cmd_report_registry_head(data, ctx)
+        elif cmd == 0x56:
+            return self._cmd_report_registry_nodes(data, ctx)
+        elif cmd == 0x57:
+            return self._cmd_report_registry_records(data, ctx)
+        elif cmd == 0x58:
+            return self._cmd_report_registry_heads(data, ctx)
+        elif cmd == 0x59:
+            return self._cmd_report_registry_head_chain(data, ctx)
         elif cmd == 0x60:
             return self._cmd_punishment_create(data, ctx)
         elif cmd == 0x61:
@@ -176,6 +186,16 @@ class CommandHandler:
             return self._cmd_is_banned(data, ctx)
         elif cmd == 0x64:
             return self._cmd_punishment_list_by_pubkey(data, ctx)
+        elif cmd == 0x65:
+            return self._cmd_punishment_registry_head(data, ctx)
+        elif cmd == 0x66:
+            return self._cmd_punishment_registry_nodes(data, ctx)
+        elif cmd == 0x67:
+            return self._cmd_punishment_registry_records(data, ctx)
+        elif cmd == 0x68:
+            return self._cmd_punishment_registry_heads(data, ctx)
+        elif cmd == 0x69:
+            return self._cmd_punishment_registry_head_chain(data, ctx)
         elif cmd == 0x70:
             return self._cmd_peer_key_rotate(data, ctx)
         elif cmd == 0x71:
@@ -1547,8 +1567,12 @@ class CommandHandler:
         notes_bytes = (punishment.ban_notes or "").encode('utf-8')
         report_ids_list = punishment.get_report_ids()
         issued_by_bytes = punishment.issued_by or b''
+        origin_bytes = (punishment.origin or "").encode('utf-8')
+        origin_sig_bytes = (punishment.origin_sig or "").encode('utf-8')
 
         payload = struct.pack('>Q', punishment.punishment_id) + \
+                  struct.pack('>B', len(origin_bytes)) + origin_bytes + \
+                  struct.pack('>Q', punishment.rollover) + \
                   struct.pack('>B', len(pubkey_bytes)) + pubkey_bytes + \
                   struct.pack('>B', len(report_ids_list))
 
@@ -1559,18 +1583,25 @@ class CommandHandler:
         payload += struct.pack('>B', len(notes_bytes)) + notes_bytes
         payload += struct.pack('>B', len(issued_by_bytes)) + issued_by_bytes
         payload += struct.pack('>q', punishment.created_at)
+        payload += struct.pack('>B', len(origin_sig_bytes)) + origin_sig_bytes
 
         return payload
 
     def _cmd_punishment_get(self, data: bytes, ctx: CommandContext) -> bytes:
         try:
-            punishment_id = struct.unpack('>Q', data[0:8])[0]
+            offset = 0
+            # §12.4: PUNISHMENT_GET now takes (origin: u8-length UTF-8, punishment_id: u64be)
+            origin_len = data[offset]
+            offset += 1
+            origin = data[offset:offset+origin_len].decode('utf-8')
+            offset += origin_len
+            punishment_id = struct.unpack('>Q', data[offset:offset+8])[0]
 
-            result = self._keibatsu.get_punishment(punishment_id)
+            result = self._keibatsu.get_punishment(punishment_id, origin=origin)
             punishment = result.result()
 
             if punishment is None:
-                return self._build_error(404, "No punishment found for id")
+                return self._build_error(404, f"No punishment found for {origin}:{punishment_id}")
 
             return struct.pack('>B', 0x00) + self._encode_punishment(punishment)
 
@@ -1898,6 +1929,579 @@ class CommandHandler:
                 return self._build_error(404, f"No registry for origin '{origin}'")
 
             from core.user_registry import encode_head
+
+            end_seq = max(1, start_seq - max_count + 1)
+            heads = []
+            for seq in range(start_seq, end_seq - 1, -1):
+                head = store.get_head(origin, seq)
+                if head is not None:
+                    heads.append(head)
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(heads))
+            for head in heads:
+                encoded = encode_head(head)
+                response += struct.pack(">H", len(encoded)) + encoded
+            return response
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    # ------------------------------------------------------------------
+    # Report registry commands (opcodes 0x55–0x59) — mirror user registry
+    # ------------------------------------------------------------------
+
+    def _get_report_registry_service(self):
+        svc = getattr(self._engine, 'report_registry_service', None)
+        if svc is None:
+            return None
+        return svc
+
+    def _get_report_registry_store(self):
+        store = getattr(self._engine, 'report_registry_store', None)
+        if store is None:
+            return None
+        return store
+
+    def _cmd_report_registry_head(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            requested_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            if offset != len(data):
+                return self._build_error(400, "Trailing data in request")
+
+            svc = self._get_report_registry_service()
+            store = self._get_report_registry_store()
+
+            if svc is not None and origin == self._config.origin:
+                head = svc.build_snapshot()
+            elif store is not None:
+                head = store.get_head(origin, requested_seq)
+            else:
+                head = None
+
+            if head is None:
+                return self._build_error(404, f"No report registry head for origin '{origin}'")
+
+            from core.merkle_registry import encode_head
+            encoded = encode_head(head)
+            return struct.pack(">B", 0x00) + struct.pack(">H", len(encoded)) + encoded
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_report_registry_nodes(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 + 2 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            registry_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            prefix_count = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if prefix_count > 256:
+                return self._build_error(400, "Too many prefixes")
+
+            prefixes = []
+            for _ in range(prefix_count):
+                if offset + 3 > len(data):
+                    return self._build_error(400, "Truncated prefix header")
+                bit_len = struct.unpack(">H", data[offset:offset + 2])[0]
+                offset += 2
+                byte_len = data[offset]
+                offset += 1
+                if bit_len > 256 or offset + byte_len > len(data):
+                    return self._build_error(400, "Invalid prefix or truncated data")
+                prefix = data[offset:offset + byte_len]
+                offset += byte_len
+                prefixes.append((bit_len, prefix))
+            if offset != len(data):
+                return self._build_error(400, "Trailing data in request")
+
+            store = self._get_report_registry_store()
+            if store is None:
+                return self._build_error(503, "Report registry not available")
+
+            from core.merkle_registry import TREE_DEPTH, get_default_hashes
+            from core.report_registry import REGISTRY_TYPE_REPORTS
+
+            defaults = get_default_hashes(REGISTRY_TYPE_REPORTS)
+
+            state = store.get_state(origin)
+            if state is None or (registry_seq != 0 and registry_seq > state["highest_accepted_seq"]):
+                return self._build_error(404, f"No head at seq {registry_seq} for origin '{origin}'")
+            actual_seq = registry_seq if registry_seq != 0 else state["highest_accepted_seq"]
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(prefixes))
+            for bit_len, prefix in prefixes:
+                level = bit_len
+                prefix_int = int.from_bytes(prefix, "big") if prefix else 0
+                norm_prefix = prefix_int.to_bytes((level + 7) // 8 or 1, "big")
+                node_hash = store.get_node(origin, actual_seq, level, norm_prefix)
+
+                if node_hash is None:
+                    if level <= TREE_DEPTH:
+                        node_hash = defaults[level]
+                    else:
+                        node_hash = b"\x00" * 32
+
+                is_leaf = (level == TREE_DEPTH)
+                is_default = (node_hash == defaults[level])
+
+                if is_default:
+                    node_kind = 0
+                elif is_leaf:
+                    node_kind = 2
+                else:
+                    node_kind = 1
+
+                response += struct.pack(">H", bit_len)
+                response += struct.pack(">B", len(prefix)) + prefix
+                response += struct.pack(">B", node_kind)
+                response += node_hash
+
+                if node_kind == 1:
+                    left_prefix = (prefix_int << 1)
+                    right_prefix = (prefix_int << 1) | 1
+                    child_byte_len = ((level + 1) + 7) // 8 or 1
+                    left_hash = store.get_node(origin, actual_seq, level + 1,
+                                               left_prefix.to_bytes(child_byte_len, "big"))
+                    right_hash = store.get_node(origin, actual_seq, level + 1,
+                                                right_prefix.to_bytes(child_byte_len, "big"))
+                    if left_hash is None:
+                        left_hash = defaults[level + 1]
+                    if right_hash is None:
+                        right_hash = defaults[level + 1]
+                    response += left_hash + right_hash
+                elif node_kind == 2:
+                    record = store.get_record(origin, prefix_int.to_bytes(32, "big"))
+                    if record is not None:
+                        from core.merkle_registry import compute_value_hash
+                        vh = compute_value_hash(REGISTRY_TYPE_REPORTS, record)
+                        response += prefix_int.to_bytes(32, "big") + vh
+                    else:
+                        response += b"\x00" * 64
+
+            return response
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_report_registry_records(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 + 2 + 1 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            registry_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            record_count = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if record_count > 64:
+                return self._build_error(400, "Too many records requested")
+            include_proofs = data[offset]
+            offset += 1
+
+            store = self._get_report_registry_store()
+            if store is None:
+                return self._build_error(503, "Report registry not available")
+
+            state = store.get_state(origin)
+            if state is None:
+                return self._build_error(404, f"No report registry for origin '{origin}'")
+            actual_seq = registry_seq if registry_seq != 0 else state["highest_accepted_seq"]
+
+            if record_count == 0:
+                all_records = store.get_all_records(origin)
+                record_entries = [(r[0], r[1]) for r in all_records]
+            else:
+                expected_len = offset + record_count * 32
+                if len(data) != expected_len:
+                    return self._build_error(400, "Truncated or trailing key data")
+                keys = []
+                for _ in range(record_count):
+                    keys.append(data[offset:offset + 32])
+                    offset += 32
+                record_entries = []
+                for key in keys:
+                    raw = store.get_record(origin, key)
+                    if raw is not None:
+                        record_entries.append((key, raw))
+                    else:
+                        record_entries.append((key, None))
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(record_entries))
+            for key, raw in record_entries:
+                if raw is None:
+                    response += key + struct.pack(">B", 0)
+                else:
+                    response += key + struct.pack(">B", 1)
+                    response += struct.pack(">H", len(raw)) + raw
+                    response += struct.pack(">H", 0)
+            return response
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_report_registry_heads(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            if len(data) < 6:
+                return self._build_error(400, "Request too short")
+            offset_val = struct.unpack(">I", data[:4])[0]
+            limit = struct.unpack(">H", data[4:6])[0]
+            if limit > 100:
+                limit = 100
+
+            store = self._get_report_registry_store()
+            if store is None:
+                return self._build_error(503, "Report registry not available")
+
+            heads = store.list_heads(offset=offset_val, limit=limit)
+            from core.merkle_registry import encode_head
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(heads))
+            for head in heads:
+                encoded = encode_head(head)
+                response += struct.pack(">H", len(encoded)) + encoded
+            return response
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_report_registry_head_chain(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 + 2 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            start_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            max_count = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if max_count > 100:
+                max_count = 100
+            if offset != len(data):
+                return self._build_error(400, "Trailing data in request")
+
+            store = self._get_report_registry_store()
+            if store is None:
+                return self._build_error(503, "Report registry not available")
+
+            state = store.get_state(origin)
+            if state is None:
+                return self._build_error(404, f"No report registry for origin '{origin}'")
+
+            from core.merkle_registry import encode_head
+
+            end_seq = max(1, start_seq - max_count + 1)
+            heads = []
+            for seq in range(start_seq, end_seq - 1, -1):
+                head = store.get_head(origin, seq)
+                if head is not None:
+                    heads.append(head)
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(heads))
+            for head in heads:
+                encoded = encode_head(head)
+                response += struct.pack(">H", len(encoded)) + encoded
+            return response
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    # ------------------------------------------------------------------
+    # Punishment registry commands (opcodes 0x65–0x69) — mirror report registry
+    # ------------------------------------------------------------------
+
+    def _get_punishment_registry_service(self):
+        svc = getattr(self._engine, 'punishment_registry_service', None)
+        if svc is None:
+            return None
+        return svc
+
+    def _get_punishment_registry_store(self):
+        store = getattr(self._engine, 'punishment_registry_store', None)
+        if store is None:
+            return None
+        return store
+
+    def _cmd_punishment_registry_head(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            requested_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            if offset != len(data):
+                return self._build_error(400, "Trailing data in request")
+
+            svc = self._get_punishment_registry_service()
+            store = self._get_punishment_registry_store()
+
+            if svc is not None and origin == self._config.origin:
+                head = svc.build_snapshot()
+            elif store is not None:
+                head = store.get_head(origin, requested_seq)
+            else:
+                head = None
+
+            if head is None:
+                return self._build_error(404, f"No punishment registry head for origin '{origin}'")
+
+            from core.merkle_registry import encode_head
+            encoded = encode_head(head)
+            return struct.pack(">B", 0x00) + struct.pack(">H", len(encoded)) + encoded
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_punishment_registry_nodes(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 + 2 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            registry_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            prefix_count = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if prefix_count > 256:
+                return self._build_error(400, "Too many prefixes")
+
+            prefixes = []
+            for _ in range(prefix_count):
+                if offset + 3 > len(data):
+                    return self._build_error(400, "Truncated prefix header")
+                bit_len = struct.unpack(">H", data[offset:offset + 2])[0]
+                offset += 2
+                byte_len = data[offset]
+                offset += 1
+                if bit_len > 256 or offset + byte_len > len(data):
+                    return self._build_error(400, "Invalid prefix or truncated data")
+                prefix = data[offset:offset + byte_len]
+                offset += byte_len
+                prefixes.append((bit_len, prefix))
+            if offset != len(data):
+                return self._build_error(400, "Trailing data in request")
+
+            store = self._get_punishment_registry_store()
+            if store is None:
+                return self._build_error(503, "Punishment registry not available")
+
+            from core.merkle_registry import TREE_DEPTH, get_default_hashes, compute_value_hash
+            from core.punishment_registry import REGISTRY_TYPE_PUNISHMENTS
+
+            defaults = get_default_hashes(REGISTRY_TYPE_PUNISHMENTS)
+
+            state = store.get_state(origin)
+            if state is None or (registry_seq != 0 and registry_seq > state["highest_accepted_seq"]):
+                return self._build_error(404, f"No head at seq {registry_seq} for origin '{origin}'")
+            actual_seq = registry_seq if registry_seq != 0 else state["highest_accepted_seq"]
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(prefixes))
+            for bit_len, prefix in prefixes:
+                level = bit_len
+                prefix_int = int.from_bytes(prefix, "big") if prefix else 0
+                norm_prefix = prefix_int.to_bytes((level + 7) // 8 or 1, "big")
+                node_hash = store.get_node(origin, actual_seq, level, norm_prefix)
+
+                if node_hash is None:
+                    if level <= TREE_DEPTH:
+                        node_hash = defaults[level]
+                    else:
+                        node_hash = b"\x00" * 32
+
+                is_leaf = (level == TREE_DEPTH)
+                is_default = (node_hash == defaults[level])
+
+                if is_default:
+                    node_kind = 0
+                elif is_leaf:
+                    node_kind = 2
+                else:
+                    node_kind = 1
+
+                response += struct.pack(">H", bit_len)
+                response += struct.pack(">B", len(prefix)) + prefix
+                response += struct.pack(">B", node_kind)
+                response += node_hash
+
+                if node_kind == 1:
+                    left_prefix = (prefix_int << 1)
+                    right_prefix = (prefix_int << 1) | 1
+                    child_byte_len = ((level + 1) + 7) // 8 or 1
+                    left_hash = store.get_node(origin, actual_seq, level + 1,
+                                               left_prefix.to_bytes(child_byte_len, "big"))
+                    right_hash = store.get_node(origin, actual_seq, level + 1,
+                                                right_prefix.to_bytes(child_byte_len, "big"))
+                    if left_hash is None:
+                        left_hash = defaults[level + 1]
+                    if right_hash is None:
+                        right_hash = defaults[level + 1]
+                    response += left_hash + right_hash
+                elif node_kind == 2:
+                    record = store.get_record(origin, prefix_int.to_bytes(32, "big"))
+                    if record is not None:
+                        vh = compute_value_hash(REGISTRY_TYPE_PUNISHMENTS, record)
+                        response += prefix_int.to_bytes(32, "big") + vh
+                    else:
+                        response += b"\x00" * 64
+
+            return response
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_punishment_registry_records(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 + 2 + 1 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            registry_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            record_count = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if record_count > 64:
+                return self._build_error(400, "Too many records requested")
+            include_proofs = data[offset]
+            offset += 1
+
+            store = self._get_punishment_registry_store()
+            if store is None:
+                return self._build_error(503, "Punishment registry not available")
+
+            state = store.get_state(origin)
+            if state is None:
+                return self._build_error(404, f"No punishment registry for origin '{origin}'")
+            actual_seq = registry_seq if registry_seq != 0 else state["highest_accepted_seq"]
+
+            if record_count == 0:
+                all_records = store.get_all_records(origin)
+                record_entries = [(r[0], r[1]) for r in all_records]
+            else:
+                expected_len = offset + record_count * 32
+                if len(data) != expected_len:
+                    return self._build_error(400, "Truncated or trailing key data")
+                keys = []
+                for _ in range(record_count):
+                    keys.append(data[offset:offset + 32])
+                    offset += 32
+                record_entries = []
+                for key in keys:
+                    raw = store.get_record(origin, key)
+                    if raw is not None:
+                        record_entries.append((key, raw))
+                    else:
+                        record_entries.append((key, None))
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(record_entries))
+            for key, raw in record_entries:
+                if raw is None:
+                    response += key + struct.pack(">B", 0)
+                else:
+                    response += key + struct.pack(">B", 1)
+                    response += struct.pack(">H", len(raw)) + raw
+                    response += struct.pack(">H", 0)
+            return response
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_punishment_registry_heads(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            if len(data) < 6:
+                return self._build_error(400, "Request too short")
+            offset_val = struct.unpack(">I", data[:4])[0]
+            limit = struct.unpack(">H", data[4:6])[0]
+            if limit > 100:
+                limit = 100
+
+            store = self._get_punishment_registry_store()
+            if store is None:
+                return self._build_error(503, "Punishment registry not available")
+
+            heads = store.list_heads(offset=offset_val, limit=limit)
+            from core.merkle_registry import encode_head
+
+            response = struct.pack(">B", 0x00) + struct.pack(">H", len(heads))
+            for head in heads:
+                encoded = encode_head(head)
+                response += struct.pack(">H", len(encoded)) + encoded
+            return response
+
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_punishment_registry_head_chain(self, data: bytes, ctx: CommandContext) -> bytes:
+        try:
+            offset = 0
+            if len(data) < 2:
+                return self._build_error(400, "Request too short")
+            origin_len = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if origin_len > 255 or offset + origin_len + 8 + 2 > len(data):
+                return self._build_error(400, "Invalid origin or truncated request")
+            origin = data[offset:offset + origin_len].decode("utf-8")
+            offset += origin_len
+            start_seq = struct.unpack(">Q", data[offset:offset + 8])[0]
+            offset += 8
+            max_count = struct.unpack(">H", data[offset:offset + 2])[0]
+            offset += 2
+            if max_count > 100:
+                max_count = 100
+            if offset != len(data):
+                return self._build_error(400, "Trailing data in request")
+
+            store = self._get_punishment_registry_store()
+            if store is None:
+                return self._build_error(503, "Punishment registry not available")
+
+            state = store.get_state(origin)
+            if state is None:
+                return self._build_error(404, f"No punishment registry for origin '{origin}'")
+
+            from core.merkle_registry import encode_head
 
             end_seq = max(1, start_seq - max_count + 1)
             heads = []
