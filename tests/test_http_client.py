@@ -399,7 +399,7 @@ class TestDiscovery:
     async def test_discover_returns_correct_info(self, setup):
         async with _make_client(setup) as client:
             info = await client.discover()
-            assert info["protocol_versions"] == [2]
+            assert info["protocol_versions"] == [2, 3]
             assert info["origin"] == "bbs.test"
             assert info["public_key"] == setup.server_identity.public_key.hex()
             assert "anonymous_key" in info

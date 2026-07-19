@@ -141,8 +141,81 @@ class Filter:
         return Filter(origin, created_after, created_before)
 
 
+class FeedSubscription:
+    """Feed subscription config (§15).
+
+    A subscription says "import metadata for these boards from this origin,
+    dialing these relay candidates." Matching is against event origin and
+    board, never relay hostname.
+    """
+    def __init__(self, origin: str, boards: list, relays: list,
+                 body_policy: str = "on-demand"):
+        self.origin = origin
+        self.boards = boards  # list of board names, or ["*"] for all
+        self.relays = relays
+        self.body_policy = body_policy  # "none", "on-demand", "eager"
+
+    def matches_board(self, board: str) -> bool:
+        if not self.boards:
+            return False
+        if "*" in self.boards:
+            return True
+        return board in self.boards
+
+    @staticmethod
+    def from_dict(data: dict) -> 'FeedSubscription':
+        origin = data.get('origin', '')
+        boards = data.get('boards', [])
+        if isinstance(boards, str):
+            boards = [boards]
+        relays = data.get('relays', [])
+        if isinstance(relays, str):
+            relays = [relays]
+        body_policy = data.get('body_policy', 'on-demand')
+        return FeedSubscription(origin, boards, relays, body_policy)
+
+
+class ControlPolicy:
+    """Control enforcement policy (§15).
+
+    Specifies which event types to apply from a specific (origin, board) feed.
+    Evaluated only over already accepted events.
+    """
+    def __init__(self, origin: str, board: str, apply: list):
+        self.origin = origin
+        self.board = board
+        self.apply = apply  # e.g. ["punishment", "punishment-revoke"]
+
+    @staticmethod
+    def from_dict(data: dict) -> 'ControlPolicy':
+        origin = data.get('origin', '')
+        board = data.get('board', '')
+        apply_types = data.get('apply', [])
+        if isinstance(apply_types, str):
+            apply_types = [apply_types]
+        return ControlPolicy(origin, board, apply_types)
+
+
+class ModerationBoards:
+    """Configured local moderation board names (§15)."""
+    def __init__(self, rules: str = "moderation.rules",
+                 reports: str = "moderation.reports",
+                 punishments: str = "moderation.actions"):
+        self.rules = rules
+        self.reports = reports
+        self.punishments = punishments
+
+    @staticmethod
+    def from_dict(data: dict) -> 'ModerationBoards':
+        return ModerationBoards(
+            rules=data.get('rules', 'moderation.rules'),
+            reports=data.get('reports', 'moderation.reports'),
+            punishments=data.get('punishments', 'moderation.actions'),
+        )
+
+
 class Config:
-    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None, tls_ca_bundle: bool | str = True, search_max_count: int = 1000, search_timeout_seconds: int = 10, search_result_limit: int = 100, search_per_identity_concurrency: int = 1, search_rate_limit: int = 10, search_rate_window_seconds: int = 60, rg_path: str = None, http_port: int = 2272, http_host: str = "0.0.0.0", signature_lifetime_seconds: int = 60, clock_skew_seconds: int = 30, replay_db_path: str = None, max_concurrent_requests: int = 100, keepalive_seconds: int = 15, allow_cleartext_loopback: bool = False, trusted_proxies: list = None, max_creation_time_correction: int = 86400, allow_legacy_unsigned_user_sync: bool = False, filters: List['Filter'] = None, import_allowlist: dict = None):
+    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None, tls_ca_bundle: bool | str = True, search_max_count: int = 1000, search_timeout_seconds: int = 10, search_result_limit: int = 100, search_per_identity_concurrency: int = 1, search_rate_limit: int = 10, search_rate_window_seconds: int = 60, rg_path: str = None, http_port: int = 2272, http_host: str = "0.0.0.0", signature_lifetime_seconds: int = 60, clock_skew_seconds: int = 30, replay_db_path: str = None, max_concurrent_requests: int = 100, keepalive_seconds: int = 15, allow_cleartext_loopback: bool = False, trusted_proxies: list = None, max_creation_time_correction: int = 86400, allow_legacy_unsigned_user_sync: bool = False, filters: List['Filter'] = None, import_allowlist: dict = None, feed_subscriptions: List['FeedSubscription'] = None, control_policies: List['ControlPolicy'] = None, moderation_boards: 'ModerationBoards' = None, sync_interval_seconds: int = 300, sync_backoff_max_seconds: int = 3600, max_article_body_size: int = 1048576):
         if registrars is None:
             registrars = ["knolastna.me"]
         self.registrars = [r.lower() for r in registrars]
@@ -216,6 +289,14 @@ class Config:
         self.acls = acls
         self.admin_bypass_acl = admin_bypass_acl
         self.filters = filters or []
+
+        # Feed subscriptions (§15): per-(origin, boards) import config.
+        self.feed_subscriptions: List[FeedSubscription] = feed_subscriptions or []
+        self.control_policies: List[ControlPolicy] = control_policies or []
+        self.moderation_boards: ModerationBoards = moderation_boards or ModerationBoards()
+        self.sync_interval_seconds = sync_interval_seconds
+        self.sync_backoff_max_seconds = sync_backoff_max_seconds
+        self.max_article_body_size = max_article_body_size
 
     def _resolve_paths(self, identity_path: str, userfile_path: str, nav_db_path: str, reports_db_path: str, punishments_db_path: str, log_dir: str) -> None:
         """
@@ -319,6 +400,27 @@ class Config:
                     if isinstance(origins, list):
                         import_allowlist[obj_type] = [o for o in origins if isinstance(o, str) and o]
 
+        feed_subscriptions = []
+        if 'feed_subscription' in data:
+            for sub_data in data['feed_subscription']:
+                feed_subscriptions.append(FeedSubscription.from_dict(sub_data))
+
+        control_policies = []
+        if 'control_policy' in data:
+            for pol_data in data['control_policy']:
+                control_policies.append(ControlPolicy.from_dict(pol_data))
+
+        moderation_boards = None
+        if 'moderation_boards' in data:
+            moderation_boards = ModerationBoards.from_dict(data['moderation_boards'])
+
+        sync_cfg = data.get('sync', {})
+        sync_interval_seconds = sync_cfg.get('interval_seconds', 300)
+        sync_backoff_max_seconds = sync_cfg.get('backoff_max_seconds', 3600)
+
+        limits_cfg = data.get('limits', {})
+        max_article_body_size = limits_cfg.get('max_article_body_size', 1048576)
+
         return Config(
             registrars=registrars,
             timeout_seconds=timeout_seconds,
@@ -352,7 +454,13 @@ class Config:
             search_rate_window_seconds=search_rate_window_seconds,
             rg_path=rg_path,
             filters=filters,
-            import_allowlist=import_allowlist
+            import_allowlist=import_allowlist,
+            feed_subscriptions=feed_subscriptions,
+            control_policies=control_policies,
+            moderation_boards=moderation_boards,
+            sync_interval_seconds=sync_interval_seconds,
+            sync_backoff_max_seconds=sync_backoff_max_seconds,
+            max_article_body_size=max_article_body_size,
         )
 
     @staticmethod
@@ -552,6 +660,29 @@ key_path = "./certs/bonnet.key"
         if not allowed:
             return False
         return origin.lower() in allowed
+
+    def get_feed_subscription(self, origin: str, board: str):
+        """Find the first matching FeedSubscription for (origin, board).
+
+        Returns the FeedSubscription or None. Matching is against event origin
+        and board, never relay hostname. A subscription with boards=["*"]
+        matches any board for that origin.
+        """
+        for sub in self.feed_subscriptions:
+            if sub.origin == origin and sub.matches_board(board):
+                return sub
+        return None
+
+    def is_feed_subscribed(self, origin: str, board: str) -> bool:
+        """Check if a (origin, board) feed is subscribed for import."""
+        return self.get_feed_subscription(origin, board) is not None
+
+    def get_control_policy(self, origin: str, board: str):
+        """Find the ControlPolicy for (origin, board), or None."""
+        for policy in self.control_policies:
+            if policy.origin == origin and policy.board == board:
+                return policy
+        return None
 
     def record_in_window(self, origin: str, creation_time: int) -> bool:
         """Eval-time creation-date window for a record's origin.

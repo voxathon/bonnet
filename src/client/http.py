@@ -57,6 +57,12 @@ from .protocol import (
     encode_tlv_str, encode_tlv_long_str, encode_tlv_i32, encode_tlv_u8,
     TLV_CONTENT, TLV_SUBJECT, TLV_OPTIONS, TLV_TAGS, TLV_STICKY, TLV_CLOSED,
     ResponseStatus,
+    build_article_publish, build_article_get, build_article_list,
+    build_feed_head, build_feed_events, build_article_body,
+    build_feed_heads, build_article_search, build_ban_status,
+    parse_article_publish_resp, parse_article_get_resp, parse_article_list_resp,
+    parse_feed_head_resp, parse_feed_events_resp, parse_article_body_resp,
+    parse_feed_heads_resp, parse_article_search_resp, parse_ban_status_resp,
 )
 from .models import User, Board, Post, PostSummary, PostCreateResult, Rule, Report, Punishment, BannedStatus, Peer
 
@@ -568,6 +574,121 @@ class BonnetHTTPClient:
     @property
     def server_public_key(self) -> Optional[bytes]:
         return self._server_public_key
+
+    # ------------------------------------------------------------------
+    # Protocol v3 article feed methods
+    # ------------------------------------------------------------------
+
+    async def _send_command_v3(self, cmd_bytes: bytes) -> bytes:
+        """Send a signed v3 command and return the verified response payload."""
+        if self._signer is None:
+            raise BonnetHTTPError(500, "Not connected — call connect() or connect_anonymous() first")
+
+        self._ensure_client()
+        nonce = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+        now = int(time.time())
+        expires = now + 60
+
+        msg = HTTPMessage(
+            method="POST",
+            url=f"{self._base_url}/v3/command",
+            headers={
+                "Content-Type": "application/vnd.bonnet.command",
+                "Content-Digest": compute_content_digest(cmd_bytes),
+                "Bonnet-Version": "3",
+                "Bonnet-Nonce": nonce,
+            },
+            body=cmd_bytes,
+        )
+
+        await self._signer.sign_request(
+            msg, nonce=nonce, created=now, expires=expires,
+            include_username=self._username is not None,
+        )
+
+        headers = dict(msg.headers)
+        resp = await self._http_client.post("/v3/command", content=cmd_bytes, headers=headers)
+
+        if resp.status_code != 200:
+            raise BonnetHTTPError(resp.status_code, f"HTTP error: {resp.text[:200]}")
+
+        await self._verify_response(resp, nonce)
+
+        status, payload = parse_response(resp.content)
+        if status == ResponseStatus.ERROR:
+            raise BonnetHTTPError(*self._parse_error(payload))
+        if status == ResponseStatus.REDIRECT:
+            origin = decode_redirect(payload)
+            raise BonnetHTTPError(302, f"Redirect to origin: {origin}")
+
+        return payload
+
+    async def article_publish(self, encoded_submission: bytes, body: bytes,
+                              author_signature_scheme: int,
+                              author_signature: bytes) -> dict:
+        """Publish an article or control event via v3 ARTICLE_PUBLISH."""
+        cmd = build_article_publish(encoded_submission, body,
+                                    author_signature_scheme, author_signature)
+        payload = await self._send_command_v3(cmd)
+        return parse_article_publish_resp(payload)
+
+    async def article_get(self, board: str, selector_type: int,
+                          selector, include_body: bool = True) -> dict:
+        """Get a single article via v3 ARTICLE_GET."""
+        cmd = build_article_get(board, selector_type, selector, include_body)
+        payload = await self._send_command_v3(cmd)
+        return parse_article_get_resp(payload)
+
+    async def article_list(self, board: str, offset: int = 0, limit: int = 50,
+                           flags: int = 0) -> list[dict]:
+        """List articles via v3 ARTICLE_LIST."""
+        cmd = build_article_list(board, offset, limit, flags)
+        payload = await self._send_command_v3(cmd)
+        return parse_article_list_resp(payload)
+
+    async def article_search(self, board: str, text_query: str = "",
+                             offset: int = 0, limit: int = 50,
+                             flags: int = 0,
+                             actor_pubkey: bytes = None,
+                             created_after: int = 0,
+                             created_before: int = 0) -> dict:
+        """Search articles via v3 ARTICLE_SEARCH."""
+        cmd = build_article_search(board, text_query, offset, limit, flags,
+                                   actor_pubkey, created_after, created_before)
+        payload = await self._send_command_v3(cmd)
+        return parse_article_search_resp(payload)
+
+    async def feed_head(self, board: str) -> bytes:
+        """Get the signed feed head via v3 FEED_HEAD."""
+        cmd = build_feed_head(board)
+        payload = await self._send_command_v3(cmd)
+        return parse_feed_head_resp(payload)
+
+    async def feed_events(self, board: str, start_seq: int = 1,
+                          max_count: int = 100) -> list[bytes]:
+        """Fetch feed events via v3 FEED_EVENTS."""
+        cmd = build_feed_events(board, start_seq, max_count)
+        payload = await self._send_command_v3(cmd)
+        return parse_feed_events_resp(payload)
+
+    async def article_body(self, board: str, message_id: bytes,
+                           body_hash: bytes) -> bytes:
+        """Fetch a body blob via v3 ARTICLE_BODY."""
+        cmd = build_article_body(board, message_id, body_hash)
+        payload = await self._send_command_v3(cmd)
+        return parse_article_body_resp(payload)
+
+    async def feed_heads(self, offset: int = 0, limit: int = 100) -> list[dict]:
+        """List feed heads via v3 FEED_HEADS."""
+        cmd = build_feed_heads(offset, limit)
+        payload = await self._send_command_v3(cmd)
+        return parse_feed_heads_resp(payload)
+
+    async def ban_status(self, pubkey: bytes) -> dict:
+        """Check ban status via v3 BAN_STATUS."""
+        cmd = build_ban_status(pubkey)
+        payload = await self._send_command_v3(cmd)
+        return parse_ban_status_resp(payload)
 
 
 class _ServerKeyResolver(KeyResolver):
