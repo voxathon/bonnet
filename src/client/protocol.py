@@ -12,6 +12,9 @@ from .models import (
     Punishment,
     BannedStatus,
     Peer,
+    Article,
+    ArticleEvent,
+    FeedHeadInfo,
 )
 
 
@@ -1329,3 +1332,433 @@ def build_punishment_registry_head_chain(origin: str, start_seq: int,
         + struct.pack(">Q", start_seq)
         + struct.pack(">H", max_count)
     )
+
+
+# ===========================================================================
+# Protocol v3 article feed builders and parsers (§13.4)
+# ===========================================================================
+
+V3_COMMANDS = {
+    "ARTICLE_PUBLISH": 0x12,
+    "ARTICLE_GET": 0x13,
+    "ARTICLE_LIST": 0x14,
+    "FEED_HEAD": 0x15,
+    "FEED_EVENTS": 0x16,
+    "ARTICLE_BODY": 0x17,
+    "FEED_HEADS": 0x18,
+    "ARTICLE_SEARCH": 0x19,
+    "BOARD_SET_STATE": 0x1A,
+    "BAN_STATUS": 0x1B,
+}
+
+
+def _encode_v3_str(s: str) -> bytes:
+    """u16 length + UTF-8 bytes (§13.4: stop using u8 string lengths)."""
+    b = s.encode("utf-8")
+    return struct.pack(">H", len(b)) + b
+
+
+def _decode_v3_str(data: bytes, offset: int) -> tuple[str, int]:
+    length = struct.unpack(">H", data[offset:offset + 2])[0]
+    offset += 2
+    s = data[offset:offset + length].decode("utf-8")
+    return s, offset + length
+
+
+def _decode_v3_bytes_u16(data: bytes, offset: int) -> tuple[bytes, int]:
+    length = struct.unpack(">H", data[offset:offset + 2])[0]
+    offset += 2
+    b = data[offset:offset + length]
+    return b, offset + length
+
+
+def _decode_v3_bytes_u32(data: bytes, offset: int) -> tuple[bytes, int]:
+    length = struct.unpack(">I", data[offset:offset + 4])[0]
+    offset += 4
+    b = data[offset:offset + length]
+    return b, offset + length
+
+
+# --- ARTICLE_PUBLISH (§13.4) ---
+
+def build_article_publish(encoded_submission: bytes, body: bytes,
+                          author_signature_scheme: int,
+                          author_signature: bytes) -> bytes:
+    """Build an ARTICLE_PUBLISH request.
+
+    Wire format:
+      opcode:u8 + submission_len:u32 + encoded_submission +
+      body_len:u32 + body + author_signature_scheme:u8 +
+      author_signature_len:u16 + author_signature
+    """
+    return (
+        struct.pack(">B", V3_COMMANDS["ARTICLE_PUBLISH"])
+        + struct.pack(">I", len(encoded_submission)) + encoded_submission
+        + struct.pack(">I", len(body)) + body
+        + struct.pack(">B", author_signature_scheme)
+        + struct.pack(">H", len(author_signature)) + author_signature
+    )
+
+
+def parse_article_publish_resp(payload: bytes) -> dict:
+    """Parse ARTICLE_PUBLISH success response.
+
+    Format: event_len:u32 + encoded_event + head_len:u16 + encoded_head
+    Returns dict with 'event_bytes' and 'head_bytes'.
+    """
+    offset = 0
+    event_len = struct.unpack(">I", payload[offset:offset + 4])[0]
+    offset += 4
+    event_bytes = payload[offset:offset + event_len]
+    offset += event_len
+    head_len = struct.unpack(">H", payload[offset:offset + 2])[0]
+    offset += 2
+    head_bytes = payload[offset:offset + head_len]
+    return {"event_bytes": event_bytes, "head_bytes": head_bytes}
+
+
+# --- ARTICLE_GET (§13.4) ---
+
+def build_article_get(board: str, selector_type: int,
+                      selector: bytes | int, include_body: bool = True) -> bytes:
+    """Build an ARTICLE_GET request.
+
+    selector_type: 0x01 (article_num, selector is int) or
+                   0x02 (message_id, selector is 32-byte bytes)
+    """
+    out = struct.pack(">B", V3_COMMANDS["ARTICLE_GET"]) + _encode_v3_str(board)
+    out += struct.pack(">B", selector_type)
+    if selector_type == 0x01:
+        out += struct.pack(">Q", selector)
+    elif selector_type == 0x02:
+        out += selector  # 32 bytes raw
+    else:
+        raise ProtocolError(f"invalid selector_type {selector_type}")
+    out += struct.pack(">B", 1 if include_body else 0)
+    return out
+
+
+def parse_article_get_resp(payload: bytes) -> dict:
+    """Parse ARTICLE_GET success response.
+
+    Format: event_len:u32 + encoded_event + projected_state:u8 +
+    control_count:u16 + control_message_ids:(32*count) +
+    body_status:u8 + body_len:u32 + body_bytes
+    """
+    offset = 0
+    event_len = struct.unpack(">I", payload[offset:offset + 4])[0]
+    offset += 4
+    event_bytes = payload[offset:offset + event_len]
+    offset += event_len
+    projected_state = payload[offset]
+    offset += 1
+    control_count = struct.unpack(">H", payload[offset:offset + 2])[0]
+    offset += 2
+    control_ids = []
+    for _ in range(control_count):
+        control_ids.append(payload[offset:offset + 32].hex())
+        offset += 32
+    body_status = payload[offset]
+    offset += 1
+    body_len = struct.unpack(">I", payload[offset:offset + 4])[0]
+    offset += 4
+    body = payload[offset:offset + body_len] if body_len > 0 else b""
+    return {
+        "event_bytes": event_bytes,
+        "projected_state": projected_state,
+        "control_event_ids": control_ids,
+        "body_status": body_status,
+        "body": body,
+    }
+
+
+# --- ARTICLE_LIST (§13.4) ---
+
+def build_article_list(board: str, offset: int = 0, limit: int = 50,
+                       flags: int = 0) -> bytes:
+    """Build an ARTICLE_LIST request."""
+    return (
+        struct.pack(">B", V3_COMMANDS["ARTICLE_LIST"])
+        + _encode_v3_str(board)
+        + struct.pack(">I", offset)
+        + struct.pack(">H", limit)
+        + struct.pack(">H", flags)
+    )
+
+
+def parse_article_list_resp(payload: bytes) -> list[dict]:
+    """Parse ARTICLE_LIST success response.
+
+    Format: count:u16 + repeated { event_len:u32 + encoded_event +
+    projected_state:u8 + control_count:u16 + control_ids + body_status:u8 +
+    body_len:u32 + optional_body }
+    """
+    offset = 0
+    count = struct.unpack(">H", payload[offset:offset + 2])[0]
+    offset += 2
+    results = []
+    for _ in range(count):
+        event_len = struct.unpack(">I", payload[offset:offset + 4])[0]
+        offset += 4
+        event_bytes = payload[offset:offset + event_len]
+        offset += event_len
+        projected_state = payload[offset]
+        offset += 1
+        control_count = struct.unpack(">H", payload[offset:offset + 2])[0]
+        offset += 2
+        control_ids = []
+        for _ in range(control_count):
+            control_ids.append(payload[offset:offset + 32].hex())
+            offset += 32
+        body_status = payload[offset]
+        offset += 1
+        body_len = struct.unpack(">I", payload[offset:offset + 4])[0]
+        offset += 4
+        body = payload[offset:offset + body_len] if body_len > 0 else b""
+        offset += body_len
+        results.append({
+            "event_bytes": event_bytes,
+            "projected_state": projected_state,
+            "control_event_ids": control_ids,
+            "body_status": body_status,
+            "body": body,
+        })
+    return results
+
+
+# --- FEED_HEAD (§13.4) ---
+
+def build_feed_head(board: str) -> bytes:
+    """Build a FEED_HEAD request. Format: origin + board (u16 strings)."""
+    return (
+        struct.pack(">B", V3_COMMANDS["FEED_HEAD"])
+        + _encode_v3_str("")  # origin omitted for local; server fills
+        + _encode_v3_str(board)
+    )
+
+
+def parse_feed_head_resp(payload: bytes) -> bytes:
+    """Parse FEED_HEAD success response. Returns encoded head bytes."""
+    head_len = struct.unpack(">H", payload[0:2])[0]
+    return payload[2:2 + head_len]
+
+
+# --- FEED_EVENTS (§13.4) ---
+
+def build_feed_events(board: str, start_seq: int, max_count: int = 100) -> bytes:
+    """Build a FEED_EVENTS request."""
+    return (
+        struct.pack(">B", V3_COMMANDS["FEED_EVENTS"])
+        + _encode_v3_str("")  # origin omitted for local
+        + _encode_v3_str(board)
+        + struct.pack(">Q", start_seq)
+        + struct.pack(">H", max_count)
+    )
+
+
+def parse_feed_events_resp(payload: bytes) -> list[bytes]:
+    """Parse FEED_EVENTS success response. Returns list of encoded event bytes."""
+    offset = 0
+    count = struct.unpack(">H", payload[offset:offset + 2])[0]
+    offset += 2
+    events = []
+    for _ in range(count):
+        event_len = struct.unpack(">I", payload[offset:offset + 4])[0]
+        offset += 4
+        events.append(payload[offset:offset + event_len])
+        offset += event_len
+    return events
+
+
+# --- ARTICLE_BODY (§13.4) ---
+
+def build_article_body(board: str, message_id: bytes, body_hash: bytes) -> bytes:
+    """Build an ARTICLE_BODY request."""
+    return (
+        struct.pack(">B", V3_COMMANDS["ARTICLE_BODY"])
+        + _encode_v3_str("")  # origin
+        + _encode_v3_str(board)
+        + message_id  # 32 bytes
+        + body_hash   # 32 bytes
+    )
+
+
+def parse_article_body_resp(payload: bytes) -> bytes:
+    """Parse ARTICLE_BODY success response. Returns body bytes."""
+    body_len = struct.unpack(">I", payload[0:4])[0]
+    return payload[4:4 + body_len]
+
+
+# --- FEED_HEADS (§13.4) ---
+
+def build_feed_heads(offset: int = 0, limit: int = 100) -> bytes:
+    """Build a FEED_HEADS request."""
+    return (
+        struct.pack(">B", V3_COMMANDS["FEED_HEADS"])
+        + struct.pack(">I", offset)
+        + struct.pack(">H", limit)
+    )
+
+
+def parse_feed_heads_resp(payload: bytes) -> list[dict]:
+    """Parse FEED_HEADS success response.
+
+    Format: count:u16 + repeated { origin:u16 + board:u16 + head_len:u16 + head }
+    """
+    offset = 0
+    count = struct.unpack(">H", payload[offset:offset + 2])[0]
+    offset += 2
+    results = []
+    for _ in range(count):
+        origin, offset = _decode_v3_str(payload, offset)
+        board, offset = _decode_v3_str(payload, offset)
+        head_len = struct.unpack(">H", payload[offset:offset + 2])[0]
+        offset += 2
+        head_bytes = payload[offset:offset + head_len]
+        offset += head_len
+        results.append({"origin": origin, "board": board, "head_bytes": head_bytes})
+    return results
+
+
+# --- ARTICLE_SEARCH (§13.4) ---
+
+def build_article_search(board: str, text_query: str = "",
+                         offset: int = 0, limit: int = 50,
+                         flags: int = 0,
+                         actor_pubkey: bytes = None,
+                         created_after: int = 0,
+                         created_before: int = 0) -> bytes:
+    """Build an ARTICLE_SEARCH request with structured filters."""
+    out = struct.pack(">B", V3_COMMANDS["ARTICLE_SEARCH"])
+    out += _encode_v3_str("")  # origin
+    out += _encode_v3_str(board)
+    out += struct.pack(">I", 0)  # event_type_mask (not used in Phase 3)
+    out += (actor_pubkey if actor_pubkey else b"\x00" * 32)  # actor_pubkey_or_zero
+    out += b"\x00" * 32  # subject_pubkey_or_zero
+    out += b"\x00" * 32  # target_message_id_or_zero
+    out += struct.pack(">q", created_after)
+    out += struct.pack(">q", created_before)
+    out += _encode_v3_str(text_query)
+    out += struct.pack(">I", offset)
+    out += struct.pack(">H", limit)
+    out += struct.pack(">H", flags)
+    return out
+
+
+def parse_article_search_resp(payload: bytes) -> dict:
+    """Parse ARTICLE_SEARCH success response.
+
+    Format: body_search_complete:u8 + same entry list as ARTICLE_LIST
+    """
+    body_search_complete = payload[0]
+    entries = parse_article_list_resp(payload[1:])
+    return {"body_search_complete": body_search_complete, "entries": entries}
+
+
+# --- BAN_STATUS (§13.4) ---
+
+def build_ban_status(pubkey: bytes) -> bytes:
+    """Build a BAN_STATUS request. Format: opcode + 32-byte pubkey."""
+    return struct.pack(">B", V3_COMMANDS["BAN_STATUS"]) + pubkey
+
+
+def parse_ban_status_resp(payload: bytes) -> dict:
+    """Parse BAN_STATUS success response.
+
+    Format: banned:u8 + reason:u16 + punishment_message_id:32 +
+    source_origin:u16 + source_board:u16 + expires_at:i64
+    """
+    offset = 0
+    banned = payload[offset]
+    offset += 1
+    reason, offset = _decode_v3_str(payload, offset)
+    punishment_message_id = payload[offset:offset + 32].hex()
+    offset += 32
+    source_origin, offset = _decode_v3_str(payload, offset)
+    source_board, offset = _decode_v3_str(payload, offset)
+    expires_at = struct.unpack(">q", payload[offset:offset + 8])[0]
+    return {
+        "banned": bool(banned),
+        "reason": reason,
+        "punishment_message_id": punishment_message_id,
+        "source_origin": source_origin,
+        "source_board": source_board,
+        "expires_at": expires_at,
+    }
+
+
+# --- Event decoding helper for client-side consumption ---
+
+def decode_v3_event(event_bytes: bytes) -> dict:
+    """Decode a v3 encoded event into a dict of fields.
+
+    Uses core.article_feed.decode_event and converts to client-friendly dict.
+    """
+    import sys
+    import os
+    src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "src")
+    if src_path not in sys.path:
+        sys.path.insert(0, src_path)
+    from core.article_feed import (
+        decode_event, EVENT_ARTICLE, EVENT_CANCEL, EVENT_RESTORE, EVENT_PURGE,
+        ArticleHeaders, ReportHeaders, PunishmentHeaders, RuleHeaders, PinHeaders,
+    )
+
+    ev = decode_event(event_bytes)
+    event_type_names = {
+        0x01: "ARTICLE", 0x02: "CANCEL", 0x03: "RESTORE", 0x04: "PURGE",
+        0x05: "RULE", 0x06: "RULE_REVOKE", 0x07: "REPORT", 0x08: "PUNISHMENT",
+        0x09: "PUNISHMENT_REVOKE", 0x0A: "BOARD_CLOSE", 0x0B: "BOARD_REOPEN",
+        0x0C: "ARTICLE_PIN", 0x0D: "ARTICLE_UNPIN", 0x0E: "THREAD_CLOSE",
+        0x0F: "THREAD_REOPEN",
+    }
+    result = {
+        "feed_seq": ev.feed_seq,
+        "article_num": ev.article_num,
+        "message_id": ev.message_id.hex(),
+        "event_type": ev.event_type,
+        "event_type_name": event_type_names.get(ev.event_type, "UNKNOWN"),
+        "origin": ev.origin,
+        "board": ev.board,
+        "created_at": ev.created_at,
+        "actor_pubkey": ev.actor_pubkey.hex(),
+        "actor_username": ev.actor_username,
+        "actor_registrar": ev.actor_registrar,
+        "root_message_id": ev.root_message_id.hex(),
+        "reply_to_message_id": ev.reply_to_message_id.hex(),
+        "supersedes_message_id": ev.supersedes_message_id.hex(),
+        "target_message_id": ev.target_message_id.hex(),
+        "body_hash": ev.body_hash.hex(),
+        "body_size": ev.body_size,
+    }
+    if isinstance(ev.headers, ArticleHeaders):
+        result["subject"] = ev.headers.subject
+        result["tags"] = ev.headers.tags
+        result["options"] = ev.headers.options
+    else:
+        result["subject"] = ""
+        result["tags"] = ""
+        result["options"] = ""
+    return result
+
+
+def decode_v3_head(head_bytes: bytes) -> dict:
+    """Decode a v3 encoded feed head into a dict."""
+    import sys
+    import os
+    src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "src")
+    if src_path not in sys.path:
+        sys.path.insert(0, src_path)
+    from core.article_feed import decode_head
+
+    head = decode_head(head_bytes)
+    return {
+        "origin": head.origin,
+        "board": head.board,
+        "latest_feed_seq": head.latest_feed_seq,
+        "latest_event_hash": head.latest_event_hash.hex(),
+        "article_count": head.article_count,
+        "event_count": head.event_count,
+        "snapshot_timestamp": head.snapshot_timestamp,
+        "signature": head.signature.hex(),
+    }

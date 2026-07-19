@@ -25,6 +25,10 @@ from engine.facade import BonnetEngine
 from net.http_server import BonnetHTTPServer
 from net.replay import ReplayLedger
 from net.rate_limiter import RateLimiter
+from core.article_feed import ArticleFeedStore
+from core.migration import MigrationExecutor
+from engine.article_service import ArticleService
+from engine.moderation_service import ModerationService
 
 class Bonnet:
     def __init__(self, userfile_path, identity_path, config):
@@ -87,6 +91,36 @@ class Bonnet:
         self.engine.punishment_registry_store = self.punishment_registry_store
         self.engine.punishment_registry_service = self.punishment_registry_service
         self.keibatsu.register_punishment_mutation_callback(self.punishment_registry_service.mark_dirty)
+
+        # Article feed store + service (protocol v3)
+        article_feeds_db_path = os.path.join(config.data_dir, "article_feeds.db")
+        article_bodies_dir = os.path.join(config.data_dir, "article_bodies")
+        self.article_feed_store = ArticleFeedStore(
+            article_feeds_db_path, article_bodies_dir,
+            max_body_size=getattr(config, 'max_article_body_size', 1024 * 1024),
+        )
+        self.article_service = ArticleService(
+            self.article_feed_store, config.origin, self.server_identity,
+        )
+        self.engine.article_service = self.article_service
+        self.moderation_service = ModerationService(
+            self.article_feed_store, config,
+        )
+        self.engine.moderation_service = self.moderation_service
+        log_msg(f"INIT: ArticleFeedStore at {article_feeds_db_path}")
+
+        # Run migration from legacy v2 data to v3 events (Phase 6)
+        # Idempotent: skips already-completed migration units on restart
+        try:
+            migrator = MigrationExecutor(
+                self.article_feed_store, self.server_identity, config,
+                ame=self.ame, keibatsu=self.keibatsu,
+            )
+            mig_results = migrator.migrate_all()
+            if any(v > 0 for v in mig_results.values() if isinstance(v, int)):
+                log_msg(f"INIT: migration completed — {mig_results}")
+        except Exception as e:
+            log_msg(f"INIT: migration error (non-fatal): {e}")
 
         self.command_handler = CommandHandler(self.engine)
         self.root_user = self.ume.ensure_root_user(config.origin, self.server_identity.public_key)

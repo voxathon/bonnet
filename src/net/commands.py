@@ -6,7 +6,7 @@ from net.context import CommandContext
 from net.rate_limiter import RateLimiter
 from core.crypto import Identity
 from core.binutil import resolve_rg
-from core.commands import COMMAND_SPECS, get_spec
+from core.commands import COMMAND_SPECS, get_spec, V3_COMMAND_SPECS, get_v3_spec
 from engine.facade import BonnetEngine
 from engine.ame import SearchUnavailable, SearchTimedOut
 from core.logging import log_msg, log_hex, log_dict
@@ -202,6 +202,636 @@ class CommandHandler:
             return self._cmd_peer_key_list(data, ctx)
         else:
             return self._build_error(400, f"Unknown command {cmd}")
+
+    # ------------------------------------------------------------------
+    # Protocol v3 dispatch
+    # ------------------------------------------------------------------
+
+    def handle_v3(self, request: bytes, ctx: CommandContext) -> bytes:
+        """Dispatch a protocol v3 command."""
+        max_size = self._config.max_request_size
+        if max_size > 0 and len(request) > max_size:
+            return self._build_error(413, f"Request too large (max {max_size} bytes)")
+
+        rl_key = self._rate_limiter.identity_key(ctx.peer_public_key) if ctx.peer_public_key else self._rate_limiter.address_key(ctx.remote_addr)
+        if not self._rate_limiter.check(rl_key):
+            return self._build_error(429, "Too many requests. Please slow down.")
+
+        if len(request) == 0:
+            return self._build_error(400, "Empty request")
+
+        cmd = request[0]
+        data = request[1:]
+
+        spec = get_v3_spec(cmd)
+        cmd_name = spec.name if spec else f'UNKNOWN_{cmd:02x}'
+
+        username = ctx.user.username if ctx.user else 'anonymous'
+        log_msg(f"HANDLE_V3: cmd=0x{cmd:02x} ({cmd_name}), user={username}")
+
+        if spec is None:
+            return self._build_error(400, f"Unknown v3 command 0x{cmd:02x}")
+
+        # Command ACL gate
+        if not self._engine.check_command_permission(spec, ctx):
+            log_msg(f"HANDLE_V3: rejected - command ACL denied cmd=0x{cmd:02x} ({cmd_name}) for user={username}")
+            return self._build_error(403, "Command not permitted")
+
+        # Object ACL gate
+        if spec.object_name is not None:
+            if not self._engine.check_object_permission(spec.action, spec.object_name, ctx):
+                log_msg(f"HANDLE_V3: rejected - object ACL denied object={spec.object_name} for cmd=0x{cmd:02x}")
+                return self._build_error(403, "Object not permitted")
+
+        # Banned-write gate
+        if ctx.user is not None and spec.action == "write":
+            ban_result = self._keibatsu.is_banned(ctx.user.publickey).result()
+            if ban_result[0]:
+                log_msg(f"HANDLE_V3: rejected - banned user '{ctx.user.username}' attempted write cmd=0x{cmd:02x}")
+                return self._build_error(403, "You are banned from performing this action")
+
+        # Dispatch v3 commands
+        if cmd == 0x01:
+            return self._cmd_register(data, ctx)
+        elif cmd == 0x02:
+            return self._cmd_get(data, ctx)
+        elif cmd == 0x03:
+            return self._cmd_list(data, ctx)
+        elif cmd == 0x04:
+            return self._cmd_list_peers(data, ctx)
+        elif cmd == 0x05:
+            return self._cmd_user_registry_head(data, ctx)
+        elif cmd == 0x06:
+            return self._cmd_user_registry_nodes(data, ctx)
+        elif cmd == 0x07:
+            return self._cmd_user_registry_records(data, ctx)
+        elif cmd == 0x08:
+            return self._cmd_user_registry_heads(data, ctx)
+        elif cmd == 0x09:
+            return self._cmd_user_registry_head_chain(data, ctx)
+        elif cmd == 0x10:
+            return self._cmd_board_create(data, ctx)
+        elif cmd == 0x11:
+            return self._cmd_board_list(data, ctx)
+        elif cmd == 0x12:
+            return self._cmd_v3_article_publish(data, ctx)
+        elif cmd == 0x13:
+            return self._cmd_v3_article_get(data, ctx)
+        elif cmd == 0x14:
+            return self._cmd_v3_article_list(data, ctx)
+        elif cmd == 0x15:
+            return self._cmd_v3_feed_head(data, ctx)
+        elif cmd == 0x16:
+            return self._cmd_v3_feed_events(data, ctx)
+        elif cmd == 0x17:
+            return self._cmd_v3_article_body(data, ctx)
+        elif cmd == 0x18:
+            return self._cmd_v3_feed_heads(data, ctx)
+        elif cmd == 0x19:
+            return self._cmd_v3_article_search(data, ctx)
+        elif cmd == 0x1A:
+            return self._cmd_v3_board_set_state(data, ctx)
+        elif cmd == 0x1B:
+            return self._cmd_v3_ban_status(data, ctx)
+        elif cmd == 0x20:
+            return self._cmd_user_promote(data, ctx)
+        elif cmd == 0x21:
+            return self._cmd_user_demote(data, ctx)
+        elif cmd == 0x30:
+            return self._cmd_get_pubkey(data, ctx)
+        elif cmd == 0x70:
+            return self._cmd_peer_key_rotate(data, ctx)
+        elif cmd == 0x71:
+            return self._cmd_peer_key_list(data, ctx)
+        else:
+            return self._build_error(400, f"Unknown v3 command {cmd}")
+
+    # ------------------------------------------------------------------
+    # v3 article/feed command handlers (§13.4)
+    # ------------------------------------------------------------------
+
+    def _cmd_v3_article_publish(self, data: bytes, ctx: CommandContext) -> bytes:
+        """ARTICLE_PUBLISH — publish an article or control event to the local feed."""
+        if not ctx.is_registered:
+            return self._build_error(401, "Authentication required")
+        try:
+            from core.article_feed import (
+                decode_submission, validate_submission, verify_author_signature,
+                SCHEME_V3, encode_event, encode_head, Submission,
+            )
+            idx = 0
+            sub_len = struct.unpack(">I", data[idx:idx + 4])[0]
+            idx += 4
+            encoded_sub = data[idx:idx + sub_len]
+            idx += sub_len
+            body_len = struct.unpack(">I", data[idx:idx + 4])[0]
+            idx += 4
+            body = data[idx:idx + body_len]
+            idx += body_len
+            author_scheme = data[idx]
+            idx += 1
+            sig_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            author_sig = data[idx:idx + sig_len]
+
+            submission = decode_submission(encoded_sub)
+            validate_submission(submission)
+
+            # Verify the submission origin matches local origin
+            if submission.origin != self._config.origin:
+                return self._build_error(403, "Submission origin does not match server origin")
+
+            # Check board write permission
+            if not self._engine.check_permission("write", submission.board, ctx):
+                return self._build_error(403, "Permission denied for this board")
+
+            # Verify author signature for scheme 1
+            if author_scheme == SCHEME_V3:
+                if not verify_author_signature(submission, author_sig, submission.actor_pubkey):
+                    return self._build_error(403, "Author signature verification failed")
+            else:
+                return self._build_error(400, "Only scheme 1 is supported for normal publication")
+
+            # Verify body hash
+            from core.article_feed import compute_body_hash
+            actual_hash = compute_body_hash(body)
+            if actual_hash != submission.body_hash:
+                return self._build_error(400, "body_hash does not match supplied body")
+            if len(body) != submission.body_size:
+                return self._build_error(400, "body_size does not match supplied body")
+
+            # Check that the actor pubkey matches the authenticated user
+            if ctx.peer_public_key != submission.actor_pubkey:
+                return self._build_error(403, "Actor pubkey does not match authenticated key")
+
+            # Dispatch to ArticleService
+            service = self._engine.article_service
+            if service is None:
+                return self._build_error(500, "Article service not configured")
+
+            from core.article_feed import EVENT_ARTICLE, EVENT_CANCEL, EVENT_RESTORE, EVENT_PURGE
+            et = submission.event_type
+            if et == EVENT_ARTICLE:
+                event, head = service.publish_article(submission, body, author_sig)
+            elif et == EVENT_CANCEL:
+                event, head = service.cancel_article(submission, author_sig)
+            elif et == EVENT_RESTORE:
+                event, head = service.restore_article(submission, author_sig)
+            elif et == EVENT_PURGE:
+                event, head = service.purge_article(submission, author_sig)
+            else:
+                # For other event types (REPORT, PUNISHMENT, RULE, etc.), use raw publish
+                event, head = service.publish_article_raw(
+                    et, submission, body, author_sig)
+
+            # Build response: event_len:u32 + encoded_event + head_len:u16 + encoded_head
+            encoded_event = encode_event(event)
+            encoded_head_bytes = encode_head(head)
+            return (
+                struct.pack(">B", 0x00)
+                + struct.pack(">I", len(encoded_event)) + encoded_event
+                + struct.pack(">H", len(encoded_head_bytes)) + encoded_head_bytes
+            )
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_v3_article_get(self, data: bytes, ctx: CommandContext) -> bytes:
+        """ARTICLE_GET — get a single article with lifecycle state."""
+        try:
+            from core.article_feed import encode_event
+            idx = 0
+            # board (u16 string)
+            b_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            board = data[idx:idx + b_len].decode("utf-8")
+            idx += b_len
+
+            valid, err = _validate_name(board, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
+            if not self._engine.check_permission("read", board, ctx):
+                return self._build_error(403, "Permission denied for this board")
+
+            selector_type = data[idx]
+            idx += 1
+            if selector_type == 0x01:
+                selector = struct.unpack(">Q", data[idx:idx + 8])[0]
+                idx += 8
+            elif selector_type == 0x02:
+                selector = data[idx:idx + 32]
+                idx += 32
+            else:
+                return self._build_error(400, "Invalid selector type")
+
+            include_body = data[idx] if idx < len(data) else 0
+            idx += 1
+
+            service = self._engine.article_service
+            if service is None:
+                return self._build_error(500, "Article service not configured")
+
+            view = service.get_article(self._config.origin, board, selector_type,
+                                       selector, include_body=bool(include_body))
+            if view is None:
+                return self._build_error(404, "Article not found")
+
+            from core.article_feed import (
+                STATE_ACTIVE, STATE_CANCELLED, STATE_SUPERSEDED, STATE_PURGED,
+                BODY_NOT_REQUESTED, BODY_INCLUDED, BODY_AVAILABLE_NOT_INCLUDED,
+                BODY_UNAVAILABLE,
+            )
+            state_map = {
+                "active": STATE_ACTIVE, "cancelled": STATE_CANCELLED,
+                "superseded": STATE_SUPERSEDED, "purged": STATE_PURGED,
+            }
+            projected_state = state_map.get(view.projected_state, STATE_ACTIVE)
+
+            if include_body and view.body is not None:
+                body_status = BODY_INCLUDED
+                body_bytes = view.body
+            elif view.body_available:
+                body_status = BODY_AVAILABLE_NOT_INCLUDED
+                body_bytes = b""
+            else:
+                body_status = BODY_UNAVAILABLE
+                body_bytes = b""
+
+            encoded_event = encode_event(view.event)
+            control_ids = view.control_event_ids
+
+            out = struct.pack(">B", 0x00)
+            out += struct.pack(">I", len(encoded_event)) + encoded_event
+            out += struct.pack(">B", projected_state)
+            out += struct.pack(">H", len(control_ids))
+            for cid in control_ids:
+                out += cid
+            out += struct.pack(">B", body_status)
+            out += struct.pack(">I", len(body_bytes)) + body_bytes
+            return out
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_v3_article_list(self, data: bytes, ctx: CommandContext) -> bytes:
+        """ARTICLE_LIST — list articles with projection filtering."""
+        try:
+            from core.article_feed import (
+                encode_event, FLAG_INCLUDE_CANCELLED, FLAG_INCLUDE_SUPERSEDED,
+                FLAG_INCLUDE_PURGED, FLAG_INCLUDE_CONTROLS, FLAG_INCLUDE_BODIES,
+                STATE_ACTIVE, STATE_CANCELLED, STATE_SUPERSEDED, STATE_PURGED,
+                BODY_AVAILABLE_NOT_INCLUDED, BODY_INCLUDED, BODY_NOT_REQUESTED,
+            )
+            idx = 0
+            b_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            board = data[idx:idx + b_len].decode("utf-8")
+            idx += b_len
+
+            valid, err = _validate_name(board, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
+            if not self._engine.check_permission("read", board, ctx):
+                return self._build_error(403, "Permission denied for this board")
+
+            offset = struct.unpack(">I", data[idx:idx + 4])[0]
+            idx += 4
+            limit = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            flags = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+
+            include_cancelled = bool(flags & FLAG_INCLUDE_CANCELLED)
+            include_superseded = bool(flags & FLAG_INCLUDE_SUPERSEDED)
+            include_purged = bool(flags & FLAG_INCLUDE_PURGED)
+            include_body = bool(flags & FLAG_INCLUDE_BODIES)
+
+            service = self._engine.article_service
+            if service is None:
+                return self._build_error(500, "Article service not configured")
+
+            articles = service.list_articles(
+                self._config.origin, board, offset=offset, limit=limit,
+                include_cancelled=include_cancelled,
+                include_superseded=include_superseded,
+                include_purged=include_purged,
+                include_body=include_body,
+            )
+
+            state_map = {
+                "active": STATE_ACTIVE, "cancelled": STATE_CANCELLED,
+                "superseded": STATE_SUPERSEDED, "purged": STATE_PURGED,
+            }
+
+            out = struct.pack(">B", 0x00)
+            out += struct.pack(">H", len(articles))
+            for view in articles:
+                encoded_event = encode_event(view.event)
+                projected_state = state_map.get(view.projected_state, STATE_ACTIVE)
+                out += struct.pack(">I", len(encoded_event)) + encoded_event
+                out += struct.pack(">B", projected_state)
+                out += struct.pack(">H", len(view.control_event_ids))
+                for cid in view.control_event_ids:
+                    out += cid
+                if include_body and view.body is not None:
+                    out += struct.pack(">B", BODY_INCLUDED)
+                    out += struct.pack(">I", len(view.body)) + view.body
+                else:
+                    out += struct.pack(">B", BODY_AVAILABLE_NOT_INCLUDED)
+                    out += struct.pack(">I", 0)
+            return out
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_v3_feed_head(self, data: bytes, ctx: CommandContext) -> bytes:
+        """FEED_HEAD — get the signed feed head for a board."""
+        try:
+            from core.article_feed import encode_head
+            idx = 0
+            # origin (u16 string, may be empty for local)
+            o_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            origin = data[idx:idx + o_len].decode("utf-8") if o_len > 0 else self._config.origin
+            idx += o_len
+            b_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            board = data[idx:idx + b_len].decode("utf-8")
+            idx += b_len
+
+            valid, err = _validate_name(board, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
+            if not self._engine.check_permission("read", board, ctx):
+                return self._build_error(403, "Permission denied for this board")
+
+            service = self._engine.article_service
+            if service is None:
+                return self._build_error(500, "Article service not configured")
+
+            head = service.store.get_head(origin, board)
+            if head is None:
+                # Return an empty head for an empty feed
+                from core.article_feed import make_empty_head, sign_head
+                head = make_empty_head(origin, board)
+                sign_head(head, self._server_identity)
+
+            encoded = encode_head(head)
+            return struct.pack(">B", 0x00) + struct.pack(">H", len(encoded)) + encoded
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_v3_feed_events(self, data: bytes, ctx: CommandContext) -> bytes:
+        """FEED_EVENTS — fetch a contiguous range of feed events."""
+        try:
+            from core.article_feed import encode_event
+            idx = 0
+            o_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            origin = data[idx:idx + o_len].decode("utf-8") if o_len > 0 else self._config.origin
+            idx += o_len
+            b_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            board = data[idx:idx + b_len].decode("utf-8")
+            idx += b_len
+
+            valid, err = _validate_name(board, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
+            if not self._engine.check_permission("read", board, ctx):
+                return self._build_error(403, "Permission denied for this board")
+
+            start_seq = struct.unpack(">Q", data[idx:idx + 8])[0]
+            idx += 8
+            max_count = struct.unpack(">H", data[idx:idx + 2])[0]
+
+            service = self._engine.article_service
+            if service is None:
+                return self._build_error(500, "Article service not configured")
+
+            events = service.store.get_events_range(origin, board, start_seq, max_count)
+            out = struct.pack(">B", 0x00)
+            out += struct.pack(">H", len(events))
+            for ev in events:
+                encoded = encode_event(ev)
+                out += struct.pack(">I", len(encoded)) + encoded
+            return out
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_v3_article_body(self, data: bytes, ctx: CommandContext) -> bytes:
+        """ARTICLE_BODY — fetch a body blob by hash."""
+        try:
+            idx = 0
+            o_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            origin = data[idx:idx + o_len].decode("utf-8") if o_len > 0 else self._config.origin
+            idx += o_len
+            b_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            board = data[idx:idx + b_len].decode("utf-8")
+            idx += b_len
+
+            valid, err = _validate_name(board, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
+            if not self._engine.check_permission("read", board, ctx):
+                return self._build_error(403, "Permission denied for this board")
+
+            message_id = data[idx:idx + 32]
+            idx += 32
+            body_hash = data[idx:idx + 32]
+
+            service = self._engine.article_service
+            if service is None:
+                return self._build_error(500, "Article service not configured")
+
+            # Verify the message belongs to this feed
+            event = service.store.get_event_by_message_id(message_id)
+            if event is None or event.origin != origin or event.board != board:
+                return self._build_error(404, "Article not found")
+
+            # Verify the body hash matches
+            if event.body_hash != body_hash:
+                return self._build_error(404, "Body hash mismatch")
+
+            body = service.store.get_body(body_hash)
+            if body is None:
+                return self._build_error(410, "Body unavailable")
+
+            return struct.pack(">B", 0x00) + struct.pack(">I", len(body)) + body
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_v3_feed_heads(self, data: bytes, ctx: CommandContext) -> bytes:
+        """FEED_HEADS — list feed heads across all boards."""
+        try:
+            from core.article_feed import encode_head
+            offset = struct.unpack(">I", data[0:4])[0]
+            limit = struct.unpack(">H", data[4:6])[0]
+
+            service = self._engine.article_service
+            if service is None:
+                return self._build_error(500, "Article service not configured")
+
+            heads = service.store.list_heads(offset, limit)
+            out = struct.pack(">B", 0x00)
+            out += struct.pack(">H", len(heads))
+            for origin, board, head in heads:
+                origin_b = origin.encode("utf-8")
+                board_b = board.encode("utf-8")
+                encoded = encode_head(head)
+                out += struct.pack(">H", len(origin_b)) + origin_b
+                out += struct.pack(">H", len(board_b)) + board_b
+                out += struct.pack(">H", len(encoded)) + encoded
+            return out
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_v3_article_search(self, data: bytes, ctx: CommandContext) -> bytes:
+        """ARTICLE_SEARCH — search articles with structured filters."""
+        try:
+            from core.article_feed import (
+                encode_event, FLAG_INCLUDE_CANCELLED, FLAG_INCLUDE_SUPERSEDED,
+                FLAG_INCLUDE_PURGED, FLAG_INCLUDE_BODIES,
+                STATE_ACTIVE, STATE_CANCELLED, STATE_SUPERSEDED, STATE_PURGED,
+                BODY_AVAILABLE_NOT_INCLUDED, BODY_INCLUDED,
+            )
+            idx = 0
+            # origin (u16 string)
+            o_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            origin = data[idx:idx + o_len].decode("utf-8") if o_len > 0 else self._config.origin
+            idx += o_len
+            b_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            board = data[idx:idx + b_len].decode("utf-8")
+            idx += b_len
+
+            valid, err = _validate_name(board, "Board name")
+            if not valid:
+                return self._build_error(400, err)
+
+            if not self._engine.check_permission("read", board, ctx):
+                return self._build_error(403, "Permission denied for this board")
+
+            # Skip event_type_mask (u32), actor_pubkey (32), subject_pubkey (32),
+            # target_message_id (32), created_after (i64), created_before (i64)
+            idx += 4 + 32 + 32 + 32 + 8 + 8
+
+            # text_query (u16 string)
+            tq_len = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            text_query = data[idx:idx + tq_len].decode("utf-8") if tq_len > 0 else ""
+            idx += tq_len
+
+            offset = struct.unpack(">I", data[idx:idx + 4])[0]
+            idx += 4
+            limit = struct.unpack(">H", data[idx:idx + 2])[0]
+            idx += 2
+            flags = struct.unpack(">H", data[idx:idx + 2])[0]
+
+            include_cancelled = bool(flags & FLAG_INCLUDE_CANCELLED)
+            include_superseded = bool(flags & FLAG_INCLUDE_SUPERSEDED)
+            include_purged = bool(flags & FLAG_INCLUDE_PURGED)
+
+            service = self._engine.article_service
+            if service is None:
+                return self._build_error(500, "Article service not configured")
+
+            results = service.search_articles(
+                origin, board, text_query=text_query,
+                offset=offset, limit=limit,
+                include_cancelled=include_cancelled,
+                include_superseded=include_superseded,
+                include_purged=include_purged,
+            )
+
+            state_map = {
+                "active": STATE_ACTIVE, "cancelled": STATE_CANCELLED,
+                "superseded": STATE_SUPERSEDED, "purged": STATE_PURGED,
+            }
+
+            out = struct.pack(">B", 0x00)
+            out += struct.pack(">B", 1)  # body_search_complete = true
+            out += struct.pack(">H", len(results))
+            for view in results:
+                encoded = encode_event(view.event)
+                projected_state = state_map.get(view.projected_state, STATE_ACTIVE)
+                out += struct.pack(">I", len(encoded)) + encoded
+                out += struct.pack(">B", projected_state)
+                out += struct.pack(">H", len(view.control_event_ids))
+                for cid in view.control_event_ids:
+                    out += cid
+                out += struct.pack(">B", BODY_AVAILABLE_NOT_INCLUDED)
+                out += struct.pack(">I", 0)
+            return out
+        except Exception as e:
+            return self._build_error(400, str(e))
+
+    def _cmd_v3_board_set_state(self, data: bytes, ctx: CommandContext) -> bytes:
+        """BOARD_SET_STATE — publish BOARD_CLOSE or BOARD_REOPEN via the feed."""
+        if not ctx.is_registered:
+            return self._build_error(401, "Authentication required")
+        return self._build_error(501, "BOARD_SET_STATE not yet implemented")
+
+    def _cmd_v3_ban_status(self, data: bytes, ctx: CommandContext) -> bytes:
+        """BAN_STATUS — check effective ban status for a public key.
+
+        Checks both legacy Keibatsu bans and v3 event-derived bans.
+        The v3 check uses ModerationService if configured; the legacy check
+        uses Keibatsu. During the migration transition, the union of both
+        applies (§17.3, §18.6).
+        """
+        try:
+            pubkey = data[0:32]
+
+            # Check v3 event-derived bans first
+            mod_service = getattr(self._engine, 'moderation_service', None)
+            v3_ban = None
+            if mod_service is not None:
+                v3_ban = mod_service.is_banned(pubkey)
+
+            # Check legacy bans
+            ban_result = self._keibatsu.is_banned(pubkey).result()
+            legacy_banned = ban_result[0] if ban_result else False
+            legacy_reason = ""
+            if ban_result and len(ban_result) > 1 and ban_result[1]:
+                legacy_reason = ban_result[1]
+
+            # Union: banned if either says banned (§18.6 transition)
+            banned = legacy_banned or (v3_ban.banned if v3_ban else False)
+
+            # Prefer v3 reason if available, else legacy
+            if v3_ban and v3_ban.banned:
+                reason = v3_ban.reason
+                punishment_id = v3_ban.punishment_message_id
+                source_origin = v3_ban.source_origin
+                source_board = v3_ban.source_board
+                expires_at = v3_ban.expires_at
+            else:
+                reason = legacy_reason
+                punishment_id = b"\x00" * 32
+                source_origin = ""
+                source_board = ""
+                expires_at = 0
+
+            reason_b = reason.encode("utf-8")
+            origin_b = source_origin.encode("utf-8")
+            board_b = source_board.encode("utf-8")
+
+            out = struct.pack(">B", 0x00)
+            out += struct.pack(">B", 1 if banned else 0)
+            out += struct.pack(">H", len(reason_b)) + reason_b
+            out += punishment_id
+            out += struct.pack(">H", len(origin_b)) + origin_b
+            out += struct.pack(">H", len(board_b)) + board_b
+            out += struct.pack(">q", expires_at)
+            return out
+        except Exception as e:
+            return self._build_error(400, str(e))
 
     def _build_error(self, code: int, message: str) -> bytes:
         msg_bytes = message.encode('utf-8')

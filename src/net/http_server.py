@@ -126,7 +126,9 @@ class BonnetHTTPServer:
             if path == "/.well-known/bonnet" and method == "GET":
                 await self._handle_discovery(scope, receive, send)
             elif path == "/v2/command" and method == "POST":
-                await self._handle_command(scope, receive, send)
+                await self._handle_command(scope, receive, send, version="2")
+            elif path == "/v3/command" and method == "POST":
+                await self._handle_command(scope, receive, send, version="3")
             else:
                 await self._send_error_response(send, 404, b"Not Found", scope)
         elif scope["type"] == "lifespan":
@@ -150,19 +152,24 @@ class BonnetHTTPServer:
     # ------------------------------------------------------------------
 
     async def _handle_discovery(self, scope, receive, send):
+        capabilities = [
+            "user-registry-merkle-v1",
+            "report-registry-merkle-v1",
+            "punishment-registry-merkle-v1",
+            "command-object-acl-v1",
+            "immutable-article-feed-v1",
+            "article-control-messages-v1",
+            "article-body-by-hash-v1",
+        ]
         body = json.dumps({
-            "protocol_versions": [2],
+            "protocol_versions": [2, 3],
             "origin": self._config.origin,
             "public_key": self._server_identity.public_key.hex(),
             "anonymous_key": self._anonymous_public_key.hex(),
             "anonymous_private_key": self._anonymous_identity.private_key.hex(),
             "command_endpoint": "/v2/command",
-            "capabilities": [
-                "user-registry-merkle-v1",
-                "report-registry-merkle-v1",
-                "punishment-registry-merkle-v1",
-                "command-object-acl-v1",
-            ],
+            "v3_command_endpoint": "/v3/command",
+            "capabilities": capabilities,
         }).encode("utf-8")
 
         msg = HTTPMessage(
@@ -190,7 +197,7 @@ class BonnetHTTPServer:
     # Command endpoint
     # ------------------------------------------------------------------
 
-    async def _handle_command(self, scope, receive, send):
+    async def _handle_command(self, scope, receive, send, version="2"):
         remote_addr = self._get_remote_addr(scope)
 
         # 1. Read body
@@ -218,7 +225,7 @@ class BonnetHTTPServer:
         bonnet_username = headers.get("bonnet-username", "")
 
         # 3. Check Bonnet-Version
-        if bonnet_version != "2":
+        if bonnet_version != version:
             await self._send_protocol_error(send, 426, "Unsupported protocol version", remote_addr, scope)
             return
 
@@ -253,7 +260,7 @@ class BonnetHTTPServer:
 
         # 7. Verify signature
         authority = self._get_authority(scope)
-        url = f"https://{authority}/v2/command"
+        url = f"https://{authority}/v{version}/command"
 
         req_msg = HTTPMessage(
             method="POST",
@@ -344,7 +351,10 @@ class BonnetHTTPServer:
 
         # 13. Dispatch
         try:
-            response_body = await asyncio.to_thread(self._handler.handle, body, ctx)
+            if version == "3":
+                response_body = await asyncio.to_thread(self._handler.handle_v3, body, ctx)
+            else:
+                response_body = await asyncio.to_thread(self._handler.handle, body, ctx)
         except Exception as e:
             import traceback
             log_msg(f"HTTP_COMMAND: dispatch error: {type(e).__name__}: {e}")
@@ -352,19 +362,19 @@ class BonnetHTTPServer:
             response_body = bytes([0x01]) + struct.pack(">BHB", 0x01, 500, len(str(e))) + str(e).encode("utf-8")
 
         # 14. Sign and send response
-        await self._send_signed_response(send, response_body, remote_addr, request_nonce_for_response)
+        await self._send_signed_response(send, response_body, remote_addr, request_nonce_for_response, version=version)
 
     # ------------------------------------------------------------------
     # Response helpers
     # ------------------------------------------------------------------
 
-    async def _send_signed_response(self, send, response_body: bytes, remote_addr: str, request_nonce: str):
+    async def _send_signed_response(self, send, response_body: bytes, remote_addr: str, request_nonce: str, version: str = "2"):
         msg = HTTPMessage(
             method="POST",
-            url=f"https://{self._config.origin}/v2/command",
+            url=f"https://{self._config.origin}/v{version}/command",
             headers={
                 "Content-Type": "application/vnd.bonnet.command",
-                "Bonnet-Version": "2",
+                "Bonnet-Version": version,
                 "Bonnet-Origin": self._config.origin,
             },
             status_code=200,

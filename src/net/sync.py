@@ -25,6 +25,10 @@ from client.protocol import (
     parse_punishment_registry_head_resp, parse_punishment_registry_nodes_resp,
     parse_punishment_registry_records_resp, parse_punishment_registry_heads_resp,
     parse_response, ResponseStatus,
+    build_feed_heads, parse_feed_heads_resp,
+    build_feed_events, parse_feed_events_resp,
+    build_article_body, parse_article_body_resp,
+    build_feed_head, parse_feed_head_resp,
 )
 
 # Strict hostname regex: dot-separated labels of [a-zA-Z0-9-], each label 1-63
@@ -177,6 +181,87 @@ class SyncManager:
         elif hasattr(engine.config, "tls_ca_bundle"):
             self._federation_verify = engine.config.tls_ca_bundle
 
+        # Periodic scheduler (§16.2): bounded interval with jitter + backoff
+        sync_interval = getattr(engine.config, 'sync_interval_seconds', 300)
+        self._sync_interval = sync_interval if isinstance(sync_interval, (int, float)) else 300
+        backoff_max = getattr(engine.config, 'sync_backoff_max_seconds', 3600)
+        self._backoff_max = backoff_max if isinstance(backoff_max, (int, float)) else 3600
+        self._peer_backoff: dict = {}  # peer -> current backoff seconds (0 = no backoff)
+        self._peer_last_success: dict = {}
+        self._peer_last_failure: dict = {}
+        self._scheduler_task = None
+        self._shutdown = False
+
+        # Start the periodic scheduler alongside the event-driven worker
+        if self._sync_interval > 0:
+            self._scheduler_task = asyncio.create_task(self._periodic_scheduler())
+
+    def shutdown(self):
+        """Signal the periodic scheduler to stop cleanly."""
+        self._shutdown = True
+
+    async def _periodic_scheduler(self):
+        """Periodically enumerate relay candidates and queue syncs.
+
+        Runs on a configurable interval with jitter. Applies exponential
+        backoff per peer on failure. Does not let one failing peer block
+        the queue permanently.
+        """
+        import random
+        while not self._shutdown:
+            # Sleep with jitter (0.75x to 1.25x the interval)
+            jitter = self._sync_interval * (0.75 + random.random() * 0.5)
+            try:
+                await asyncio.sleep(jitter)
+            except asyncio.CancelledError:
+                break
+            if self._shutdown:
+                break
+
+            # Enumerate relay candidates from feed subscriptions + known board relays
+            relay_candidates = set()
+
+            # From feed subscriptions
+            for sub in getattr(self._config, 'feed_subscriptions', []):
+                for relay in sub.relays:
+                    if _is_dialable_host(relay):
+                        relay_candidates.add(relay)
+
+            # From nav (known board relays)
+            try:
+                peers = self._ame.list_peers()
+                for peer in peers:
+                    if _is_dialable_host(peer):
+                        relay_candidates.add(peer)
+            except Exception:
+                pass
+
+            for peer in relay_candidates:
+                # Check backoff
+                backoff = self._peer_backoff.get(peer, 0)
+                if backoff > 0:
+                    last_fail = self._peer_last_failure.get(peer, 0)
+                    if time.time() - last_fail < backoff:
+                        continue
+
+                await self.queue_sync(peer)
+
+    def _record_peer_success(self, peer_hostname):
+        """Record a successful sync and reset backoff."""
+        self._peer_last_success[peer_hostname] = time.time()
+        self._peer_backoff[peer_hostname] = 0
+
+    def _record_peer_failure(self, peer_hostname):
+        """Record a failed sync and increase backoff exponentially."""
+        self._peer_last_failure[peer_hostname] = time.time()
+        current = self._peer_backoff.get(peer_hostname, 0)
+        if current == 0:
+            new_backoff = self._sync_interval
+        else:
+            new_backoff = min(current * 2, self._backoff_max)
+        self._peer_backoff[peer_hostname] = new_backoff
+        log_msg(f"SYNC: backoff for {peer_hostname} increased to {new_backoff}s")
+
     def get_peer_pubkey(self, origin) -> bytes:
         return self._sync_db.get_peer_pubkey(origin)
 
@@ -191,8 +276,10 @@ class SyncManager:
             peer_hostname = await self._sync_queue.get()
             try:
                 await self._do_sync_from_peer(peer_hostname)
+                self._record_peer_success(peer_hostname)
             except Exception as e:
                 log_msg(f"SYNC_WORKER: Error syncing from {peer_hostname}: {e}")
+                self._record_peer_failure(peer_hostname)
             finally:
                 self._sync_queue.task_done()
                 self._inflight_syncs.discard(peer_hostname)
@@ -252,11 +339,13 @@ class SyncManager:
             # Sync using multiple commands over one HTTP client (fixes v1 lifecycle mismatch)
             await self._sync_boards(client, peer_hostname)
             await self._sync_registry(client, peer_hostname)
+            await self._sync_article_feeds(client, peer_hostname)
             await self._sync_report_registry(client, peer_hostname)
             await self._sync_punishment_registry(client, peer_hostname)
             await self._sync_relayed_origins(client, peer_hostname)
             await self._sync_report_relayed_origins(client, peer_hostname)
             await self._sync_punishment_relayed_origins(client, peer_hostname)
+            await self._sync_relayed_article_feeds(client, peer_hostname)
 
         except Exception as e:
             log_msg(f"SYNC: failed to sync with {peer_hostname}: {e}")
@@ -1094,3 +1183,230 @@ class SyncManager:
                 continue
 
             log_msg(f"SYNC: relayed punishment head accepted for {head.origin} seq {full_head.registry_seq}")
+
+    # ------------------------------------------------------------------
+    # Article feed sync (Phase 4 — v3)
+    # ------------------------------------------------------------------
+
+    async def _sync_article_feeds(self, client, peer_hostname):
+        """Sync article feeds from the peer's own origin.
+
+        Per §16.1: fetch FEED_HEADS, for each advertised (origin, board):
+        skip local authoritative feeds, check feed subscription, require pinned
+        origin key, verify signed head, fetch missing FEED_EVENTS range,
+        validate and atomically accept, fetch bodies per body_policy.
+        """
+        article_service = getattr(self._engine, 'article_service', None)
+        if article_service is None:
+            return
+
+        store = article_service.store
+        peer_origin = getattr(client, '_server_origin', None)
+
+        # Fetch FEED_HEADS from the peer
+        try:
+            cmd = build_feed_heads(offset=0, limit=100)
+            payload = await client._send_command_v3(cmd)
+        except Exception as e:
+            log_msg(f"SYNC: FEED_HEADS failed for {peer_hostname}: {e}")
+            return
+
+        try:
+            entries = parse_feed_heads_resp(payload)
+        except Exception as e:
+            log_msg(f"SYNC: failed to parse FEED_HEADS from {peer_hostname}: {e}")
+            return
+
+        for entry in entries:
+            origin = entry["origin"]
+            board = entry["board"]
+            head_bytes = entry["head_bytes"]
+
+            # Skip our own origin
+            if origin == self._config.origin:
+                continue
+
+            # Check feed subscription
+            sub = self._config.get_feed_subscription(origin, board)
+            if sub is None:
+                continue
+
+            # Require pinned origin key
+            origin_pubkey = self._sync_db.get_peer_pubkey(origin)
+            if origin_pubkey is None:
+                log_msg(f"SYNC: no pinned key for article feed origin '{origin}', skipping")
+                continue
+
+            await self._sync_single_feed(client, origin, board, head_bytes,
+                                         origin_pubkey, peer_hostname,
+                                         sub.body_policy, store)
+
+    async def _sync_relayed_article_feeds(self, client, peer_hostname):
+        """Sync article feeds for relayed origins (not the peer's own).
+
+        Same as _sync_article_feeds but skips the peer's own origin (already
+        synced in _sync_article_feeds). A relay cannot introduce trust in an
+        unpinned origin.
+        """
+        article_service = getattr(self._engine, 'article_service', None)
+        if article_service is None:
+            return
+
+        store = article_service.store
+        peer_origin = getattr(client, '_server_origin', None)
+
+        try:
+            cmd = build_feed_heads(offset=0, limit=100)
+            payload = await client._send_command_v3(cmd)
+        except Exception as e:
+            return
+
+        try:
+            entries = parse_feed_heads_resp(payload)
+        except Exception:
+            return
+
+        for entry in entries:
+            origin = entry["origin"]
+            board = entry["board"]
+            head_bytes = entry["head_bytes"]
+
+            # Skip our own origin and the peer's own origin (already synced)
+            if origin == self._config.origin:
+                continue
+            if origin == peer_origin:
+                continue
+
+            sub = self._config.get_feed_subscription(origin, board)
+            if sub is None:
+                continue
+
+            origin_pubkey = self._sync_db.get_peer_pubkey(origin)
+            if origin_pubkey is None:
+                continue
+
+            await self._sync_single_feed(client, origin, board, head_bytes,
+                                         origin_pubkey, peer_hostname,
+                                         sub.body_policy, store)
+
+    async def _sync_single_feed(self, client, origin, board, head_bytes,
+                                origin_pubkey, peer_hostname, body_policy,
+                                store):
+        """Sync a single (origin, board) feed from a peer.
+
+        1. Decode and verify the signed head
+        2. Compare with local feed_state
+        3. Fetch the missing FEED_EVENTS range
+        4. Validate and atomically accept via accept_remote_range
+        5. Fetch bodies per body_policy
+        """
+        from core.article_feed import (
+            decode_head, verify_head_signature, decode_event,
+            compute_event_hash, encode_event, compute_head_hash,
+            encode_head, AcceptResult,
+        )
+
+        try:
+            head = decode_head(head_bytes)
+        except Exception as e:
+            log_msg(f"SYNC: failed to decode feed head for ({origin}, {board}): {e}")
+            return
+
+        if head.origin != origin or head.board != board:
+            log_msg(f"SYNC: feed head origin/board mismatch for ({origin}, {board})")
+            return
+
+        if not verify_head_signature(head, origin_pubkey):
+            log_msg(f"SYNC: feed head signature verification failed for ({origin}, {board})")
+            return
+
+        # Check local state
+        state = store.get_feed_state(origin, board)
+        highest_seq = state["highest_accepted_seq"] if state else 0
+
+        if head.latest_feed_seq <= highest_seq:
+            return  # already up to date or rollback
+
+        # Fetch the missing event range
+        start_seq = highest_seq + 1
+        total_accepted = 0
+
+        while start_seq <= head.latest_feed_seq:
+            try:
+                cmd = build_feed_events(board, start_seq, max_count=50)
+                payload = await client._send_command_v3(cmd)
+            except Exception as e:
+                log_msg(f"SYNC: FEED_EVENTS failed for ({origin}, {board}) at seq {start_seq}: {e}")
+                return
+
+            try:
+                event_bytes_list = parse_feed_events_resp(payload)
+            except Exception as e:
+                log_msg(f"SYNC: failed to parse FEED_EVENTS from ({origin}, {board}): {e}")
+                return
+
+            if not event_bytes_list:
+                break
+
+            events = []
+            for eb in event_bytes_list:
+                try:
+                    events.append(decode_event(eb))
+                except Exception as e:
+                    log_msg(f"SYNC: failed to decode event from ({origin}, {board}): {e}")
+                    return
+
+            # Accept the range atomically
+            result = store.accept_remote_range(
+                origin, board, head, events, origin_pubkey,
+                source_relay=peer_hostname,
+            )
+
+            if not result.accepted:
+                log_msg(f"SYNC: feed range rejected for ({origin}, {board}): {result.reason}")
+                return
+
+            total_accepted += len(events)
+            start_seq = events[-1].feed_seq + 1
+
+            # If we got fewer events than requested, we're done or at a byte limit
+            if len(event_bytes_list) < 50:
+                break
+
+        log_msg(f"SYNC: accepted {total_accepted} events for feed ({origin}, {board}) from {peer_hostname}")
+
+        # Fetch bodies per body_policy
+        if body_policy == "eager":
+            await self._fetch_feed_bodies(client, origin, board, store,
+                                          peer_hostname, start_fetch=highest_seq + 1)
+        elif body_policy == "on-demand":
+            # Bodies are fetched lazily when locally requested
+            pass
+        # body_policy == "none": no body fetch
+
+    async def _fetch_feed_bodies(self, client, origin, board, store,
+                                 peer_hostname, start_fetch=1):
+        """Eagerly fetch bodies for articles in a feed that we don't have."""
+        from core.article_feed import EVENT_ARTICLE
+
+        events = store.get_events_range(origin, board, start_fetch, max_count=100)
+        fetched = 0
+        for ev in events:
+            if ev.event_type != EVENT_ARTICLE:
+                continue
+            if ev.body_size == 0:
+                continue
+            if store.has_body(ev.body_hash):
+                continue
+            try:
+                cmd = build_article_body(board, ev.message_id, ev.body_hash)
+                payload = await client._send_command_v3(cmd)
+                body = parse_article_body_resp(payload)
+                # Store the body — the store will verify the hash
+                store._store_body_bytes(body)
+                fetched += 1
+            except Exception as e:
+                log_msg(f"SYNC: body fetch failed for {ev.message_id.hex()[:16]}...: {e}")
+                continue
+        if fetched > 0:
+            log_msg(f"SYNC: fetched {fetched} bodies for ({origin}, {board}) from {peer_hostname}")
