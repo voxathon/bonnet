@@ -413,50 +413,17 @@ class TestSSRFGuard:
 # Body policy tests
 # ---------------------------------------------------------------------------
 
-class TestBodyPolicy:
+class TestMetadataOnlyPeering:
 
-    def test_eager_body_fetch(self, temp_dir):
-        """When body_policy=eager, bodies are fetched after metadata sync."""
+    def test_remote_bodies_not_fetched(self, temp_dir):
+        """Peers replicate metadata only; bodies are never fetched during sync."""
         store_a = _make_store(temp_dir, "a", ORIGIN_A)
         store_c = _make_store(temp_dir, "c", ORIGIN_C)
         try:
             origin_id = Identity.generate()
             service_a = ArticleService(store_a, ORIGIN_A, origin_id)
 
-            # Publish an article with a body on A
-            body = b"eager body content"
-            sub, _, sig = _make_article_submission(1, body=body)
-            ev, head = service_a.publish_article(sub, body, sig)
-
-            # C accepts the metadata range
-            result = store_c.accept_remote_range(
-                ORIGIN_A, BOARD, head, [ev],
-                origin_pubkey=origin_id.public_key,
-                source_relay="origin-a.test",
-            )
-            assert result.accepted
-
-            # C does NOT have the body yet (accept_remote_range doesn't fetch bodies)
-            assert not store_c.has_body(sub.body_hash)
-
-            # Simulate eager body fetch: C fetches from A's store directly
-            fetched_body = store_a.get_body(sub.body_hash)
-            assert fetched_body == body
-            store_c._store_body_bytes(fetched_body)
-            assert store_c.has_body(sub.body_hash)
-        finally:
-            store_a.close()
-            store_c.close()
-
-    def test_on_demand_body_not_fetched(self, temp_dir):
-        """When body_policy=on-demand, bodies are not fetched during sync."""
-        store_a = _make_store(temp_dir, "a", ORIGIN_A)
-        store_c = _make_store(temp_dir, "c", ORIGIN_C)
-        try:
-            origin_id = Identity.generate()
-            service_a = ArticleService(store_a, ORIGIN_A, origin_id)
-
-            body = b"on-demand body"
+            body = b"remote body content"
             sub, _, sig = _make_article_submission(1, body=body)
             ev, head = service_a.publish_article(sub, body, sig)
 
@@ -465,7 +432,7 @@ class TestBodyPolicy:
                                         origin_pubkey=origin_id.public_key,
                                         source_relay="origin-a.test")
 
-            # Body should NOT be present on C
+            # Body should NOT be present on C (metadata-only peering)
             assert not store_c.has_body(sub.body_hash)
 
             # But the article projection should exist

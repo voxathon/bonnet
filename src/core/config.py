@@ -148,14 +148,13 @@ class FeedSubscription:
 
     A subscription says "import metadata for these boards from this origin,
     dialing these relay candidates." Matching is against event origin and
-    board, never relay hostname.
+    board, never relay hostname. Peers replicate metadata only; article
+    bodies are served by the origin and fetched directly by clients.
     """
-    def __init__(self, origin: str, boards: list, relays: list,
-                 body_policy: str = "on-demand"):
+    def __init__(self, origin: str, boards: list, relays: list):
         self.origin = normalize_origin(origin) if origin else origin
         self.boards = boards  # list of board names, or ["*"] for all
         self.relays = relays
-        self.body_policy = body_policy  # "none", "on-demand", "eager"
 
     def matches_board(self, board: str) -> bool:
         if not self.boards:
@@ -173,8 +172,7 @@ class FeedSubscription:
         relays = data.get('relays', [])
         if isinstance(relays, str):
             relays = [relays]
-        body_policy = data.get('body_policy', 'on-demand')
-        return FeedSubscription(origin, boards, relays, body_policy)
+        return FeedSubscription(origin, boards, relays)
 
 
 class ControlPolicy:
@@ -202,10 +200,12 @@ class ModerationBoards:
     """Configured local moderation board names (§15)."""
     def __init__(self, rules: str = "moderation.rules",
                  reports: str = "moderation.reports",
-                 punishments: str = "moderation.actions"):
+                 punishments: str = "moderation.actions",
+                 users: str = "users.registry"):
         self.rules = rules
         self.reports = reports
         self.punishments = punishments
+        self.users = users
 
     @staticmethod
     def from_dict(data: dict) -> 'ModerationBoards':
@@ -213,11 +213,12 @@ class ModerationBoards:
             rules=data.get('rules', 'moderation.rules'),
             reports=data.get('reports', 'moderation.reports'),
             punishments=data.get('punishments', 'moderation.actions'),
+            users=data.get('users', 'users.registry'),
         )
 
 
 class Config:
-    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None, tls_ca_bundle: bool | str = True, search_max_count: int = 1000, search_timeout_seconds: int = 10, search_result_limit: int = 100, search_per_identity_concurrency: int = 1, search_rate_limit: int = 10, search_rate_window_seconds: int = 60, rg_path: str = None, http_port: int = 2272, http_host: str = "0.0.0.0", signature_lifetime_seconds: int = 60, clock_skew_seconds: int = 30, replay_db_path: str = None, max_concurrent_requests: int = 100, keepalive_seconds: int = 15, allow_cleartext_loopback: bool = False, trusted_proxies: list = None, max_creation_time_correction: int = 86400, allow_legacy_unsigned_user_sync: bool = False, filters: List['Filter'] = None, import_allowlist: dict = None, feed_subscriptions: List['FeedSubscription'] = None, control_policies: List['ControlPolicy'] = None, moderation_boards: 'ModerationBoards' = None, sync_interval_seconds: int = 300, sync_backoff_max_seconds: int = 3600, max_article_body_size: int = 1048576):
+    def __init__(self, registrars: List[str] = None, timeout_seconds: int = 30, ame_path: str = None, origin: str = None, anonymous_read: bool = True, nav_db_path: str = None, reports_db_path: str = None, punishments_db_path: str = None, log_dir: str = None, acls: List[ACLEntry] = None, admin_bypass_acl: bool = True, public_commands: set = None, data_dir: str = None, identity_path: str = None, userfile_path: str = None, port_standard: int = 2272, port_privileged: int = 272, max_connections: int = 100, max_request_size: int = 10485760, rate_limit_requests: int = 100, rate_limit_window: int = 1, tls_enabled: bool = False, tls_cert_path: str = None, tls_key_path: str = None, tls_ca_bundle: bool | str = True, search_max_count: int = 1000, search_timeout_seconds: int = 10, search_result_limit: int = 100, search_per_identity_concurrency: int = 1, search_rate_limit: int = 10, search_rate_window_seconds: int = 60, rg_path: str = None, http_port: int = 2272, http_host: str = "0.0.0.0", signature_lifetime_seconds: int = 60, clock_skew_seconds: int = 30, replay_db_path: str = None, max_concurrent_requests: int = 100, keepalive_seconds: int = 15, allow_cleartext_loopback: bool = False, trusted_proxies: list = None, max_creation_time_correction: int = 86400, allow_legacy_unsigned_user_sync: bool = False, filters: List['Filter'] = None, import_allowlist: dict = None, feed_subscriptions: List['FeedSubscription'] = None, control_policies: List['ControlPolicy'] = None, moderation_boards: 'ModerationBoards' = None, sync_interval_seconds: int = 300, sync_backoff_max_seconds: int = 3600, sync_max_events_per_cycle: int = 5000, max_article_body_size: int = 1048576):
         if registrars is None:
             registrars = ["knolastna.me"]
         self.registrars = [r.lower() for r in registrars]
@@ -298,6 +299,7 @@ class Config:
         self.moderation_boards: ModerationBoards = moderation_boards or ModerationBoards()
         self.sync_interval_seconds = sync_interval_seconds
         self.sync_backoff_max_seconds = sync_backoff_max_seconds
+        self.sync_max_events_per_cycle = sync_max_events_per_cycle
         self.max_article_body_size = max_article_body_size
 
     def _resolve_paths(self, identity_path: str, userfile_path: str, nav_db_path: str, reports_db_path: str, punishments_db_path: str, log_dir: str) -> None:
@@ -419,6 +421,7 @@ class Config:
         sync_cfg = data.get('sync', {})
         sync_interval_seconds = sync_cfg.get('interval_seconds', 300)
         sync_backoff_max_seconds = sync_cfg.get('backoff_max_seconds', 3600)
+        sync_max_events_per_cycle = sync_cfg.get('max_events_per_cycle', 5000)
 
         limits_cfg = data.get('limits', {})
         max_article_body_size = limits_cfg.get('max_article_body_size', 1048576)
@@ -462,6 +465,7 @@ class Config:
             moderation_boards=moderation_boards,
             sync_interval_seconds=sync_interval_seconds,
             sync_backoff_max_seconds=sync_backoff_max_seconds,
+            sync_max_events_per_cycle=sync_max_events_per_cycle,
             max_article_body_size=max_article_body_size,
         )
 

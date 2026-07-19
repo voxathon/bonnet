@@ -332,9 +332,30 @@ class BonnetHTTPServer:
                         await self._send_protocol_error(send, 403, "Username not associated with key",
                                                         remote_addr, scope, request_nonce=request_nonce_for_response)
                         return
-            # Unknown key — not anonymous, not in UME. No preauthorization
-            # gate here (§4.2): command ACL evaluation decides whether the
-            # opcode is allowed for an unknown principal.
+            # Unknown key — not anonymous, not in UME. Fallback: check
+            # user_projection for remote (federated) users whose identity
+            # was synced via the article feed.
+            if user is None:
+                article_service = getattr(self._handler._engine, 'article_service', None)
+                if article_service is not None:
+                    proj = article_service.store.get_user_by_pubkey(peer_public_key)
+                    if proj is not None:
+                        from engine.ume import User
+                        flags = proj.get("flags", 0)
+                        user = User(
+                            username=proj["username"],
+                            registrar=proj["origin"],
+                            record_origin=proj["origin"],
+                            relay="",
+                            publickey=proj["publickey"],
+                            seq_numbr=proj.get("seq_numbr", 0),
+                            is_administrator=bool(flags & 1),
+                            is_moderator=bool(flags & 2),
+                            is_banned=bool(flags & 4),
+                            creation_time=proj.get("creation_time", 0),
+                            relay_time=proj.get("creation_time", 0),
+                        )
+                        username = proj["username"]
 
         # Classify principal: anonymous, unknown, or known (§4.1).
         is_unknown = not is_anonymous and user is None

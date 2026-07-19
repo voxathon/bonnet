@@ -31,6 +31,8 @@ from core.article_feed import (
     EVENT_REPORT,
     EVENT_PUNISHMENT,
     EVENT_PUNISHMENT_REVOKE,
+    EVENT_USER_REGISTER,
+    EVENT_USER_REVOKE,
     SCHEME_V3,
     ZERO_MESSAGE_ID,
     ZERO_HASH,
@@ -41,6 +43,7 @@ from core.article_feed import (
     RuleHeaders,
     ReportHeaders,
     PunishmentHeaders,
+    UserHeaders,
     ArticleFeedStore,
     compute_body_hash,
     encode_event,
@@ -285,6 +288,37 @@ class ArticleService:
             self._identity, expected_origin=self._origin,
         )
 
+    def publish_user_register(
+        self,
+        submission: Submission,
+        author_signature: bytes,
+    ) -> tuple:
+        """Publish a USER_REGISTER event to the configured users.registry board.
+
+        The submission must have event_type=USER_REGISTER and
+        headers=UserHeaders. No body is needed — all user data is in headers.
+        """
+        self._validate_local_submission(submission, EVENT_USER_REGISTER)
+        if not isinstance(submission.headers, UserHeaders):
+            raise FeedAcceptanceError("USER_REGISTER requires UserHeaders")
+        return self._store.append_authoritative(
+            submission, b"", SCHEME_V3, author_signature,
+            self._identity, expected_origin=self._origin,
+        )
+
+    def publish_user_revoke(
+        self,
+        submission: Submission,
+        author_signature: bytes,
+    ) -> tuple:
+        """Publish a USER_REVOKE event targeting an existing user registration."""
+        self._validate_local_submission(submission, EVENT_USER_REVOKE)
+        self._validate_target_event_exists(submission)
+        return self._store.append_authoritative(
+            submission, b"", SCHEME_V3, author_signature,
+            self._identity, expected_origin=self._origin,
+        )
+
     def get_article(
         self,
         origin: str,
@@ -511,3 +545,86 @@ class ArticleService:
             raise FeedAcceptanceError(
                 f"target article {message_id.hex()} not found in feed "
                 f"({origin}, {board})")
+
+
+import time
+from core.article_feed import sign_author
+from core.logging import log_msg
+
+
+class UserFeedPublisher:
+    """Publishes USER_REGISTER / USER_REVOKE events to the users.registry feed
+    in response to UME mutations. Wired as a UME mutation callback."""
+
+    def __init__(self, article_service: ArticleService, identity: Identity,
+                 origin: str, board: str):
+        self._service = article_service
+        self._identity = identity
+        self._origin = origin
+        self._board = board
+
+    def on_mutation(self, action: str = "", user=None) -> None:
+        try:
+            if action in ("put", "upd") and user is not None:
+                if user.record_origin != self._origin:
+                    return
+                self._publish_register(user)
+            elif action == "delete" and user is not None:
+                self._publish_revoke(user)
+        except Exception as e:
+            log_msg(f"UserFeedPublisher: error on {action}: {e}")
+
+    def _publish_register(self, user) -> None:
+        flags = (
+            (1 if user.is_administrator else 0)
+            | (2 if user.is_moderator else 0)
+            | (4 if user.is_banned else 0)
+        )
+        headers = UserHeaders(
+            username=user.username,
+            publickey=user.publickey,
+            flags=flags,
+            seq_numbr=user.seq_numbr,
+            creation_time=user.creation_time,
+        )
+        import os
+        mid = os.urandom(32)
+        while mid == ZERO_MESSAGE_ID:
+            mid = os.urandom(32)
+        sub = Submission(
+            event_type=EVENT_USER_REGISTER,
+            origin=self._origin,
+            board=self._board,
+            message_id=mid,
+            actor_pubkey=self._identity.public_key,
+            actor_username=user.username,
+            actor_registrar=self._origin,
+            headers=headers,
+            body_hash=compute_body_hash(b""),
+            body_size=0,
+            created_at=int(time.time()),
+        )
+        sig = sign_author(sub, self._identity)
+        self._service.publish_user_register(sub, sig)
+
+    def _publish_revoke(self, user) -> None:
+        proj = self._service.store.get_user_by_pubkey(user.publickey)
+        if proj is None:
+            return
+        import os
+        mid = os.urandom(32)
+        while mid == ZERO_MESSAGE_ID:
+            mid = os.urandom(32)
+        sub = Submission(
+            event_type=EVENT_USER_REVOKE,
+            origin=self._origin,
+            board=self._board,
+            message_id=mid,
+            target_message_id=proj["message_id"],
+            actor_pubkey=self._identity.public_key,
+            body_hash=compute_body_hash(b""),
+            body_size=0,
+            created_at=int(time.time()),
+        )
+        sig = sign_author(sub, self._identity)
+        self._service.publish_user_revoke(sub, sig)

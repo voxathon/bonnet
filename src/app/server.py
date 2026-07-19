@@ -25,7 +25,7 @@ from net.replay import ReplayLedger
 from net.rate_limiter import RateLimiter
 from core.article_feed import ArticleFeedStore
 from core.migration import MigrationExecutor
-from engine.article_service import ArticleService
+from engine.article_service import ArticleService, UserFeedPublisher
 from engine.moderation_service import ModerationService
 
 class Bonnet:
@@ -88,6 +88,24 @@ class Bonnet:
         )
         self.engine.moderation_service = self.moderation_service
         log_msg(f"INIT: ArticleFeedStore at {article_feeds_db_path}")
+
+        # UserFeedPublisher: publishes user registration events to the
+        # users.registry feed when UME mutations occur.
+        users_board = config.moderation_boards.users
+        self.user_feed_publisher = UserFeedPublisher(
+            self.article_service, self.server_identity, config.origin, users_board,
+        )
+        self.ume.register_mutation_callback(self.user_feed_publisher.on_mutation)
+
+        # Ensure the users.registry feed exists
+        try:
+            existing = self.article_feed_store.get_head(config.origin, users_board)
+            if existing is None:
+                self.article_feed_store.create_empty_feed(
+                    config.origin, users_board, self.server_identity)
+                log_msg(f"INIT: created empty feed for users registry '{users_board}'")
+        except Exception as e:
+            log_msg(f"INIT: users.registry feed creation error (non-fatal): {e}")
 
         # Reconcile board creation state (§9 lines 707-716):
         # For each local board in nav, ensure a signed empty feed head exists.
