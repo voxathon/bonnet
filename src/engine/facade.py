@@ -9,8 +9,6 @@ class BonnetEngine:
         self.keibatsu = keibatsu
         self.config = config
         self.server_identity = server_identity
-        self.registry_store = None
-        self.registry_service = None
         self.article_service = None
         self.moderation_service = None
 

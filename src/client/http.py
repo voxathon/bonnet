@@ -66,7 +66,7 @@ from net.http_auth import (
     SignatureError,
 )
 from .protocol import (
-    build_register, build_get_user, build_list_users, build_list_peers,
+    build_register, build_get_users_by_pubkey, build_list_users, build_list_peers,
     build_board_create, build_board_list,
     build_user_promote, build_user_demote, build_get_pubkey,
     build_article_publish, build_article_get, build_article_list,
@@ -77,7 +77,7 @@ from .protocol import (
     build_submission, sign_submission, make_message_id,
     encode_and_sign_submission,
     parse_response, parse_error_response, decode_redirect,
-    parse_register_resp, parse_list_users_resp, parse_get_user_resp,
+    parse_register_resp, parse_list_users_resp, parse_get_users_by_pubkey_resp,
     parse_list_peers_resp, parse_board_list_resp, parse_get_pubkey_resp,
     parse_article_publish_resp, parse_article_get_resp, parse_article_list_resp,
     parse_feed_head_resp, parse_feed_events_resp, parse_article_body_resp,
@@ -416,16 +416,27 @@ class BonnetHTTPClient:
 
     async def get_user(self, username: str) -> User | None:
         """Look up a user by username. Returns None if not found."""
-        cmd = build_get_user(username)
+        cmd = build_get_users_by_pubkey(0x01, username)
         try:
             payload = await self._send_command(cmd)
         except BonnetHTTPError as e:
             if e.code == 0x0404 or "not found" in e.message.lower():
                 return None
             raise
-        user = parse_get_user_resp(payload)
-        user.username = username
-        return user
+        users = parse_get_users_by_pubkey_resp(payload)
+        return users[0] if users else None
+
+    async def get_users_by_pubkey(self, pubkey: bytes) -> list[User]:
+        """Look up users by Ed25519 public key. Returns all matching users
+        (a pubkey may be associated with multiple users across origins)."""
+        cmd = build_get_users_by_pubkey(0x02, pubkey)
+        try:
+            payload = await self._send_command(cmd)
+        except BonnetHTTPError as e:
+            if e.code == 0x0404 or "not found" in e.message.lower():
+                return []
+            raise
+        return parse_get_users_by_pubkey_resp(payload)
 
     async def list_users(self, offset: int = 0, limit: int = 100) -> list[User]:
         cmd = build_list_users(offset, limit)

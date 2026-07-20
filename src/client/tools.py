@@ -193,12 +193,29 @@ async def register(username: str, password: str) -> str:
 async def get_user(username: str, auth: str | None = None) -> User | None:
     """Look up a registered user by their username.
 
-    Returns the user's public key and registrar, or None if not found.
+    Returns the user's public key, registrar, record origin, and relay,
+    or None if not found.
     """
     client = get_client()
     async with client:
         await _connect(client, auth)
         return await client.get_user(username)
+
+
+@mcp.tool
+async def get_users_by_pubkey(pubkey: str, auth: str | None = None) -> list[User]:
+    """Look up all users associated with an Ed25519 public key.
+
+    A single public key may be associated with multiple users across
+    different origins. Returns a list of matching user records.
+
+    pubkey: hex-encoded 32-byte Ed25519 public key.
+    """
+    pubkey_bytes = validate_pubkey(pubkey)
+    client = get_client()
+    async with client:
+        await _connect(client, auth)
+        return await client.get_users_by_pubkey(pubkey_bytes)
 
 
 @mcp.tool

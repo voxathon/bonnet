@@ -35,7 +35,6 @@ from engine.ume import Ume
 from engine.ame import Ame
 from engine.keibatsu import Keibatsu
 from engine.facade import BonnetEngine
-from core.user_registry import UserRegistryStore, RegistryService
 from core.article_feed import (
     ArticleFeedStore,
     Submission,
@@ -148,15 +147,6 @@ class V3ServerSetup:
         )
         self.engine.article_service = self.article_service
 
-        # User registry
-        self.registry_store = UserRegistryStore(os.path.join(temp_dir, "user_registry.db"))
-        self.registry_service = RegistryService(
-            self.registry_store, self.ume, self.server_identity, ORIGIN
-        )
-        self.ume.register_mutation_callback(self.registry_service.mark_dirty)
-        self.engine.registry_store = self.registry_store
-        self.engine.registry_service = self.registry_service
-
         self.handler = CommandHandler(self.engine)
 
         # Cancel sync worker
@@ -187,7 +177,6 @@ class V3ServerSetup:
         self.ame.shutdown()
         self.keibatsu.shutdown()
         self.replay_ledger.close()
-        self.registry_store.close()
         self.article_feed_store.close()
 
     def make_client(self):

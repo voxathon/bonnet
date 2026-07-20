@@ -45,8 +45,6 @@ from net.http_server import BonnetHTTPServer
 from net.http_auth import BonnetSigner, HTTPMessage, compute_content_digest
 from net.replay import ReplayLedger
 from net.rate_limiter import RateLimiter
-from core.user_registry import UserRegistryStore, RegistryService
-from core.user_registry import UserRegistryStore, RegistryService
 from tests.helpers import default_test_acls, permissive_import_allowlist
 
 import httpx
@@ -370,14 +368,6 @@ class EnforcementTestServer:
         )
         self.engine = BonnetEngine(self.ume, self.ame, self.keibatsu, self.config, self.server_identity)
 
-        self.registry_store = UserRegistryStore(os.path.join(temp_dir, origin, "user_registry.db"))
-        self.registry_service = RegistryService(
-            self.registry_store, self.ume, self.server_identity, origin
-        )
-        self.ume.register_mutation_callback(self.registry_service.mark_dirty)
-        self.engine.registry_store = self.registry_store
-        self.engine.registry_service = self.registry_service
-
         self.handler = CommandHandler(self.engine)
         task = self.handler._sync_mgr._worker_task
         if task and not task.done():
@@ -403,8 +393,6 @@ class EnforcementTestServer:
         self.ame.shutdown()
         self.keibatsu.shutdown()
         self.replay_ledger.close()
-        self.registry_store.close()
-        self.registry_store.close()
 
     def make_client(self):
         transport = ASGITransport(app=self.app)

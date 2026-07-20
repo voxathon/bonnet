@@ -68,8 +68,8 @@ def _engine(acls, origin="local.test", admin_bypass_acl=True):
 # ---------------------------------------------------------------------------
 
 class TestCommandSpecTable:
-    def test_all_19_commands_present(self):
-        assert len(COMMAND_SPECS) == 19
+    def test_all_14_commands_present(self):
+        assert len(COMMAND_SPECS) == 14
 
     def test_get_spec_by_opcode(self):
         spec = get_spec(0x01)
@@ -86,10 +86,9 @@ class TestCommandSpecTable:
 
     def test_read_commands_classified(self):
         reads = {s.name for s in COMMAND_SPECS.values() if s.action == "read"}
-        assert "GET_USER" in reads
+        assert "GET_USERS_BY_PUBKEY" in reads
         assert "BOARD_LIST" in reads
         assert "POST_GET" in reads
-        assert "USER_REGISTRY_HEAD" in reads
         assert "PEER_KEY_LIST" in reads
 
     def test_write_commands_classified(self):

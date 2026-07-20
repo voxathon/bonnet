@@ -194,14 +194,9 @@ def decode_redirect(payload: bytes) -> str:
 V3_COMMANDS = {
     # Shared with v2 (identical wire format, routed via /v3/command)
     "REGISTER": 0x01,
-    "GET_USER": 0x02,
+    "GET_USERS_BY_PUBKEY": 0x02,
     "LIST_USERS": 0x03,
     "LIST_PEERS": 0x04,
-    "USER_REGISTRY_HEAD": 0x05,
-    "USER_REGISTRY_NODES": 0x06,
-    "USER_REGISTRY_RECORDS": 0x07,
-    "USER_REGISTRY_HEADS": 0x08,
-    "USER_REGISTRY_HEAD_CHAIN": 0x09,
     "BOARD_CREATE": 0x10,
     "BOARD_LIST": 0x11,
     "USER_PROMOTE": 0x20,
@@ -244,14 +239,23 @@ def build_register(username: str, registrar: str) -> bytes:
     )
 
 
-def build_get_user(username: str) -> bytes:
-    """Build a GET_USER request.
+def build_get_users_by_pubkey(selector_type: int, selector) -> bytes:
+    """Build a GET_USERS_BY_PUBKEY request.
 
-    The server's _cmd_get handler parses a u8-length username string (not a
-    32-byte pubkey as the v3 spec name GET_USERS_BY_PUBKEY suggests). This
-    builder matches the actual server wire format.
+    selector_type: 0x01 (username, selector is str) or
+                   0x02 (pubkey, selector is 32-byte bytes)
     """
-    return struct.pack(">B", V3_COMMANDS["GET_USER"]) + encode_string(username)
+    out = struct.pack(">B", V3_COMMANDS["GET_USERS_BY_PUBKEY"])
+    out += struct.pack(">B", selector_type)
+    if selector_type == 0x01:
+        out += encode_string(selector)
+    elif selector_type == 0x02:
+        if len(selector) != 32:
+            raise ProtocolError(f"Invalid pubkey length: {len(selector)}")
+        out += selector
+    else:
+        raise ProtocolError(f"Invalid selector type {selector_type}")
+    return out
 
 
 def build_list_users(offset: int, limit: int) -> bytes:
@@ -317,20 +321,12 @@ def parse_list_users_resp(payload: bytes) -> list[User]:
     return users
 
 
-def parse_get_user_resp(payload: bytes) -> User:
-    """Parse a GET_USER success response.
+def parse_get_users_by_pubkey_resp(payload: bytes) -> list[User]:
+    """Parse a GET_USERS_BY_PUBKEY success response.
 
-    Format: pubkey:32 + registrar_len:u8 + registrar_bytes
+    Same format as LIST_USERS: count:u16 + repeated user records.
     """
-    pubkey = payload[:32]
-    registrar, _ = decode_string(payload, 32)
-    return User(
-        username="",
-        registrar=registrar,
-        record_origin="",
-        relay="",
-        public_key=pubkey.hex(),
-    )
+    return parse_list_users_resp(payload)
 
 
 def parse_list_peers_resp(payload: bytes) -> list[Peer]:
@@ -374,228 +370,6 @@ def parse_board_list_resp(payload: bytes) -> list[Board]:
 
 def parse_get_pubkey_resp(payload: bytes) -> str:
     return payload[:32].hex()
-
-
-# ---------------------------------------------------------------------------
-# Registry protocol builders and parsers (opcodes 0x05–0x09)
-# ---------------------------------------------------------------------------
-
-_MAX_ORIGIN_LEN = 255
-_MAX_PREFIX_BITS = 256
-_MAX_NODES_PER_REQUEST = 256
-_MAX_RECORDS_PER_REQUEST = 64
-_MAX_HEADS_PER_RESPONSE = 100
-_REGISTRY_HEAD_FIXED_SIZE = 22 + 32 + 32 + 64  # domain(22) + fields + root + prev + sig
-
-
-def build_user_registry_head(origin: str, requested_seq: int = 0) -> bytes:
-    origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
-        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
-    return (
-        struct.pack(">B", V3_COMMANDS["USER_REGISTRY_HEAD"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", requested_seq)
-    )
-
-
-def parse_user_registry_head_resp(payload: bytes) -> bytes:
-    if len(payload) < 3:
-        raise ProtocolError("Response too short for registry head")
-    head_len = struct.unpack(">H", payload[:2])[0]
-    if len(payload) != 2 + head_len:
-        raise ProtocolError(f"Trailing/truncated head: expected {2 + head_len}, got {len(payload)}")
-    return payload[2:2 + head_len]
-
-
-def build_user_registry_nodes(origin: str, registry_seq: int,
-                              prefixes: list[tuple[int, bytes]]) -> bytes:
-    origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
-        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
-    if len(prefixes) > _MAX_NODES_PER_REQUEST:
-        raise ProtocolError(f"Too many prefixes: {len(prefixes)} > {_MAX_NODES_PER_REQUEST}")
-    data = (
-        struct.pack(">B", V3_COMMANDS["USER_REGISTRY_NODES"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", registry_seq)
-        + struct.pack(">H", len(prefixes))
-    )
-    for bit_len, prefix_bytes in prefixes:
-        if bit_len > _MAX_PREFIX_BITS:
-            raise ProtocolError(f"Prefix bit length {bit_len} exceeds {_MAX_PREFIX_BITS}")
-        byte_len = (bit_len + 7) // 8
-        if len(prefix_bytes) != byte_len:
-            raise ProtocolError(f"Prefix byte length mismatch: {len(prefix_bytes)} != {byte_len}")
-        data += struct.pack(">H", bit_len) + struct.pack(">B", byte_len) + prefix_bytes
-    return data
-
-
-def parse_user_registry_nodes_resp(payload: bytes) -> list[dict]:
-    offset = 0
-    if len(payload) < 2:
-        raise ProtocolError("Response too short for registry nodes")
-    node_count = struct.unpack(">H", payload[offset:offset + 2])[0]
-    offset += 2
-    if node_count > _MAX_NODES_PER_REQUEST:
-        raise ProtocolError(f"Node count {node_count} exceeds limit")
-    nodes = []
-    for _ in range(node_count):
-        if offset + 3 > len(payload):
-            raise ProtocolError("Truncated node header")
-        bit_len = struct.unpack(">H", payload[offset:offset + 2])[0]
-        offset += 2
-        byte_len = payload[offset]
-        offset += 1
-        if offset + byte_len > len(payload):
-            raise ProtocolError("Truncated prefix bytes")
-        prefix = payload[offset:offset + byte_len]
-        offset += byte_len
-        if offset + 1 > len(payload):
-            raise ProtocolError("Truncated node kind")
-        node_kind = payload[offset]
-        offset += 1
-        if offset + 32 > len(payload):
-            raise ProtocolError("Truncated node hash")
-        node_hash = payload[offset:offset + 32]
-        offset += 32
-        entry = {
-            "prefix_bit_length": bit_len,
-            "prefix": prefix,
-            "node_kind": node_kind,
-            "node_hash": node_hash,
-        }
-        if node_kind == 1:  # branch
-            if offset + 64 > len(payload):
-                raise ProtocolError("Truncated branch children")
-            entry["left_hash"] = payload[offset:offset + 32]
-            offset += 32
-            entry["right_hash"] = payload[offset:offset + 32]
-            offset += 32
-        elif node_kind == 2:  # leaf
-            if offset + 64 > len(payload):
-                raise ProtocolError("Truncated leaf data")
-            entry["registry_key"] = payload[offset:offset + 32]
-            offset += 32
-            entry["value_hash"] = payload[offset:offset + 32]
-            offset += 32
-        nodes.append(entry)
-    if offset != len(payload):
-        raise ProtocolError(f"Trailing data in nodes response: {len(payload) - offset} bytes")
-    return nodes
-
-
-def build_user_registry_records(origin: str, registry_seq: int,
-                                keys: list[bytes],
-                                include_proofs: bool = False) -> bytes:
-    origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
-        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
-    if len(keys) > _MAX_RECORDS_PER_REQUEST:
-        raise ProtocolError(f"Too many keys: {len(keys)} > {_MAX_RECORDS_PER_REQUEST}")
-    data = (
-        struct.pack(">B", V3_COMMANDS["USER_REGISTRY_RECORDS"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", registry_seq)
-        + struct.pack(">H", len(keys))
-        + struct.pack(">B", 1 if include_proofs else 0)
-    )
-    for key in keys:
-        if len(key) != 32:
-            raise ProtocolError(f"Registry key must be 32 bytes, got {len(key)}")
-        data += key
-    return data
-
-
-def parse_user_registry_records_resp(payload: bytes) -> list[dict]:
-    offset = 0
-    if len(payload) < 2:
-        raise ProtocolError("Response too short for registry records")
-    record_count = struct.unpack(">H", payload[offset:offset + 2])[0]
-    offset += 2
-    if record_count > _MAX_RECORDS_PER_REQUEST:
-        raise ProtocolError(f"Record count {record_count} exceeds limit")
-    records = []
-    for _ in range(record_count):
-        if offset + 33 > len(payload):
-            raise ProtocolError("Truncated record header")
-        key = payload[offset:offset + 32]
-        offset += 32
-        present = payload[offset]
-        offset += 1
-        entry = {"registry_key": key, "present": present}
-        if present:
-            if offset + 2 > len(payload):
-                raise ProtocolError("Truncated record length")
-            rec_len = struct.unpack(">H", payload[offset:offset + 2])[0]
-            offset += 2
-            if offset + rec_len > len(payload):
-                raise ProtocolError("Truncated record bytes")
-            entry["raw_record"] = payload[offset:offset + rec_len]
-            offset += rec_len
-            if offset + 2 > len(payload):
-                raise ProtocolError("Truncated proof length")
-            proof_len = struct.unpack(">H", payload[offset:offset + 2])[0]
-            offset += 2
-            if proof_len > 0:
-                if offset + proof_len > len(payload):
-                    raise ProtocolError("Truncated proof bytes")
-                entry["proof"] = payload[offset:offset + proof_len]
-                offset += proof_len
-            else:
-                entry["proof"] = None
-        records.append(entry)
-    if offset != len(payload):
-        raise ProtocolError(f"Trailing data in records response: {len(payload) - offset} bytes")
-    return records
-
-
-def build_user_registry_heads(offset: int = 0, limit: int = 100) -> bytes:
-    if limit > _MAX_HEADS_PER_RESPONSE:
-        limit = _MAX_HEADS_PER_RESPONSE
-    return (
-        struct.pack(">B", V3_COMMANDS["USER_REGISTRY_HEADS"])
-        + struct.pack(">I", offset)
-        + struct.pack(">H", limit)
-    )
-
-
-def parse_user_registry_heads_resp(payload: bytes) -> list[bytes]:
-    offset = 0
-    if len(payload) < 2:
-        raise ProtocolError("Response too short for registry heads list")
-    head_count = struct.unpack(">H", payload[offset:offset + 2])[0]
-    offset += 2
-    if head_count > _MAX_HEADS_PER_RESPONSE:
-        raise ProtocolError(f"Head count {head_count} exceeds limit")
-    heads = []
-    for _ in range(head_count):
-        if offset + 2 > len(payload):
-            raise ProtocolError("Truncated head length")
-        head_len = struct.unpack(">H", payload[offset:offset + 2])[0]
-        offset += 2
-        if offset + head_len > len(payload):
-            raise ProtocolError("Truncated head bytes")
-        heads.append(payload[offset:offset + head_len])
-        offset += head_len
-    if offset != len(payload):
-        raise ProtocolError(f"Trailing data in heads response: {len(payload) - offset} bytes")
-    return heads
-
-
-def build_user_registry_head_chain(origin: str, start_seq: int,
-                                   max_count: int = 10) -> bytes:
-    origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
-        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
-    if max_count > _MAX_HEADS_PER_RESPONSE:
-        max_count = _MAX_HEADS_PER_RESPONSE
-    return (
-        struct.pack(">B", V3_COMMANDS["USER_REGISTRY_HEAD_CHAIN"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", start_seq)
-        + struct.pack(">H", max_count)
-    )
 
 
 # ---------------------------------------------------------------------------
