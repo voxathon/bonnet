@@ -406,7 +406,7 @@ class TestV3FeedHead:
             resp = await client.post("/v3/command", content=cmd, headers=headers)
             assert resp.status_code == 200
             assert resp.content[0] == 0x00
-            head_bytes = parse_feed_head_resp(resp.content[1:])
+            head_bytes = parse_feed_head_resp(resp.content[1:])["head_bytes"]
             head = decode_head(head_bytes)
             assert head.origin == ORIGIN
             assert head.board == BOARD
@@ -423,7 +423,7 @@ class TestV3FeedHead:
             resp = await client.post("/v3/command", content=cmd, headers=headers)
             assert resp.status_code == 200
             assert resp.content[0] == 0x00
-            head_bytes = parse_feed_head_resp(resp.content[1:])
+            head_bytes = parse_feed_head_resp(resp.content[1:])["head_bytes"]
             head = decode_head(head_bytes)
             assert head.latest_feed_seq == 0
             assert head.article_count == 0
@@ -448,8 +448,8 @@ class TestV3FeedEvents:
             assert resp.content[0] == 0x00
             events = parse_feed_events_resp(resp.content[1:])
             assert len(events) == 3
-            for i, ev_bytes in enumerate(events):
-                ev = decode_event(ev_bytes)
+            for i, entry in enumerate(events):
+                ev = decode_event(entry["event_bytes"])
                 assert ev.feed_seq == i + 1
                 assert ev.event_type == EVENT_ARTICLE
 
@@ -509,7 +509,7 @@ class TestV3FeedHeads:
             resp3 = await client.post("/v3/command", content=cmd3, headers=headers3)
             assert resp3.status_code == 200
             assert resp3.content[0] == 0x00
-            head_bytes = parse_feed_head_resp(resp3.content[1:])
+            head_bytes = parse_feed_head_resp(resp3.content[1:])["head_bytes"]
             head = decode_head(head_bytes)
             assert head.latest_feed_seq == 0
             assert head.article_count == 0
@@ -531,11 +531,11 @@ class TestV3FeedHeads:
             cmd2 = build_feed_head("stableboard")
             headers2 = await _sign_v3_request(setup.server_identity, cmd2)
             resp1 = await client.post("/v3/command", content=cmd2, headers=headers2)
-            head_bytes_1 = parse_feed_head_resp(resp1.content[1:])
+            head_bytes_1 = parse_feed_head_resp(resp1.content[1:])["head_bytes"]
 
             headers3 = await _sign_v3_request(setup.server_identity, cmd2)
             resp2 = await client.post("/v3/command", content=cmd2, headers=headers3)
-            head_bytes_2 = parse_feed_head_resp(resp2.content[1:])
+            head_bytes_2 = parse_feed_head_resp(resp2.content[1:])["head_bytes"]
 
             assert head_bytes_1 == head_bytes_2  # stable, not ephemeral
 

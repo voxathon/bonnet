@@ -132,17 +132,19 @@ class ArticleService:
         self,
         submission: Submission,
         author_signature: bytes,
+        body: bytes = b"",
     ) -> tuple:
         """Publish a CANCEL control event targeting an article.
 
         Validates that the target exists in the same feed. Authorization
         (author vs moderator) is checked by the caller — this method
-        validates structural correctness only.
+        validates structural correctness only. The body may contain an
+        optional human-readable cancellation reason.
         """
         self._validate_local_submission(submission, EVENT_CANCEL)
         self._validate_target_exists(submission)
         return self._store.append_authoritative(
-            submission, b"", SCHEME_V3, author_signature,
+            submission, body, SCHEME_V3, author_signature,
             self._identity, expected_origin=self._origin,
         )
 
@@ -150,12 +152,16 @@ class ArticleService:
         self,
         submission: Submission,
         author_signature: bytes,
+        body: bytes = b"",
     ) -> tuple:
-        """Publish a RESTORE control event targeting an article."""
+        """Publish a RESTORE control event targeting an article.
+
+        The body may contain an optional human-readable restore reason.
+        """
         self._validate_local_submission(submission, EVENT_RESTORE)
         self._validate_target_exists(submission)
         return self._store.append_authoritative(
-            submission, b"", SCHEME_V3, author_signature,
+            submission, body, SCHEME_V3, author_signature,
             self._identity, expected_origin=self._origin,
         )
 
@@ -163,17 +169,19 @@ class ArticleService:
         self,
         submission: Submission,
         author_signature: bytes,
+        body: bytes = b"",
     ) -> tuple:
         """Publish a PURGE control event targeting an article.
 
         After the purge event is committed, the target's body ref is marked
         not retained and the local body blob may be deleted. The article
-        metadata and event history remain.
+        metadata and event history remain. The body should contain a
+        human-readable purge reason.
         """
         self._validate_local_submission(submission, EVENT_PURGE)
         self._validate_target_exists(submission)
         return self._store.append_authoritative(
-            submission, b"", SCHEME_V3, author_signature,
+            submission, body, SCHEME_V3, author_signature,
             self._identity, expected_origin=self._origin,
         )
 

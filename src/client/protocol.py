@@ -1,17 +1,72 @@
+"""Bonnet protocol v3 binary codec.
+
+Builders and parsers for all v3 wire commands. The v2 command table and
+v2-only builders (mutable posts, dedicated report/punishment/rule commands,
+post signing, content search, query posts) have been removed per the v3
+cutover. Opcodes shared between v2 and v3 (REGISTER, GET_USER, LIST_USERS,
+LIST_PEERS, BOARD_CREATE, BOARD_LIST, USER_PROMOTE, USER_DEMOTE, GET_PUBKEY,
+USER_REGISTRY_*) are retained with their original wire format and routed
+through /v3/command by the HTTP client.
+
+Control events (cancel, restore, purge, rule, report, punishment, board
+close/reopen, pin/unpin, thread close/reopen) are published via
+ARTICLE_PUBLISH with the appropriate event_type — they do not have separate
+opcodes. BOARD_SET_STATE (0x1A) is the only control command with its own
+opcode (for board close/reopen with idempotency checks).
+"""
+
+import os
 import struct
+import time
+from dataclasses import dataclass
 from typing import Optional
+
+from core.article_feed import (
+    Submission,
+    ArticleHeaders,
+    RuleHeaders,
+    ReportHeaders,
+    PunishmentHeaders,
+    PinHeaders,
+    UserHeaders,
+    encode_submission,
+    decode_event,
+    decode_head,
+    compute_body_hash,
+    author_signature_payload,
+    EVENT_ARTICLE,
+    EVENT_CANCEL,
+    EVENT_RESTORE,
+    EVENT_PURGE,
+    EVENT_RULE,
+    EVENT_RULE_REVOKE,
+    EVENT_REPORT,
+    EVENT_PUNISHMENT,
+    EVENT_PUNISHMENT_REVOKE,
+    EVENT_BOARD_CLOSE,
+    EVENT_BOARD_REOPEN,
+    EVENT_ARTICLE_PIN,
+    EVENT_ARTICLE_UNPIN,
+    EVENT_THREAD_CLOSE,
+    EVENT_THREAD_REOPEN,
+    SCHEME_V3,
+    ZERO_HASH,
+    ZERO_MESSAGE_ID,
+    FLAG_INCLUDE_CANCELLED,
+    FLAG_INCLUDE_SUPERSEDED,
+    FLAG_INCLUDE_PURGED,
+    FLAG_INCLUDE_CONTROLS,
+    FLAG_INCLUDE_BODIES,
+    SELECTOR_ARTICLE_NUM,
+    SELECTOR_MESSAGE_ID,
+)
+from core.crypto import Identity
 
 from .models import (
     User,
     Board,
-    Post,
-    PostSummary,
-    PostCreateResult,
-    Rule,
-    Report,
-    Punishment,
-    BannedStatus,
     Peer,
+    BanStatus,
     Article,
     ArticleEvent,
     FeedHeadInfo,
@@ -40,6 +95,10 @@ class ErrorCode:
     BOARD_CLOSED = 0x0008
     NOT_REGISTERED = 0x0009
 
+
+# ---------------------------------------------------------------------------
+# Frame / string utilities (shared with v2 wire format)
+# ---------------------------------------------------------------------------
 
 def encode_frame(payload: bytes) -> bytes:
     return struct.pack(">I", len(payload)) + payload
@@ -128,7 +187,12 @@ def decode_redirect(payload: bytes) -> str:
     return origin
 
 
-COMMANDS = {
+# ---------------------------------------------------------------------------
+# v3 command opcode table (single source of truth)
+# ---------------------------------------------------------------------------
+
+V3_COMMANDS = {
+    # Shared with v2 (identical wire format, routed via /v3/command)
     "REGISTER": 0x01,
     "GET_USER": 0x02,
     "LIST_USERS": 0x03,
@@ -140,353 +204,87 @@ COMMANDS = {
     "USER_REGISTRY_HEAD_CHAIN": 0x09,
     "BOARD_CREATE": 0x10,
     "BOARD_LIST": 0x11,
-    "POST_CREATE": 0x12,
-    "POST_GET": 0x13,
-    "POST_LIST": 0x14,
-    "POST_UPDATE": 0x15,
-    "POST_DELETE": 0x16,
-    "BOARD_CLOSE": 0x17,
-    "BOARD_DELETE": 0x18,
-    "QUERY_POSTS": 0x19,
-    "POST_CONTENT_SEARCH": 0x1A,
     "USER_PROMOTE": 0x20,
     "USER_DEMOTE": 0x21,
-    "POST_SIGN": 0x22,
     "GET_PUBKEY": 0x30,
-    "RULE_CREATE": 0x40,
-    "RULE_GET": 0x41,
-    "RULE_GET_BY_NAME": 0x42,
-    "RULE_LIST": 0x43,
-    "RULE_UPDATE": 0x44,
-    "REPORT_CREATE": 0x50,
-    "REPORT_GET": 0x51,
-    "REPORT_LIST_BY_CULPRIT": 0x52,
-    "REPORT_SIGN": 0x53,
-    "REPORT_LIST_SINCE": 0x54,
-    "PUNISHMENT_CREATE": 0x60,
-    "PUNISHMENT_GET": 0x61,
-    "PUNISHMENT_LIST_ACTIVE": 0x62,
-    "IS_BANNED": 0x63,
-    "PUNISHMENT_LIST_BY_PUBKEY": 0x64,
-    "REPORT_REGISTRY_HEAD": 0x55,
-    "REPORT_REGISTRY_NODES": 0x56,
-    "REPORT_REGISTRY_RECORDS": 0x57,
-    "REPORT_REGISTRY_HEADS": 0x58,
-    "REPORT_REGISTRY_HEAD_CHAIN": 0x59,
-    "PUNISHMENT_REGISTRY_HEAD": 0x65,
-    "PUNISHMENT_REGISTRY_NODES": 0x66,
-    "PUNISHMENT_REGISTRY_RECORDS": 0x67,
-    "PUNISHMENT_REGISTRY_HEADS": 0x68,
-    "PUNISHMENT_REGISTRY_HEAD_CHAIN": 0x69,
+    "PEER_KEY_ROTATE": 0x70,
+    "PEER_KEY_LIST": 0x71,
+    # v3 article feed commands
+    "ARTICLE_PUBLISH": 0x12,
+    "ARTICLE_GET": 0x13,
+    "ARTICLE_LIST": 0x14,
+    "FEED_HEAD": 0x15,
+    "FEED_EVENTS": 0x16,
+    "ARTICLE_BODY": 0x17,
+    "FEED_HEADS": 0x18,
+    "ARTICLE_SEARCH": 0x19,
+    "BOARD_SET_STATE": 0x1A,
+    "BAN_STATUS": 0x1B,
+}
+
+# Human-readable event type names
+EVENT_TYPE_NAMES = {
+    0x01: "ARTICLE", 0x02: "CANCEL", 0x03: "RESTORE", 0x04: "PURGE",
+    0x05: "RULE", 0x06: "RULE_REVOKE", 0x07: "REPORT", 0x08: "PUNISHMENT",
+    0x09: "PUNISHMENT_REVOKE", 0x0A: "BOARD_CLOSE", 0x0B: "BOARD_REOPEN",
+    0x0C: "ARTICLE_PIN", 0x0D: "ARTICLE_UNPIN", 0x0E: "THREAD_CLOSE",
+    0x0F: "THREAD_REOPEN", 0x10: "USER_REGISTER", 0x11: "USER_REVOKE",
 }
 
 
+# ---------------------------------------------------------------------------
+# Builders for shared opcodes (retained from v2, routed via /v3/command)
+# ---------------------------------------------------------------------------
+
 def build_register(username: str, registrar: str) -> bytes:
     return (
-        struct.pack(">B", COMMANDS["REGISTER"])
+        struct.pack(">B", V3_COMMANDS["REGISTER"])
         + encode_string(username)
         + encode_string(registrar)
     )
 
 
-def build_get_user(pubkey: bytes) -> bytes:
-    if len(pubkey) != 32:
-        raise ProtocolError(f"Invalid pubkey length: {len(pubkey)}")
-    return struct.pack(">B", COMMANDS["GET_USER"]) + pubkey
+def build_get_user(username: str) -> bytes:
+    """Build a GET_USER request.
+
+    The server's _cmd_get handler parses a u8-length username string (not a
+    32-byte pubkey as the v3 spec name GET_USERS_BY_PUBKEY suggests). This
+    builder matches the actual server wire format.
+    """
+    return struct.pack(">B", V3_COMMANDS["GET_USER"]) + encode_string(username)
 
 
 def build_list_users(offset: int, limit: int) -> bytes:
-    return struct.pack(">BII", COMMANDS["LIST_USERS"], offset, limit)
+    return struct.pack(">BII", V3_COMMANDS["LIST_USERS"], offset, limit)
 
 
 def build_list_peers() -> bytes:
-    return struct.pack(">B", COMMANDS["LIST_PEERS"])
+    return struct.pack(">B", V3_COMMANDS["LIST_PEERS"])
 
 
 def build_board_create(name: str) -> bytes:
-    return struct.pack(">B", COMMANDS["BOARD_CREATE"]) + encode_string(name)
+    return struct.pack(">B", V3_COMMANDS["BOARD_CREATE"]) + encode_string(name)
 
 
 def build_board_list() -> bytes:
-    return struct.pack(">B", COMMANDS["BOARD_LIST"])
-
-
-def build_board_close(name: str) -> bytes:
-    return struct.pack(">B", COMMANDS["BOARD_CLOSE"]) + encode_string(name)
-
-
-def build_board_delete(name: str) -> bytes:
-    return struct.pack(">B", COMMANDS["BOARD_DELETE"]) + encode_string(name)
-
-
-def build_post_create(
-    board: str, root: int, subject: str, tags: str, options: str, content: str
-) -> bytes:
-    return (
-        struct.pack(">B", COMMANDS["POST_CREATE"])
-        + encode_string(board)
-        + struct.pack(">Q", root)
-        + encode_string(subject)
-        + encode_string(tags)
-        + encode_string(options)
-        + encode_long_string(content)
-    )
-
-
-def build_post_get(board: str, post_num: int) -> bytes:
-    return (
-        struct.pack(">B", COMMANDS["POST_GET"])
-        + encode_string(board)
-        + struct.pack(">Q", post_num)
-    )
-
-
-def build_post_list(board: str, offset: int, limit: int) -> bytes:
-    return (
-        struct.pack(">B", COMMANDS["POST_LIST"])
-        + encode_string(board)
-        + struct.pack(">II", offset, limit)
-    )
-
-
-TLV_CONTENT = 0x01
-TLV_SUBJECT = 0x02
-TLV_OPTIONS = 0x03
-TLV_TAGS = 0x04
-TLV_STICKY = 0x05
-TLV_CLOSED = 0x06
-
-
-def encode_tlv_str(field_type: int, value: str) -> bytes:
-    return struct.pack(">B", field_type) + encode_string(value)
-
-
-def encode_tlv_long_str(field_type: int, value: str) -> bytes:
-    return struct.pack(">B", field_type) + encode_long_string(value)
-
-
-def encode_tlv_i32(field_type: int, value: int) -> bytes:
-    return struct.pack(">Bi", field_type, value)
-
-
-def encode_tlv_u8(field_type: int, value: int) -> bytes:
-    return struct.pack(">BB", field_type, value)
-
-
-def build_post_update(
-    board: str, post_num: int, fields: list[tuple[str, bytes]]
-) -> bytes:
-    field_map = {
-        "content": TLV_CONTENT,
-        "subject": TLV_SUBJECT,
-        "options": TLV_OPTIONS,
-        "tags": TLV_TAGS,
-        "sticky": TLV_STICKY,
-        "closed": TLV_CLOSED,
-    }
-    tlv_data = b""
-    for name, value in fields:
-        if name not in field_map:
-            raise ProtocolError(f"Unknown field: {name}")
-        tlv_data += value
-
-    return (
-        struct.pack(">B", COMMANDS["POST_UPDATE"])
-        + encode_string(board)
-        + struct.pack(">Q", post_num)
-        + struct.pack(">B", len(fields))
-        + tlv_data
-    )
-
-
-def build_post_delete(board: str, post_num: int) -> bytes:
-    return (
-        struct.pack(">B", COMMANDS["POST_DELETE"])
-        + encode_string(board)
-        + struct.pack(">Q", post_num)
-    )
-
-
-def build_query_posts(
-    board: str, where: str, values: list[tuple[int, bytes]], orderby: str, limit: int
-) -> bytes:
-    where_encoded = where.encode("utf-8") if where else b""
-    where_bytes = struct.pack(">H", len(where_encoded)) + where_encoded
-
-    values_data = struct.pack(">B", len(values))
-    for vtype, vdata in values:
-        values_data += struct.pack(">B", vtype) + vdata
-
-    orderby_encoded = orderby.encode("utf-8") if orderby else b""
-    orderby_bytes = struct.pack(">H", len(orderby_encoded)) + orderby_encoded
-
-    return (
-        struct.pack(">B", COMMANDS["QUERY_POSTS"])
-        + encode_string(board)
-        + where_bytes
-        + values_data
-        + orderby_bytes
-        + struct.pack(">I", limit)
-    )
-
-
-def build_post_content_search(board: str, pattern: str, limit: int = 100) -> bytes:
-    return (
-        struct.pack(">B", COMMANDS["POST_CONTENT_SEARCH"])
-        + encode_string(board)
-        + encode_long_string(pattern)
-        + struct.pack(">I", limit)
-    )
-
-
-def build_post_sign(board: str, post_num: int, signature: str) -> bytes:
-    sig_bytes = bytes.fromhex(signature) if signature else b""
-    return (
-        struct.pack(">B", COMMANDS["POST_SIGN"])
-        + encode_string(board)
-        + struct.pack(">Q", post_num)
-        + encode_string(signature)
-    )
+    return struct.pack(">B", V3_COMMANDS["BOARD_LIST"])
 
 
 def build_user_promote(username: str) -> bytes:
-    return struct.pack(">B", COMMANDS["USER_PROMOTE"]) + encode_string(username)
+    return struct.pack(">B", V3_COMMANDS["USER_PROMOTE"]) + encode_string(username)
 
 
 def build_user_demote(username: str) -> bytes:
-    return struct.pack(">B", COMMANDS["USER_DEMOTE"]) + encode_string(username)
+    return struct.pack(">B", V3_COMMANDS["USER_DEMOTE"]) + encode_string(username)
 
 
 def build_get_pubkey() -> bytes:
-    return struct.pack(">B", COMMANDS["GET_PUBKEY"])
+    return struct.pack(">B", V3_COMMANDS["GET_PUBKEY"])
 
 
-def build_rule_create(name: str, description: str) -> bytes:
-    return (
-        struct.pack(">B", COMMANDS["RULE_CREATE"])
-        + encode_string(name)
-        + encode_string(description)
-    )
-
-
-def build_rule_get(rule_num: int) -> bytes:
-    return struct.pack(">BQ", COMMANDS["RULE_GET"], rule_num)
-
-
-def build_rule_get_by_name(name: str) -> bytes:
-    return struct.pack(">B", COMMANDS["RULE_GET_BY_NAME"]) + encode_string(name)
-
-
-def build_rule_list() -> bytes:
-    return struct.pack(">B", COMMANDS["RULE_LIST"])
-
-
-def build_rule_update(rule_num: int, fields: list[tuple[str, bytes]]) -> bytes:
-    RULE_TLV_NAME = 0x01
-    RULE_TLV_DESC = 0x02
-
-    tlv_data = b""
-    for name, value in fields:
-        if name == "name":
-            tlv_data += struct.pack(">B", RULE_TLV_NAME) + value
-        elif name == "description":
-            tlv_data += struct.pack(">B", RULE_TLV_DESC) + value
-
-    return (
-        struct.pack(">B", COMMANDS["RULE_UPDATE"])
-        + struct.pack(">Q", rule_num)
-        + struct.pack(">B", len(fields))
-        + tlv_data
-    )
-
-
-def build_report_create(
-    rule_num: int,
-    culprit_pubkey: bytes,
-    reporter_pubkey: bytes,
-    description: str,
-    board: Optional[str] = None,
-    post_num: Optional[int] = None,
-    origin: Optional[str] = None,
-    relay: Optional[str] = None,
-) -> bytes:
-    return (
-        struct.pack(">B", COMMANDS["REPORT_CREATE"])
-        + struct.pack(">Q", rule_num)
-        + encode_bytes(culprit_pubkey)
-        + encode_bytes(reporter_pubkey)
-        + encode_string(description)
-        + encode_string(board or "")
-        + struct.pack(">Q", post_num or 0)
-        + encode_string(origin or "")
-        + encode_string(relay or "")
-    )
-
-
-def build_report_get(origin: str, report_num: int) -> bytes:
-    return (
-        struct.pack(">B", COMMANDS["REPORT_GET"])
-        + encode_string(origin)
-        + struct.pack(">Q", report_num)
-    )
-
-
-def build_report_list_by_culprit(pubkey: bytes) -> bytes:
-    return struct.pack(">B", COMMANDS["REPORT_LIST_BY_CULPRIT"]) + encode_string(
-        pubkey.hex()
-    )
-
-
-def build_report_sign(origin: str, report_num: int, signature: str) -> bytes:
-    return (
-        struct.pack(">B", COMMANDS["REPORT_SIGN"])
-        + encode_string(origin)
-        + struct.pack(">Q", report_num)
-        + encode_string(signature)
-    )
-
-
-def build_report_list_since(since: int) -> bytes:
-    return struct.pack(">Bq", COMMANDS["REPORT_LIST_SINCE"], since)
-
-
-def build_punishment_create(
-    pubkey: bytes, report_ids: list[int], expires_at: int, notes: str
-) -> bytes:
-    ids_data = struct.pack(">B", len(report_ids))
-    for rid in report_ids:
-        ids_data += struct.pack(">Q", rid)
-
-    return (
-        struct.pack(">B", COMMANDS["PUNISHMENT_CREATE"])
-        + encode_bytes(pubkey)
-        + ids_data
-        + struct.pack(">q", expires_at)
-        + encode_string(notes)
-    )
-
-
-def build_punishment_get(origin: str, punishment_id: int) -> bytes:
-    """§12.4: PUNISHMENT_GET takes (origin: u8-length UTF-8, punishment_id: u64be)."""
-    origin_b = origin.encode("utf-8")
-    return (
-        struct.pack(">B", COMMANDS["PUNISHMENT_GET"])
-        + struct.pack(">B", len(origin_b)) + origin_b
-        + struct.pack(">Q", punishment_id)
-    )
-
-
-def build_punishment_list_active() -> bytes:
-    return struct.pack(">B", COMMANDS["PUNISHMENT_LIST_ACTIVE"])
-
-
-def build_punishment_list_by_pubkey(pubkey: bytes) -> bytes:
-    return struct.pack(">B", COMMANDS["PUNISHMENT_LIST_BY_PUBKEY"]) + encode_bytes(pubkey)
-
-
-def build_is_banned(pubkey: bytes) -> bytes:
-    return struct.pack(">B", COMMANDS["IS_BANNED"]) + encode_bytes(pubkey)
-
+# ---------------------------------------------------------------------------
+# Parsers for shared opcodes
+# ---------------------------------------------------------------------------
 
 def parse_register_resp(payload: bytes) -> str:
     username, _ = decode_string(payload, 0)
@@ -517,6 +315,22 @@ def parse_list_users_resp(payload: bytes) -> list[User]:
         )
 
     return users
+
+
+def parse_get_user_resp(payload: bytes) -> User:
+    """Parse a GET_USER success response.
+
+    Format: pubkey:32 + registrar_len:u8 + registrar_bytes
+    """
+    pubkey = payload[:32]
+    registrar, _ = decode_string(payload, 32)
+    return User(
+        username="",
+        registrar=registrar,
+        record_origin="",
+        relay="",
+        public_key=pubkey.hex(),
+    )
 
 
 def parse_list_peers_resp(payload: bytes) -> list[Peer]:
@@ -558,349 +372,8 @@ def parse_board_list_resp(payload: bytes) -> list[Board]:
     return boards
 
 
-def parse_post_create_resp(payload: bytes) -> PostCreateResult:
-    offset = 0
-    post_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-    offset += 8
-    creation_date = struct.unpack(">q", payload[offset : offset + 8])[0]
-    offset += 8
-    last_modified = struct.unpack(">q", payload[offset : offset + 8])[0]
-    offset += 8
-    author, offset = decode_string(payload, offset)
-    author_registrar, offset = decode_string(payload, offset)
-    tags, offset = decode_string(payload, offset)
-    subject, offset = decode_string(payload, offset)
-    options, offset = decode_string(payload, offset)
-
-    return PostCreateResult(
-        post_num=post_num,
-        creation_date=creation_date,
-        last_modified=last_modified,
-        author=author,
-        author_registrar=author_registrar,
-        tags=tags,
-        subject=subject,
-        options=options,
-    )
-
-
-def parse_post_get_resp(payload: bytes) -> Post:
-    offset = 0
-    post_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-    offset += 8
-    last_modified = struct.unpack(">q", payload[offset : offset + 8])[0]
-    offset += 8
-    creation_date = struct.unpack(">q", payload[offset : offset + 8])[0]
-    offset += 8
-    last_bumped = struct.unpack(">q", payload[offset : offset + 8])[0]
-    offset += 8
-    closed = payload[offset]
-    offset += 1
-    sticky = struct.unpack(">i", payload[offset : offset + 4])[0]
-    offset += 4
-    tags, offset = decode_string(payload, offset)
-    subject, offset = decode_string(payload, offset)
-    options, offset = decode_string(payload, offset)
-    root = struct.unpack(">Q", payload[offset : offset + 8])[0]
-    offset += 8
-    author, offset = decode_string(payload, offset)
-    author_registrar, offset = decode_string(payload, offset)
-    signature, offset = decode_string(payload, offset)
-    content, offset = decode_long_string(payload, offset)
-
-    return Post(
-        post_num=post_num,
-        last_modified=last_modified,
-        creation_date=creation_date,
-        last_bumped=last_bumped,
-        closed=bool(closed),
-        sticky=sticky,
-        tags=[t for t in tags.split(",") if t],
-        subject=subject,
-        options=options,
-        root=root,
-        author=author,
-        author_registrar=author_registrar,
-        signature=signature,
-        content=content,
-    )
-
-
-def parse_post_list_resp(payload: bytes) -> list[PostSummary]:
-    posts = []
-    offset = 0
-
-    while offset < len(payload):
-        post_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        creation_date = struct.unpack(">q", payload[offset : offset + 8])[0]
-        offset += 8
-        subject, offset = decode_string(payload, offset)
-        author, offset = decode_string(payload, offset)
-        root = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-
-        posts.append(
-            PostSummary(
-                post_num=post_num,
-                creation_date=creation_date,
-                subject=subject,
-                author=author,
-                root=root,
-            )
-        )
-
-    return posts
-
-
-def parse_query_posts_resp(payload: bytes) -> list[PostSummary]:
-    posts = []
-    offset = 0
-
-    while offset < len(payload):
-        post_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        last_modified = struct.unpack(">q", payload[offset : offset + 8])[0]
-        offset += 8
-        creation_date = struct.unpack(">q", payload[offset : offset + 8])[0]
-        offset += 8
-        last_bumped = struct.unpack(">q", payload[offset : offset + 8])[0]
-        offset += 8
-        closed = payload[offset]
-        offset += 1
-        sticky = struct.unpack(">i", payload[offset : offset + 4])[0]
-        offset += 4
-        tags, offset = decode_string(payload, offset)
-        subject, offset = decode_string(payload, offset)
-        options, offset = decode_string(payload, offset)
-        root = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        author, offset = decode_string(payload, offset)
-        author_registrar, offset = decode_string(payload, offset)
-        signature, offset = decode_string(payload, offset)
-
-        posts.append(
-            PostSummary(
-                post_num=post_num,
-                creation_date=creation_date,
-                subject=subject,
-                author=author,
-                root=root,
-            )
-        )
-
-    return posts
-
-
-def parse_post_content_search_resp(payload: bytes) -> list[PostSummary]:
-    # The server serializes content-search results with the same per-post
-    # encoding as QUERY_POSTS, so reuse that decoder.
-    return parse_query_posts_resp(payload)
-
-
 def parse_get_pubkey_resp(payload: bytes) -> str:
     return payload[:32].hex()
-
-
-def parse_rule_resp(payload: bytes) -> Rule:
-    offset = 0
-    rule_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-    offset += 8
-    name, offset = decode_string(payload, offset)
-    description, offset = decode_string(payload, offset)
-
-    return Rule(rule_num=rule_num, name=name, description=description)
-
-
-def parse_rule_list_resp(payload: bytes) -> list[Rule]:
-    offset = 0
-    count = struct.unpack(">H", payload[offset : offset + 2])[0]
-    offset += 2
-
-    rules = []
-    for _ in range(count):
-        rule_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        name, offset = decode_string(payload, offset)
-        description, offset = decode_string(payload, offset)
-        rules.append(Rule(rule_num=rule_num, name=name, description=description))
-
-    return rules
-
-
-def parse_report_resp(payload: bytes) -> Report:
-    offset = 0
-    report_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-    offset += 8
-    rule_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-    offset += 8
-    culprit, offset = decode_bytes(payload, offset)
-    board, offset = decode_string(payload, offset)
-    post_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-    offset += 8
-    reporter, offset = decode_bytes(payload, offset)
-    report_time = struct.unpack(">q", payload[offset : offset + 8])[0]
-    offset += 8
-    origin, offset = decode_string(payload, offset)
-    relay, offset = decode_string(payload, offset)
-    description, offset = decode_string(payload, offset)
-    origin_sig, offset = decode_string(payload, offset)
-    reporter_sig, offset = decode_string(payload, offset)
-
-    return Report(
-        report_num=report_num,
-        rule_num=rule_num,
-        culprit_pubkey=culprit.hex(),
-        board=board if board else None,
-        post_num=post_num if post_num else None,
-        reporter_pubkey=reporter.hex(),
-        report_time=report_time,
-        origin=origin,
-        relay=relay,
-        description=description,
-        origin_sig=origin_sig,
-        reporter_sig=reporter_sig if reporter_sig else None,
-    )
-
-
-def parse_report_list_resp(payload: bytes) -> list[Report]:
-    offset = 0
-    count = struct.unpack(">H", payload[offset : offset + 2])[0]
-    offset += 2
-
-    reports = []
-    for _ in range(count):
-        report_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        rule_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        culprit, offset = decode_bytes(payload, offset)
-        board, offset = decode_string(payload, offset)
-        post_num = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        reporter, offset = decode_bytes(payload, offset)
-        report_time = struct.unpack(">q", payload[offset : offset + 8])[0]
-        offset += 8
-        origin, offset = decode_string(payload, offset)
-        relay, offset = decode_string(payload, offset)
-        description, offset = decode_string(payload, offset)
-        origin_sig, offset = decode_string(payload, offset)
-        reporter_sig, offset = decode_string(payload, offset)
-
-        reports.append(
-            Report(
-                report_num=report_num,
-                rule_num=rule_num,
-                culprit_pubkey=culprit.hex(),
-                board=board if board else None,
-                post_num=post_num if post_num else None,
-                reporter_pubkey=reporter.hex(),
-                report_time=report_time,
-                origin=origin,
-                relay=relay,
-                description=description,
-                origin_sig=origin_sig,
-                reporter_sig=reporter_sig if reporter_sig else None,
-            )
-        )
-
-    return reports
-
-
-def parse_punishment_resp(payload: bytes) -> Punishment:
-    offset = 0
-    punishment_id = struct.unpack(">Q", payload[offset : offset + 8])[0]
-    offset += 8
-    origin, offset = decode_string(payload, offset)
-    rollover = struct.unpack(">Q", payload[offset : offset + 8])[0]
-    offset += 8
-    pubkey, offset = decode_bytes(payload, offset)
-    id_count = payload[offset]
-    offset += 1
-
-    report_ids = []
-    for _ in range(id_count):
-        rid = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        report_ids.append(rid)
-
-    expires_at = struct.unpack(">q", payload[offset : offset + 8])[0]
-    offset += 8
-    notes, offset = decode_string(payload, offset)
-    issued_by, offset = decode_bytes(payload, offset)
-    created_at = struct.unpack(">q", payload[offset : offset + 8])[0]
-    offset += 8
-    origin_sig, offset = decode_string(payload, offset)
-
-    return Punishment(
-        punishment_id=punishment_id,
-        origin=origin,
-        rollover=rollover,
-        pubkey=pubkey.hex(),
-        report_ids=report_ids,
-        expires_at=expires_at,
-        notes=notes,
-        issued_by=issued_by.hex() if issued_by else None,
-        created_at=created_at,
-        origin_sig=origin_sig if origin_sig else None,
-    )
-
-
-def parse_punishment_list_resp(payload: bytes) -> list[Punishment]:
-    offset = 0
-    count = struct.unpack(">H", payload[offset : offset + 2])[0]
-    offset += 2
-
-    punishments = []
-    for _ in range(count):
-        punishment_id = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        origin, offset = decode_string(payload, offset)
-        rollover = struct.unpack(">Q", payload[offset : offset + 8])[0]
-        offset += 8
-        pubkey, offset = decode_bytes(payload, offset)
-        id_count = payload[offset]
-        offset += 1
-
-        report_ids = []
-        for _ in range(id_count):
-            rid = struct.unpack(">Q", payload[offset : offset + 8])[0]
-            offset += 8
-            report_ids.append(rid)
-
-        expires_at = struct.unpack(">q", payload[offset : offset + 8])[0]
-        offset += 8
-        notes, offset = decode_string(payload, offset)
-        issued_by, offset = decode_bytes(payload, offset)
-        created_at = struct.unpack(">q", payload[offset : offset + 8])[0]
-        offset += 8
-        origin_sig, offset = decode_string(payload, offset)
-
-        punishments.append(
-            Punishment(
-                punishment_id=punishment_id,
-                origin=origin,
-                rollover=rollover,
-                pubkey=pubkey.hex(),
-                report_ids=report_ids,
-                expires_at=expires_at,
-                notes=notes,
-                issued_by=issued_by.hex() if issued_by else None,
-                created_at=created_at,
-                origin_sig=origin_sig if origin_sig else None,
-            )
-        )
-
-    return punishments
-
-
-def parse_is_banned_resp(payload: bytes) -> BannedStatus:
-    offset = 0
-    banned = payload[offset]
-    offset += 1
-    reason, offset = decode_string(payload, offset)
-
-    return BannedStatus(banned=bool(banned), reason=reason)
 
 
 # ---------------------------------------------------------------------------
@@ -920,7 +393,7 @@ def build_user_registry_head(origin: str, requested_seq: int = 0) -> bytes:
     if len(origin_b) > _MAX_ORIGIN_LEN:
         raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
     return (
-        struct.pack(">B", COMMANDS["USER_REGISTRY_HEAD"])
+        struct.pack(">B", V3_COMMANDS["USER_REGISTRY_HEAD"])
         + struct.pack(">H", len(origin_b)) + origin_b
         + struct.pack(">Q", requested_seq)
     )
@@ -943,7 +416,7 @@ def build_user_registry_nodes(origin: str, registry_seq: int,
     if len(prefixes) > _MAX_NODES_PER_REQUEST:
         raise ProtocolError(f"Too many prefixes: {len(prefixes)} > {_MAX_NODES_PER_REQUEST}")
     data = (
-        struct.pack(">B", COMMANDS["USER_REGISTRY_NODES"])
+        struct.pack(">B", V3_COMMANDS["USER_REGISTRY_NODES"])
         + struct.pack(">H", len(origin_b)) + origin_b
         + struct.pack(">Q", registry_seq)
         + struct.pack(">H", len(prefixes))
@@ -1021,7 +494,7 @@ def build_user_registry_records(origin: str, registry_seq: int,
     if len(keys) > _MAX_RECORDS_PER_REQUEST:
         raise ProtocolError(f"Too many keys: {len(keys)} > {_MAX_RECORDS_PER_REQUEST}")
     data = (
-        struct.pack(">B", COMMANDS["USER_REGISTRY_RECORDS"])
+        struct.pack(">B", V3_COMMANDS["USER_REGISTRY_RECORDS"])
         + struct.pack(">H", len(origin_b)) + origin_b
         + struct.pack(">Q", registry_seq)
         + struct.pack(">H", len(keys))
@@ -1081,7 +554,7 @@ def build_user_registry_heads(offset: int = 0, limit: int = 100) -> bytes:
     if limit > _MAX_HEADS_PER_RESPONSE:
         limit = _MAX_HEADS_PER_RESPONSE
     return (
-        struct.pack(">B", COMMANDS["USER_REGISTRY_HEADS"])
+        struct.pack(">B", V3_COMMANDS["USER_REGISTRY_HEADS"])
         + struct.pack(">I", offset)
         + struct.pack(">H", limit)
     )
@@ -1118,7 +591,7 @@ def build_user_registry_head_chain(origin: str, start_seq: int,
     if max_count > _MAX_HEADS_PER_RESPONSE:
         max_count = _MAX_HEADS_PER_RESPONSE
     return (
-        struct.pack(">B", COMMANDS["USER_REGISTRY_HEAD_CHAIN"])
+        struct.pack(">B", V3_COMMANDS["USER_REGISTRY_HEAD_CHAIN"])
         + struct.pack(">H", len(origin_b)) + origin_b
         + struct.pack(">Q", start_seq)
         + struct.pack(">H", max_count)
@@ -1126,231 +599,55 @@ def build_user_registry_head_chain(origin: str, start_seq: int,
 
 
 # ---------------------------------------------------------------------------
-# Report registry protocol commands (opcodes 0x55–0x59)
-# Mirrors the user registry protocol but with report registry opcodes.
+# PEER_KEY_ROTATE (0x70) / PEER_KEY_LIST (0x71)
 # ---------------------------------------------------------------------------
 
-def build_report_registry_head(origin: str, requested_seq: int = 0) -> bytes:
+def build_peer_key_rotate(origin: str, old_pubkey: bytes, new_pubkey: bytes,
+                          signature: bytes) -> bytes:
+    """Build a PEER_KEY_ROTATE request.
+
+    Format: opcode:u8 + origin_len:u8 + origin + old_pubkey:32 + new_pubkey:32 + signature:64
+    The signature is an Ed25519 signature over (old_pubkey || new_pubkey) using
+    the old private key, proving key ownership.
+    """
     origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
+    if len(origin_b) > 255:
         raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
+    if len(old_pubkey) != 32 or len(new_pubkey) != 32:
+        raise ProtocolError("Public keys must be 32 bytes")
+    if len(signature) != 64:
+        raise ProtocolError("Signature must be 64 bytes")
     return (
-        struct.pack(">B", COMMANDS["REPORT_REGISTRY_HEAD"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", requested_seq)
+        struct.pack(">B", V3_COMMANDS["PEER_KEY_ROTATE"])
+        + struct.pack(">B", len(origin_b)) + origin_b
+        + old_pubkey + new_pubkey + signature
     )
 
 
-def parse_report_registry_head_resp(payload: bytes) -> bytes:
-    if len(payload) < 3:
-        raise ProtocolError("Response too short for registry head")
-    head_len = struct.unpack(">H", payload[:2])[0]
-    if len(payload) != 2 + head_len:
-        raise ProtocolError(f"Trailing/truncated head: expected {2 + head_len}, got {len(payload)}")
-    return payload[2:2 + head_len]
+def build_peer_key_list() -> bytes:
+    return struct.pack(">B", V3_COMMANDS["PEER_KEY_LIST"])
 
 
-def build_report_registry_nodes(origin: str, registry_seq: int,
-                                prefixes: list[tuple[int, bytes]]) -> bytes:
-    origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
-        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
-    if len(prefixes) > _MAX_NODES_PER_REQUEST:
-        raise ProtocolError(f"Too many prefixes: {len(prefixes)} > {_MAX_NODES_PER_REQUEST}")
-    data = (
-        struct.pack(">B", COMMANDS["REPORT_REGISTRY_NODES"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", registry_seq)
-        + struct.pack(">H", len(prefixes))
-    )
-    for bit_len, prefix_bytes in prefixes:
-        if bit_len > _MAX_PREFIX_BITS:
-            raise ProtocolError(f"Prefix bit length {bit_len} exceeds {_MAX_PREFIX_BITS}")
-        byte_len = (bit_len + 7) // 8
-        if len(prefix_bytes) != byte_len:
-            raise ProtocolError(f"Prefix byte length mismatch: {len(prefix_bytes)} != {byte_len}")
-        data += struct.pack(">H", bit_len) + struct.pack(">B", byte_len) + prefix_bytes
-    return data
+def parse_peer_key_list_resp(payload: bytes) -> list[dict]:
+    """Parse PEER_KEY_LIST success response.
 
-
-def parse_report_registry_nodes_resp(payload: bytes) -> list[dict]:
-    return parse_user_registry_nodes_resp(payload)
-
-
-def build_report_registry_records(origin: str, registry_seq: int,
-                                  keys: list[bytes],
-                                  include_proofs: bool = False) -> bytes:
-    origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
-        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
-    if len(keys) > _MAX_RECORDS_PER_REQUEST:
-        raise ProtocolError(f"Too many keys: {len(keys)} > {_MAX_RECORDS_PER_REQUEST}")
-    data = (
-        struct.pack(">B", COMMANDS["REPORT_REGISTRY_RECORDS"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", registry_seq)
-        + struct.pack(">H", len(keys))
-        + struct.pack(">B", 1 if include_proofs else 0)
-    )
-    for key in keys:
-        if len(key) != 32:
-            raise ProtocolError(f"Registry key must be 32 bytes, got {len(key)}")
-        data += key
-    return data
-
-
-def parse_report_registry_records_resp(payload: bytes) -> list[dict]:
-    return parse_user_registry_records_resp(payload)
-
-
-def build_report_registry_heads(offset: int = 0, limit: int = 100) -> bytes:
-    if limit > _MAX_HEADS_PER_RESPONSE:
-        limit = _MAX_HEADS_PER_RESPONSE
-    return (
-        struct.pack(">B", COMMANDS["REPORT_REGISTRY_HEADS"])
-        + struct.pack(">I", offset)
-        + struct.pack(">H", limit)
-    )
-
-
-def parse_report_registry_heads_resp(payload: bytes) -> list[bytes]:
-    return parse_user_registry_heads_resp(payload)
-
-
-def build_report_registry_head_chain(origin: str, start_seq: int,
-                                     max_count: int = 10) -> bytes:
-    origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
-        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
-    if max_count > _MAX_HEADS_PER_RESPONSE:
-        max_count = _MAX_HEADS_PER_RESPONSE
-    return (
-        struct.pack(">B", COMMANDS["REPORT_REGISTRY_HEAD_CHAIN"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", start_seq)
-        + struct.pack(">H", max_count)
-    )
-
-
-# ---------------------------------------------------------------------------
-# Punishment registry protocol commands (opcodes 0x65–0x69)
-# Mirrors the report registry protocol but with punishment registry opcodes.
-# ---------------------------------------------------------------------------
-
-def build_punishment_registry_head(origin: str, requested_seq: int = 0) -> bytes:
-    origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
-        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
-    return (
-        struct.pack(">B", COMMANDS["PUNISHMENT_REGISTRY_HEAD"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", requested_seq)
-    )
-
-
-def parse_punishment_registry_head_resp(payload: bytes) -> bytes:
-    return parse_report_registry_head_resp(payload)
-
-
-def build_punishment_registry_nodes(origin: str, registry_seq: int,
-                                    prefixes: list[tuple[int, bytes]]) -> bytes:
-    origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
-        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
-    if len(prefixes) > _MAX_NODES_PER_REQUEST:
-        raise ProtocolError(f"Too many prefixes: {len(prefixes)} > {_MAX_NODES_PER_REQUEST}")
-    data = (
-        struct.pack(">B", COMMANDS["PUNISHMENT_REGISTRY_NODES"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", registry_seq)
-        + struct.pack(">H", len(prefixes))
-    )
-    for bit_len, prefix_bytes in prefixes:
-        if bit_len > _MAX_PREFIX_BITS:
-            raise ProtocolError(f"Prefix bit length {bit_len} exceeds {_MAX_PREFIX_BITS}")
-        byte_len = (bit_len + 7) // 8
-        if len(prefix_bytes) != byte_len:
-            raise ProtocolError(f"Prefix byte length mismatch: {len(prefix_bytes)} != {byte_len}")
-        data += struct.pack(">H", bit_len) + struct.pack(">B", byte_len) + prefix_bytes
-    return data
-
-
-def parse_punishment_registry_nodes_resp(payload: bytes) -> list[dict]:
-    return parse_user_registry_nodes_resp(payload)
-
-
-def build_punishment_registry_records(origin: str, registry_seq: int,
-                                      keys: list[bytes],
-                                      include_proofs: bool = False) -> bytes:
-    origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
-        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
-    if len(keys) > _MAX_RECORDS_PER_REQUEST:
-        raise ProtocolError(f"Too many keys: {len(keys)} > {_MAX_RECORDS_PER_REQUEST}")
-    data = (
-        struct.pack(">B", COMMANDS["PUNISHMENT_REGISTRY_RECORDS"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", registry_seq)
-        + struct.pack(">H", len(keys))
-        + struct.pack(">B", 1 if include_proofs else 0)
-    )
-    for key in keys:
-        if len(key) != 32:
-            raise ProtocolError(f"Registry key must be 32 bytes, got {len(key)}")
-        data += key
-    return data
-
-
-def parse_punishment_registry_records_resp(payload: bytes) -> list[dict]:
-    return parse_user_registry_records_resp(payload)
-
-
-def build_punishment_registry_heads(offset: int = 0, limit: int = 100) -> bytes:
-    if limit > _MAX_HEADS_PER_RESPONSE:
-        limit = _MAX_HEADS_PER_RESPONSE
-    return (
-        struct.pack(">B", COMMANDS["PUNISHMENT_REGISTRY_HEADS"])
-        + struct.pack(">I", offset)
-        + struct.pack(">H", limit)
-    )
-
-
-def parse_punishment_registry_heads_resp(payload: bytes) -> list[bytes]:
-    return parse_user_registry_heads_resp(payload)
-
-
-def build_punishment_registry_head_chain(origin: str, start_seq: int,
-                                         max_count: int = 10) -> bytes:
-    origin_b = origin.encode("utf-8")
-    if len(origin_b) > _MAX_ORIGIN_LEN:
-        raise ProtocolError(f"Origin too long: {len(origin_b)} bytes")
-    if max_count > _MAX_HEADS_PER_RESPONSE:
-        max_count = _MAX_HEADS_PER_RESPONSE
-    return (
-        struct.pack(">B", COMMANDS["PUNISHMENT_REGISTRY_HEAD_CHAIN"])
-        + struct.pack(">H", len(origin_b)) + origin_b
-        + struct.pack(">Q", start_seq)
-        + struct.pack(">H", max_count)
-    )
+    Format: count:u16 + repeated { origin_len:u8 + origin + pubkey:32 }
+    """
+    offset = 0
+    count = struct.unpack(">H", payload[offset:offset + 2])[0]
+    offset += 2
+    keys = []
+    for _ in range(count):
+        origin, offset = decode_string(payload, offset)
+        pubkey = payload[offset:offset + 32]
+        offset += 32
+        keys.append({"origin": origin, "publickey": pubkey})
+    return keys
 
 
 # ===========================================================================
-# Protocol v3 article feed builders and parsers (§13.4)
+# v3 article feed builders and parsers (§13.4)
 # ===========================================================================
-
-V3_COMMANDS = {
-    "ARTICLE_PUBLISH": 0x12,
-    "ARTICLE_GET": 0x13,
-    "ARTICLE_LIST": 0x14,
-    "FEED_HEAD": 0x15,
-    "FEED_EVENTS": 0x16,
-    "ARTICLE_BODY": 0x17,
-    "FEED_HEADS": 0x18,
-    "ARTICLE_SEARCH": 0x19,
-    "BOARD_SET_STATE": 0x1A,
-    "BAN_STATUS": 0x1B,
-}
-
 
 def _encode_v3_str(s: str) -> bytes:
     """u16 length + UTF-8 bytes (§13.4: stop using u8 string lengths)."""
@@ -1377,6 +674,80 @@ def _decode_v3_bytes_u32(data: bytes, offset: int) -> tuple[bytes, int]:
     offset += 4
     b = data[offset:offset + length]
     return b, offset + length
+
+
+# ---------------------------------------------------------------------------
+# Submission construction + signing helpers
+# ---------------------------------------------------------------------------
+
+def make_message_id() -> bytes:
+    """Generate a random 32-byte message ID."""
+    return os.urandom(32)
+
+
+def build_submission(
+    event_type: int,
+    origin: str,
+    board: str,
+    actor_pubkey: bytes,
+    actor_username: str,
+    actor_registrar: str,
+    body: bytes = b"",
+    headers=None,
+    message_id: Optional[bytes] = None,
+    created_at: Optional[int] = None,
+    root_message_id: Optional[bytes] = None,
+    reply_to_message_id: Optional[bytes] = None,
+    supersedes_message_id: Optional[bytes] = None,
+    target_message_id: Optional[bytes] = None,
+) -> tuple[Submission, bytes]:
+    """Construct a v3 Submission and compute its body hash.
+
+    Returns (submission, body) where body is the raw body bytes to send.
+    The caller is responsible for signing the submission and sending via
+    build_article_publish or build_board_set_state.
+    """
+    body_hash = compute_body_hash(body)
+    sub = Submission(
+        event_type=event_type,
+        origin=origin,
+        board=board,
+        message_id=message_id or make_message_id(),
+        created_at=created_at if created_at is not None else int(time.time()),
+        actor_pubkey=actor_pubkey,
+        actor_username=actor_username,
+        actor_registrar=actor_registrar,
+        root_message_id=root_message_id or ZERO_MESSAGE_ID,
+        reply_to_message_id=reply_to_message_id or ZERO_MESSAGE_ID,
+        supersedes_message_id=supersedes_message_id or ZERO_MESSAGE_ID,
+        target_message_id=target_message_id or ZERO_MESSAGE_ID,
+        headers=headers,
+        body_hash=body_hash,
+        body_size=len(body),
+    )
+    return sub, body
+
+
+def sign_submission(submission: Submission, private_key: bytes) -> bytes:
+    """Sign a submission with an Ed25519 private key (SCHEME_V3).
+
+    Returns the 64-byte author signature.
+    """
+    identity = Identity.from_private_key(private_key)
+    return identity.sign(author_signature_payload(submission))
+
+
+def encode_and_sign_submission(submission: Submission, body: bytes,
+                               private_key: bytes) -> bytes:
+    """Encode a submission, sign it, and build the ARTICLE_PUBLISH request.
+
+    Convenience wrapper for build_article_publish(sign_submission(sub, key)).
+    Returns the complete ARTICLE_PUBLISH command bytes ready to send.
+    """
+    author_sig = sign_submission(submission, private_key)
+    return build_article_publish(
+        encode_submission(submission), body, SCHEME_V3, author_sig,
+    )
 
 
 # --- ARTICLE_PUBLISH (§13.4) ---
@@ -1420,7 +791,7 @@ def parse_article_publish_resp(payload: bytes) -> dict:
 # --- ARTICLE_GET (§13.4) ---
 
 def build_article_get(board: str, selector_type: int,
-                      selector: bytes | int, include_body: bool = True) -> bytes:
+                      selector, include_body: bool = True) -> bytes:
     """Build an ARTICLE_GET request.
 
     selector_type: 0x01 (article_num, selector is int) or
@@ -1537,10 +908,24 @@ def build_feed_head(board: str) -> bytes:
     )
 
 
-def parse_feed_head_resp(payload: bytes) -> bytes:
-    """Parse FEED_HEAD success response. Returns encoded head bytes."""
+def parse_feed_head_resp(payload: bytes) -> dict:
+    """Parse FEED_HEAD success response.
+
+    Returns dict with 'head_bytes', 'accepted_at', 'source_relay'.
+    Trailing witness metadata (accepted_at, source_relay) is advisory and
+    may be absent from older servers — defaults to (0, "") in that case.
+    """
     head_len = struct.unpack(">H", payload[0:2])[0]
-    return payload[2:2 + head_len]
+    head_bytes = payload[2:2 + head_len]
+    offset = 2 + head_len
+    accepted_at, source_relay = 0, ""
+    if len(payload) >= offset + 10:
+        accepted_at = struct.unpack(">q", payload[offset:offset + 8])[0]
+        offset += 8
+        relay_len = struct.unpack(">H", payload[offset:offset + 2])[0]
+        offset += 2
+        source_relay = payload[offset:offset + relay_len].decode("utf-8", errors="replace")
+    return {"head_bytes": head_bytes, "accepted_at": accepted_at, "source_relay": source_relay}
 
 
 # --- FEED_EVENTS (§13.4) ---
@@ -1556,8 +941,13 @@ def build_feed_events(board: str, start_seq: int, max_count: int = 100) -> bytes
     )
 
 
-def parse_feed_events_resp(payload: bytes) -> list[bytes]:
-    """Parse FEED_EVENTS success response. Returns list of encoded event bytes."""
+def parse_feed_events_resp(payload: bytes) -> list[dict]:
+    """Parse FEED_EVENTS success response.
+
+    Returns list of dicts with 'event_bytes', 'accepted_at', 'source_relay'.
+    Trailing witness metadata per event is advisory and may be absent from
+    older servers — defaults to (0, "") in that case.
+    """
     offset = 0
     count = struct.unpack(">H", payload[offset:offset + 2])[0]
     offset += 2
@@ -1565,8 +955,18 @@ def parse_feed_events_resp(payload: bytes) -> list[bytes]:
     for _ in range(count):
         event_len = struct.unpack(">I", payload[offset:offset + 4])[0]
         offset += 4
-        events.append(payload[offset:offset + event_len])
+        event_bytes = payload[offset:offset + event_len]
         offset += event_len
+        accepted_at, source_relay = 0, ""
+        if len(payload) >= offset + 10:
+            accepted_at = struct.unpack(">q", payload[offset:offset + 8])[0]
+            offset += 8
+            relay_len = struct.unpack(">H", payload[offset:offset + 2])[0]
+            offset += 2
+            source_relay = payload[offset:offset + relay_len].decode("utf-8", errors="replace")
+            offset += relay_len
+        events.append({"event_bytes": event_bytes, "accepted_at": accepted_at,
+                        "source_relay": source_relay})
     return events
 
 
@@ -1603,7 +1003,11 @@ def build_feed_heads(offset: int = 0, limit: int = 100) -> bytes:
 def parse_feed_heads_resp(payload: bytes) -> list[dict]:
     """Parse FEED_HEADS success response.
 
-    Format: count:u16 + repeated { origin:u16 + board:u16 + head_len:u16 + head }
+    Format: count:u16 + repeated { origin:u16 + board:u16 + head_len:u16 + head
+    + accepted_at:i64 + relay_len:u16 + relay_bytes }
+
+    Trailing witness metadata per entry is advisory and may be absent from
+    older servers — defaults to (0, "") in that case.
     """
     offset = 0
     count = struct.unpack(">H", payload[offset:offset + 2])[0]
@@ -1616,7 +1020,16 @@ def parse_feed_heads_resp(payload: bytes) -> list[dict]:
         offset += 2
         head_bytes = payload[offset:offset + head_len]
         offset += head_len
-        results.append({"origin": origin, "board": board, "head_bytes": head_bytes})
+        accepted_at, source_relay = 0, ""
+        if len(payload) >= offset + 10:
+            accepted_at = struct.unpack(">q", payload[offset:offset + 8])[0]
+            offset += 8
+            relay_len = struct.unpack(">H", payload[offset:offset + 2])[0]
+            offset += 2
+            source_relay = payload[offset:offset + relay_len].decode("utf-8", errors="replace")
+            offset += relay_len
+        results.append({"origin": origin, "board": board, "head_bytes": head_bytes,
+                         "accepted_at": accepted_at, "source_relay": source_relay})
     return results
 
 
@@ -1625,17 +1038,27 @@ def parse_feed_heads_resp(payload: bytes) -> list[dict]:
 def build_article_search(board: str, text_query: str = "",
                          offset: int = 0, limit: int = 50,
                          flags: int = 0,
+                         event_type_mask: int = 0,
                          actor_pubkey: bytes = None,
+                         subject_pubkey: bytes = None,
+                         target_message_id: bytes = None,
                          created_after: int = 0,
                          created_before: int = 0) -> bytes:
-    """Build an ARTICLE_SEARCH request with structured filters."""
+    """Build an ARTICLE_SEARCH request with structured filters.
+
+    event_type_mask: bitmask selecting event types (bit (type-1) set; 0 = all).
+    actor_pubkey: filter by actor/author public key (None = no filter).
+    subject_pubkey: filter by typed subject — culprit/punished key (None = none).
+    target_message_id: filter by target_message_id field (None = no filter).
+    created_after/created_before: time window (0 = unbounded).
+    """
     out = struct.pack(">B", V3_COMMANDS["ARTICLE_SEARCH"])
-    out += _encode_v3_str("")  # origin
+    out += _encode_v3_str("")  # origin (local)
     out += _encode_v3_str(board)
-    out += struct.pack(">I", 0)  # event_type_mask (not used in Phase 3)
-    out += (actor_pubkey if actor_pubkey else b"\x00" * 32)  # actor_pubkey_or_zero
-    out += b"\x00" * 32  # subject_pubkey_or_zero
-    out += b"\x00" * 32  # target_message_id_or_zero
+    out += struct.pack(">I", event_type_mask)
+    out += (actor_pubkey if actor_pubkey else b"\x00" * 32)
+    out += (subject_pubkey if subject_pubkey else b"\x00" * 32)
+    out += (target_message_id if target_message_id else b"\x00" * 32)
     out += struct.pack(">q", created_after)
     out += struct.pack(">q", created_before)
     out += _encode_v3_str(text_query)
@@ -1653,6 +1076,34 @@ def parse_article_search_resp(payload: bytes) -> dict:
     body_search_complete = payload[0]
     entries = parse_article_list_resp(payload[1:])
     return {"body_search_complete": body_search_complete, "entries": entries}
+
+
+# --- BOARD_SET_STATE (§13.4) ---
+
+def build_board_set_state(encoded_submission: bytes, body: bytes,
+                          author_signature_scheme: int,
+                          author_signature: bytes) -> bytes:
+    """Build a BOARD_SET_STATE request.
+
+    Same framing as ARTICLE_PUBLISH but dispatched to opcode 0x1A.
+    Only EVENT_BOARD_CLOSE (0x0A) and EVENT_BOARD_REOPEN (0x0B) are accepted.
+    """
+    return (
+        struct.pack(">B", V3_COMMANDS["BOARD_SET_STATE"])
+        + struct.pack(">I", len(encoded_submission)) + encoded_submission
+        + struct.pack(">I", len(body)) + body
+        + struct.pack(">B", author_signature_scheme)
+        + struct.pack(">H", len(author_signature)) + author_signature
+    )
+
+
+def parse_board_set_state_resp(payload: bytes) -> dict:
+    """Parse BOARD_SET_STATE success response.
+
+    Same format as ARTICLE_PUBLISH: event_len:u32 + encoded_event +
+    head_len:u16 + encoded_head
+    """
+    return parse_article_publish_resp(payload)
 
 
 # --- BAN_STATUS (§13.4) ---
@@ -1687,37 +1138,19 @@ def parse_ban_status_resp(payload: bytes) -> dict:
     }
 
 
-# --- Event decoding helper for client-side consumption ---
+# ---------------------------------------------------------------------------
+# Event / head decoding helpers for client-side consumption
+# ---------------------------------------------------------------------------
 
 def decode_v3_event(event_bytes: bytes) -> dict:
-    """Decode a v3 encoded event into a dict of fields.
-
-    Uses core.article_feed.decode_event and converts to client-friendly dict.
-    """
-    import sys
-    import os
-    src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "src")
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
-    from core.article_feed import (
-        decode_event, EVENT_ARTICLE, EVENT_CANCEL, EVENT_RESTORE, EVENT_PURGE,
-        ArticleHeaders, ReportHeaders, PunishmentHeaders, RuleHeaders, PinHeaders,
-    )
-
+    """Decode a v3 encoded event into a dict of fields."""
     ev = decode_event(event_bytes)
-    event_type_names = {
-        0x01: "ARTICLE", 0x02: "CANCEL", 0x03: "RESTORE", 0x04: "PURGE",
-        0x05: "RULE", 0x06: "RULE_REVOKE", 0x07: "REPORT", 0x08: "PUNISHMENT",
-        0x09: "PUNISHMENT_REVOKE", 0x0A: "BOARD_CLOSE", 0x0B: "BOARD_REOPEN",
-        0x0C: "ARTICLE_PIN", 0x0D: "ARTICLE_UNPIN", 0x0E: "THREAD_CLOSE",
-        0x0F: "THREAD_REOPEN",
-    }
     result = {
         "feed_seq": ev.feed_seq,
         "article_num": ev.article_num,
         "message_id": ev.message_id.hex(),
         "event_type": ev.event_type,
-        "event_type_name": event_type_names.get(ev.event_type, "UNKNOWN"),
+        "event_type_name": EVENT_TYPE_NAMES.get(ev.event_type, "UNKNOWN"),
         "origin": ev.origin,
         "board": ev.board,
         "created_at": ev.created_at,
@@ -1744,13 +1177,6 @@ def decode_v3_event(event_bytes: bytes) -> dict:
 
 def decode_v3_head(head_bytes: bytes) -> dict:
     """Decode a v3 encoded feed head into a dict."""
-    import sys
-    import os
-    src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "src")
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
-    from core.article_feed import decode_head
-
     head = decode_head(head_bytes)
     return {
         "origin": head.origin,

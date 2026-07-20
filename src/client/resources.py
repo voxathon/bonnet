@@ -1,7 +1,7 @@
 from fastmcp import FastMCP
 
 from .tools import mcp, get_client, get_username
-from .models import Board, Post, PostSummary, User, Rule, Report, Punishment
+from .models import Board, Article, User, FeedHeadInfo
 
 
 @mcp.resource("bonnet://boards")
@@ -28,39 +28,28 @@ async def get_board_resource(board_name: str) -> Board:
         raise ValueError(f"Board not found: {board_name}")
 
 
-@mcp.resource("bonnet://boards/{board_name}/posts")
-async def list_board_posts_resource(board_name: str) -> list[PostSummary]:
-    """List posts on a board."""
+@mcp.resource("bonnet://boards/{board_name}/articles")
+async def list_board_articles_resource(board_name: str) -> list[Article]:
+    """List articles on a board (active only)."""
     client = get_client()
     username = get_username()
     async with client:
         await client.connect(username, require_auth=False)
-        return await client.post_list(board_name)
+        return await client.article_list(board_name)
 
 
-@mcp.resource("bonnet://boards/{board_name}/posts/{post_num}")
-async def get_post_resource(board_name: str, post_num: int) -> Post:
-    """Get full post content."""
+@mcp.resource("bonnet://boards/{board_name}/articles/{article_num}")
+async def get_article_resource(board_name: str, article_num: int) -> Article:
+    """Get full article content by board and article number."""
+    from client.protocol import SELECTOR_ARTICLE_NUM
     client = get_client()
     username = get_username()
     async with client:
         await client.connect(username, require_auth=False)
-        return await client.post_get(board_name, post_num)
-
-
-@mcp.resource("bonnet://boards/{board_name}/thread/{root}")
-async def get_thread_resource(board_name: str, root: int) -> list[Post]:
-    """Get all posts in a thread."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.query_posts(
-            board_name,
-            where="root = ?",
-            values=[(1, root)],
-            orderby="creation_date ASC",
-        )
+        article = await client.article_get(board_name, SELECTOR_ARTICLE_NUM, article_num, True)
+        if article is None:
+            raise ValueError(f"Article not found: {board_name}/{article_num}")
+        return article
 
 
 @mcp.resource("bonnet://users")
@@ -73,41 +62,24 @@ async def list_users_resource() -> list[User]:
         return await client.list_users()
 
 
-@mcp.resource("bonnet://rules")
-async def list_rules_resource() -> list[Rule]:
-    """List all community rules."""
+@mcp.resource("bonnet://feeds/{board}/head")
+async def feed_head_resource(board: str) -> FeedHeadInfo:
+    """Get the signed feed head for a board."""
     client = get_client()
     username = get_username()
     async with client:
         await client.connect(username, require_auth=False)
-        return await client.rule_list()
+        head = await client.feed_head(board)
+        if head is None:
+            raise ValueError(f"No feed found for board: {board}")
+        return head
 
 
-@mcp.resource("bonnet://rules/{rule_num}")
-async def get_rule_resource(rule_num: int) -> Rule:
-    """Get rule by number."""
+@mcp.resource("bonnet://feeds/heads")
+async def feed_heads_resource() -> list[FeedHeadInfo]:
+    """List feed heads across all local-origin boards."""
     client = get_client()
     username = get_username()
     async with client:
         await client.connect(username, require_auth=False)
-        return await client.rule_get(rule_num)
-
-
-@mcp.resource("bonnet://reports/culprit/{pubkey}")
-async def list_reports_by_culprit_resource(pubkey: str) -> list[Report]:
-    """List reports against a user."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.report_list_by_culprit(pubkey)
-
-
-@mcp.resource("bonnet://punishments/pubkey/{pubkey}")
-async def list_punishments_by_pubkey_resource(pubkey: str) -> list[Punishment]:
-    """List all punishments (active and historical) for a user by public key."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.punishment_list_by_pubkey(pubkey)
+        return await client.feed_heads()

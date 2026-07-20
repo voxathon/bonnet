@@ -4,7 +4,7 @@ from fastmcp import FastMCP
 
 from .http import BonnetMCPClient as BonnetClient
 from .identity import IdentityStore
-from .models import Board, Post, PostSummary, User
+from .models import Board, Article, User, ArticlePublishResult
 
 simple_mcp = FastMCP("Bonnet Simple")
 
@@ -70,6 +70,16 @@ async def _connect(client: BonnetClient, auth: str | None) -> None:
         await client.connect("anonymous", require_auth=False)
 
 
+def _validate_message_id(mid: str) -> bytes:
+    try:
+        mid_bytes = bytes.fromhex(mid)
+        if len(mid_bytes) != 32:
+            raise ValueError(f"Message ID must be 32 bytes (64 hex characters), got {len(mid_bytes)} bytes.")
+        return mid_bytes
+    except ValueError as e:
+        raise ValueError(f"Invalid message ID format: {mid}") from e
+
+
 @simple_mcp.tool
 async def register(username: str, password: str) -> str:
     """Register a new user locally and on the Bonnet server. Returns the registered username."""
@@ -93,7 +103,7 @@ async def register(username: str, password: str) -> str:
             await client._register(username)
         except Exception as backend_err:
             if is_existing and "already exists" in str(backend_err).lower():
-                user = await client.get_user(client._public_key)
+                user = await client.get_user(username)
                 if user and user.username == username:
                     return username
             raise backend_err
@@ -128,7 +138,7 @@ async def whoami(auth: str) -> User:
     username, password = resolve_auth(auth)
     async with client:
         await client.connect(username, password, require_auth=True)
-        user = await client.get_user(client._public_key)
+        user = await client.get_user(username)
         if user is None:
             raise ValueError("User not found")
         return user
@@ -145,114 +155,108 @@ async def list_boards(auth: str) -> list[Board]:
 
 
 @simple_mcp.tool
-async def list_posts(board: str, auth: str) -> list[PostSummary]:
-    """List posts on a board, sorted by bump order (most recently bumped first)."""
+async def list_articles(board: str, auth: str) -> list[Article]:
+    """List articles on a board (active only, most recent first)."""
     client = get_client()
     username = resolve_username(auth)
     async with client:
         await client.connect(username, require_auth=False)
-        return await client.post_list(board, offset=0, limit=100)
+        return await client.article_list(board, offset=0, limit=100)
 
 
 @simple_mcp.tool
-async def search_posts(board: str, pattern: str, auth: str, limit: int = 100) -> list[PostSummary]:
-    """Search post content (bodies) on a local board for a regex pattern via server-side ripgrep."""
+async def search_articles(
+    board: str, text_query: str, auth: str, limit: int = 100,
+) -> list[Article]:
+    """Search articles on a board by subject/tag text."""
     client = get_client()
     username = resolve_username(auth)
     async with client:
         await client.connect(username, require_auth=False)
-        return await client.post_content_search(board, pattern, limit)
+        return await client.article_search(board, text_query, offset=0, limit=limit)
 
 
 @simple_mcp.tool
-async def get_post(board: str, post_num: int, auth: str) -> Post:
-    """Get full post content by board and post number."""
+async def get_article(board: str, article_num: int, auth: str) -> Article:
+    """Get full article content by board and article number."""
+    from client.protocol import SELECTOR_ARTICLE_NUM
     client = get_client()
     username = resolve_username(auth)
     async with client:
         await client.connect(username, require_auth=False)
-        return await client.post_get(board, post_num)
+        article = await client.article_get(board, SELECTOR_ARTICLE_NUM, article_num, True)
+        if article is None:
+            raise ValueError(f"Article not found: {board}/{article_num}")
+        return article
 
 
 @simple_mcp.tool
-async def create_post(
+async def publish_article(
     board: str,
     subject: str,
     content: str,
     auth: str,
     tags: str = "",
     options: str = "",
-    root: int = 0,
-) -> Post:
-    """Create a new post. root=0 starts a new thread, root>0 replies to that post. Returns the created post."""
+    root_message_id: str | None = None,
+    reply_to_message_id: str | None = None,
+) -> ArticlePublishResult:
+    """Publish a new article. The article is signed with your Ed25519 key
+    and recorded as an immutable feed event. Omit root_message_id and
+    reply_to_message_id to start a new thread.
+
+    root_message_id: hex message ID of the thread root (for replies).
+    reply_to_message_id: hex message ID of the article being replied to.
+    """
+    root_mid = _validate_message_id(root_message_id) if root_message_id else None
+    reply_mid = _validate_message_id(reply_to_message_id) if reply_to_message_id else None
+
     client = get_client()
     username, password = resolve_auth(auth)
-
-    # Step 1: Create the post (new connection)
     async with client:
         await client.connect(username, password, require_auth=True)
-        result = await client.post_create(board, subject, content, tags, options, root)
-
-    # Step 2: Fetch the full post data (new connection)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        post = await client.post_get(board, result.post_num)
-
-    # Step 3: Sign the post (new connection)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        await client.post_sign(
-            board,
-            post.post_num,
-            post.creation_date,
-            post.last_modified,
-            post.author,
-            post.author_registrar,
-            ",".join(post.tags),
-            post.subject,
-            post.options,
-            post.content,
+        return await client.publish_article(
+            board, subject, content, tags, options, root_mid, reply_mid,
         )
 
-    # Step 4: Return the signed post (new connection)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        return await client.post_get(board, result.post_num)
-
 
 @simple_mcp.tool
-async def update_post(
+async def supersede_article(
     board: str,
-    post_num: int,
+    target_message_id: str,
+    subject: str,
+    content: str,
     auth: str,
-    content: str | None = None,
-    subject: str | None = None,
-    tags: str | None = None,
-    options: str | None = None,
-) -> Post:
-    """Update post fields. Only the post author can update. Returns the updated post."""
+    tags: str = "",
+    options: str = "",
+) -> ArticlePublishResult:
+    """Publish a new article that supersedes an existing one. Only the original
+    author may supersede. The superseded article's state becomes 'superseded'.
+
+    target_message_id: hex message ID of the article being superseded.
+    """
+    target_mid = _validate_message_id(target_message_id)
     client = get_client()
     username, password = resolve_auth(auth)
-
-    # Step 1: Update the post (new connection)
     async with client:
         await client.connect(username, password, require_auth=True)
-        await client.post_update(board, post_num, content, subject, tags, options)
-
-    # Step 2: Return the updated post (new connection)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        return await client.post_get(board, post_num)
+        return await client.supersede_article(board, target_mid, subject, content, tags, options)
 
 
 @simple_mcp.tool
-async def delete_post(board: str, post_num: int, auth: str) -> None:
-    """Delete a post. Only the post author or moderators can delete."""
+async def cancel_article(
+    board: str, target_message_id: str, auth: str, reason: str = "",
+) -> ArticlePublishResult:
+    """Cancel an article (soft delete). Author or moderator.
+
+    target_message_id: hex message ID of the article to cancel.
+    """
+    target_mid = _validate_message_id(target_message_id)
     client = get_client()
     username, password = resolve_auth(auth)
     async with client:
         await client.connect(username, password, require_auth=True)
-        await client.post_delete(board, post_num)
+        return await client.cancel_article(board, target_mid, reason)
 
 
 def run():

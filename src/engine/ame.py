@@ -267,6 +267,9 @@ class Board:
     def close(self) -> None:
         self._closed = True
 
+    def reopen(self) -> None:
+        self._closed = False
+
     def is_closed(self) -> bool:
         return self._closed
 
@@ -590,6 +593,27 @@ class Ame:
                 self._boards[name].close()
                 # we don't have access to _db from outside unless public, so call a NavDB method
                 self._nav._set_board_closed(name)
+
+    def set_board_closed(self, name: str, closed: bool) -> None:
+        """Update both the in-memory Board closed state and the nav DB.
+
+        Used by BOARD_SET_STATE to keep list_boards() consistent with nav.
+        """
+        name = "".join([c for c in name if c.isalnum() or c in "-_"])
+        with self._boards_lock:
+            board = self._boards.get(name)
+            if board is not None:
+                if closed:
+                    board.close()
+                else:
+                    board.reopen()
+            if closed:
+                self._nav._set_board_closed(name)
+            else:
+                with self._nav._db.open() as nav_ctx:
+                    nav_ctx.execute(
+                        "UPDATE nav SET closed = 0 WHERE board_name = ?",
+                        [name])
 
     def delete_board(self, name: str):
         import shutil

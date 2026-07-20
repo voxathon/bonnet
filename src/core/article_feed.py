@@ -1223,6 +1223,7 @@ class ArticleFeedStore:
                 encoded_head        BLOB NOT NULL,
                 is_authoritative    INTEGER NOT NULL DEFAULT 0,
                 accepted_at         INTEGER NOT NULL,
+                source_relay        TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (origin, board, latest_feed_seq, head_hash)
             );
 
@@ -1330,7 +1331,17 @@ class ArticleFeedStore:
                 FOREIGN KEY (body_hash) REFERENCES article_bodies(body_hash)
             );
         """)
+        self._migrate_feed_heads_source_relay()
         self._conn.commit()
+
+    def _migrate_feed_heads_source_relay(self) -> None:
+        """Idempotent migration: add source_relay column to feed_heads if missing."""
+        cols = self._conn.execute("PRAGMA table_info(feed_heads)").fetchall()
+        col_names = {c[1] for c in cols}
+        if "source_relay" not in col_names:
+            self._conn.execute(
+                "ALTER TABLE feed_heads ADD COLUMN source_relay TEXT NOT NULL DEFAULT ''"
+            )
 
     # --- Read: feed state ---
 
@@ -1394,9 +1405,9 @@ class ArticleFeedStore:
             self._conn.execute(
                 "INSERT OR REPLACE INTO feed_heads "
                 "(origin, board, latest_feed_seq, head_hash, latest_event_hash, "
-                " encoded_head, is_authoritative, accepted_at) "
-                "VALUES (?, ?, 0, ?, ?, ?, 1, ?)",
-                (origin, board, head_hash, ZERO_HASH, encoded, now),
+                " encoded_head, is_authoritative, accepted_at, source_relay) "
+                "VALUES (?, ?, 0, ?, ?, ?, 1, ?, ?)",
+                (origin, board, head_hash, ZERO_HASH, encoded, now, origin),
             )
             self._conn.commit()
             return head
@@ -1434,6 +1445,60 @@ class ArticleFeedStore:
         for r in rows:
             result.append((r[0], r[1], decode_head(bytes(r[2]))))
         return result
+
+    # --- Read: witness metadata (advisory, unsigned) ---
+
+    def get_head_witness(self, origin: str, board: str) -> Optional[tuple]:
+        """Return (accepted_at, source_relay) for the current head, or None."""
+        with self._lock:
+            state = self.get_feed_state(origin, board)
+            if state is None or state["highest_accepted_seq"] == 0:
+                row = self._conn.execute(
+                    "SELECT accepted_at, source_relay FROM feed_heads "
+                    "WHERE origin=? AND board=? AND latest_feed_seq=0 "
+                    "ORDER BY accepted_at DESC LIMIT 1",
+                    (origin, board),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT accepted_at, source_relay FROM feed_heads "
+                    "WHERE origin=? AND board=? AND latest_feed_seq=? "
+                    "AND head_hash=?",
+                    (origin, board, state["highest_accepted_seq"],
+                     state["current_head_hash"]),
+                ).fetchone()
+        if not row:
+            return None
+        return (row[0], row[1])
+
+    def get_events_range_witnesses(self, origin: str, board: str,
+                                    start_seq: int, max_count: int) -> list:
+        """Return list of (accepted_at, source_relay) for events in range."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT feed_seq, accepted_at, source_relay FROM feed_events "
+                "WHERE origin=? AND board=? AND feed_seq >= ? "
+                "ORDER BY feed_seq ASC LIMIT ?",
+                (origin, board, start_seq, max_count),
+            ).fetchall()
+        witnesses = []
+        expected = start_seq
+        for r in rows:
+            if r[0] != expected:
+                break
+            witnesses.append((r[1], r[2]))
+            expected += 1
+        return witnesses
+
+    def list_heads_witnesses(self, offset: int = 0, limit: int = 100) -> list:
+        """Return list of (accepted_at, source_relay) parallel to list_heads."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT accepted_at, source_relay FROM feed_heads "
+                "ORDER BY accepted_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
 
     # --- Read: events ---
 
@@ -2153,10 +2218,10 @@ class ArticleFeedStore:
             self._conn.execute(
                 "INSERT OR REPLACE INTO feed_heads "
                 "(origin, board, latest_feed_seq, head_hash, latest_event_hash, "
-                " encoded_head, is_authoritative, accepted_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                " encoded_head, is_authoritative, accepted_at, source_relay) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
                 (origin, board, feed_seq, head_hash, event_hash,
-                 encoded_head, now),
+                 encoded_head, now, expected_origin),
             )
 
             self._conn.execute(
@@ -2337,10 +2402,10 @@ class ArticleFeedStore:
             self._conn.execute(
                 "INSERT OR REPLACE INTO feed_heads "
                 "(origin, board, latest_feed_seq, head_hash, latest_event_hash, "
-                " encoded_head, is_authoritative, accepted_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+                " encoded_head, is_authoritative, accepted_at, source_relay) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
                 (origin, board, head.latest_feed_seq, head_hash,
-                 head.latest_event_hash, encoded_head, now),
+                 head.latest_event_hash, encoded_head, now, source_relay),
             )
             self._conn.execute(
                 "UPDATE feed_state SET "
@@ -2552,10 +2617,10 @@ class ArticleFeedStore:
             self._conn.execute(
                 "INSERT OR REPLACE INTO feed_heads "
                 "(origin, board, latest_feed_seq, head_hash, latest_event_hash, "
-                " encoded_head, is_authoritative, accepted_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+                " encoded_head, is_authoritative, accepted_at, source_relay) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
                 (origin, board, head.latest_feed_seq, head_hash,
-                 head.latest_event_hash, encoded_head, now),
+                 head.latest_event_hash, encoded_head, now, source_relay),
             )
             self._conn.execute(
                 "UPDATE feed_state SET "

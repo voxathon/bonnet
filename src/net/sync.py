@@ -929,9 +929,9 @@ class SyncManager:
                 break
 
             events = []
-            for eb in event_bytes_list:
+            for entry in event_bytes_list:
                 try:
-                    events.append(decode_event(eb))
+                    events.append(decode_event(entry["event_bytes"]))
                 except Exception as e:
                     log_msg(f"SYNC: failed to decode event from ({origin}, {board}): {e}")
                     return

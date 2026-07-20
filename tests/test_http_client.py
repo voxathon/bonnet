@@ -7,12 +7,10 @@ Tests the full client → server round-trip via httpx ASGI transport:
   - Response signature verification
   - Origin pin TOFU
   - Changed server key fails closed
-  - Every command family round-trips
-
-Exit gate (§13 Phase 5):
-  - Client/server end-to-end tests cover every command family
-  - A changed server key fails closed
-  - Unsigned, stale, mismatched-nonce, and wrong-origin responses fail closed
+  - v3 article feed: publish, get, list, search, cancel, supersede
+  - v3 board state: close / reopen
+  - v3 ban status
+  - Every command family round-trips via /v3/command
 """
 
 import os
@@ -30,16 +28,20 @@ from httpx import AsyncClient, ASGITransport
 
 from core.crypto import Identity
 from core.config import Config
+from core.article_feed import ArticleFeedStore
+from core.user_registry import UserRegistryStore, RegistryService
 from engine.ume import Ume
 from engine.ame import Ame
 from engine.keibatsu import Keibatsu
 from engine.facade import BonnetEngine
+from engine.article_service import ArticleService
 from net.commands import CommandHandler
 from net.http_server import BonnetHTTPServer
 from net.http_auth import BonnetSigner, BonnetVerifier, KeyResolver, HTTPMessage, compute_content_digest
 from net.replay import ReplayLedger
 from net.rate_limiter import RateLimiter
 from client.http import BonnetHTTPClient, BonnetHTTPError
+from client.protocol import SELECTOR_ARTICLE_NUM, SELECTOR_MESSAGE_ID
 
 from tests.fixtures.protocol_v1.wire_fixtures import TEST_SEED
 from tests.helpers import default_test_acls
@@ -92,6 +94,26 @@ class ServerSetup:
                                   origin="bbs.test")
 
         self.engine = BonnetEngine(self.ume, self.ame, self.keibatsu, self.config, self.server_identity)
+
+        # Article feed store + service (required for v3 ARTICLE_PUBLISH etc.)
+        self.article_feed_store = ArticleFeedStore(
+            os.path.join(temp_dir, "article_feeds.db"),
+            os.path.join(temp_dir, "article_bodies"),
+        )
+        self.article_service = ArticleService(
+            self.article_feed_store, "bbs.test", self.server_identity,
+        )
+        self.engine.article_service = self.article_service
+
+        # User registry
+        self.registry_store = UserRegistryStore(os.path.join(temp_dir, "user_registry.db"))
+        self.registry_service = RegistryService(
+            self.registry_store, self.ume, self.server_identity, "bbs.test"
+        )
+        self.ume.register_mutation_callback(self.registry_service.mark_dirty)
+        self.engine.registry_store = self.registry_store
+        self.engine.registry_service = self.registry_service
+
         self.handler = CommandHandler(self.engine)
 
         task = self.handler._sync_mgr._worker_task
@@ -119,6 +141,8 @@ class ServerSetup:
         self.ame.shutdown()
         self.keibatsu.shutdown()
         self.replay_ledger.close()
+        self.registry_store.close()
+        self.article_feed_store.close()
 
     def make_asgi_transport(self):
         return ASGITransport(app=self.app)
@@ -134,9 +158,7 @@ async def setup(tmp_path):
 def _make_client(setup, base_url="https://bbs.test"):
     """Create a BonnetHTTPClient wired to the ASGI app."""
     transport = setup.make_asgi_transport()
-    # We need to inject the transport into the client's httpx client
     client = BonnetHTTPClient(base_url=base_url)
-    # Override the _ensure_client to use our ASGI transport
     client._http_client = httpx.AsyncClient(
         transport=transport,
         base_url=base_url,
@@ -179,11 +201,18 @@ class TestAnonymousClient:
             await client.connect_anonymous(anonymous_private_key=setup.anonymous_identity.private_key)
             with pytest.raises(BonnetHTTPError) as exc:
                 await client.board_create("test")
-            assert exc.value.code == 403  # command ACL denies write for anonymous
+            assert exc.value.code == 403
+
+    @pytest.mark.asyncio
+    async def test_anonymous_rejected_for_publish(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect_anonymous(anonymous_private_key=setup.anonymous_identity.private_key)
+            with pytest.raises((BonnetHTTPError, Exception)):
+                await client.publish_article("general", "test", "body")
 
 
 # ---------------------------------------------------------------------------
-# Authenticated client tests
+# Authenticated client tests — identity / board / user admin
 # ---------------------------------------------------------------------------
 
 class TestAuthenticatedClient:
@@ -200,37 +229,31 @@ class TestAuthenticatedClient:
             assert boards == []
 
     @pytest.mark.asyncio
+    async def test_get_user(self, setup):
+        ident = Identity.generate()
+        async with _make_client(setup) as client:
+            await client.connect(ident)
+            await client.register("alice", "bbs.test")
+            user = await client.get_user("alice")
+            assert user is not None
+            assert user.username == "alice"
+            assert bytes.fromhex(user.public_key) == ident.public_key
+
+    @pytest.mark.asyncio
+    async def test_get_user_not_found(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect_anonymous(anonymous_private_key=setup.anonymous_identity.private_key)
+            user = await client.get_user("nonexistent")
+            assert user is None
+
+    @pytest.mark.asyncio
     async def test_admin_board_create_and_list(self, setup):
         async with _make_client(setup) as client:
-            await client.connect(setup.server_identity)
+            await client.connect(setup.server_identity, "root")
             await client.board_create("general")
             boards = await client.board_list()
             names = [b.name for b in boards]
             assert "general" in names
-
-    @pytest.mark.asyncio
-    async def test_post_create_and_get(self, setup):
-        async with _make_client(setup) as client:
-            await client.connect(setup.server_identity)
-            await client.board_create("general")
-            result = await client.post_create("general", "Hello", "Body text here", tags="test", options="")
-            assert result.post_num >= 1
-            assert result.author == "root"
-
-            post = await client.post_get("general", result.post_num)
-            assert post.subject == "Hello"
-            assert post.content == "Body text here"
-
-    @pytest.mark.asyncio
-    async def test_post_list(self, setup):
-        async with _make_client(setup) as client:
-            await client.connect(setup.server_identity)
-            await client.board_create("general")
-            await client.post_create("general", "Post 1", "body1")
-            await client.post_create("general", "Post 2", "body2")
-
-            posts = await client.post_list("general")
-            assert len(posts) == 2
 
     @pytest.mark.asyncio
     async def test_user_promote_demote(self, setup):
@@ -239,9 +262,176 @@ class TestAuthenticatedClient:
             await client.connect(ident)
             await client.register("bob", "bbs.test")
 
-            await client.connect(setup.server_identity)
+            await client.connect(setup.server_identity, "root")
             await client.user_promote("bob")
             await client.user_demote("bob")
+
+
+# ---------------------------------------------------------------------------
+# v3 article feed tests
+# ---------------------------------------------------------------------------
+
+class TestArticleFeed:
+
+    @pytest.mark.asyncio
+    async def test_publish_and_get_article(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect(setup.server_identity, "root")
+            await client.board_create("general")
+
+            result = await client.publish_article("general", "Hello", "Body text here", tags="test")
+            assert result.article_num >= 1
+            assert result.event_type_name == "ARTICLE"
+
+            article = await client.article_get("general", SELECTOR_ARTICLE_NUM, result.article_num, True)
+            assert article is not None
+            assert article.subject == "Hello"
+            assert article.body == "Body text here"
+            assert article.tags == "test"
+
+    @pytest.mark.asyncio
+    async def test_list_articles(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect(setup.server_identity, "root")
+            await client.board_create("general")
+            await client.publish_article("general", "Post 1", "body1")
+            await client.publish_article("general", "Post 2", "body2")
+
+            articles = await client.article_list("general")
+            assert len(articles) == 2
+
+    @pytest.mark.asyncio
+    async def test_search_articles(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect(setup.server_identity, "root")
+            await client.board_create("general")
+            await client.publish_article("general", "Hello World", "body1")
+            await client.publish_article("general", "Goodbye", "body2")
+
+            results = await client.article_search("general", text_query="Hello")
+            assert len(results) == 1
+            assert results[0].subject == "Hello World"
+
+    @pytest.mark.asyncio
+    async def test_cancel_and_restore_article(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect(setup.server_identity, "root")
+            await client.board_create("general")
+            result = await client.publish_article("general", "To cancel", "body")
+
+            cancel_result = await client.cancel_article(
+                "general", bytes.fromhex(result.message_id), "test cancel reason",
+            )
+            assert cancel_result.event_type_name == "CANCEL"
+
+            article = await client.article_get("general", SELECTOR_MESSAGE_ID, bytes.fromhex(result.message_id), False)
+            assert article is not None
+            assert article.projected_state == "cancelled"
+
+            restore_result = await client.restore_article(
+                "general", bytes.fromhex(result.message_id), "restored reason",
+            )
+            assert restore_result.event_type_name == "RESTORE"
+
+            article = await client.article_get("general", SELECTOR_MESSAGE_ID, bytes.fromhex(result.message_id), False)
+            assert article is not None
+            assert article.projected_state == "active"
+
+    @pytest.mark.asyncio
+    async def test_supersede_article(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect(setup.server_identity, "root")
+            await client.board_create("general")
+            original = await client.publish_article("general", "Original", "original body")
+
+            superseded = await client.supersede_article(
+                "general", bytes.fromhex(original.message_id),
+                "Updated", "updated body",
+            )
+            assert superseded.event_type_name == "ARTICLE"
+            assert superseded.article_num > original.article_num
+
+            # Original should be superseded
+            old = await client.article_get("general", SELECTOR_MESSAGE_ID, bytes.fromhex(original.message_id), False)
+            assert old is not None
+            assert old.projected_state == "superseded"
+
+    @pytest.mark.asyncio
+    async def test_feed_head_and_events(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect(setup.server_identity, "root")
+            await client.board_create("general")
+            await client.publish_article("general", "Test", "body")
+
+            head = await client.feed_head("general")
+            assert head is not None
+            assert head.board == "general"
+            assert head.latest_feed_seq >= 1
+
+            events = await client.feed_events("general", start_seq=1)
+            assert len(events) >= 1
+
+    @pytest.mark.asyncio
+    async def test_feed_heads_list(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect(setup.server_identity, "root")
+            await client.board_create("general")
+            await client.publish_article("general", "Test", "body")
+
+            heads = await client.feed_heads()
+            assert len(heads) >= 1
+            assert any(h.board == "general" for h in heads)
+
+
+# ---------------------------------------------------------------------------
+# v3 board state tests
+# ---------------------------------------------------------------------------
+
+class TestBoardState:
+
+    @pytest.mark.asyncio
+    async def test_close_and_reopen_board(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect(setup.server_identity, "root")
+            await client.board_create("general")
+
+            close_result = await client.close_board("general", "testing")
+            assert close_result.event_type_name == "BOARD_CLOSE"
+
+            boards = await client.board_list()
+            general = [b for b in boards if b.name == "general"][0]
+            assert general.closed is True
+
+            reopen_result = await client.reopen_board("general", "reopened")
+            assert reopen_result.event_type_name == "BOARD_REOPEN"
+
+            boards = await client.board_list()
+            general = [b for b in boards if b.name == "general"][0]
+            assert general.closed is False
+
+    @pytest.mark.asyncio
+    async def test_publish_rejected_on_closed_board(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect(setup.server_identity, "root")
+            await client.board_create("general")
+            await client.close_board("general")
+
+            with pytest.raises(BonnetHTTPError):
+                await client.publish_article("general", "should fail", "body")
+
+
+# ---------------------------------------------------------------------------
+# v3 ban status test
+# ---------------------------------------------------------------------------
+
+class TestBanStatus:
+
+    @pytest.mark.asyncio
+    async def test_ban_status_not_banned(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect_anonymous(anonymous_private_key=setup.anonymous_identity.private_key)
+            status = await client.ban_status(setup.server_identity.public_key)
+            assert status.banned is False
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +454,6 @@ class TestFailClosed:
             client._trust_store.close()
 
         # Second connection with a DIFFERENT server key
-        # We simulate this by creating a new server with a different identity
         wrong_identity = Identity.generate()
         setup.app._server_identity = wrong_identity
         setup.app._signer = BonnetSigner(
@@ -286,9 +475,7 @@ class TestFailClosed:
         async with _make_client(setup) as client:
             await client.connect(ident)
 
-            # Tamper with the verifier to make it strict
-            # Manually send a request and intercept the response
-            client._ensure_client = lambda: None  # prevent re-creation
+            client._ensure_client = lambda: None
             if client._http_client is None:
                 client._http_client = httpx.AsyncClient(
                     transport=setup.make_asgi_transport(),
@@ -296,8 +483,6 @@ class TestFailClosed:
                     verify=False,
                 )
 
-            # Send a raw unsigned request to get a raw response
-            # The server will sign it, but we'll strip the signature before verification
             import base64 as b64
             nonce = b64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
             body = b"\x11"  # BOARD_LIST
@@ -305,17 +490,17 @@ class TestFailClosed:
 
             msg = HTTPMessage(
                 method="POST",
-                url="https://bbs.test/v2/command",
+                url="https://bbs.test/v3/command",
                 headers={
                     "Content-Type": "application/vnd.bonnet.command",
                     "Content-Digest": cd,
-                    "Bonnet-Version": "2",
+                    "Bonnet-Version": "3",
                     "Bonnet-Nonce": nonce,
                 },
                 body=body,
             )
             await client._signer.sign_request(msg, nonce=nonce)
-            resp = await client._http_client.post("/v2/command", content=body, headers=dict(msg.headers))
+            resp = await client._http_client.post("/v3/command", content=body, headers=dict(msg.headers))
 
             # Strip the signature headers
             tampered_headers = {k: v for k, v in resp.headers.items()
@@ -364,7 +549,6 @@ class TestOriginPinning:
 
         trust_path = str(tmp_path / "trust.db")
 
-        # Use anonymous mode for both connections (no registration needed)
         async with _make_client(setup) as client:
             client._trust_store = TrustStore(trust_path)
             await client.connect_anonymous(anonymous_private_key=setup.anonymous_identity.private_key)
@@ -373,7 +557,6 @@ class TestOriginPinning:
         async with _make_client(setup) as client:
             client._trust_store = TrustStore(trust_path)
             await client.connect_anonymous(anonymous_private_key=setup.anonymous_identity.private_key)
-            # Should not raise
             await client.board_list()
             client._trust_store.close()
 
