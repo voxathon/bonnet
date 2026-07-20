@@ -16,6 +16,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+pytestmark = pytest.mark.slow
+
 from core.article_feed import (
     ArticleFeedStore,
     Submission,
