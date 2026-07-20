@@ -25,12 +25,18 @@ def all_write_command_names():
 
 def anonymous_read_command_names():
     """Read commands granted to anonymous by default.
+    Includes both v2 and v3 spec names so ACLs work under both endpoints.
     Excludes removed v2-only commands (report/punishment registry, content search, etc.)."""
     return [
+        # v2 names (used by /v2/command dispatch)
         "GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET",
         "POST_LIST", "GET_PUBKEY", "PEER_KEY_LIST",
         "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS",
         "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN",
+        # v3 names (used by /v3/command dispatch)
+        "ARTICLE_GET", "ARTICLE_LIST",
+        "FEED_HEAD", "FEED_EVENTS", "ARTICLE_BODY", "FEED_HEADS",
+        "ARTICLE_SEARCH", "BAN_STATUS",
     ]
 
 
