@@ -259,17 +259,6 @@ class CommandHandler:
                 self._sync_mgr.queue_sync_threadsafe(relay)
                 return
 
-    def _refuse_remote_feed(self, origin: str, board: str, ctx: CommandContext) -> bytes:
-        """C1: refuse to serve remote-origin feed data to anonymous/known
-        callers (permission laundering prevention). Unknown signers (peer
-        sync clients) are allowed through. Queues a lazy sync first."""
-        if origin == self._config.origin:
-            return None
-        if ctx.is_unknown:
-            return None
-        self._maybe_queue_remote_feed_sync(origin, board)
-        return self._build_error(404, f"Feed not local; origin={origin}")
-
     def _cmd_v3_article_publish(self, data: bytes, ctx: CommandContext) -> bytes:
         """ARTICLE_PUBLISH — publish an article or control event to the local feed."""
         if not ctx.is_registered:
@@ -278,6 +267,7 @@ class CommandHandler:
             from core.article_feed import (
                 decode_submission, validate_submission, verify_author_signature,
                 SCHEME_V3, encode_event, encode_head, Submission,
+                ZERO_MESSAGE_ID,
             )
             idx = 0
             sub_len = struct.unpack(">I", data[idx:idx + 4])[0]
@@ -367,11 +357,34 @@ class CommandHandler:
                 if et not in permitted_when_closed:
                     return self._build_error(409, "Board is closed")
 
-            # Dispatch to ArticleService
+            # --- Ownership checks for supersede/cancel/restore (§6.1, §6.2, §6.3) ---
+            # Supersede: only the original author may supersede — no moderator
+            # override (moderators should cancel or purge instead).
+            # Cancel/Restore: the original author OR a moderator/administrator.
             service = self._engine.article_service
             if service is None:
                 return self._build_error(500, "Article service not configured")
 
+            if et == EVENT_ARTICLE and submission.supersedes_message_id != ZERO_MESSAGE_ID:
+                target_proj = service.store.get_article_projection_by_message_id(
+                    submission.origin, submission.board,
+                    submission.supersedes_message_id)
+                if target_proj is None:
+                    return self._build_error(404, "Supersede target article not found")
+                if submission.actor_pubkey != target_proj["author_pubkey"]:
+                    return self._build_error(403, "Only the original author may supersede an article")
+
+            if et in (EVENT_CANCEL, EVENT_RESTORE):
+                target_proj = service.store.get_article_projection_by_message_id(
+                    submission.origin, submission.board,
+                    submission.target_message_id)
+                if target_proj is None:
+                    return self._build_error(404, "Target article not found")
+                if (submission.actor_pubkey != target_proj["author_pubkey"]
+                        and not ctx.is_moderator() and not ctx.is_administrator()):
+                    return self._build_error(403, "Only the original author or a moderator may cancel or restore an article")
+
+            # Dispatch to ArticleService
             if et == EVENT_ARTICLE:
                 event, head = service.publish_article(submission, body, author_sig)
             elif et == EVENT_CANCEL:
@@ -566,17 +579,16 @@ class CommandHandler:
             if not self._engine.check_permission("read", board, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
-            refusal = self._refuse_remote_feed(origin, board, ctx)
-            if refusal is not None:
-                return refusal
-
             service = self._engine.article_service
             if service is None:
                 return self._build_error(500, "Article service not configured")
 
             head = service.store.get_head(origin, board)
             if head is None:
-                # Board exists but no stored head (e.g., pre-v3 board not yet
+                if origin != self._config.origin:
+                    self._maybe_queue_remote_feed_sync(origin, board)
+                    return self._build_error(404, f"Feed not cached; origin={origin}")
+                # Local board with no stored head (e.g., pre-v3 board not yet
                 # migrated). Create and store one now as a fallback.
                 from core.article_feed import make_empty_head, sign_head
                 head = service.store.create_empty_feed(
@@ -608,9 +620,8 @@ class CommandHandler:
             if not self._engine.check_permission("read", board, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
-            refusal = self._refuse_remote_feed(origin, board, ctx)
-            if refusal is not None:
-                return refusal
+            if origin != self._config.origin:
+                self._maybe_queue_remote_feed_sync(origin, board)
 
             start_seq = struct.unpack(">Q", data[idx:idx + 8])[0]
             idx += 8
@@ -650,9 +661,8 @@ class CommandHandler:
             if not self._engine.check_permission("read", board, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
-            refusal = self._refuse_remote_feed(origin, board, ctx)
-            if refusal is not None:
-                return refusal
+            if origin != self._config.origin:
+                self._maybe_queue_remote_feed_sync(origin, board)
 
             message_id = data[idx:idx + 32]
             idx += 32
@@ -732,9 +742,8 @@ class CommandHandler:
             if not self._engine.check_permission("read", board, ctx):
                 return self._build_error(403, "Permission denied for this board")
 
-            refusal = self._refuse_remote_feed(origin, board, ctx)
-            if refusal is not None:
-                return refusal
+            if origin != self._config.origin:
+                self._maybe_queue_remote_feed_sync(origin, board)
 
             # Parse structured filters (§13.4)
             event_type_mask = struct.unpack(">I", data[idx:idx + 4])[0]
@@ -1179,10 +1188,10 @@ class CommandHandler:
 
             nav_map = {e['board_name']: e for e in nav_entries}
 
-            visible_boards = []
-            for name, closed in boards:
-                if self._engine.check_permission("read", name, ctx):
-                    visible_boards.append((name, closed))
+            # All local boards are listed regardless of read permission — board
+            # names and metadata are public; content access (bodies) is gated
+            # by ARTICLE_BODY/ARTICLE_GET board read checks.
+            visible_boards = [(name, closed) for name, closed in boards]
 
             payload = struct.pack('>B', 0x00) + struct.pack('>H', len(visible_boards))
 

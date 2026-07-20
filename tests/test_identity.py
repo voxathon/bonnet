@@ -2,6 +2,8 @@ import pytest
 import os
 from client.identity import IdentityStore
 
+pytestmark = pytest.mark.slow
+
 def test_identity_store():
     store = IdentityStore("test_identities.db")
     try:
