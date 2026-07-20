@@ -29,7 +29,6 @@ from httpx import AsyncClient, ASGITransport
 from core.crypto import Identity
 from core.config import Config
 from core.article_feed import ArticleFeedStore
-from core.user_registry import UserRegistryStore, RegistryService
 from engine.ume import Ume
 from engine.ame import Ame
 from engine.keibatsu import Keibatsu
@@ -105,15 +104,6 @@ class ServerSetup:
         )
         self.engine.article_service = self.article_service
 
-        # User registry
-        self.registry_store = UserRegistryStore(os.path.join(temp_dir, "user_registry.db"))
-        self.registry_service = RegistryService(
-            self.registry_store, self.ume, self.server_identity, "bbs.test"
-        )
-        self.ume.register_mutation_callback(self.registry_service.mark_dirty)
-        self.engine.registry_store = self.registry_store
-        self.engine.registry_service = self.registry_service
-
         self.handler = CommandHandler(self.engine)
 
         task = self.handler._sync_mgr._worker_task
@@ -141,7 +131,6 @@ class ServerSetup:
         self.ame.shutdown()
         self.keibatsu.shutdown()
         self.replay_ledger.close()
-        self.registry_store.close()
         self.article_feed_store.close()
 
     def make_asgi_transport(self):
@@ -245,6 +234,24 @@ class TestAuthenticatedClient:
             await client.connect_anonymous(anonymous_private_key=setup.anonymous_identity.private_key)
             user = await client.get_user("nonexistent")
             assert user is None
+
+    @pytest.mark.asyncio
+    async def test_get_users_by_pubkey(self, setup):
+        ident = Identity.generate()
+        async with _make_client(setup) as client:
+            await client.connect(ident)
+            await client.register("alice", "bbs.test")
+            users = await client.get_users_by_pubkey(ident.public_key)
+            assert len(users) >= 1
+            alice = [u for u in users if u.username == "alice"][0]
+            assert bytes.fromhex(alice.public_key) == ident.public_key
+
+    @pytest.mark.asyncio
+    async def test_get_users_by_pubkey_not_found(self, setup):
+        async with _make_client(setup) as client:
+            await client.connect_anonymous(anonymous_private_key=setup.anonymous_identity.private_key)
+            users = await client.get_users_by_pubkey(b"\x01" * 32)
+            assert users == []
 
     @pytest.mark.asyncio
     async def test_admin_board_create_and_list(self, setup):
