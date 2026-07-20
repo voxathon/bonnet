@@ -20,85 +20,30 @@ class Board(BaseModel):
     )
 
 
-class PostSummary(BaseModel):
-    post_num: int
-    creation_date: int
-    subject: str
-    author: str
-    root: int
-
-
-class Post(BaseModel):
-    post_num: int
-    last_modified: int
-    creation_date: int
-    last_bumped: int
-    closed: bool
-    sticky: int
-    tags: list[str]
-    subject: str
-    options: str
-    root: int
-    author: str
-    author_registrar: str
-    signature: str = Field(..., description="Hex-encoded Ed25519 signature")
-    content: str
-
-
-class PostCreateResult(BaseModel):
-    post_num: int
-    creation_date: int
-    last_modified: int
-    author: str
-    author_registrar: str
-    tags: str
-    subject: str
-    options: str
-
-
-class Rule(BaseModel):
-    rule_num: int
-    name: str
-    description: str
-
-
-class Report(BaseModel):
-    report_num: int
-    rule_num: int
-    culprit_pubkey: str = Field(..., description="Hex-encoded Ed25519 public key")
-    board: Optional[str]
-    post_num: Optional[int]
-    reporter_pubkey: str = Field(..., description="Hex-encoded Ed25519 public key")
-    report_time: int
-    origin: str
-    relay: str
-    description: str
-    origin_sig: str = Field(..., description="Hex-encoded signature")
-    reporter_sig: Optional[str] = Field(None, description="Hex-encoded signature")
-
-
-class Punishment(BaseModel):
-    punishment_id: int = Field(..., description="Per-origin punishment ID")
-    origin: str = Field("", description="Origin that issued the punishment")
-    rollover: int = Field(0, description="Rollover variant for conflicts")
-    pubkey: str = Field(..., description="Hex-encoded Ed25519 public key")
-    report_ids: list[int]
-    expires_at: int = Field(
-        ..., description="0=warning, -1=permanent, >0=unix timestamp"
-    )
-    notes: str
-    issued_by: Optional[str] = Field(None, description="Hex-encoded Ed25519 public key of the issuing moderator")
-    created_at: int = Field(0, description="Unix timestamp when the punishment was issued")
-    origin_sig: Optional[str] = Field(None, description="Hex-encoded origin signature")
-
-
-class BannedStatus(BaseModel):
-    banned: bool
-    reason: str
-
-
 class Peer(BaseModel):
     origin: str
+
+
+class BanStatus(BaseModel):
+    """Result of a v3 BAN_STATUS query."""
+    banned: bool
+    reason: str
+    punishment_message_id: str = Field("", description="Hex-encoded 32-byte message ID of the issuing punishment event")
+    source_origin: str = Field("", description="Origin that issued the punishment")
+    source_board: str = Field("", description="Board on which the punishment was issued")
+    expires_at: int = Field(0, description="Unix timestamp when the punishment expires (0=warning, -1=permanent)")
+
+
+class ArticlePublishResult(BaseModel):
+    """Result of publishing an article or control event via ARTICLE_PUBLISH."""
+    article_num: int = Field(0, description="Assigned article number (0 for control events)")
+    message_id: str = Field(..., description="Hex-encoded 32-byte message ID")
+    feed_seq: int = Field(..., description="Assigned feed sequence number")
+    event_type: int = Field(..., description="Event type that was published")
+    event_type_name: str = Field("", description="Human-readable event type name")
+    projected_state: str = Field("active", description="Projected state after publish (active/cancelled/superseded/purged)")
+    board: str = Field("", description="Board the event was published to")
+    origin: str = Field("", description="Origin the event was published to")
 
 
 # ---------------------------------------------------------------------------
@@ -166,3 +111,5 @@ class FeedHeadInfo(BaseModel):
     event_count: int
     snapshot_timestamp: int
     signature: str = Field(..., description="Hex-encoded origin signature")
+    accepted_at: int = Field(0, description="When the relay accepted this head (advisory)")
+    source_relay: str = Field("", description="Relay that provided this head (advisory)")

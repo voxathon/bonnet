@@ -77,7 +77,7 @@ V3_COMMAND_SPECS: dict[int, CommandSpec] = {
     spec.opcode: spec for spec in [
         # Retained from v2 (§13.1)
         CommandSpec(0x01, "REGISTER", "write"),
-        CommandSpec(0x02, "GET_USERS_BY_PUBKEY", "read"),
+        CommandSpec(0x02, "GET_USER", "read"),
         CommandSpec(0x03, "LIST_USERS", "read"),
         CommandSpec(0x04, "LIST_PEERS", "read"),
         CommandSpec(0x05, "USER_REGISTRY_HEAD", "read"),

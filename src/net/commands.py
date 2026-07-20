@@ -388,11 +388,11 @@ class CommandHandler:
             if et == EVENT_ARTICLE:
                 event, head = service.publish_article(submission, body, author_sig)
             elif et == EVENT_CANCEL:
-                event, head = service.cancel_article(submission, author_sig)
+                event, head = service.cancel_article(submission, author_sig, body)
             elif et == EVENT_RESTORE:
-                event, head = service.restore_article(submission, author_sig)
+                event, head = service.restore_article(submission, author_sig, body)
             elif et == EVENT_PURGE:
-                event, head = service.purge_article(submission, author_sig)
+                event, head = service.purge_article(submission, author_sig, body)
             else:
                 # For other event types (REPORT, PUNISHMENT, RULE, etc.), use raw publish
                 event, head = service.publish_article_raw(
@@ -595,7 +595,18 @@ class CommandHandler:
                     origin, board, self._server_identity)
 
             encoded = encode_head(head)
-            return struct.pack(">B", 0x00) + struct.pack(">H", len(encoded)) + encoded
+            witness = service.store.get_head_witness(origin, board)
+            if witness is not None:
+                accepted_at, source_relay = witness
+            else:
+                accepted_at, source_relay = 0, ""
+            relay_bytes = source_relay.encode("utf-8")
+            return (
+                struct.pack(">B", 0x00)
+                + struct.pack(">H", len(encoded)) + encoded
+                + struct.pack(">q", accepted_at)
+                + struct.pack(">H", len(relay_bytes)) + relay_bytes
+            )
         except Exception as e:
             return self._build_error(400, str(e))
 
@@ -632,11 +643,20 @@ class CommandHandler:
                 return self._build_error(500, "Article service not configured")
 
             events = service.store.get_events_range(origin, board, start_seq, max_count)
+            witnesses = service.store.get_events_range_witnesses(
+                origin, board, start_seq, max_count)
             out = struct.pack(">B", 0x00)
             out += struct.pack(">H", len(events))
-            for ev in events:
+            for i, ev in enumerate(events):
                 encoded = encode_event(ev)
                 out += struct.pack(">I", len(encoded)) + encoded
+                if i < len(witnesses):
+                    accepted_at, source_relay = witnesses[i]
+                else:
+                    accepted_at, source_relay = 0, ""
+                relay_bytes = source_relay.encode("utf-8")
+                out += struct.pack(">q", accepted_at)
+                out += struct.pack(">H", len(relay_bytes)) + relay_bytes
             return out
         except Exception as e:
             return self._build_error(400, str(e))
@@ -701,16 +721,24 @@ class CommandHandler:
                 return self._build_error(500, "Article service not configured")
 
             heads = service.store.list_heads(offset, limit)
-            local_heads = [(o, b, h) for o, b, h in heads if o == self._config.origin]
+            witnesses = service.store.list_heads_witnesses(offset, limit)
+            local = []
+            for i, (o, b, h) in enumerate(heads):
+                if o == self._config.origin:
+                    w = witnesses[i] if i < len(witnesses) else (0, "")
+                    local.append((o, b, h, w))
             out = struct.pack(">B", 0x00)
-            out += struct.pack(">H", len(local_heads))
-            for origin, board, head in local_heads:
+            out += struct.pack(">H", len(local))
+            for origin, board, head, (accepted_at, source_relay) in local:
                 origin_b = origin.encode("utf-8")
                 board_b = board.encode("utf-8")
                 encoded = encode_head(head)
+                relay_b = source_relay.encode("utf-8")
                 out += struct.pack(">H", len(origin_b)) + origin_b
                 out += struct.pack(">H", len(board_b)) + board_b
                 out += struct.pack(">H", len(encoded)) + encoded
+                out += struct.pack(">q", accepted_at)
+                out += struct.pack(">H", len(relay_b)) + relay_b
             return out
         except Exception as e:
             return self._build_error(400, str(e))
@@ -940,12 +968,9 @@ class CommandHandler:
 
             # Update nav closed state (derived read optimization, §6.9)
             if submission.event_type == EVENT_BOARD_CLOSE:
-                self._ame.get_nav()._set_board_closed(submission.board)
+                self._ame.set_board_closed(submission.board, closed=True)
             elif submission.event_type == EVENT_BOARD_REOPEN:
-                with self._ame.get_nav()._db.open() as nav_ctx:
-                    nav_ctx.execute(
-                        "UPDATE nav SET closed = 0 WHERE board_name = ?",
-                        [submission.board])
+                self._ame.set_board_closed(submission.board, closed=False)
 
             # Build response: same framing as ARTICLE_PUBLISH
             encoded_event = encode_event(event)

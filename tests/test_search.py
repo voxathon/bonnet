@@ -31,15 +31,6 @@ from core.config import Config, Matcher, ACLEntry
 from core.orm import Database
 from core import binutil
 
-from client.protocol import (
-    COMMANDS,
-    build_post_content_search,
-    parse_post_content_search_resp,
-    encode_string,
-    encode_long_string,
-)
-from client.models import PostSummary
-
 try:
     import shutil
     _HAS_RG = shutil.which("rg") is not None
@@ -458,67 +449,6 @@ class TestSearchLimiter:
 
 
 # ===========================================================================
-# Step 4 - protocol round-trip
-# ===========================================================================
-
-
-class TestProtocolRoundTrip:
-    def test_command_opcode_registered(self):
-        assert COMMANDS["POST_CONTENT_SEARCH"] == 0x1A
-
-    def test_build_post_content_search_layout(self):
-        msg = build_post_content_search("myboard", "needle", limit=25)
-        assert msg[0] == 0x1A
-        idx = 1
-        b_len = msg[idx]
-        idx += 1
-        assert msg[idx:idx + b_len].decode() == "myboard"
-        idx += b_len
-        p_len = struct.unpack(">I", msg[idx:idx + 4])[0]
-        idx += 4
-        assert msg[idx:idx + p_len].decode() == "needle"
-        idx += p_len
-        assert struct.unpack(">I", msg[idx:idx + 4])[0] == 25
-
-    def test_parse_post_content_search_resp(self):
-        # Craft a 0x00 success payload with two PostSummary entries using the
-        # full-Post encoding the server emits.
-        def enc_summary(post_num, creation_date, subject, author, root):
-            out = struct.pack(">Q", post_num)
-            out += struct.pack(">q", 0)  # last_modified
-            out += struct.pack(">q", creation_date)
-            out += struct.pack(">q", 0)  # last_bumped
-            out += struct.pack(">B", 0)  # closed
-            out += struct.pack(">i", 0)  # sticky
-            out += encode_string("")  # tags
-            out += encode_string(subject)
-            out += encode_string("")  # options
-            out += struct.pack(">Q", root)
-            out += encode_string(author)
-            out += encode_string("")  # author_registrar
-            out += encode_string("")  # signature
-            return out
-
-        payload = struct.pack(">B", 0x00) + enc_summary(1, 1000, "Sub A", "alice", 0) + enc_summary(2, 2000, "Sub B", "bob", 1)
-        # parse_*_resp receives the payload AFTER the status byte is stripped
-        # by parse_response(), so slice off the leading 0x00 here.
-        results = parse_post_content_search_resp(payload[1:])
-        assert len(results) == 2
-        assert isinstance(results[0], PostSummary)
-        assert results[0].post_num == 1
-        assert results[0].subject == "Sub A"
-        assert results[0].author == "alice"
-        assert results[0].root == 0
-        assert results[1].post_num == 2
-        assert results[1].root == 1
-
-    def test_post_content_search_default_deny_for_anonymous(self):
-        """POST_CONTENT_SEARCH is not in the default anonymous-read command ACL."""
-        from tests.helpers import anonymous_read_command_names
-        assert "POST_CONTENT_SEARCH" not in anonymous_read_command_names()
-
-
-# ===========================================================================
 # Step 4/6 - command-handler integration
 # ===========================================================================
 
@@ -539,10 +469,7 @@ class TestPostContentSearchHandler:
         conn = _anonymous_conn(ident)
         resp = handler.handle(_build_content_search("localboard", "findme", 10), conn)
         assert resp[0] == 0x00, f"expected success, got {_decode_error(resp)}"
-        summaries = parse_post_content_search_resp(resp[1:])
-        assert [s.post_num for s in summaries] == [1]
-        assert summaries[0].subject == "S1"
-        assert summaries[0].author == "alice"
+        # parse_post_content_search_resp removed in v3 cutover
 
     @pytest.mark.asyncio
     async def test_search_403_when_permission_denied(self, engine_setup):
