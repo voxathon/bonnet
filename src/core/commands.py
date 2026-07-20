@@ -37,14 +37,9 @@ class CommandSpec:
 COMMAND_SPECS: dict[int, CommandSpec] = {
     spec.opcode: spec for spec in [
         CommandSpec(0x01, "REGISTER", "write"),
-        CommandSpec(0x02, "GET_USER", "read"),
+        CommandSpec(0x02, "GET_USERS_BY_PUBKEY", "read"),
         CommandSpec(0x03, "LIST_USERS", "read"),
         CommandSpec(0x04, "LIST_PEERS", "read"),
-        CommandSpec(0x05, "USER_REGISTRY_HEAD", "read"),
-        CommandSpec(0x06, "USER_REGISTRY_NODES", "read"),
-        CommandSpec(0x07, "USER_REGISTRY_RECORDS", "read"),
-        CommandSpec(0x08, "USER_REGISTRY_HEADS", "read"),
-        CommandSpec(0x09, "USER_REGISTRY_HEAD_CHAIN", "read"),
         CommandSpec(0x10, "BOARD_CREATE", "write"),
         CommandSpec(0x11, "BOARD_LIST", "read"),
         CommandSpec(0x12, "POST_CREATE", "write"),
@@ -77,14 +72,9 @@ V3_COMMAND_SPECS: dict[int, CommandSpec] = {
     spec.opcode: spec for spec in [
         # Retained from v2 (§13.1)
         CommandSpec(0x01, "REGISTER", "write"),
-        CommandSpec(0x02, "GET_USER", "read"),
+        CommandSpec(0x02, "GET_USERS_BY_PUBKEY", "read"),
         CommandSpec(0x03, "LIST_USERS", "read"),
         CommandSpec(0x04, "LIST_PEERS", "read"),
-        CommandSpec(0x05, "USER_REGISTRY_HEAD", "read"),
-        CommandSpec(0x06, "USER_REGISTRY_NODES", "read"),
-        CommandSpec(0x07, "USER_REGISTRY_RECORDS", "read"),
-        CommandSpec(0x08, "USER_REGISTRY_HEADS", "read"),
-        CommandSpec(0x09, "USER_REGISTRY_HEAD_CHAIN", "read"),
         CommandSpec(0x10, "BOARD_CREATE", "write"),
         CommandSpec(0x11, "BOARD_LIST", "read"),
         CommandSpec(0x20, "USER_PROMOTE", "write"),

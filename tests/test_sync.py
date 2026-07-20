@@ -509,9 +509,9 @@ async def sync_setup_real_ume(temp_dir):
 
 
 class TestLegacySyncRemoved:
-    """The legacy _sync_users and _sync_reports methods have been removed
-    entirely. User sync is handled by the user registry; report sync is
-    handled by the report registry."""
+    """The legacy _sync_users, _sync_reports, _sync_registry, and
+    _sync_relayed_origins methods have been removed entirely. User sync is
+    handled by the article feed (users.registry board)."""
 
     def test_sync_users_method_removed(self):
         from net.sync import SyncManager
@@ -521,6 +521,14 @@ class TestLegacySyncRemoved:
         from net.sync import SyncManager
         assert not hasattr(SyncManager, "_sync_reports")
 
+    def test_sync_registry_method_removed(self):
+        from net.sync import SyncManager
+        assert not hasattr(SyncManager, "_sync_registry")
+
+    def test_sync_relayed_origins_method_removed(self):
+        from net.sync import SyncManager
+        assert not hasattr(SyncManager, "_sync_relayed_origins")
+
     def test_build_list_users_not_imported_in_sync(self):
         import net.sync as sync_module
         assert not hasattr(sync_module, "build_list_users")
@@ -528,3 +536,7 @@ class TestLegacySyncRemoved:
     def test_build_report_list_since_not_imported_in_sync(self):
         import net.sync as sync_module
         assert not hasattr(sync_module, "build_report_list_since")
+
+    def test_build_user_registry_not_imported_in_sync(self):
+        import net.sync as sync_module
+        assert not hasattr(sync_module, "build_user_registry_head")

@@ -16,7 +16,6 @@ from net.commands import CommandHandler
 from core.crypto import Identity
 from core.config import Config
 from core.binutil import set_rg_path
-from core.user_registry import UserRegistryStore, RegistryService
 from engine.keibatsu import Keibatsu
 from app.cli import LocalConnection
 from engine.facade import BonnetEngine
@@ -62,15 +61,6 @@ class Bonnet:
             'punishments_db_path': config.punishments_db_path
         })
         self.engine = BonnetEngine(self.ume, self.ame, self.keibatsu, config, self.server_identity)
-
-        registry_db_path = os.path.join(config.data_dir, "user_registry.db")
-        self.registry_store = UserRegistryStore(registry_db_path)
-        self.registry_service = RegistryService(
-            self.registry_store, self.ume, self.server_identity, config.origin
-        )
-        self.ume.register_mutation_callback(self.registry_service.mark_dirty)
-        self.engine.registry_store = self.registry_store
-        self.engine.registry_service = self.registry_service
 
         # Article feed store + service (protocol v3)
         article_feeds_db_path = os.path.join(config.data_dir, "article_feeds.db")

@@ -153,7 +153,6 @@ class BonnetHTTPServer:
 
     async def _handle_discovery(self, scope, receive, send):
         capabilities = [
-            "user-registry-merkle-v1",
             "command-object-acl-v1",
             "immutable-article-feed-v1",
             "article-control-messages-v1",
