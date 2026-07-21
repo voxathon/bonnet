@@ -34,12 +34,20 @@ interval_seconds = 300
 # Admin full access (uncomment and set your server's pubkey)
 [[acl]]
 effect = "allow"
-match.pubkey = "hex:b17d20b7243f89626046d4bf278da4e7286013ab2c1cc56ceb34fa8071251058"
+match.pubkey = "hex:dddf572692b2b655d520959fa6ebefdd141a6cfe8fc0fd3236b521ddf4b1edf8"
 actions = ["read", "write"]
 commands = ["*"]
 kinds = ["*"]
 boards = ["*"]
 objects = ["*"]
+
+[[acl]]
+effect = "allow"
+match.role = "moderator"
+actions = ["write"]
+commands = ["PUBLISH_RECORD"]
+kinds = ["bonnet.article.cancel", "bonnet.article.restore", "bonnet.article.purge", "bonnet.article.pin", "bonnet.article.unpin", "bonnet.thread.close", "bonnet.thread.reopen", "bonnet.report", "bonnet.rule.publish", "bonnet.rule.revoke", "bonnet.punishment.issue", "bonnet.punishment.revoke"]
+boards = ["*"]
 
 # Anonymous: read-only
 [[acl]]
@@ -73,13 +81,13 @@ commands = ["PUBLISH_RECORD"]
 kinds = ["bonnet.user.register"]
 boards = ["*"]
 
-# Authenticated users: can publish articles, register, cancel, restore
+# Authenticated users: can publish articles, register, cancel/restore/purge own articles
 [[acl]]
 effect = "allow"
 match.wildcard = true
 actions = ["write"]
 commands = ["PUBLISH_RECORD"]
-kinds = ["bonnet.article", "bonnet.user.register", "bonnet.article.cancel", "bonnet.article.restore"]
+kinds = ["bonnet.article", "bonnet.user.register", "bonnet.article.cancel", "bonnet.article.restore", "bonnet.article.purge"]
 boards = ["*"]
 
 # Authenticated users: read everything

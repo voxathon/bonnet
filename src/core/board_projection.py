@@ -659,9 +659,10 @@ class BoardProjection:
             states.append(VISIBILITY_CANCELLED)
         if include_superseded:
             states.append(VISIBILITY_SUPERSEDED)
-        if include_purged:
-            states.append("purged")
         placeholders = ",".join("?" * len(states))
+        where_extra = ""
+        if not include_purged:
+            where_extra = " AND body_state != 'purged'"
         with self._lock:
             rows = self._conn.execute(
                 f"SELECT origin, board, article_num, article_id, event_id, "
@@ -672,7 +673,7 @@ class BoardProjection:
                 f"root_article_id, reply_to_article_id, replacement_article_id, "
                 f"latest_control_seq "
                 f"FROM articles WHERE origin=? AND board=? "
-                f"AND visibility IN ({placeholders}) "
+                f"AND visibility IN ({placeholders}){where_extra} "
                 f"ORDER BY article_num ASC LIMIT ? OFFSET ?",
                 [origin, board] + states + [limit, offset],
             ).fetchall()
@@ -730,7 +731,8 @@ class BoardProjection:
         where_parts = ["origin=?", "board=?"]
         params = [origin, board]
 
-        include_purged = False
+        has_visibility_filter = False
+        query_purged = False
 
         for field_id, op, value in filters:
             if field_id == 0x01:
@@ -783,15 +785,18 @@ class BoardProjection:
                     where_parts.append(f"{col} = ?")
                     params.append(int(value))
             elif field_id == 0x06:
-                col = "visibility"
-                if op == 0x01:
-                    where_parts.append(f"{col}=?")
-                    params.append(value)
-                    if value == "purged":
-                        include_purged = True
-                elif op == 0x02:
-                    where_parts.append(f"{col}!=?")
-                    params.append(value)
+                has_visibility_filter = True
+                if value == "purged":
+                    query_purged = True
+                    where_parts.append("body_state = 'purged'")
+                else:
+                    col = "visibility"
+                    if op == 0x01:
+                        where_parts.append(f"{col}=?")
+                        params.append(value)
+                    elif op == 0x02:
+                        where_parts.append(f"{col}!=?")
+                        params.append(value)
             elif field_id == 0x07:
                 if op == 0x01:
                     if value:
@@ -811,7 +816,10 @@ class BoardProjection:
                     else:
                         where_parts.append(f"{col} = 'unpinned'")
 
-        if not include_purged:
+        if not has_visibility_filter:
+            where_parts.append("visibility = 'active'")
+
+        if not query_purged:
             where_parts.append("body_state != 'purged'")
 
         where_clause = " AND ".join(where_parts)

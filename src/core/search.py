@@ -100,8 +100,18 @@ class SearchService:
 
         total = len(filtered)
         page = filtered[offset:offset + limit]
-        results = [
-            SearchResult(
+        results = []
+        for art in page:
+            excerpt = None
+            if art.body_state == "available" and art.body_size > 0:
+                body = self._body_store.get_article_body(
+                    art.origin, art.board, art.article_num,
+                    art.body_hash, art.body_size,
+                )
+                if body:
+                    text = body.decode("utf-8", errors="replace")
+                    excerpt = text[:80]
+            results.append(SearchResult(
                 article_num=art.article_num,
                 article_id=art.article_id,
                 origin=art.origin,
@@ -112,9 +122,8 @@ class SearchService:
                 visibility=art.visibility,
                 body_state=art.body_state,
                 body_available=(art.body_state == "available"),
-            )
-            for art in page
-        ]
+                excerpt=excerpt,
+            ))
         return SearchResults(results=results, total=total, truncated=(offset + limit) < total)
 
     def search_bodies(

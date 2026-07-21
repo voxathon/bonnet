@@ -382,12 +382,13 @@ class TestArticleList:
         item += struct.pack(">B", 0)  # no replacement
         item += _enc_text16("unpinned")
         item += _enc_text16("open")
+        item += struct.pack(">I", 0)  # body blob (empty for list)
 
         resp = _success(struct.pack(">H", 1) + item)
         articles = parse_article_list_response(resp)
-        assert len(articles) == 1
-        assert articles[0].article_num == 1
-        assert articles[0].subject == "Subject"
+        assert len(articles.results) == 1
+        assert articles.results[0].article_num == 1
+        assert articles.results[0].subject == "Subject"
 
 
 # ---------------------------------------------------------------------------

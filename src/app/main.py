@@ -5,6 +5,8 @@ import asyncio
 import os
 import sys
 
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from core.config import FirehoseConfig
@@ -26,7 +28,9 @@ def main():
     server = BonnetFirehoseServer(config)
 
     try:
-        asyncio.run(server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key))
+        asyncio.run(
+            server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key)
+        )
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:

@@ -14,7 +14,7 @@ from fastmcp import FastMCP
 from client.firehose_client import FirehoseHTTPClient, FirehoseClientError
 from client.firehose_models import (
     PublishResult, HeadInfo, ArticleView, ArticleListItem,
-    SearchResult, SearchResponse, BoardInfo, UserInfo, BanStatus,
+    SearchResult, SearchResponse, QueryResponse, BoardInfo, UserInfo, BanStatus,
 )
 from client.identity import IdentityStore
 from core.crypto import Identity
@@ -293,7 +293,7 @@ async def list_articles(
     include_superseded: bool = False,
     origin: str = "",
     auth: str | None = None,
-) -> list[ArticleListItem]:
+) -> QueryResponse:
     """List articles on a board with pagination and state filtering.
 
     By default only active articles are returned. Set include_cancelled or
@@ -304,6 +304,10 @@ async def list_articles(
     limit: max articles to return.
     origin: origin to query (defaults to server's origin).
     """
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
     client = _make_client()
     try:
         if auth:
@@ -333,6 +337,10 @@ async def search_articles(
     board: board name.
     origin: origin to query (defaults to server's origin).
     """
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
     client = _make_client()
     try:
         if auth:
@@ -358,7 +366,7 @@ async def query_articles(
     limit: int = 50,
     origin: str = "",
     auth: str | None = None,
-) -> list[ArticleListItem]:
+) -> QueryResponse:
     """Query articles with structured field filters. All filters are AND'd.
 
     author_pubkey: hex Ed25519 public key to filter by author.
@@ -369,6 +377,10 @@ async def query_articles(
     pinned_only: only show pinned articles.
     origin: origin to query (defaults to server's origin).
     """
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
     filters = []
     if author_pubkey:
         pk = _validate_pubkey(author_pubkey)
@@ -493,7 +505,8 @@ async def purge_article(
     origin: str = "",
     auth: str | None = None,
 ) -> str:
-    """Purge an article (hard delete body). Moderator/admin only. Irreversible.
+    """Purge an article's body (hard delete). The author or a moderator/admin may purge.
+    Irreversible — the body is deleted but the event metadata is retained in the firehose.
 
     board: board where the target article lives.
     target_article_id: hex article ID of the article to purge.
@@ -613,7 +626,7 @@ async def event_range(
     """Fetch firehose events from an origin starting at a sequence number.
 
     Returns a list of event summaries with origin_seq, kind, event_id,
-    actor_pubkey, board, and article_num.
+    actor info, board, article_num, and target fields (for control events).
 
     origin: origin to query (defaults to server's origin).
     start_seq: first sequence number to fetch.
@@ -637,6 +650,10 @@ async def event_range(
                 "actor_registrar": rec.actor_registrar,
                 "board": rec.board,
                 "article_num": rec.article_num,
+                "target_origin": rec.target_origin,
+                "target_board": rec.target_board,
+                "target_article_id": rec.target_article_id.hex() if rec.target_article_id != ZERO_ID else "",
+                "target_event_id": rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else "",
                 "created_at": rec.created_at,
             }
             for rec, witness in results
@@ -677,6 +694,10 @@ async def get_event(
             "board": rec.board,
             "article_id": rec.article_id.hex() if rec.article_id != ZERO_ID else "",
             "article_num": rec.article_num,
+            "target_origin": rec.target_origin,
+            "target_board": rec.target_board,
+            "target_article_id": rec.target_article_id.hex() if rec.target_article_id != ZERO_ID else "",
+            "target_event_id": rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else "",
             "body_hash": rec.body_hash.hex(),
             "body_size": rec.body_size,
             "witness": {

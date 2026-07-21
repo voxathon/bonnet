@@ -656,7 +656,15 @@ initial thread state is open.
 PURGE may apply to an article in any visibility state. CANCEL and RESTORE may
 change visibility after purge, but they never change purged body state. A
 control whose transition already holds or cannot apply is an idempotent no-op
-recorded in `applied_events`.
+record in `applied_events`.
+
+A purged article has `visibility='active'` and `body_state='purged'`.
+Clients MUST check `body_state` alongside `visibility` to determine if an
+article's body is available. The `visibility` field reflects lifecycle
+state (active/cancelled/superseded); the `body_state` field reflects body
+availability (available/unavailable/purged). The two dimensions are
+independent — a purged article is still visibility-active until separately
+cancelled.
 
 Applicable controls are reduced in origin sequence order. Timestamps do not
 override sequence order.
