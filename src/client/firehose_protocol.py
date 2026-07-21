@@ -21,7 +21,7 @@ from core.record import (
 )
 from client.firehose_models import (
     PublishResult, EventInfo, HeadInfo, ArticleView, ArticleListItem,
-    SearchResult, SearchResponse, BoardInfo, UserInfo, BanStatus,
+    SearchResult, SearchResponse, QueryResponse, BoardInfo, UserInfo, BanStatus,
 )
 
 
@@ -388,6 +388,7 @@ def build_article_list(origin: str, board: str, offset: int = 0, limit: int = 10
         flags |= 0x01
     if include_superseded:
         flags |= 0x02
+    limit = max(1, min(limit, 65535))
     out = struct.pack(">B", OP_ARTICLE_LIST)
     out += _enc_text16(origin)
     out += _enc_text16(board)
@@ -397,15 +398,14 @@ def build_article_list(origin: str, board: str, offset: int = 0, limit: int = 10
     return out
 
 
-def parse_article_list_response(resp: bytes) -> list[ArticleListItem]:
+def parse_article_list_response(resp: bytes) -> QueryResponse:
     status, payload = parse_response(resp)
     count, offset = _read_u16(payload, 0)
     items = []
     for _ in range(count):
-        item = _decode_article_list_item(payload, offset)
-        items.append(item[0])
-        offset = item[1]
-    return items
+        item, offset = _decode_article_list_item(payload, offset)
+        items.append(item)
+    return QueryResponse(results=items)
 
 
 def _decode_article_list_item(data: bytes, offset: int) -> tuple[ArticleListItem, int]:
@@ -451,6 +451,8 @@ def _decode_article_list_item(data: bytes, offset: int) -> tuple[ArticleListItem
     pin_state, offset = _read_text16(data, offset)
     thread_state, offset = _read_text16(data, offset)
 
+    _, offset = _read_blob32(data, offset)
+
     vis_map = {0: "active", 1: "cancelled", 2: "superseded"}
     body_map = {0: "available", 1: "unavailable", 2: "purged"}
 
@@ -489,6 +491,7 @@ def build_article_search(origin: str, board: str, meta_query: str = "", body_que
         flags |= 0x01
     if include_superseded:
         flags |= 0x02
+    limit = max(1, min(limit, 65535))
     out = struct.pack(">B", OP_ARTICLE_SEARCH)
     out += _enc_text16(origin)
     out += _enc_text16(board)
@@ -555,20 +558,21 @@ def build_article_query(
         out += struct.pack(">B", operator)
         out += struct.pack(">B", value_type)
         out += struct.pack(">H", len(value)) + value
+    limit = max(1, min(limit, 65535))
     out += struct.pack(">I", offset)
     out += struct.pack(">H", limit)
     return out
 
 
-def parse_article_query_response(resp: bytes) -> list:
-    """Parse an ARTICLE_QUERY response. Returns list of ArticleListItem."""
+def parse_article_query_response(resp: bytes) -> QueryResponse:
+    """Parse an ARTICLE_QUERY response. Returns QueryResponse."""
     status, payload = parse_response(resp)
     count, offset = _read_u16(payload, 0)
     items = []
     for _ in range(count):
         item, offset = _decode_article_list_item(payload, offset)
         items.append(item)
-    return items
+    return QueryResponse(results=items)
 
 
 # ---------------------------------------------------------------------------

@@ -41,6 +41,14 @@ from core.global_projections import NavProjection, UserProjection, PolicyProject
 from core.bodies import BodyStore
 from core.search import SearchService
 
+KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
+KIND_ARTICLE_RESTORE = "bonnet.article.restore"
+KIND_ARTICLE_PURGE = "bonnet.article.purge"
+KIND_ARTICLE_PIN = "bonnet.article.pin"
+KIND_ARTICLE_UNPIN = "bonnet.article.unpin"
+KIND_THREAD_CLOSE = "bonnet.thread.close"
+KIND_THREAD_REOPEN = "bonnet.thread.reopen"
+
 
 # ---------------------------------------------------------------------------
 # Opcodes (§19)
@@ -324,6 +332,52 @@ class FirehoseCommandHandler:
                                command="PUBLISH_RECORD", kind=kind, board=board or None):
             return _error(0x0004, "Not permitted")
 
+        if kind in (KIND_ARTICLE_CANCEL, KIND_ARTICLE_RESTORE, KIND_ARTICLE_PURGE,
+                    KIND_ARTICLE_PIN, KIND_ARTICLE_UNPIN,
+                    KIND_THREAD_CLOSE, KIND_THREAD_REOPEN):
+            if intent.target_article_id == ZERO_ID or not intent.target_origin or not intent.target_board:
+                return _error(0x0006, "Control event requires complete target tuple")
+
+            bp = self._get_board_projection(intent.target_origin, intent.target_board)
+            target = bp.get_article_by_id(
+                intent.target_origin, intent.target_board, intent.target_article_id,
+            )
+
+            if target is None:
+                return _error(0x0003, "Target article not found")
+
+            if kind == KIND_ARTICLE_CANCEL:
+                if target.author_pubkey != intent.actor_pubkey:
+                    if ctx.role != "administrator" and ctx.role != "moderator":
+                        return _error(0x0004, "Only the author or a moderator may cancel this article")
+                if target.visibility == "cancelled":
+                    return _error(0x0009, "Article is already cancelled")
+                if target.visibility == "superseded":
+                    return _error(0x0009, "Cannot cancel a superseded article")
+            elif kind == KIND_ARTICLE_RESTORE:
+                if target.author_pubkey != intent.actor_pubkey:
+                    if ctx.role != "administrator" and ctx.role != "moderator":
+                        return _error(0x0004, "Only the author or a moderator may restore this article")
+                if target.visibility != "cancelled":
+                    return _error(0x0009, "Article is not cancelled")
+                if target.body_state == "purged":
+                    return _error(0x0009, "Cannot restore a purged article")
+            elif kind == KIND_ARTICLE_PURGE:
+                if target.author_pubkey != intent.actor_pubkey:
+                    if ctx.role != "administrator" and ctx.role != "moderator":
+                        return _error(0x0004, "Only the author or a moderator may purge this article")
+                if target.body_state == "purged":
+                    return _error(0x0009, "Article is already purged")
+            elif kind == KIND_ARTICLE_UNPIN:
+                if target.pin_state == "unpinned":
+                    return _error(0x0009, "Article is not pinned")
+            elif kind == KIND_THREAD_CLOSE:
+                if target.thread_state == "closed":
+                    return _error(0x0009, "Thread is already closed")
+            elif kind == KIND_THREAD_REOPEN:
+                if target.thread_state == "open":
+                    return _error(0x0009, "Thread is not closed")
+
         if intent.body_size > 0:
             if len(body) != intent.body_size:
                 return _error(0x0006, "Body length mismatch")
@@ -335,6 +389,11 @@ class FirehoseCommandHandler:
             self._body_store.stage_article_body(
                 intent.origin, intent.board, intent.event_id,
                 body, intent.body_hash, intent.body_size,
+            )
+        elif intent.body_size > 0:
+            self._body_store.write_event_body(
+                intent.origin, intent.event_id, body,
+                intent.body_hash, intent.body_size,
             )
 
         rec = self._firehose.append_record(self._identity, intent, actor_sig, body)

@@ -20,6 +20,7 @@ from core.crypto import Identity
 from core.record import (
     Intent, MetadataMap, ZERO_ID,
     encode_intent, sign_intent, compute_body_hash,
+    encode_record, compute_event_hash,
     metadata_text, metadata_text_list, metadata_bytes, metadata_u64, metadata_i64,
 )
 from core.trust import TrustStore
@@ -30,7 +31,7 @@ from net.http_auth import (
 )
 from client.firehose_models import (
     PublishResult, EventInfo, HeadInfo, ArticleView, ArticleListItem,
-    SearchResult, SearchResponse, BoardInfo, UserInfo, BanStatus, DiscoveryInfo,
+    SearchResult, SearchResponse, QueryResponse, BoardInfo, UserInfo, BanStatus, DiscoveryInfo,
 )
 from client.firehose_protocol import (
     build_publish_record, parse_publish_response, parse_publish_response_raw,
@@ -489,7 +490,7 @@ class FirehoseHTTPClient:
         return parse_article_get_response(resp)
 
     async def list_articles(self, origin: str, board: str, offset: int = 0, limit: int = 100,
-                            include_cancelled: bool = False, include_superseded: bool = False) -> list[ArticleListItem]:
+                            include_cancelled: bool = False, include_superseded: bool = False) -> QueryResponse:
         cmd = build_article_list(origin, board, offset, limit, include_cancelled, include_superseded)
         resp = await self._send_command(cmd)
         return parse_article_list_response(resp)
@@ -503,7 +504,7 @@ class FirehoseHTTPClient:
         return parse_article_search_response(resp)
 
     async def query_articles(self, origin: str, board: str, filters: list,
-                             offset: int = 0, limit: int = 100) -> list[ArticleListItem]:
+                             offset: int = 0, limit: int = 100) -> QueryResponse:
         """Query articles with structured filters.
 
         filters: list of (field_id, operator, value_type, value_bytes) tuples.
@@ -571,7 +572,6 @@ class FirehoseHTTPClient:
                 break
 
             encoded = encode_record(rec) if hasattr(rec, 'origin_seq') else b""
-            from core.record import compute_event_hash
             event_hash = compute_event_hash(encoded).hex() if encoded else ""
 
             hop = {

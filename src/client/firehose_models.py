@@ -58,7 +58,12 @@ class HeadInfo:
 
 @dataclass
 class ArticleView:
-    """An article projection returned by ARTICLE_GET."""
+    """An article projection returned by ARTICLE_GET.
+
+    Note: visibility and body_state are independent dimensions. A purged
+    article has visibility='active' and body_state='purged'. Clients MUST
+    check body_state alongside visibility to determine body availability.
+    """
     article_num: int
     article_id: str
     event_id: str
@@ -114,7 +119,7 @@ class SearchResult:
     author_pubkey: str
     created_at: int
     body_available: bool
-    excerpt: str
+    excerpt: Optional[str] = None
 
 
 @dataclass
@@ -123,6 +128,12 @@ class SearchResponse:
     results: list[SearchResult]
     total: int
     truncated: bool
+
+
+@dataclass
+class QueryResponse:
+    """Query response wrapping article list."""
+    results: list[ArticleListItem]
 
 
 @dataclass
