@@ -704,6 +704,152 @@ class BoardProjection:
             return row[0]
 
     # ------------------------------------------------------------------
+    # Structured query
+    # ------------------------------------------------------------------
+
+    def query_articles(
+        self,
+        origin: str,
+        board: str,
+        filters: list,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> list[ArticleProjection]:
+        """Query articles with structured field filters.
+
+        filters: list of (field_id, operator, value) tuples.
+            field_id: 0x01=author_pubkey, 0x02=author_username,
+                      0x03=author_registrar, 0x04=tags, 0x05=created_at,
+                      0x06=visibility, 0x07=thread_root, 0x08=reply_to,
+                      0x09=pin_state
+            operator: 0x01=EQ, 0x02=NE, 0x03=GT, 0x04=LT, 0x05=LIKE, 0x06=IN
+            value: bytes, str, int, or bool depending on field
+
+        All filters are AND'd. Purged articles excluded unless visibility=purged.
+        """
+        where_parts = ["origin=?", "board=?"]
+        params = [origin, board]
+
+        include_purged = False
+
+        for field_id, op, value in filters:
+            if field_id == 0x01:
+                col = "author_pubkey"
+                if op == 0x01:
+                    where_parts.append(f"{col}=?")
+                    params.append(value)
+                elif op == 0x02:
+                    where_parts.append(f"{col}!=?")
+                    params.append(value)
+            elif field_id == 0x02:
+                col = "author_username"
+                if op == 0x01:
+                    where_parts.append(f"{col}=?")
+                    params.append(value)
+                elif op == 0x02:
+                    where_parts.append(f"{col}!=?")
+                    params.append(value)
+                elif op == 0x05:
+                    where_parts.append(f"{col} LIKE ?")
+                    params.append(f"%{value}%")
+            elif field_id == 0x03:
+                col = "author_registrar"
+                if op == 0x01:
+                    where_parts.append(f"{col}=?")
+                    params.append(value)
+                elif op == 0x05:
+                    where_parts.append(f"{col} LIKE ?")
+                    params.append(f"%{value}%")
+            elif field_id == 0x04:
+                col = "tags"
+                if op == 0x05:
+                    where_parts.append(f"{col} LIKE ?")
+                    params.append(f"%{value}%")
+                elif op == 0x06:
+                    for tag in value.split(","):
+                        tag = tag.strip()
+                        if tag:
+                            where_parts.append(f"{col} LIKE ?")
+                            params.append(f"%{tag}%")
+            elif field_id == 0x05:
+                col = "created_at"
+                if op == 0x03:
+                    where_parts.append(f"{col} > ?")
+                    params.append(int(value))
+                elif op == 0x04:
+                    where_parts.append(f"{col} < ?")
+                    params.append(int(value))
+                elif op == 0x01:
+                    where_parts.append(f"{col} = ?")
+                    params.append(int(value))
+            elif field_id == 0x06:
+                col = "visibility"
+                if op == 0x01:
+                    where_parts.append(f"{col}=?")
+                    params.append(value)
+                    if value == "purged":
+                        include_purged = True
+                elif op == 0x02:
+                    where_parts.append(f"{col}!=?")
+                    params.append(value)
+            elif field_id == 0x07:
+                if op == 0x01:
+                    if value:
+                        where_parts.append("root_article_id = x'0000000000000000000000000000000000000000000000000000000000000000'")
+                    else:
+                        where_parts.append("root_article_id != x'0000000000000000000000000000000000000000000000000000000000000000'")
+            elif field_id == 0x08:
+                col = "reply_to_article_id"
+                if op == 0x01:
+                    where_parts.append(f"{col}=?")
+                    params.append(value)
+            elif field_id == 0x09:
+                col = "pin_state"
+                if op == 0x01:
+                    if value:
+                        where_parts.append(f"{col} != 'unpinned'")
+                    else:
+                        where_parts.append(f"{col} = 'unpinned'")
+
+        if not include_purged:
+            where_parts.append("body_state != 'purged'")
+
+        where_clause = " AND ".join(where_parts)
+        placeholders = ",".join("?" * 0)
+
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT origin, board, article_num, article_id, event_id, "
+                f"visibility, body_state, pin_state, thread_state, "
+                f"subject, tags, options, content_type, "
+                f"author_pubkey, author_username, author_registrar, "
+                f"created_at, body_hash, body_size, "
+                f"root_article_id, reply_to_article_id, replacement_article_id, "
+                f"latest_control_seq "
+                f"FROM articles WHERE {where_clause} "
+                f"ORDER BY article_num ASC LIMIT ? OFFSET ?",
+                params + [limit, offset],
+            ).fetchall()
+            return [
+                ArticleProjection(
+                    origin=r[0], board=r[1], article_num=r[2],
+                    article_id=bytes(r[3]), event_id=bytes(r[4]),
+                    visibility=r[5], body_state=r[6],
+                    pin_state=r[7], thread_state=r[8],
+                    subject=r[9], tags=r[10], options=r[11],
+                    content_type=r[12],
+                    author_pubkey=bytes(r[13]), author_username=r[14],
+                    author_registrar=r[15],
+                    created_at=r[16], body_hash=bytes(r[17]),
+                    body_size=r[18],
+                    root_article_id=bytes(r[19]), reply_to_article_id=bytes(r[20]),
+                    replacement_article_id=bytes(r[21]) if r[21] else None,
+                    latest_control_seq=r[22],
+                )
+                for r in rows
+            ]
+
+    # ------------------------------------------------------------------
     # Rebuild
     # ------------------------------------------------------------------
 

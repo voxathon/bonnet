@@ -37,6 +37,7 @@ OP_BOARD_LIST = 0x10
 OP_ARTICLE_GET = 0x11
 OP_ARTICLE_LIST = 0x12
 OP_ARTICLE_SEARCH = 0x13
+OP_ARTICLE_QUERY = 0x15
 OP_ARTICLE_BODY = 0x14
 OP_USER_GET = 0x20
 OP_USER_LIST = 0x21
@@ -322,9 +323,29 @@ def _decode_article_view(data: bytes) -> ArticleView:
     ap_len, offset = _read_u8(data, offset)
     author_pubkey = data[offset:offset + ap_len]
     offset += ap_len
+    author_username, offset = _read_text16(data, offset)
+    author_registrar, offset = _read_text16(data, offset)
     subject, offset = _read_text16(data, offset)
     tags, offset = _read_text16(data, offset)
     content_type, offset = _read_text16(data, offset)
+
+    root_len, offset = _read_u8(data, offset)
+    root_id = data[offset:offset + root_len].hex() if root_len else ""
+    offset += root_len
+
+    reply_len, offset = _read_u8(data, offset)
+    reply_id = data[offset:offset + reply_len].hex() if reply_len else ""
+    offset += reply_len
+
+    has_replacement, offset = _read_u8(data, offset)
+    replacement_id = ""
+    if has_replacement:
+        replacement_id = data[offset:offset + 32].hex()
+        offset += 32
+
+    pin_state, offset = _read_text16(data, offset)
+    thread_state, offset = _read_text16(data, offset)
+
     body_bytes, offset = _read_blob32(data, offset)
 
     vis_map = {0: "active", 1: "cancelled", 2: "superseded"}
@@ -340,9 +361,16 @@ def _decode_article_view(data: bytes) -> ArticleView:
         body_size=body_size,
         created_at=created_at,
         author_pubkey=author_pubkey.hex(),
+        author_username=author_username,
+        author_registrar=author_registrar,
         subject=subject,
         tags=tags,
         content_type=content_type,
+        root_article_id=root_id,
+        reply_to_article_id=reply_id,
+        replacement_article_id=replacement_id,
+        pin_state=pin_state,
+        thread_state=thread_state,
         body=body_bytes if body_bytes else None,
     )
 
@@ -396,9 +424,28 @@ def _decode_article_list_item(data: bytes, offset: int) -> tuple[ArticleListItem
     ap_len, offset = _read_u8(data, offset)
     author_pubkey = data[offset:offset + ap_len]
     offset += ap_len
+    author_username, offset = _read_text16(data, offset)
+    author_registrar, offset = _read_text16(data, offset)
     subject, offset = _read_text16(data, offset)
     tags, offset = _read_text16(data, offset)
     content_type, offset = _read_text16(data, offset)
+
+    root_len, offset = _read_u8(data, offset)
+    root_id = data[offset:offset + root_len].hex() if root_len else ""
+    offset += root_len
+
+    reply_len, offset = _read_u8(data, offset)
+    reply_id = data[offset:offset + reply_len].hex() if reply_len else ""
+    offset += reply_len
+
+    has_replacement, offset = _read_u8(data, offset)
+    replacement_id = ""
+    if has_replacement:
+        replacement_id = data[offset:offset + 32].hex()
+        offset += 32
+
+    pin_state, offset = _read_text16(data, offset)
+    thread_state, offset = _read_text16(data, offset)
 
     vis_map = {0: "active", 1: "cancelled", 2: "superseded"}
     body_map = {0: "available", 1: "unavailable", 2: "purged"}
@@ -413,9 +460,16 @@ def _decode_article_list_item(data: bytes, offset: int) -> tuple[ArticleListItem
         body_size=body_size,
         created_at=created_at,
         author_pubkey=author_pubkey.hex(),
+        author_username=author_username,
+        author_registrar=author_registrar,
         subject=subject,
         tags=tags,
         content_type=content_type,
+        root_article_id=root_id,
+        reply_to_article_id=reply_id,
+        replacement_article_id=replacement_id,
+        pin_state=pin_state,
+        thread_state=thread_state,
     ), offset
 
 
@@ -472,6 +526,45 @@ def parse_article_search_response(resp: bytes) -> SearchResponse:
             excerpt=excerpt,
         ))
     return SearchResponse(results=results, total=total, truncated=bool(truncated))
+
+
+# ---------------------------------------------------------------------------
+# ARTICLE_QUERY
+# ---------------------------------------------------------------------------
+
+def build_article_query(
+    origin: str, board: str, filters: list, offset: int = 0, limit: int = 100,
+) -> bytes:
+    """Build an ARTICLE_QUERY request.
+
+    filters: list of (field_id, operator, value_type, value_bytes) tuples.
+        value_type: 0x01=BYTES, 0x02=TEXT, 0x03=I64, 0x04=BOOL
+    """
+    out = struct.pack(">B", OP_ARTICLE_QUERY)
+    out += _enc_text16(origin)
+    out += _enc_text16(board)
+    out += struct.pack(">B", len(filters))
+    for field_id, operator, value_type, value in filters:
+        if isinstance(value, str):
+            value = value.encode("utf-8")
+        out += struct.pack(">B", field_id)
+        out += struct.pack(">B", operator)
+        out += struct.pack(">B", value_type)
+        out += struct.pack(">H", len(value)) + value
+    out += struct.pack(">I", offset)
+    out += struct.pack(">H", limit)
+    return out
+
+
+def parse_article_query_response(resp: bytes) -> list:
+    """Parse an ARTICLE_QUERY response. Returns list of ArticleListItem."""
+    status, payload = parse_response(resp)
+    count, offset = _read_u16(payload, 0)
+    items = []
+    for _ in range(count):
+        item, offset = _decode_article_list_item(payload, offset)
+        items.append(item)
+    return items
 
 
 # ---------------------------------------------------------------------------
