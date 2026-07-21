@@ -143,6 +143,8 @@ class UserInfo:
     reg_seq: int
     created_at: int
     revoked: bool
+    revoked_seq: int = 0
+    origin: str = ""
 
 
 @dataclass

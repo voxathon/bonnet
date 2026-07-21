@@ -68,10 +68,12 @@ class FirehoseHTTPServer:
         anonymous_identity: Optional[Identity] = None,
         replay_ledger: Optional[ReplayLedger] = None,
         rate_limiter: Optional[RateLimiter] = None,
+        users_projection=None,
     ):
         self._handler = command_handler
         self._server_identity = server_identity
         self._config = config
+        self._users = users_projection
 
         if anonymous_identity is None:
             anonymous_identity = Identity.generate()
@@ -279,7 +281,24 @@ class FirehoseHTTPServer:
 
         role = ""
         is_registered = False
-        is_unknown = not is_anonymous
+        is_unknown = False
+
+        if is_anonymous:
+            is_unknown = False
+        else:
+            if self._users is not None:
+                user = self._users.get_user_by_pubkey(self._config.origin, peer_public_key)
+                if user is not None and not user.get("revoked", False):
+                    is_registered = True
+                    flags = user.get("flags", 0)
+                    if flags & 0x01:
+                        role = "administrator"
+                    elif flags & 0x02:
+                        role = "moderator"
+                else:
+                    is_unknown = True
+            else:
+                is_unknown = True
 
         ctx = FirehoseContext(
             peer_pubkey=peer_public_key,
