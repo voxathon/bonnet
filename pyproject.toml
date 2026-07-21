@@ -4,21 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bonnet"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "A computer bulletin board system for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pynacl>=1.5.0",
-    "click>=8.3.1",
-    "pydantic>=2.0.0",
     "fastmcp>=3.0.0",
-    "starlette>=1.0.0",
-    "fastapi>=0.135.2",
-    "bcrypt>=5.0.0",
-    "pytest-cov>=7.1.0",
     "httpx>=0.27.0",
     "uvicorn>=0.30.0",
+    "bcrypt>=5.0.0",
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]
@@ -35,11 +31,11 @@ dev = [
 ]
 
 [project.scripts]
-bonnet-client = "client:run"
-bonnet-simple = "client:run_simple"
+bonnet-server = "app.main:main"
+bonnet-mcp = "client.server:run"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/client", "src/core", "src/engine", "src/net", "src/app"]
+packages = ["src/client", "src/core", "src/net", "src/app"]
 
 [tool.pytest.ini_options]
 tmp_path_retention_policy = "none"

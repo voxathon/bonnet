@@ -93,6 +93,16 @@ class FirehoseHTTPServer:
             key_id=f"ed25519:{server_identity.public_key.hex()}",
             tag=FIREHOSE_TAG,
             label=FIREHOSE_LABEL,
+            request_components=[
+                "@method", "@authority", "@target-uri",
+                "content-type", "content-digest",
+                "bonnet-protocol", "bonnet-nonce",
+            ],
+            response_components=[
+                "@status", "content-type", "content-digest",
+                "bonnet-protocol", "bonnet-origin",
+                "bonnet-request-nonce",
+            ],
         )
 
         self._verifier = BonnetVerifier(
@@ -100,6 +110,8 @@ class FirehoseHTTPServer:
             tag=FIREHOSE_TAG,
             max_lifetime=getattr(config, 'signature_lifetime_seconds', 60),
             clock_skew=getattr(config, 'clock_skew_seconds', 30),
+            request_required_components=REQUEST_REQUIRED_COMPONENTS,
+            response_required_components=RESPONSE_REQUIRED_COMPONENTS,
         )
 
         self._max_request_size = getattr(config, 'max_request_size', 10 * 1024 * 1024)
