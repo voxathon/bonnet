@@ -330,11 +330,13 @@ def _decode_article_view(data: bytes) -> ArticleView:
     content_type, offset = _read_text16(data, offset)
 
     root_len, offset = _read_u8(data, offset)
-    root_id = data[offset:offset + root_len].hex() if root_len else ""
+    root_raw = data[offset:offset + root_len] if root_len else b""
+    root_id = root_raw.hex() if root_raw and root_raw != ZERO_ID else ""
     offset += root_len
 
     reply_len, offset = _read_u8(data, offset)
-    reply_id = data[offset:offset + reply_len].hex() if reply_len else ""
+    reply_raw = data[offset:offset + reply_len] if reply_len else b""
+    reply_id = reply_raw.hex() if reply_raw and reply_raw != ZERO_ID else ""
     offset += reply_len
 
     has_replacement, offset = _read_u8(data, offset)
@@ -431,11 +433,13 @@ def _decode_article_list_item(data: bytes, offset: int) -> tuple[ArticleListItem
     content_type, offset = _read_text16(data, offset)
 
     root_len, offset = _read_u8(data, offset)
-    root_id = data[offset:offset + root_len].hex() if root_len else ""
+    root_raw = data[offset:offset + root_len] if root_len else b""
+    root_id = root_raw.hex() if root_raw and root_raw != ZERO_ID else ""
     offset += root_len
 
     reply_len, offset = _read_u8(data, offset)
-    reply_id = data[offset:offset + reply_len].hex() if reply_len else ""
+    reply_raw = data[offset:offset + reply_len] if reply_len else b""
+    reply_id = reply_raw.hex() if reply_raw and reply_raw != ZERO_ID else ""
     offset += reply_len
 
     has_replacement, offset = _read_u8(data, offset)
@@ -607,6 +611,7 @@ def parse_user_get_response(resp: bytes) -> UserInfo:
     reg_seq, offset = _read_u64(payload, offset)
     created_at, offset = _read_i64(payload, offset)
     revoked, offset = _read_u8(payload, offset)
+    revoked_seq, offset = _read_u64(payload, offset)
     return UserInfo(
         pubkey=pubkey.hex(),
         username=username,
@@ -614,6 +619,7 @@ def parse_user_get_response(resp: bytes) -> UserInfo:
         reg_seq=reg_seq,
         created_at=created_at,
         revoked=bool(revoked),
+        revoked_seq=revoked_seq,
     )
 
 
@@ -634,19 +640,23 @@ def parse_user_list_response(resp: bytes) -> list[UserInfo]:
     count, offset = _read_u16(payload, 0)
     users = []
     for _ in range(count):
+        origin, offset = _read_text16(payload, offset)
         pk_len, offset = _read_u8(payload, offset)
         pubkey = payload[offset:offset + pk_len]
         offset += pk_len
         username, offset = _read_text16(payload, offset)
         flags, offset = _read_u64(payload, offset)
+        reg_seq, offset = _read_u64(payload, offset)
+        created_at, offset = _read_i64(payload, offset)
         revoked, offset = _read_u8(payload, offset)
         users.append(UserInfo(
             pubkey=pubkey.hex(),
             username=username,
             flags=flags,
-            reg_seq=0,
-            created_at=0,
+            reg_seq=reg_seq,
+            created_at=created_at,
             revoked=bool(revoked),
+            origin=origin,
         ))
     return users
 

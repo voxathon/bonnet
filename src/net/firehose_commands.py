@@ -240,8 +240,9 @@ class FirehoseCommandHandler:
 
         action = "write" if opcode in WRITE_OPS else "read"
 
-        if not self._acl.check(ctx.to_auth_context(), action, command=cmd_name):
-            return _error(0x0004, "Command not permitted")
+        if action == "read":
+            if not self._acl.check(ctx.to_auth_context(), action, command=cmd_name):
+                return _error(0x0004, "Command not permitted")
 
         try:
             if opcode == OP_PUBLISH_RECORD:
@@ -319,8 +320,9 @@ class FirehoseCommandHandler:
 
         kind = intent.kind
         board = intent.board
-        if not self._acl.check(ctx.to_auth_context(), "write", kind=kind, board=board or None):
-            return _error(0x0004, "Kind or board not permitted")
+        if not self._acl.check(ctx.to_auth_context(), "write",
+                               command="PUBLISH_RECORD", kind=kind, board=board or None):
+            return _error(0x0004, "Not permitted")
 
         if intent.body_size > 0:
             if len(body) != intent.body_size:
@@ -735,6 +737,8 @@ class FirehoseCommandHandler:
         out += struct.pack(">Q", user["reg_seq"])
         out += struct.pack(">q", user["created_at"])
         out += struct.pack(">B", 1 if user["revoked"] else 0)
+        revoked_seq = user.get("revoked_seq") or 0
+        out += struct.pack(">Q", revoked_seq)
         return _success(out)
 
     # ------------------------------------------------------------------
@@ -751,10 +755,14 @@ class FirehoseCommandHandler:
 
         out = struct.pack(">H", len(users))
         for u in users:
+            origin_bytes = u["origin"].encode("utf-8")
+            out += struct.pack(">H", len(origin_bytes)) + origin_bytes
             out += struct.pack(">B", len(u["user_pubkey"])) + u["user_pubkey"]
             username = u["username"].encode("utf-8")
             out += struct.pack(">H", len(username)) + username
             out += struct.pack(">Q", u["flags"])
+            out += struct.pack(">Q", u["reg_seq"])
+            out += struct.pack(">q", u["created_at"])
             out += struct.pack(">B", 1 if u["revoked"] else 0)
         return _success(out)
 

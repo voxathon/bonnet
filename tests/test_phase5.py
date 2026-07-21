@@ -456,12 +456,14 @@ class TestUserGet:
         out += struct.pack(">Q", 1)  # reg_seq
         out += struct.pack(">q", 1700000000)  # created_at
         out += struct.pack(">B", 0)  # not revoked
+        out += struct.pack(">Q", 0)  # revoked_seq
         resp = _success(out)
 
         user = parse_user_get_response(resp)
         assert user.username == "alice"
         assert user.flags == 0x01
         assert not user.revoked
+        assert user.revoked_seq == 0
 
 
 # ---------------------------------------------------------------------------
@@ -475,15 +477,20 @@ class TestUserList:
 
     def test_parse(self):
         pk = ACTOR_PUB
-        item = struct.pack(">B", 32) + pk
+        item = _enc_text16("bbs.test")  # origin
+        item += struct.pack(">B", 32) + pk
         item += _enc_text16("bob")
-        item += struct.pack(">Q", 0)
-        item += struct.pack(">B", 0)
+        item += struct.pack(">Q", 0)  # flags
+        item += struct.pack(">Q", 1)  # reg_seq
+        item += struct.pack(">q", 1700000000)  # created_at
+        item += struct.pack(">B", 0)  # not revoked
         resp = _success(struct.pack(">H", 1) + item)
 
         users = parse_user_list_response(resp)
         assert len(users) == 1
         assert users[0].username == "bob"
+        assert users[0].origin == "bbs.test"
+        assert users[0].reg_seq == 1
 
 
 # ---------------------------------------------------------------------------
