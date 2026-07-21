@@ -1,29 +1,29 @@
-from core.crypto import Identity
-from engine.ume import User
-from net.context import CommandContext
+"""Local REPL connection for the Bonnet firehose server.
+
+Produces a FirehoseContext for local command dispatch, bypassing HTTP
+signature verification. The local admin identity is the server's own key.
+"""
+
+from __future__ import annotations
+
+from net.firehose_commands import FirehoseContext
 
 
-class LocalConnection:
-    """Local REPL principal — produces CommandContext for local command dispatch.
+class FirehoseLocalConnection:
+    """Local REPL principal — produces FirehoseContext for local dispatch."""
 
-    In protocol v2, LocalConnection is a thin factory that builds a
-    transport-neutral CommandContext. It is NOT a second connection implementation.
-    """
+    def __init__(self, server_pubkey: bytes, origin: str, role: str = "administrator"):
+        self.server_pubkey = server_pubkey
+        self.origin = origin
+        self.role = role
 
-    def __init__(self, user, peer_pubkey, engine=None, origin=None):
-        self.user = user
-        self.peer_public_key = peer_pubkey
-        self._engine = engine
-        self.origin = origin or "localhost"
-        self.remote_addr = "localhost"
-
-    def to_context(self) -> CommandContext:
-        return CommandContext(
-            peer_public_key=self.peer_public_key,
-            user=self.user,
-            username=self.user.username if self.user else None,
-            remote_addr=self.remote_addr,
-            is_anonymous=self.user is None,
+    def to_context(self) -> FirehoseContext:
+        return FirehoseContext(
+            peer_pubkey=self.server_pubkey,
+            is_anonymous=False,
+            is_unknown=False,
+            is_registered=True,
+            role=self.role,
             origin=self.origin,
+            remote_addr="localhost",
         )
-
