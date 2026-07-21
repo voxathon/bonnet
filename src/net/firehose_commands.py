@@ -54,6 +54,7 @@ OP_BOARD_LIST = 0x10
 OP_ARTICLE_GET = 0x11
 OP_ARTICLE_LIST = 0x12
 OP_ARTICLE_SEARCH = 0x13
+OP_ARTICLE_QUERY = 0x15
 OP_ARTICLE_BODY = 0x14
 OP_USER_GET = 0x20
 OP_USER_LIST = 0x21
@@ -69,6 +70,7 @@ CMD_NAMES = {
     OP_ARTICLE_GET: "ARTICLE_GET",
     OP_ARTICLE_LIST: "ARTICLE_LIST",
     OP_ARTICLE_SEARCH: "ARTICLE_SEARCH",
+    OP_ARTICLE_QUERY: "ARTICLE_QUERY",
     OP_ARTICLE_BODY: "ARTICLE_BODY",
     OP_USER_GET: "USER_GET",
     OP_USER_LIST: "USER_LIST",
@@ -80,7 +82,7 @@ WRITE_OPS = frozenset({OP_PUBLISH_RECORD})
 READ_OPS = frozenset({
     OP_EVENT_HEAD, OP_EVENT_RANGE, OP_EVENT_GET,
     OP_BOARD_LIST, OP_ARTICLE_GET, OP_ARTICLE_LIST, OP_ARTICLE_SEARCH,
-    OP_ARTICLE_BODY, OP_USER_GET, OP_USER_LIST, OP_BAN_STATUS, OP_EVENT_BODY,
+    OP_ARTICLE_QUERY, OP_ARTICLE_BODY, OP_USER_GET, OP_USER_LIST, OP_BAN_STATUS, OP_EVENT_BODY,
 })
 
 
@@ -258,6 +260,8 @@ class FirehoseCommandHandler:
                 return self._cmd_article_list(data, ctx)
             elif opcode == OP_ARTICLE_SEARCH:
                 return self._cmd_article_search(data, ctx)
+            elif opcode == OP_ARTICLE_QUERY:
+                return self._cmd_article_query(data, ctx)
             elif opcode == OP_ARTICLE_BODY:
                 return self._cmd_article_body(data, ctx)
             elif opcode == OP_USER_GET:
@@ -633,6 +637,51 @@ class FirehoseCommandHandler:
             out += struct.pack(">B", 1 if r.body_available else 0)
             excerpt = r.excerpt.encode("utf-8") if r.excerpt else b""
             out += struct.pack(">H", len(excerpt)) + excerpt
+        return _success(out)
+
+    # ------------------------------------------------------------------
+    # ARTICLE_QUERY (§19.5)
+    # ------------------------------------------------------------------
+
+    def _cmd_article_query(self, data: bytes, ctx: FirehoseContext) -> bytes:
+        offset = 0
+        origin, offset = _read_text16(data, offset)
+        board, offset = _read_text16(data, offset)
+        filter_count, offset = _read_u8(data, offset)
+
+        filters = []
+        for _ in range(filter_count):
+            field_id, offset = _read_u8(data, offset)
+            operator, offset = _read_u8(data, offset)
+            value_type, offset = _read_u8(data, offset)
+            value_len, offset = _read_u16(data, offset)
+            raw_value = data[offset:offset + value_len]
+            offset += value_len
+
+            if value_type == 0x01:
+                value = raw_value
+            elif value_type == 0x02:
+                value = raw_value.decode("utf-8")
+            elif value_type == 0x03:
+                value = struct.unpack(">q", raw_value)[0]
+            elif value_type == 0x04:
+                value = raw_value[0] != 0
+            else:
+                return _error(0x0006, f"Invalid value type 0x{value_type:02x}")
+
+            filters.append((field_id, operator, value))
+
+        list_offset, offset = _read_u32(data, offset)
+        limit, offset = _read_u16(data, offset)
+
+        bp = self._get_board_projection(origin, board)
+        articles = bp.query_articles(
+            origin, board, filters, offset=list_offset, limit=limit,
+        )
+
+        out = struct.pack(">H", len(articles))
+        for art in articles:
+            out += self._encode_article_view(art, include_body=False)
         return _success(out)
 
     # ------------------------------------------------------------------

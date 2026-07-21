@@ -1003,6 +1003,7 @@ Initial commands:
 | `0x11` | `ARTICLE_GET` | read |
 | `0x12` | `ARTICLE_LIST` | read |
 | `0x13` | `ARTICLE_SEARCH` | read |
+| `0x15` | `ARTICLE_QUERY` | read |
 | `0x14` | `ARTICLE_BODY` | read |
 | `0x20` | `USER_GET` | read |
 | `0x21` | `USER_LIST` | read |
@@ -1091,8 +1092,51 @@ selector_type:u8
 `ARTICLE_GET` supplies origin, board, selector, and an include-body flag.
 `ARTICLE_LIST` supplies origin, board, offset, limit, and state flags.
 `ARTICLE_SEARCH` supplies origin, board, metadata query, optional body query,
-offset, limit, and state flags. `ARTICLE_BODY` supplies an article reference.
-`EVENT_BODY` supplies origin and event ID.
+offset, limit, and state flags. `ARTICLE_QUERY` supplies origin, board, a
+list of structured field filters, offset, and limit. `ARTICLE_BODY` supplies
+an article reference. `EVENT_BODY` supplies origin and event ID.
+
+### 19.6 Article Query
+
+`ARTICLE_QUERY` filters articles by structured metadata fields. All filters
+are conjunctive (AND).
+
+Request:
+
+```text
+origin:text16
+board:text16
+filter_count:u8
+repeated filter_count times:
+    field_id:u8
+    operator:u8
+    value_type:u8
+    value_len:u16
+    value_bytes
+offset:u32
+limit:u16
+```
+
+Operators: `0x01`=EQ, `0x02`=NE, `0x03`=GT, `0x04`=LT, `0x05`=LIKE,
+`0x06`=IN (comma-separated).
+
+Value types: `0x01`=BYTES, `0x02`=TEXT, `0x03`=I64, `0x04`=BOOL.
+
+Filter fields:
+
+| ID | Field | Valid operators |
+|---:|---|---|
+| 0x01 | author_pubkey | EQ, NE |
+| 0x02 | author_username | EQ, NE, LIKE |
+| 0x03 | author_registrar | EQ, NE, LIKE |
+| 0x04 | tags | LIKE, IN |
+| 0x05 | created_at | GT, LT, EQ |
+| 0x06 | visibility | EQ, NE |
+| 0x07 | thread_root | EQ (true = root articles only) |
+| 0x08 | reply_to_article_id | EQ |
+| 0x09 | pin_state | EQ (true = pinned) |
+
+Success: same response format as `ARTICLE_LIST`.
 
 Exact projection response models are derived API views. They MUST include the
 origin record identity, article ID and number, projected state, body hash and

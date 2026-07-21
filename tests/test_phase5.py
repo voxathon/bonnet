@@ -321,9 +321,16 @@ class TestArticleGet:
         out += struct.pack(">Q", 5)  # body_size
         out += struct.pack(">q", 1700000000)  # created_at
         out += struct.pack(">B", 32) + ap  # author_pubkey
+        out += _enc_text16("root")  # author_username
+        out += _enc_text16("bbs.test")  # author_registrar
         out += _enc_text16("Test Subject")
         out += _enc_text16("news,tech")
         out += _enc_text16("text/plain")
+        out += struct.pack(">B", 32) + ZERO_ID  # root_article_id
+        out += struct.pack(">B", 32) + ZERO_ID  # reply_to_article_id
+        out += struct.pack(">B", 0)  # no replacement
+        out += _enc_text16("unpinned")  # pin_state
+        out += _enc_text16("open")  # thread_state
         body = b"hello world"
         out += struct.pack(">I", len(body)) + body
         resp = _success(out)
@@ -335,6 +342,10 @@ class TestArticleGet:
         assert art.subject == "Test Subject"
         assert art.tags == "news,tech"
         assert art.body == body
+        assert art.author_username == "root"
+        assert art.author_registrar == "bbs.test"
+        assert art.pin_state == "unpinned"
+        assert art.thread_state == "open"
 
 
 # ---------------------------------------------------------------------------
@@ -361,9 +372,16 @@ class TestArticleList:
         item += struct.pack(">Q", 5)
         item += struct.pack(">q", 1700000000)
         item += struct.pack(">B", 32) + ap
+        item += _enc_text16("root")
+        item += _enc_text16("bbs.test")
         item += _enc_text16("Subject")
         item += _enc_text16("")
         item += _enc_text16("text/plain")
+        item += struct.pack(">B", 32) + ZERO_ID  # root_article_id
+        item += struct.pack(">B", 32) + ZERO_ID  # reply_to_article_id
+        item += struct.pack(">B", 0)  # no replacement
+        item += _enc_text16("unpinned")
+        item += _enc_text16("open")
 
         resp = _success(struct.pack(">H", 1) + item)
         articles = parse_article_list_response(resp)
