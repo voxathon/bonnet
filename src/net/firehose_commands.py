@@ -195,6 +195,7 @@ class FirehoseCommandHandler:
         validator: KindValidator,
         search: SearchService,
         hostname: str = "",
+        dispatcher=None,
     ):
         self._firehose = firehose
         self._identity = server_identity
@@ -208,6 +209,7 @@ class FirehoseCommandHandler:
         self._validator = validator
         self._search = search
         self._hostname = hostname or config_origin
+        self._dispatcher = dispatcher
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
 
     def close(self) -> None:
@@ -335,6 +337,9 @@ class FirehoseCommandHandler:
             self._body_store.finalize_article_body(
                 intent.origin, intent.board, intent.event_id, rec.article_num,
             )
+
+        if self._dispatcher:
+            self._dispatcher.dispatch_origin(self._origin)
 
         encoded_rec = encode_record(rec)
         event_hash = compute_event_hash(encoded_rec)
@@ -490,6 +495,8 @@ class FirehoseCommandHandler:
         return _success(self._encode_article_view(art, include_body=bool(include_body)))
 
     def _encode_article_view(self, art, include_body: bool = False) -> bytes:
+        from core.record import ZERO_ID
+
         out = struct.pack(">Q", art.article_num)
         out += struct.pack(">B", len(art.article_id)) + art.article_id
         out += struct.pack(">B", len(art.event_id)) + art.event_id
@@ -513,6 +520,26 @@ class FirehoseCommandHandler:
 
         ct_bytes = art.content_type.encode("utf-8")
         out += struct.pack(">H", len(ct_bytes)) + ct_bytes
+
+        root_id = getattr(art, 'root_article_id', ZERO_ID) or ZERO_ID
+        out += struct.pack(">B", len(root_id)) + root_id
+
+        reply_id = getattr(art, 'reply_to_article_id', ZERO_ID) or ZERO_ID
+        out += struct.pack(">B", len(reply_id)) + reply_id
+
+        replacement_id = getattr(art, 'replacement_article_id', None)
+        if replacement_id and len(replacement_id) == 32:
+            out += struct.pack(">B", 1) + replacement_id
+        else:
+            out += struct.pack(">B", 0)
+
+        pin_state = getattr(art, 'pin_state', 'unpinned') or 'unpinned'
+        pin_bytes = pin_state.encode("utf-8")
+        out += struct.pack(">H", len(pin_bytes)) + pin_bytes
+
+        thread_state = getattr(art, 'thread_state', 'open') or 'open'
+        thread_bytes = thread_state.encode("utf-8")
+        out += struct.pack(">H", len(thread_bytes)) + thread_bytes
 
         body_bytes = b""
         if include_body and art.body_state == "available" and art.body_size > 0:
