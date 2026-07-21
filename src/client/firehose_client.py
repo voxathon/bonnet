@@ -136,6 +136,15 @@ class FirehoseHTTPClient:
             tag=FIREHOSE_TAG,
             max_lifetime=60,
             clock_skew=30,
+            request_required_components=frozenset({
+                "@method", "@authority", "@target-uri",
+                "content-type", "content-digest",
+                "bonnet-protocol", "bonnet-nonce",
+            }),
+            response_required_components=frozenset({
+                "@status", "content-type", "content-digest",
+                "bonnet-protocol", "bonnet-origin", "bonnet-request-nonce",
+            }),
         )
 
         return info
@@ -161,6 +170,16 @@ class FirehoseHTTPClient:
             key_id=f"ed25519:{identity.public_key.hex()}",
             tag=FIREHOSE_TAG,
             label=FIREHOSE_LABEL,
+            request_components=[
+                "@method", "@authority", "@target-uri",
+                "content-type", "content-digest",
+                "bonnet-protocol", "bonnet-nonce",
+            ],
+            response_components=[
+                "@status", "content-type", "content-digest",
+                "bonnet-protocol", "bonnet-origin",
+                "bonnet-request-nonce",
+            ],
         )
 
     async def connect_anonymous(self) -> None:
@@ -177,6 +196,16 @@ class FirehoseHTTPClient:
             key_id=f"ed25519:{self._identity.public_key.hex()}",
             tag=FIREHOSE_TAG,
             label=FIREHOSE_LABEL,
+            request_components=[
+                "@method", "@authority", "@target-uri",
+                "content-type", "content-digest",
+                "bonnet-protocol", "bonnet-nonce",
+            ],
+            response_components=[
+                "@status", "content-type", "content-digest",
+                "bonnet-protocol", "bonnet-origin",
+                "bonnet-request-nonce",
+            ],
         )
 
     # ------------------------------------------------------------------
@@ -206,7 +235,6 @@ class FirehoseHTTPClient:
 
         await self._signer.sign_request(
             msg, nonce=nonce, created=now, expires=expires,
-            extra_components=["bonnet-protocol"],
         )
 
         headers = dict(msg.headers)

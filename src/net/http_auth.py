@@ -415,11 +415,22 @@ def _serialize_sig_params(components: Sequence[str], params: dict) -> str:
 
 def _validate_keyid(keyid: str, is_response: bool) -> None:
     if is_response:
-        if not keyid.startswith("origin:"):
-            raise InvalidParameter(f"Response keyid must be origin:<name>, got: {keyid[:40]!r}")
-        origin = keyid[7:]
-        if not origin:
-            raise InvalidParameter("Response keyid origin is empty")
+        if keyid.startswith("origin:"):
+            origin = keyid[7:]
+            if not origin:
+                raise InvalidParameter("Response keyid origin is empty")
+        elif keyid.startswith("ed25519:"):
+            hex_part = keyid[8:]
+            if len(hex_part) != 64:
+                raise InvalidParameter(f"keyid hex must be 64 chars, got {len(hex_part)}")
+            try:
+                int(hex_part, 16)
+            except ValueError:
+                raise InvalidParameter("keyid hex is not valid hexadecimal")
+            if hex_part != hex_part.lower():
+                raise InvalidParameter("keyid hex must be lowercase")
+        else:
+            raise InvalidParameter(f"Response keyid must be origin:<name> or ed25519:<hex>, got: {keyid[:40]!r}")
     else:
         if not keyid.startswith("ed25519:"):
             raise InvalidParameter(f"Request keyid must be ed25519:<hex>, got: {keyid[:40]!r}")
@@ -511,6 +522,8 @@ class BonnetSigner:
         key_id: str,
         tag: str = BONNET_TAG,
         label: str = BONNET_LABEL,
+        request_components: list[str] = None,
+        response_components: list[str] = None,
     ):
         if len(private_key) != 32:
             raise ValueError("Ed25519 private key must be 32 bytes")
@@ -518,6 +531,16 @@ class BonnetSigner:
         self._key_id = key_id
         self._tag = tag
         self._label = label
+        self._request_components = request_components or [
+            "@method", "@authority", "@target-uri",
+            "content-type", "content-digest",
+            "bonnet-version", "bonnet-nonce",
+        ]
+        self._response_components = response_components or [
+            "@status", "content-type", "content-digest",
+            "bonnet-version", "bonnet-origin",
+            "bonnet-request-nonce",
+        ]
 
     async def sign_request(
         self,
@@ -529,11 +552,7 @@ class BonnetSigner:
         include_username: bool = False,
         extra_components: Sequence[str] = (),
     ) -> None:
-        components = [
-            "@method", "@authority", "@target-uri",
-            "content-type", "content-digest",
-            "bonnet-version", "bonnet-nonce",
-        ]
+        components = list(self._request_components)
         if include_username and msg.has_header("bonnet-username"):
             components.append("bonnet-username")
         components.extend(extra_components)
@@ -548,11 +567,7 @@ class BonnetSigner:
         expires: Optional[int] = None,
     ) -> None:
         msg.set_header("Bonnet-Request-Nonce", request_nonce)
-        components = [
-            "@status", "content-type", "content-digest",
-            "bonnet-version", "bonnet-origin",
-            "bonnet-request-nonce",
-        ]
+        components = list(self._response_components)
         await self._sign(msg, components, request_nonce, created, expires)
 
     async def _sign(
@@ -598,11 +613,15 @@ class BonnetVerifier:
         tag: str = BONNET_TAG,
         max_lifetime: int = DEFAULT_MAX_LIFETIME,
         clock_skew: int = DEFAULT_CLOCK_SKEW,
+        request_required_components: frozenset = None,
+        response_required_components: frozenset = None,
     ):
         self._resolver = key_resolver
         self._tag = tag
         self._max_lifetime = max_lifetime
         self._clock_skew = clock_skew
+        self._request_required = request_required_components or REQUEST_REQUIRED_COMPONENTS
+        self._response_required = response_required_components or RESPONSE_REQUIRED_COMPONENTS
 
     async def verify_request(
         self,
@@ -687,7 +706,7 @@ class BonnetVerifier:
                     )
 
         if require_components:
-            required = RESPONSE_REQUIRED_COMPONENTS if is_response else REQUEST_REQUIRED_COMPONENTS
+            required = self._response_required if is_response else self._request_required
             _check_required_components(si.components, required, msg)
 
         # Validate Content-Digest if covered
