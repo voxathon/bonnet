@@ -265,6 +265,9 @@ class BonnetFirehoseServer:
         if cmd == "search-articles":
             return self._cmd_search_articles(parts)
 
+        if cmd == "query-articles":
+            return self._cmd_query_articles(parts)
+
         if cmd == "list-users":
             return self._cmd_list_users()
 
@@ -296,6 +299,8 @@ class BonnetFirehoseServer:
                                 List articles
   search-articles <board> <query>
                                 Search article metadata
+  query-articles <board> [filters]
+                                Query articles by structured fields
   list-users [origin]           List registered users
   ban-status <pubkey-hex>       Check ban status
   event-head <origin>           Show firehose head
@@ -822,6 +827,159 @@ class BonnetFirehoseServer:
         if truncated:
             result += "\n(results truncated)"
         return result
+
+    # ------------------------------------------------------------------
+    # query-articles
+    # ------------------------------------------------------------------
+
+    def _cmd_query_articles(self, parts) -> str:
+        if len(parts) < 2:
+            return ("Usage: query-articles <board> [--author=<hex>] [--user=<name>] "
+                    "[--tag=<tag>] [--since=<ts>] [--before=<ts>] "
+                    "[--state=active|cancelled|superseded] "
+                    "[--root] [--reply-to=<num>] [--pinned] "
+                    "[--offset=N] [--limit=N]")
+
+        board = parts[1]
+
+        from core.record import ZERO_ID
+        from net.firehose_commands import OP_ARTICLE_QUERY
+
+        filters = []
+        list_offset = 0
+        limit = 100
+
+        for p in parts[2:]:
+            if p.startswith("--author="):
+                pk_hex = p.split("=", 1)[1]
+                try:
+                    pk = bytes.fromhex(pk_hex)
+                except ValueError:
+                    return "Invalid author pubkey hex"
+                filters.append((0x01, 0x01, 0x01, pk))
+            elif p.startswith("--user="):
+                val = p.split("=", 1)[1].encode("utf-8")
+                filters.append((0x02, 0x01, 0x02, val))
+            elif p.startswith("--tag="):
+                val = p.split("=", 1)[1].encode("utf-8")
+                filters.append((0x04, 0x05, 0x02, val))
+            elif p.startswith("--since="):
+                try:
+                    ts = int(p.split("=", 1)[1])
+                except ValueError:
+                    return "Invalid since timestamp"
+                filters.append((0x05, 0x03, 0x03, struct.pack(">q", ts)))
+            elif p.startswith("--before="):
+                try:
+                    ts = int(p.split("=", 1)[1])
+                except ValueError:
+                    return "Invalid before timestamp"
+                filters.append((0x05, 0x04, 0x03, struct.pack(">q", ts)))
+            elif p.startswith("--state="):
+                val = p.split("=", 1)[1].encode("utf-8")
+                filters.append((0x06, 0x01, 0x02, val))
+            elif p == "--root":
+                filters.append((0x07, 0x01, 0x04, b"\x01"))
+            elif p.startswith("--reply-to="):
+                try:
+                    reply_num = int(p.split("=", 1)[1])
+                except ValueError:
+                    return "Invalid reply-to article number"
+                bp = self.dispatcher._get_board_projection(self.config.origin, board)
+                target = bp.get_article_by_num(self.config.origin, board, reply_num)
+                if target is None:
+                    return f"Error: Article #{reply_num} not found in /{board}"
+                filters.append((0x08, 0x01, 0x01, target.article_id))
+            elif p == "--pinned":
+                filters.append((0x09, 0x01, 0x04, b"\x01"))
+            elif p.startswith("--offset="):
+                try:
+                    list_offset = int(p.split("=", 1)[1])
+                except ValueError:
+                    return "Invalid offset"
+            elif p.startswith("--limit="):
+                try:
+                    limit = int(p.split("=", 1)[1])
+                except ValueError:
+                    return "Invalid limit"
+            else:
+                return f"Unknown flag: {p}"
+
+        req = struct.pack(">B", OP_ARTICLE_QUERY)
+        req += self._enc_text16(self.config.origin)
+        req += self._enc_text16(board)
+        req += struct.pack(">B", len(filters))
+        for field_id, operator, value_type, value in filters:
+            if isinstance(value, str):
+                value = value.encode("utf-8")
+            req += struct.pack(">B", field_id)
+            req += struct.pack(">B", operator)
+            req += struct.pack(">B", value_type)
+            req += struct.pack(">H", len(value)) + value
+        req += struct.pack(">I", list_offset)
+        req += struct.pack(">H", limit)
+
+        resp = self._local_handle(req)
+        if resp[0] != 0x00:
+            return self._parse_response_error(resp)
+
+        count = struct.unpack(">H", resp[1:3])[0]
+        offset = 3
+        lines = []
+        for _ in range(count):
+            article_num = struct.unpack(">Q", resp[offset:offset + 8])[0]
+            offset += 8
+            aid_len = resp[offset]
+            offset += 1 + aid_len
+            eid_len = resp[offset]
+            offset += 1 + eid_len
+            visibility = resp[offset]
+            offset += 1
+            body_state = resp[offset]
+            offset += 1
+            bh_len = resp[offset]
+            offset += 1 + bh_len
+            body_size = struct.unpack(">Q", resp[offset:offset + 8])[0]
+            offset += 8
+            created_at = struct.unpack(">q", resp[offset:offset + 8])[0]
+            offset += 8
+            ap_len = resp[offset]
+            offset += 1
+            author_pubkey = resp[offset:offset + ap_len]
+            offset += ap_len
+            author_username, offset = self._read_text16(resp, offset)
+            author_registrar, offset = self._read_text16(resp, offset)
+            subject, offset = self._read_text16(resp, offset)
+            tags, offset = self._read_text16(resp, offset)
+            content_type, offset = self._read_text16(resp, offset)
+            root_len = resp[offset]
+            offset += 1 + root_len
+            reply_len = resp[offset]
+            offset += 1 + reply_len
+            has_replacement = resp[offset]
+            offset += 1 + (32 if has_replacement else 0)
+            pin_state, offset = self._read_text16(resp, offset)
+            thread_state, offset = self._read_text16(resp, offset)
+
+            from datetime import datetime
+            ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
+
+            author_display = f"{author_username}@{author_registrar}" if author_username else author_pubkey.hex()
+            extras = []
+            if visibility != 0:
+                vis_names = {1: "cancelled", 2: "superseded"}
+                extras.append(vis_names.get(visibility, "?"))
+            if pin_state and pin_state != "unpinned":
+                extras.append(f"pin:{pin_state}")
+            if thread_state and thread_state != "open":
+                extras.append(f"thread:{thread_state}")
+            extra_str = f" [{', '.join(extras)}]" if extras else ""
+
+            lines.append(f"#{article_num:4} | {subject} | {author_display} | {ts}{extra_str}")
+
+        if not lines:
+            return "No articles match."
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # list-users

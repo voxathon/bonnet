@@ -68,9 +68,16 @@ class ArticleView:
     body_size: int
     created_at: int
     author_pubkey: str
-    subject: str
-    tags: str
-    content_type: str
+    author_username: str = ""
+    author_registrar: str = ""
+    subject: str = ""
+    tags: str = ""
+    content_type: str = ""
+    root_article_id: str = ""
+    reply_to_article_id: str = ""
+    replacement_article_id: str = ""
+    pin_state: str = "unpinned"
+    thread_state: str = "open"
     body: Optional[bytes] = None
 
 
@@ -86,9 +93,16 @@ class ArticleListItem:
     body_size: int
     created_at: int
     author_pubkey: str
-    subject: str
-    tags: str
-    content_type: str
+    author_username: str = ""
+    author_registrar: str = ""
+    subject: str = ""
+    tags: str = ""
+    content_type: str = ""
+    root_article_id: str = ""
+    reply_to_article_id: str = ""
+    replacement_article_id: str = ""
+    pin_state: str = "unpinned"
+    thread_state: str = "open"
 
 
 @dataclass
