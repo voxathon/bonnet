@@ -335,6 +335,8 @@ class FirehoseStore:
                     schema_version=intent.schema_version,
                     created_at=int(time.time()),
                     actor_pubkey=intent.actor_pubkey,
+                    actor_username=intent.actor_username,
+                    actor_registrar=intent.actor_registrar,
                     board=intent.board,
                     article_id=intent.article_id,
                     article_num=article_num,

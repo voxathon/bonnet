@@ -512,6 +512,14 @@ class FirehoseCommandHandler:
         out += struct.pack(">q", art.created_at)
         out += struct.pack(">B", len(art.author_pubkey)) + art.author_pubkey
 
+        author_username = getattr(art, 'author_username', '') or ''
+        au_bytes = author_username.encode("utf-8")
+        out += struct.pack(">H", len(au_bytes)) + au_bytes
+
+        author_registrar = getattr(art, 'author_registrar', '') or ''
+        ar_bytes = author_registrar.encode("utf-8")
+        out += struct.pack(">H", len(ar_bytes)) + ar_bytes
+
         subject_bytes = art.subject.encode("utf-8")
         out += struct.pack(">H", len(subject_bytes)) + subject_bytes
 

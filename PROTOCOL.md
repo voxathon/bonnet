@@ -203,13 +203,15 @@ and non-zero.
 Canonical actor intent encoding:
 
 ```text
-intent_format:u8 = 1
-event_id:id32
-kind:text16
-schema_version:u16
-origin:text16
-actor_pubkey:key32
-board:text16
+ intent_format:u8 = 1
+ event_id:id32
+ kind:text16
+ schema_version:u16
+ origin:text16
+ actor_pubkey:key32
+ actor_username:text16
+ actor_registrar:text16
+ board:text16
 article_id:id32
 target_origin:text16
 target_board:text16
@@ -248,16 +250,18 @@ number after validating the signed intent.
 Canonical unsigned origin record encoding:
 
 ```text
-record_format:u8 = 1
-origin:text16
-origin_seq:u64
-previous_event_hash:id32
-event_id:id32
-kind:text16
-schema_version:u16
-created_at:i64
-actor_pubkey:key32
-board:text16
+ record_format:u8 = 1
+ origin:text16
+ origin_seq:u64
+ previous_event_hash:id32
+ event_id:id32
+ kind:text16
+ schema_version:u16
+ created_at:i64
+ actor_pubkey:key32
+ actor_username:text16
+ actor_registrar:text16
+ board:text16
 article_id:id32
 article_num:u64
 target_origin:text16
