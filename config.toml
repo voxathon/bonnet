@@ -1,82 +1,55 @@
 [server]
-registrars = ["knolastna.me"]
 origin = "knolastna.me"
-anonymous_read = true
-admin_bypass_acl = true
+hostname = "knolastna.me"
 data_dir = "./data"
-log_dir = "./logs"
-port_standard = 2272
-port_privileged = 272
-# public_commands is obsolete and silently ignored. Command access is now
-# governed by command and object ACLs below. Authorization is default-deny.
-
-[[acl]]
-name = "local-full-access"
-match.origin = "knolastna.me"
-commands = ["*"]
-objects = ["*"]
-boards = ["*"]
-read = true
-write = true
-
-[[acl]]
-name = "anonymous-read"
-match.anonymous = true
-commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "GET_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "BAN_STATUS"]
-objects = ["reports", "punishments", "articles"]
-read = true
-write = false
-
-[[acl]]
-name = "unknown-read"
-match.unknown = true
-commands = ["GET_USER", "LIST_USERS", "LIST_PEERS", "BOARD_LIST", "POST_GET", "POST_LIST", "GET_PUBKEY", "PEER_KEY_LIST", "USER_REGISTRY_HEAD", "USER_REGISTRY_NODES", "USER_REGISTRY_RECORDS", "USER_REGISTRY_HEADS", "USER_REGISTRY_HEAD_CHAIN", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "BAN_STATUS"]
-objects = ["reports", "punishments"]
-read = true
-write = false
-
-[[acl]]
-name = "unknown-registration"
-match.unknown = true
-commands = ["REGISTER"]
-write = true
+boards_dir = "./boards"
+events_bodies_dir = "./event_bodies"
+port = 2272
+# admin_pubkey = "<hex-encoded Ed25519 public key for full access>"
 
 [limits]
-timeout_seconds = 30
-max_connections = 100
 max_request_size = 10485760
+max_article_body_size = 1048576
 rate_limit_requests = 100
 rate_limit_window = 1
 
-[boards]
-path = "./boards"
-
-[keibatsu]
-reports_path = "reports.db"
-punishments_path = "punishments.db"
-
 [search]
-# Content search via ripgrep. rg is resolved at runtime (bundled in frozen
-# builds via _MEIPASS, otherwise via PATH); the server returns 503 if missing.
-# Override the binary location explicitly:
-# rg_path = "C:\Users\jaybe\ripgrep\rg"
 max_count = 1000
 timeout_seconds = 10
 result_limit = 100
-per_identity_concurrency = 1
-rate_limit = 10
-rate_window_seconds = 60
 
 [tls]
 enabled = true
 cert_path = "./knolastna.me.pem"
 key_path = "./knolastna.me.key"
+ca_bundle = true
 
-# Import allowlists (§13): per-object-type origin allowlists, default-deny.
-# Only origins listed here are imported during federation sync. Missing or
-# empty lists deny all imports for that object type. Never affects exports.
-[import_allowlist]
-# boards = ["boards.example"]
-# users = ["identity.example"]
-# reports = ["moderation.example"]
-# punishments = ["moderation.example"]
+[sync]
+interval_seconds = 300
+
+# ACL rules (PROTOCOL.md §16): explicit deny-wins, conjunctive dimensions.
+# Supported matchers: pubkey, role, origin, anonymous, unknown, wildcard.
+# Selector lists: commands, kinds, boards, objects. Omit = not granted. "*" = all.
+#
+# [[acl]]
+# effect = "allow"
+# match.pubkey = "hex:<64 hex chars>"
+# actions = ["read", "write"]
+# commands = ["*"]
+# kinds = ["*"]
+# boards = ["*"]
+# objects = ["*"]
+#
+# [[acl]]
+# effect = "allow"
+# match.anonymous = true
+# actions = ["read"]
+# commands = ["EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
+# boards = ["*"]
+#
+# [[acl]]
+# effect = "allow"
+# match.unknown = true
+# actions = ["write"]
+# commands = ["PUBLISH_RECORD"]
+# kinds = ["bonnet.user.register"]
