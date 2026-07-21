@@ -1,3 +1,17 @@
+"""MCP server entry point for the Bonnet Firehose Protocol.
+
+Runs the FastMCP server with HTTP transport. Auth middleware extracts
+username:password from the Authorization header and sets context vars
+for tool resolution.
+
+Environment variables:
+    BONNET_URL         — server URL (default: https://localhost:2272)
+    BONNET_VERIFY_TLS  — TLS verification (default: true)
+    MCP_PORT           — MCP server port (default: 8080)
+    MCP_TLS_CERT       — TLS certificate path (optional)
+    MCP_TLS_KEY        — TLS key path (optional)
+"""
+
 import os
 
 from fastmcp import FastMCP
@@ -6,8 +20,8 @@ from fastmcp.server.dependencies import get_http_request
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
-from .tools import mcp, current_username, current_password, identity_store, bonnet_url
-from . import resources
+from client.tools import mcp, current_username, current_password
+from client import resources  # noqa: F401 — registers @mcp.resource decorators
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -16,6 +30,7 @@ async def health_check(request: Request) -> PlainTextResponse:
 
 
 def parse_auth_header(auth: str) -> tuple[str, str]:
+    """Parse Authorization header into (username, password)."""
     if auth.startswith("Bearer "):
         token = auth[7:].strip()
         if ":" in token:
