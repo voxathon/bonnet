@@ -525,6 +525,8 @@ class Intent:
     schema_version: int = 1
     origin: str = ""
     actor_pubkey: bytes = b"\x00" * KEY_SIZE
+    actor_username: str = ""
+    actor_registrar: str = ""
     board: str = ""
     article_id: bytes = ZERO_ID
     target_origin: str = ""
@@ -547,6 +549,8 @@ def encode_intent(intent: Intent) -> bytes:
     out += enc_u16(intent.schema_version)
     out += enc_text16(intent.origin, MAX_ORIGIN_HOSTNAME)
     out += enc_key32(intent.actor_pubkey)
+    out += enc_text16(intent.actor_username, MAX_TEXT_FIELD)
+    out += enc_text16(intent.actor_registrar, MAX_ORIGIN_HOSTNAME)
     out += enc_text16(intent.board, MAX_BOARD)
     out += enc_id32(intent.article_id)
     out += enc_text16(intent.target_origin, MAX_ORIGIN_HOSTNAME)
@@ -571,6 +575,8 @@ def decode_intent(data: bytes) -> Intent:
         schema_version=r.u16(),
         origin=r.text16(MAX_ORIGIN_HOSTNAME),
         actor_pubkey=r.key32(),
+        actor_username=r.text16(MAX_TEXT_FIELD),
+        actor_registrar=r.text16(MAX_ORIGIN_HOSTNAME),
         board=r.text16(MAX_BOARD),
         article_id=r.id32(),
         target_origin=r.text16(MAX_ORIGIN_HOSTNAME),
@@ -600,6 +606,8 @@ class Record:
     schema_version: int = 1
     created_at: int = 0
     actor_pubkey: bytes = b"\x00" * KEY_SIZE
+    actor_username: str = ""
+    actor_registrar: str = ""
     board: str = ""
     article_id: bytes = ZERO_ID
     article_num: int = 0
@@ -626,6 +634,8 @@ def encode_unsigned_record(rec: Record) -> bytes:
     out += enc_u16(rec.schema_version)
     out += enc_i64(rec.created_at)
     out += enc_key32(rec.actor_pubkey)
+    out += enc_text16(rec.actor_username, MAX_TEXT_FIELD)
+    out += enc_text16(rec.actor_registrar, MAX_ORIGIN_HOSTNAME)
     out += enc_text16(rec.board, MAX_BOARD)
     out += enc_id32(rec.article_id)
     out += enc_u64(rec.article_num)
@@ -659,6 +669,8 @@ def decode_record(data: bytes) -> Record:
         schema_version=r.u16(),
         created_at=r.i64(),
         actor_pubkey=r.key32(),
+        actor_username=r.text16(MAX_TEXT_FIELD),
+        actor_registrar=r.text16(MAX_ORIGIN_HOSTNAME),
         board=r.text16(MAX_BOARD),
         article_id=r.id32(),
         article_num=r.u64(),
@@ -692,6 +704,8 @@ def decode_unsigned_record(data: bytes) -> tuple[Record, bytes]:
         schema_version=r.u16(),
         created_at=r.i64(),
         actor_pubkey=r.key32(),
+        actor_username=r.text16(MAX_TEXT_FIELD),
+        actor_registrar=r.text16(MAX_ORIGIN_HOSTNAME),
         board=r.text16(MAX_BOARD),
         article_id=r.id32(),
         article_num=r.u64(),
@@ -719,6 +733,8 @@ def reconstruct_intent_from_record(rec: Record) -> Intent:
         schema_version=rec.schema_version,
         origin=rec.origin,
         actor_pubkey=rec.actor_pubkey,
+        actor_username=rec.actor_username,
+        actor_registrar=rec.actor_registrar,
         board=rec.board,
         article_id=rec.article_id,
         target_origin=rec.target_origin,

@@ -250,7 +250,7 @@ class BoardProjection:
                     (rec.origin, rec.board, rec.article_num, rec.article_id,
                      rec.event_id, body_state,
                      subject, tags, options, content_type,
-                     rec.actor_pubkey, "", "",
+                     rec.actor_pubkey, rec.actor_username, rec.actor_registrar,
                      rec.created_at, rec.body_hash, rec.body_size,
                      root_id, reply_id, rec.origin_seq),
                 )

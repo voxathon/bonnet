@@ -277,6 +277,9 @@ class BonnetFirehoseServer:
         if cmd == "event-range":
             return self._cmd_event_range(parts)
 
+        if cmd == "get-event":
+            return self._cmd_get_event(parts)
+
         return f"Unknown command: {cmd}. Type 'help' for commands."
 
     def _cmd_help(self) -> str:
@@ -298,6 +301,8 @@ class BonnetFirehoseServer:
   event-head <origin>           Show firehose head
   event-range <origin> <start> <count>
                                 Show firehose events
+  get-event <origin> <event-id-hex>
+                                Show full event details
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:
@@ -359,6 +364,8 @@ class BonnetFirehoseServer:
             kind="bonnet.board.create",
             origin=self.config.origin,
             actor_pubkey=self.server_identity.public_key,
+            actor_username="root",
+            actor_registrar=self.config.origin,
             board=board,
             metadata=m,
         )
@@ -471,6 +478,8 @@ class BonnetFirehoseServer:
             kind="bonnet.article",
             origin=self.config.origin,
             actor_pubkey=self.server_identity.public_key,
+            actor_username="root",
+            actor_registrar=self.config.origin,
             board=board,
             article_id=article_id,
             metadata=m,
@@ -492,7 +501,7 @@ class BonnetFirehoseServer:
             rec_len = struct.unpack(">I", resp[1:5])[0]
             from core.record import decode_record
             rec = decode_record(resp[5:5 + rec_len])
-            return f"Article #{rec.article_num} published.\nSubject: {subject}\nEvent ID: {rec.event_id.hex()[:16]}..."
+            return f"Article #{rec.article_num} published.\nSubject: {subject}\nEvent ID: {rec.event_id.hex()}"
 
         return self._parse_response_error(resp)
 
@@ -521,6 +530,8 @@ class BonnetFirehoseServer:
             kind="bonnet.user.register",
             origin=self.config.origin,
             actor_pubkey=self.server_identity.public_key,
+            actor_username="root",
+            actor_registrar=self.config.origin,
             metadata=m,
         )
 
@@ -626,6 +637,8 @@ class BonnetFirehoseServer:
         offset += 1
         author_pubkey = data[offset:offset + ap_len].hex()
         offset += ap_len
+        author_username, offset = self._read_text16(data, offset)
+        author_registrar, offset = self._read_text16(data, offset)
         subject, offset = self._read_text16(data, offset)
         tags, offset = self._read_text16(data, offset)
         content_type, offset = self._read_text16(data, offset)
@@ -662,22 +675,27 @@ class BonnetFirehoseServer:
             f"Article #{article_num} in /{board}",
             f"Subject: {subject}",
             f"Created: {ts}",
-            f"Author: {author_pubkey[:16]}...",
-            f"Article ID: {article_id[:16]}...",
-            f"Event ID: {event_id[:16]}...",
+        ]
+        if author_username and author_registrar:
+            lines.append(f"Author: {author_username}@{author_registrar}")
+        else:
+            lines.append(f"Author: {author_pubkey}")
+        lines.extend([
+            f"Article ID: {article_id}",
+            f"Event ID: {event_id}",
             f"Visibility: {vis_names.get(visibility, '?')}",
             f"Body: {body_names.get(body_state, '?')}",
-        ]
+        ])
         if tags:
             lines.append(f"Tags: {tags}")
         if content_type:
             lines.append(f"Content-Type: {content_type}")
         if root_id and root_id != ZERO_ID:
-            lines.append(f"Root: {root_id[:16]}...")
+            lines.append(f"Root: {root_id}")
         if reply_id and reply_id != ZERO_ID:
-            lines.append(f"Reply to: {reply_id[:16]}...")
+            lines.append(f"Reply to: {reply_id}")
         if replacement_id and len(replacement_id) == 32:
-            lines.append(f"Supersedes: {replacement_id[:16]}...")
+            lines.append(f"Supersedes: {replacement_id}")
         if pin_state and pin_state != "unpinned":
             lines.append(f"Pin: {pin_state}")
         if thread_state and thread_state != "open":
@@ -741,7 +759,7 @@ class BonnetFirehoseServer:
 
             from datetime import datetime
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
-            lines.append(f"#{article_num:4} | {subject[:40]:40} | {ts}")
+            lines.append(f"#{article_num:4} | {subject} | {ts}")
 
         if not lines:
             return "No articles."
@@ -796,7 +814,7 @@ class BonnetFirehoseServer:
 
             from datetime import datetime
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
-            lines.append(f"#{article_num:4} | {subject[:40]:40} | {ts}")
+            lines.append(f"#{article_num:4} | {subject} | {ts}")
 
         if not lines:
             return "No matches."
@@ -839,7 +857,7 @@ class BonnetFirehoseServer:
                 role += " [mod]"
             if revoked:
                 role += " [REVOKED]"
-            lines.append(f"  {username}  {pubkey[:16]}...{role}")
+            lines.append(f"  {username}  {pubkey}{role}")
 
         if not lines:
             return "No users."
@@ -885,7 +903,7 @@ class BonnetFirehoseServer:
             from datetime import datetime
             exp = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d %H:%M")
 
-        return f"BANNED\nOrigin: {origin}\nExpires: {exp}\nEvent: {event_id[:16]}..."
+        return f"BANNED\nOrigin: {origin}\nExpires: {exp}\nEvent: {event_id}"
 
     # ------------------------------------------------------------------
     # event-head
@@ -911,8 +929,8 @@ class BonnetFirehoseServer:
         return (f"Origin: {head.origin}\n"
                 f"Latest seq: {head.latest_origin_seq}\n"
                 f"Event count: {head.event_count}\n"
-                f"Latest hash: {head.latest_event_hash.hex()[:16]}...\n"
-                f"Pubkey: {head.origin_pubkey.hex()[:16]}...")
+                f"Latest hash: {head.latest_event_hash.hex()}\n"
+                f"Pubkey: {head.origin_pubkey.hex()}")
 
     # ------------------------------------------------------------------
     # event-range
@@ -952,10 +970,141 @@ class BonnetFirehoseServer:
             w_len = struct.unpack(">H", resp[offset:offset + 2])[0]
             offset += 2 + w_len
 
-            lines.append(f"  seq={rec.origin_seq:4} | {rec.kind:30} | eid={rec.event_id.hex()[:12]}...")
+            lines.append(f"  seq={rec.origin_seq:4} | {rec.kind:30} | eid={rec.event_id.hex()}")
 
         if not lines:
             return "No events."
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # get-event
+    # ------------------------------------------------------------------
+
+    def _cmd_get_event(self, parts) -> str:
+        if len(parts) < 3:
+            return "Usage: get-event <origin> <event-id-hex>"
+
+        origin = parts[1]
+        try:
+            event_id = bytes.fromhex(parts[2])
+        except ValueError:
+            return "Invalid event ID hex"
+
+        if len(event_id) != 32:
+            return "Event ID must be 32 bytes (64 hex chars)"
+
+        from net.firehose_commands import OP_EVENT_GET
+        req = struct.pack(">B", OP_EVENT_GET) + self._enc_text16(origin) + event_id
+
+        resp = self._local_handle(req)
+        if resp[0] != 0x00:
+            return self._parse_response_error(resp)
+
+        offset = 1
+        rec_len = struct.unpack(">I", resp[offset:offset + 4])[0]
+        offset += 4
+        from core.record import decode_record
+        rec = decode_record(resp[offset:offset + rec_len])
+        offset += rec_len
+        w_len = struct.unpack(">H", resp[offset:offset + 2])[0]
+        offset += 2
+        from core.record import decode_witness, is_origin_witness
+        witness = decode_witness(resp[offset:offset + w_len])
+
+        from datetime import datetime
+        ts = datetime.fromtimestamp(rec.created_at).strftime("%Y-%m-%d %H:%M:%S")
+
+        lines = [
+            f"=== Event ===",
+            f"Origin:       {rec.origin}",
+            f"Sequence:     {rec.origin_seq}",
+            f"Event ID:     {rec.event_id.hex()}",
+            f"Kind:         {rec.kind}",
+            f"Schema:       {rec.schema_version}",
+            f"Created:      {ts}",
+            f"",
+            f"=== Actor ===",
+            f"Pubkey:       {rec.actor_pubkey.hex()}",
+        ]
+
+        if rec.actor_username:
+            lines.append(f"Username:     {rec.actor_username}")
+        if rec.actor_registrar:
+            lines.append(f"Registrar:    {rec.actor_registrar}")
+
+        lines.extend([
+            f"",
+            f"=== Content ===",
+            f"Board:        {rec.board or '(none)'}",
+            f"Article ID:   {rec.article_id.hex() if rec.article_id != ZERO_ID else '(none)'}",
+            f"Article Num:  {rec.article_num if rec.article_num else '(none)'}",
+        ])
+
+        if rec.target_origin:
+            lines.extend([
+                f"",
+                f"=== Target ===",
+                f"Origin:       {rec.target_origin}",
+                f"Board:        {rec.target_board}",
+                f"Article ID:   {rec.target_article_id.hex() if rec.target_article_id != ZERO_ID else '(none)'}",
+                f"Event ID:     {rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else '(none)'}",
+            ])
+
+        lines.extend([
+            f"",
+            f"=== Body ===",
+            f"Hash:         {rec.body_hash.hex()}",
+            f"Size:         {rec.body_size} bytes",
+        ])
+
+        lines.extend([
+            f"",
+            f"=== Signatures ===",
+            f"Actor sig:    {rec.actor_signature.hex()}",
+            f"Origin sig:   {rec.origin_signature.hex()}",
+        ])
+
+        if rec.metadata.fields:
+            lines.extend([
+                f"",
+                f"=== Metadata ({len(rec.metadata.fields)} fields) ===",
+            ])
+            for f in rec.metadata.fields:
+                type_names = {1: "BYTES", 2: "TEXT", 3: "U64", 4: "I64", 5: "BOOL", 6: "ID_LIST", 7: "TEXT_LIST"}
+                type_name = type_names.get(f.value_type, f"0x{f.value_type:02x}")
+                if f.value_type == 2:
+                    val = f.value.decode("utf-8", errors="replace")
+                elif f.value_type == 3:
+                    import struct as _s
+                    val = str(_s.unpack(">Q", f.value)[0])
+                elif f.value_type == 4:
+                    import struct as _s
+                    val = str(_s.unpack(">q", f.value)[0])
+                elif f.value_type == 5:
+                    val = "true" if f.value == b"\x01" else "false"
+                elif f.value_type == 1:
+                    if len(f.value) == 32:
+                        val = f.value.hex()
+                    else:
+                        val = f"(len={len(f.value)})"
+                else:
+                    val = f"(len={len(f.value)})"
+                lines.append(f"  [{f.field_id}] {type_name}: {val}")
+
+        zero_key = b"\x00" * 32
+        from_pubkey = witness.received_from_pubkey.hex() if witness.received_from_pubkey != zero_key else "(origin)"
+        lines.extend([
+            f"",
+            f"=== Witness ===",
+            f"Relay pubkey: {witness.relay_pubkey.hex()}",
+            f"Relay host:   {witness.relay_hostname}",
+            f"From pubkey:  {from_pubkey}",
+            f"From host:    {witness.received_from_hostname or '(origin)'}",
+            f"Seen at:      {datetime.fromtimestamp(witness.seen_at).strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Origin term:  {'yes' if is_origin_witness(witness) else 'no'}",
+            f"Event hash:   {witness.event_hash.hex()}",
+        ])
+
         return "\n".join(lines)
 
     def close(self):
