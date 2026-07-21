@@ -445,7 +445,7 @@ async def cancel_article(
 ) -> str:
     """Cancel an article (soft delete). Author or moderator may cancel.
 
-    board: board where the control event is published.
+    board: board where the target article lives.
     target_article_id: hex article ID of the article to cancel.
     origin: origin to query (defaults to server's origin).
     reason: optional human-readable cancellation reason.
@@ -471,6 +471,7 @@ async def restore_article(
 ) -> str:
     """Restore a previously cancelled article. Author or moderator.
 
+    board: board where the target article lives.
     target_article_id: hex article ID of the cancelled article to restore.
     """
     aid = _validate_article_id(target_article_id)
@@ -494,6 +495,7 @@ async def purge_article(
 ) -> str:
     """Purge an article (hard delete body). Moderator/admin only. Irreversible.
 
+    board: board where the target article lives.
     target_article_id: hex article ID of the article to purge.
     reason: human-readable purge reason (required).
     """
@@ -518,6 +520,7 @@ async def pin_article(
 ) -> str:
     """Pin an article to the top of the board. Moderator/admin only.
 
+    board: board where the target article lives.
     target_article_id: hex article ID of the article to pin.
     priority: higher values appear more prominent.
     """
@@ -541,6 +544,7 @@ async def unpin_article(
 ) -> str:
     """Remove a pin from an article. Moderator/admin only.
 
+    board: board where the target article lives.
     target_article_id: hex article ID of the article to unpin.
     """
     aid = _validate_article_id(target_article_id)

@@ -30,26 +30,63 @@ interval_seconds = 300
 # ACL rules (PROTOCOL.md §16): explicit deny-wins, conjunctive dimensions.
 # Supported matchers: pubkey, role, origin, anonymous, unknown, wildcard.
 # Selector lists: commands, kinds, boards, objects. Omit = not granted. "*" = all.
-#
-# [[acl]]
-# effect = "allow"
-# match.pubkey = "hex:<64 hex chars>"
-# actions = ["read", "write"]
-# commands = ["*"]
-# kinds = ["*"]
-# boards = ["*"]
-# objects = ["*"]
-#
-# [[acl]]
-# effect = "allow"
-# match.anonymous = true
-# actions = ["read"]
-# commands = ["EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
-# boards = ["*"]
-#
-# [[acl]]
-# effect = "allow"
-# match.unknown = true
-# actions = ["write"]
-# commands = ["PUBLISH_RECORD"]
-# kinds = ["bonnet.user.register"]
+
+# Admin full access (uncomment and set your server's pubkey)
+[[acl]]
+effect = "allow"
+match.pubkey = "hex:b17d20b7243f89626046d4bf278da4e7286013ab2c1cc56ceb34fa8071251058"
+actions = ["read", "write"]
+commands = ["*"]
+kinds = ["*"]
+boards = ["*"]
+objects = ["*"]
+
+# Anonymous: read-only
+[[acl]]
+effect = "allow"
+match.anonymous = true
+actions = ["read"]
+commands = ["EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_QUERY", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
+boards = ["*"]
+objects = ["*"]
+
+# Anonymous: no writes
+[[acl]]
+effect = "deny"
+match.anonymous = true
+actions = ["write"]
+commands = ["PUBLISH_RECORD"]
+
+# Unknown (not registered): denied all writes except registration
+[[acl]]
+effect = "deny"
+match.unknown = true
+actions = ["write"]
+kinds = ["bonnet.article", "bonnet.article.cancel", "bonnet.article.restore", "bonnet.article.purge", "bonnet.article.pin", "bonnet.article.unpin", "bonnet.thread.close", "bonnet.thread.reopen", "bonnet.board.create", "bonnet.board.close", "bonnet.board.reopen", "bonnet.rule.publish", "bonnet.rule.revoke", "bonnet.report", "bonnet.punishment.issue", "bonnet.punishment.revoke", "bonnet.origin.key.rotate"]
+
+# Unknown: can register themselves
+[[acl]]
+effect = "allow"
+match.unknown = true
+actions = ["write"]
+commands = ["PUBLISH_RECORD"]
+kinds = ["bonnet.user.register"]
+boards = ["*"]
+
+# Authenticated users: can publish articles, register, cancel, restore
+[[acl]]
+effect = "allow"
+match.wildcard = true
+actions = ["write"]
+commands = ["PUBLISH_RECORD"]
+kinds = ["bonnet.article", "bonnet.user.register", "bonnet.article.cancel", "bonnet.article.restore"]
+boards = ["*"]
+
+# Authenticated users: read everything
+[[acl]]
+effect = "allow"
+match.wildcard = true
+actions = ["read"]
+commands = ["*"]
+boards = ["*"]
+objects = ["*"]

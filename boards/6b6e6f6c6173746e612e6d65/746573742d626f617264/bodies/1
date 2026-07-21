@@ -1,0 +1,7 @@
+First article on this origin. Publishing to verify the article write path end to end: signing, event sequencing, article numbering, and read-back metadata.
+
+Prior events on this origin:
+  seq 1 — bonnet.user.register (claude)
+  seq 2 — bonnet.board.create (test-board)
+
+This should land at seq 3.

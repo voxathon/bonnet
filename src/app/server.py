@@ -22,7 +22,7 @@ from core.bodies import BodyStore
 from core.board_projection import board_db_path
 from core.global_projections import NavProjection, UserProjection, PolicyProjection
 from core.dispatcher import Dispatcher
-from core.acl import ACLEvaluator, default_rules_for_admin
+from core.acl import ACLEvaluator, ACLRule, PrincipalMatcher, default_rules_for_admin
 from core.kind_validator import KindValidator
 from core.search import SearchService
 from core.record import (
@@ -142,6 +142,7 @@ class BonnetFirehoseServer:
             anonymous_identity=self.anonymous_identity,
             replay_ledger=self.replay_ledger,
             rate_limiter=self.rate_limiter,
+            users_projection=self.users,
         )
         log_msg("INIT: FirehoseHTTPServer initialized")
 
@@ -695,11 +696,11 @@ class BonnetFirehoseServer:
             lines.append(f"Tags: {tags}")
         if content_type:
             lines.append(f"Content-Type: {content_type}")
-        if root_id and root_id != ZERO_ID:
+        if root_id:
             lines.append(f"Root: {root_id}")
-        if reply_id and reply_id != ZERO_ID:
+        if reply_id:
             lines.append(f"Reply to: {reply_id}")
-        if replacement_id and len(replacement_id) == 32:
+        if replacement_id:
             lines.append(f"Supersedes: {replacement_id}")
         if pin_state and pin_state != "unpinned":
             lines.append(f"Pin: {pin_state}")

@@ -408,7 +408,7 @@ class FirehoseHTTPClient:
             event_id=eid, kind="bonnet.article.pin", origin=self._server_origin,
             actor_pubkey=self._identity.public_key,
             actor_username=self._username, actor_registrar=self._server_origin,
-            board=board, target_origin=target_origin, target_board=target_board,
+            board="", target_origin=target_origin, target_board=target_board,
             target_article_id=target_article_id, metadata=m,
         )
         actor_sig = sign_intent(self._identity, encode_intent(intent))
@@ -439,7 +439,7 @@ class FirehoseHTTPClient:
             event_id=eid, kind=kind, origin=self._server_origin,
             actor_pubkey=self._identity.public_key,
             actor_username=self._username, actor_registrar=self._server_origin,
-            board=board, target_origin=target_origin, target_board=target_board,
+            board="", target_origin=target_origin, target_board=target_board,
             target_article_id=target_article_id,
             body_hash=compute_body_hash(body) if body else ZERO_ID,
             body_size=len(body),
