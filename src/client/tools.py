@@ -418,22 +418,46 @@ async def publish_article(
     subject: str,
     content: str,
     tags: str = "",
+    reply_to_article_id: str = "",
     auth: str | None = None,
 ) -> str:
     """Publish a new article to a board. Requires a registered user.
 
     Articles are immutable once published; to remove use cancel_article,
-    to hard-delete use purge_article. The article is signed with your Ed25519 key.
+    to hard-delete use purge_article, to replace use supersede_article.
+    The article is signed with your Ed25519 key.
 
     board: board name.
     subject: article subject line.
     content: article body text.
     tags: comma-separated tags (optional).
+    reply_to_article_id: hex article ID of the article being replied to (optional).
     """
     import os as _os
     article_id = _os.urandom(32)
     tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     body = content.encode("utf-8")
+
+    root_id = None
+    reply_id = None
+    if reply_to_article_id:
+        reply_id = _validate_article_id(reply_to_article_id)
+        client = _make_client()
+        try:
+            if auth:
+                await _connect_authenticated(client, auth)
+            else:
+                await _connect_anonymous(client)
+            srv_origin = client._server_origin or ""
+            target = await client.get_article_by_id(srv_origin, board, reply_id, include_body=False)
+            if target is None:
+                return f"Error: Article {reply_to_article_id} not found in /{board}"
+            if target.root_article_id:
+                root_id = bytes.fromhex(target.root_article_id)
+            else:
+                root_id = reply_id
+        finally:
+            await client.close()
 
     client = _make_client()
     try:
@@ -441,8 +465,49 @@ async def publish_article(
         result = await client.publish_article(
             board, article_id, body, subject,
             tags=tags_list or None,
+            root_article_id=root_id,
+            reply_to_article_id=reply_id,
         )
         return f"Article #{result.article_num} published — event seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def supersede_article(
+    board: str,
+    target_article_id: str,
+    subject: str,
+    content: str,
+    tags: str = "",
+    auth: str | None = None,
+) -> str:
+    """Publish a replacement article that supersedes an existing one.
+
+    Only the original author may supersede. The superseded article's
+    visibility becomes 'superseded' and this article carries the link.
+
+    board: board where the target article lives.
+    target_article_id: hex article ID of the article being superseded.
+    subject: subject line for the replacement article.
+    content: body text for the replacement article.
+    tags: comma-separated tags (optional).
+    """
+    import os as _os
+    supersedes_id = _validate_article_id(target_article_id)
+    article_id = _os.urandom(32)
+    tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    body = content.encode("utf-8")
+
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_supersede(
+            board, article_id, body, subject,
+            supersedes_article_id=supersedes_id,
+            tags=tags_list or None,
+        )
+        return f"Article #{result.article_num} supersedes {target_article_id[:16]}... — event seq {result.origin_seq}"
     finally:
         await client.close()
 

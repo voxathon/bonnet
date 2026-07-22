@@ -242,6 +242,7 @@ class FirehoseStore:
         intent: Intent,
         actor_signature: bytes,
         body: bytes,
+        created_at: int = None,
     ) -> Record:
         """Accept and append a locally-authored record to the firehose.
 
@@ -333,7 +334,7 @@ class FirehoseStore:
                     event_id=intent.event_id,
                     kind=intent.kind,
                     schema_version=intent.schema_version,
-                    created_at=int(time.time()),
+                    created_at=created_at if created_at is not None else int(time.time()),
                     actor_pubkey=intent.actor_pubkey,
                     actor_username=intent.actor_username,
                     actor_registrar=intent.actor_registrar,

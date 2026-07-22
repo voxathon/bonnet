@@ -291,7 +291,7 @@ class BonnetFirehoseServer:
   help                          Show this help
   whoami                        Show server identity
   create-board <name>           Create a board (interactive)
-  publish-article <board> [reply-to-num]
+  publish-article <board> [reply-to-num] [supersede-num]
                                 Publish an article (interactive)
   register-user <name>          Register a user identity
   list-boards [origin]          List boards
@@ -404,7 +404,7 @@ class BonnetFirehoseServer:
 
     def _do_publish_article(self, parts) -> str:
         if not parts:
-            return "Usage: publish-article <board> [reply-to-num]"
+            return "Usage: publish-article <board> [reply-to-num] [supersede-num]"
 
         board = parts[0]
 
@@ -414,6 +414,13 @@ class BonnetFirehoseServer:
                 reply_to_num = int(parts[1])
             except ValueError:
                 return "Invalid reply-to article number"
+
+        supersede_num = 0
+        if len(parts) >= 3:
+            try:
+                supersede_num = int(parts[2])
+            except ValueError:
+                return "Invalid supersede article number"
 
         try:
             subject = input("Subject: ").strip()
@@ -474,6 +481,13 @@ class BonnetFirehoseServer:
 
             m.fields.append(metadata_bytes(5, root_article_id))
             m.fields.append(metadata_bytes(6, reply_to_article_id))
+
+        if supersede_num > 0:
+            bp = self.dispatcher._get_board_projection(self.config.origin, board)
+            supersede_target = bp.get_article_by_num(self.config.origin, board, supersede_num)
+            if supersede_target is None:
+                return f"Error: Article #{supersede_num} not found in /{board}"
+            m.fields.append(metadata_bytes(7, supersede_target.article_id))
 
         import os as _os
         event_id = _os.urandom(32)
