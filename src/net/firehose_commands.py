@@ -295,6 +295,7 @@ class FirehoseCommandHandler:
     # ------------------------------------------------------------------
 
     def _cmd_publish(self, data: bytes, ctx: FirehoseContext) -> bytes:
+        now = int(time.time())
         offset = 0
         intent_len, offset = _read_u32(data, offset)
         if offset + intent_len > len(data):
@@ -378,6 +379,17 @@ class FirehoseCommandHandler:
                 if target.thread_state == "open":
                     return _error(0x0009, "Thread is not closed")
 
+        if kind == KIND_ARTICLE:
+            supersedes_id = intent.metadata.get_bytes(7)
+            if supersedes_id and supersedes_id != ZERO_ID:
+                bp = self._get_board_projection(intent.origin, intent.board)
+                target = bp.get_article_by_id(intent.origin, intent.board, supersedes_id)
+                if target is None:
+                    return _error(0x0003, "Supersede target article not found")
+                if target.author_pubkey != intent.actor_pubkey:
+                    if ctx.role != "administrator" and ctx.role != "moderator":
+                        return _error(0x0004, "Only the original author may supersede an article")
+
         if intent.body_size > 0:
             if len(body) != intent.body_size:
                 return _error(0x0006, "Body length mismatch")
@@ -396,7 +408,7 @@ class FirehoseCommandHandler:
                 intent.body_hash, intent.body_size,
             )
 
-        rec = self._firehose.append_record(self._identity, intent, actor_sig, body)
+        rec = self._firehose.append_record(self._identity, intent, actor_sig, body, created_at=now)
 
         if intent.kind == KIND_ARTICLE and intent.body_size > 0:
             self._body_store.finalize_article_body(
@@ -415,8 +427,9 @@ class FirehoseCommandHandler:
             event_hash=event_hash,
             origin_identity=self._identity,
             hostname=self._hostname,
-            seen_at=int(time.time()),
+            seen_at=now,
         )
+        self._firehose.store_witness(witness)
         encoded_witness = encode_witness(witness)
 
         return _success(
@@ -460,14 +473,17 @@ class FirehoseCommandHandler:
                 break
             event_hash = compute_event_hash(encoded_rec)
 
-            witness = make_origin_witness(
-                origin=origin,
-                event_id=rec.event_id,
-                event_hash=event_hash,
-                origin_identity=self._identity,
-                hostname=self._hostname,
-                seen_at=int(time.time()),
-            )
+            witness = self._firehose.get_witness(origin, rec.event_id, self._identity.public_key)
+            if witness is None:
+                witness = make_origin_witness(
+                    origin=origin,
+                    event_id=rec.event_id,
+                    event_hash=event_hash,
+                    origin_identity=self._identity,
+                    hostname=self._hostname,
+                    seen_at=rec.created_at,
+                )
+                self._firehose.store_witness(witness)
             encoded_witness = encode_witness(witness)
 
             out += struct.pack(">I", len(encoded_rec)) + encoded_rec
@@ -492,14 +508,17 @@ class FirehoseCommandHandler:
         encoded_rec = encode_record(rec)
         event_hash = compute_event_hash(encoded_rec)
 
-        witness = make_origin_witness(
-            origin=origin,
-            event_id=rec.event_id,
-            event_hash=event_hash,
-            origin_identity=self._identity,
-            hostname=self._hostname,
-            seen_at=int(time.time()),
-        )
+        witness = self._firehose.get_witness(origin, rec.event_id, self._identity.public_key)
+        if witness is None:
+            witness = make_origin_witness(
+                origin=origin,
+                event_id=rec.event_id,
+                event_hash=event_hash,
+                origin_identity=self._identity,
+                hostname=self._hostname,
+                seen_at=rec.created_at,
+            )
+            self._firehose.store_witness(witness)
         encoded_witness = encode_witness(witness)
 
         return _success(
