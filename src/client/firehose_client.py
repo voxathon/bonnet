@@ -283,6 +283,9 @@ class FirehoseHTTPClient:
         subject: str, content_type: str = "text/plain",
         tags: list[str] = None, event_id: bytes = None,
         actor_username: str = "", actor_registrar: str = "",
+        root_article_id: bytes = None,
+        reply_to_article_id: bytes = None,
+        supersedes_article_id: bytes = None,
     ) -> PublishResult:
         """Publish an article to the connected server."""
         if self._identity is None or self._server_origin is None:
@@ -293,6 +296,12 @@ class FirehoseHTTPClient:
         if tags:
             m.fields.append(metadata_text_list(2, tags))
         m.fields.append(metadata_text(4, content_type))
+        if root_article_id:
+            m.fields.append(metadata_bytes(5, root_article_id))
+        if reply_to_article_id:
+            m.fields.append(metadata_bytes(6, reply_to_article_id))
+        if supersedes_article_id:
+            m.fields.append(metadata_bytes(7, supersedes_article_id))
 
         intent = Intent(
             event_id=eid,
@@ -311,6 +320,19 @@ class FirehoseHTTPClient:
         cmd = build_publish_record(intent, actor_sig, body)
         resp = await self._send_command(cmd)
         return parse_publish_response(resp)
+
+    async def publish_supersede(
+        self, board: str, article_id: bytes, body: bytes,
+        subject: str, supersedes_article_id: bytes,
+        content_type: str = "text/plain",
+        tags: list[str] = None, event_id: bytes = None,
+    ) -> PublishResult:
+        """Publish a new article that supersedes an existing one."""
+        return await self.publish_article(
+            board, article_id, body, subject,
+            content_type=content_type, tags=tags, event_id=event_id,
+            supersedes_article_id=supersedes_article_id,
+        )
 
     async def publish_record(
         self, intent: Intent, actor_sig: bytes, body: bytes = b"",
