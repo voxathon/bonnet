@@ -163,12 +163,12 @@ class Dispatcher:
         bp.apply_article(rec)
 
         if rec.article_num > 0 and rec.body_size > 0:
-            self._body_store.finalize_article_body(
+            if self._body_store.finalize_article_body(
                 rec.origin, rec.board, rec.event_id, rec.article_num,
-            )
-            bp.update_body_state(
-                rec.origin, rec.board, rec.article_num, "available",
-            )
+            ):
+                bp.update_body_state(
+                    rec.origin, rec.board, rec.article_num, "available",
+                )
 
     def _dispatch_article_control(self, rec: Record) -> None:
         target_origin = rec.target_origin

@@ -310,6 +310,9 @@ class BonnetFirehoseServer:
         if cmd == "get-event":
             return self._cmd_get_event(parts)
 
+        if cmd == "debug-nav":
+            return self._cmd_debug_nav(parts)
+
         return f"Unknown command: {cmd}. Type 'help' for commands."
 
     def _cmd_help(self) -> str:
@@ -335,6 +338,7 @@ class BonnetFirehoseServer:
                                 Show firehose events
   get-event <origin> <event-id-hex>
                                 Show full event details
+  debug-nav [origin]            Dump nav.db state
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:
@@ -759,15 +763,34 @@ class BonnetFirehoseServer:
 
     def _cmd_list_articles(self, parts) -> str:
         if len(parts) < 2:
-            return "Usage: list-articles <board> [offset] [limit]"
+            return "Usage: list-articles [origin] <board> [offset] [limit]"
 
+        origin = self.config.origin
         board = parts[1]
-        offset = int(parts[2]) if len(parts) > 2 else 0
-        limit = int(parts[3]) if len(parts) > 3 else 50
+        offset = 0
+        limit = 50
+
+        known_origins = set()
+        try:
+            for row in self.firehose._conn.execute(
+                "SELECT DISTINCT origin FROM origin_state"
+            ).fetchall():
+                known_origins.add(row[0])
+        except Exception:
+            pass
+
+        if parts[1] in known_origins and len(parts) >= 3:
+            origin = parts[1]
+            board = parts[2]
+            offset = int(parts[3]) if len(parts) > 3 else 0
+            limit = int(parts[4]) if len(parts) > 4 else 50
+        else:
+            offset = int(parts[2]) if len(parts) > 2 else 0
+            limit = int(parts[3]) if len(parts) > 3 else 50
 
         from net.firehose_commands import OP_ARTICLE_LIST
         req = struct.pack(">B", OP_ARTICLE_LIST)
-        req += self._enc_text16(self.config.origin)
+        req += self._enc_text16(origin)
         req += self._enc_text16(board)
         req += struct.pack(">I", offset)
         req += struct.pack(">H", limit)
@@ -1303,6 +1326,80 @@ class BonnetFirehoseServer:
             f"Origin term:  {'yes' if is_origin_witness(witness) else 'no'}",
             f"Event hash:   {witness.event_hash.hex()}",
         ])
+
+        return "\n".join(lines)
+
+    def _cmd_debug_nav(self, parts) -> str:
+        import sqlite3 as _sqlite3
+        lines = []
+        lines.append(f"CWD: {os.getcwd()}")
+        lines.append(f"nav_db_path: {self.config.nav_db_path}")
+        lines.append(f"nav object id: {id(self.nav)}")
+        lines.append(f"dispatcher._nav object id: {id(self.dispatcher._nav)}")
+        lines.append(f"command_handler._nav object id: {id(self.command_handler._nav)}")
+        lines.append(f"same nav object: {self.nav is self.command_handler._nav}")
+
+        lines.append("")
+        lines.append("=== NavProjection.list_boards() (all origins) ===")
+        all_boards = self.nav.list_boards()
+        lines.append(f"count: {len(all_boards)}")
+        for b in all_boards:
+            lines.append(f"  origin={b['origin']} board={b['board']} display={b['display_name']} closed={b['closed']}")
+
+        if parts and len(parts) > 1:
+            origin = parts[1]
+            lines.append("")
+            lines.append(f"=== NavProjection.list_boards('{origin}') ===")
+            filtered = self.nav.list_boards(origin)
+            lines.append(f"count: {len(filtered)}")
+            for b in filtered:
+                lines.append(f"  origin={b['origin']} board={b['board']} display={b['display_name']} closed={b['closed']}")
+
+        lines.append("")
+        lines.append("=== Raw SQLite boards table ===")
+        try:
+            conn = _sqlite3.connect(str(self.config.nav_db_path))
+            rows = conn.execute("SELECT origin, board, display_name, closed FROM boards").fetchall()
+            lines.append(f"count: {len(rows)}")
+            for r in rows:
+                lines.append(f"  origin={r[0]} board={r[1]} display={r[2]} closed={r[3]}")
+            conn.close()
+        except Exception as e:
+            lines.append(f"ERROR: {e}")
+
+        lines.append("")
+        lines.append("=== Raw SQLite applied_events ===")
+        try:
+            conn = _sqlite3.connect(str(self.config.nav_db_path))
+            rows = conn.execute("SELECT origin, origin_seq, kind FROM applied_events ORDER BY origin, origin_seq").fetchall()
+            lines.append(f"count: {len(rows)}")
+            for r in rows:
+                lines.append(f"  origin={r[0]} seq={r[1]} kind={r[2]}")
+            conn.close()
+        except Exception as e:
+            lines.append(f"ERROR: {e}")
+
+        lines.append("")
+        lines.append("=== Firehose origin_state ===")
+        try:
+            rows = self.firehose._conn.execute(
+                "SELECT origin, highest_seq FROM origin_state ORDER BY origin"
+            ).fetchall()
+            for r in rows:
+                lines.append(f"  origin={r[0]} highest_seq={r[1]}")
+        except Exception as e:
+            lines.append(f"ERROR: {e}")
+
+        lines.append("")
+        lines.append("=== Firehose projection_checkpoints ===")
+        try:
+            rows = self.firehose._conn.execute(
+                "SELECT origin, last_applied_seq FROM projection_checkpoints ORDER BY origin"
+            ).fetchall()
+            for r in rows:
+                lines.append(f"  origin={r[0]} last_applied_seq={r[1]}")
+        except Exception as e:
+            lines.append(f"ERROR: {e}")
 
         return "\n".join(lines)
 
