@@ -176,6 +176,8 @@ class BonnetFirehoseServer:
         self.dispatcher.dispatch_origin(config.origin)
         log_msg(f"INIT: dispatched local origin '{config.origin}'")
 
+        self._ensure_root_registered()
+
         for row in self.firehose._conn.execute(
             "SELECT DISTINCT origin FROM origin_state WHERE origin != ?", (config.origin,)
         ).fetchall():
@@ -189,6 +191,51 @@ class BonnetFirehoseServer:
         )
 
         log_msg("INIT: complete")
+
+    def _ensure_root_registered(self) -> None:
+        """Publish a bonnet.user.register record for the server identity if not already present."""
+        try:
+            existing = self.users.get_user_by_pubkey(self.config.origin, self.server_identity.public_key)
+            if existing is not None:
+                return
+
+            import os as _os
+            from core.record import (
+                Intent, MetadataMap, ZERO_ID,
+                encode_intent, sign_intent, compute_body_hash,
+                metadata_text, metadata_bytes, metadata_u64,
+            )
+
+            event_id = _os.urandom(32)
+            intent = Intent(
+                event_id=event_id,
+                kind="bonnet.user.register",
+                origin=self.config.origin,
+                actor_pubkey=self.server_identity.public_key,
+                actor_username="root",
+                actor_registrar=self.config.origin,
+                board="",
+                article_id=ZERO_ID,
+                metadata=MetadataMap(fields=[
+                    metadata_text(1, "root"),
+                    metadata_bytes(2, self.server_identity.public_key),
+                    metadata_u64(3, 1),
+                ]),
+                body_hash=compute_body_hash(b""),
+                body_size=0,
+            )
+
+            actor_signature = sign_intent(self.server_identity, encode_intent(intent))
+            self.firehose.append_record(
+                origin_identity=self.server_identity,
+                intent=intent,
+                actor_signature=actor_signature,
+                body=b"",
+            )
+            self.dispatcher.dispatch_origin(self.config.origin)
+            log_msg("INIT: registered root user in firehose")
+        except Exception as e:
+            log_msg(f"INIT: failed to register root user: {e}")
 
     async def run(self, port: int = None, ssl_certfile: str = None, ssl_keyfile: str = None):
         import uvicorn
