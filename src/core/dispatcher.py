@@ -17,6 +17,7 @@ from core.global_projections import (
     NavProjection, UserProjection, PolicyProjection,
 )
 from core.bodies import BodyStore
+from core.logging import log_msg
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +109,10 @@ class Dispatcher:
             records = self._firehose.get_events_range(origin, checkpoint + 1, max_records)
             count = 0
             for rec in records:
-                self._dispatch_record(rec)
+                try:
+                    self._dispatch_record(rec)
+                except Exception as e:
+                    log_msg(f"DISPATCH: origin='{origin}' seq={rec.origin_seq} kind='{rec.kind}' FAILED: {e}")
                 self._firehose.set_checkpoint(origin, rec.origin_seq)
                 count += 1
             return count
