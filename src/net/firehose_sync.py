@@ -18,6 +18,7 @@ import threading
 from typing import Optional
 
 from core.crypto import Identity
+from core.logging import log_msg
 from core.record import (
     Record, Head, Witness,
     encode_record, decode_record,
@@ -70,6 +71,7 @@ class HttpSyncClient(SyncClient):
         if not self._connected:
             await self._client.connect_anonymous()
             self._connected = True
+            log_msg(f"SYNC_CLIENT: connected to server origin='{self._client._server_origin}' pubkey={self._client._server_pubkey.hex()[:16]}...")
 
     async def fetch_head(self, origin: str) -> tuple[Head, bytes]:
         from client.firehose_protocol import build_event_head, parse_event_head_response_raw
@@ -187,8 +189,8 @@ class SyncManager:
                     continue
                 try:
                     await self._sync_once(origin, client)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_msg(f"SYNC_WORKER: error syncing origin '{origin}': {e}")
                 finally:
                     self._inflight.discard(origin)
                     self._sync_queue.task_done()
@@ -200,7 +202,7 @@ class SyncManager:
             try:
                 await self._sync_once(origin, client)
             except Exception as e:
-                pass
+                log_msg(f"SYNC_LOOP: error syncing origin '{origin}': {e}")
             await asyncio.sleep(interval)
 
     async def _sync_once(self, origin: str, client: SyncClient) -> AcceptResult:
@@ -209,7 +211,10 @@ class SyncManager:
 
         local_seq = self._firehose.get_highest_seq(origin)
 
+        log_msg(f"SYNC_ONCE: origin='{origin}' remote_seq={head.latest_origin_seq} local_seq={local_seq}")
+
         if head.latest_origin_seq <= local_seq:
+            log_msg(f"SYNC_ONCE: origin='{origin}' already up to date")
             return AcceptResult(accepted=False, reason="already up to date")
 
         start = local_seq + 1
@@ -224,11 +229,14 @@ class SyncManager:
             batch = min(remaining, 100)
             items = await client.fetch_range(origin, current_start, batch)
             if not items:
+                log_msg(f"SYNC_ONCE: origin='{origin}' fetch_range returned empty at seq {current_start}")
                 break
             all_records.extend(r for r, w in items)
             all_witnesses.extend(w for r, w in items)
             current_start += len(items)
             remaining -= len(items)
+
+        log_msg(f"SYNC_ONCE: origin='{origin}' fetched {len(all_records)} records (expected {count})")
 
         if not all_records:
             return AcceptResult(accepted=False, reason="no records fetched")
@@ -241,6 +249,8 @@ class SyncManager:
             source=self._hostname,
         )
 
+        log_msg(f"SYNC_ONCE: origin='{origin}' accept_remote_range: accepted={result.accepted} count={result.accepted_count} reason='{result.reason}'")
+
         if result.accepted:
             for rec, upstream_witness in zip(all_records, all_witnesses):
                 if self._firehose.get_event_by_id(origin, rec.event_id) is not None:
@@ -250,9 +260,10 @@ class SyncManager:
 
             if self._dispatcher:
                 try:
-                    self._dispatcher.dispatch_origin(origin)
-                except Exception:
-                    pass
+                    dispatched = self._dispatcher.dispatch_origin(origin)
+                    log_msg(f"SYNC_ONCE: origin='{origin}' dispatched {dispatched} records to projections")
+                except Exception as e:
+                    log_msg(f"SYNC_ONCE: origin='{origin}' dispatch failed: {e}")
 
         return result
 
