@@ -206,6 +206,7 @@ class FirehoseCommandHandler:
         search: SearchService,
         hostname: str = "",
         dispatcher=None,
+        sync_manager=None,
     ):
         self._firehose = firehose
         self._identity = server_identity
@@ -220,6 +221,7 @@ class FirehoseCommandHandler:
         self._search = search
         self._hostname = hostname or config_origin
         self._dispatcher = dispatcher
+        self._sync_manager = sync_manager
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
 
     def close(self) -> None:
@@ -234,6 +236,13 @@ class FirehoseCommandHandler:
                 board_db_path(self._boards_dir, origin, board)
             )
         return self._board_projections[key]
+
+    def _maybe_queue_remote_sync(self, origin: str) -> None:
+        """Queue an on-demand sync if the origin is a remote peer."""
+        if origin == self._origin:
+            return
+        if self._sync_manager is not None:
+            self._sync_manager.queue_sync(origin)
 
     def handle(self, body: bytes, ctx: FirehoseContext) -> bytes:
         if not body:
@@ -444,6 +453,7 @@ class FirehoseCommandHandler:
     def _cmd_event_head(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
 
         head = self._firehose.get_head(origin)
         if head is None:
@@ -459,6 +469,7 @@ class FirehoseCommandHandler:
     def _cmd_event_range(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
         start_seq, offset = _read_u64(data, offset)
         max_count, offset = _read_u16(data, offset)
         max_bytes, offset = _read_u32(data, offset)
@@ -499,6 +510,7 @@ class FirehoseCommandHandler:
     def _cmd_event_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
         event_id, offset = _read_id32(data, offset)
 
         rec = self._firehose.get_event_by_id(origin, event_id)
@@ -533,6 +545,7 @@ class FirehoseCommandHandler:
     def _cmd_board_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
 
         boards = self._nav.list_boards(origin)
         out = struct.pack(">H", len(boards))
@@ -553,6 +566,7 @@ class FirehoseCommandHandler:
     def _cmd_article_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
         board, offset = _read_text16(data, offset)
         selector_type, offset = _read_u8(data, offset)
 
@@ -650,6 +664,7 @@ class FirehoseCommandHandler:
     def _cmd_article_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
         board, offset = _read_text16(data, offset)
         list_offset, offset = _read_u32(data, offset)
         limit, offset = _read_u16(data, offset)
@@ -678,6 +693,7 @@ class FirehoseCommandHandler:
     def _cmd_article_search(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
         board, offset = _read_text16(data, offset)
         meta_query, offset = _read_text16(data, offset)
         body_query, offset = _read_text16(data, offset)
@@ -726,6 +742,7 @@ class FirehoseCommandHandler:
     def _cmd_article_query(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
         board, offset = _read_text16(data, offset)
         filter_count, offset = _read_u8(data, offset)
 
@@ -771,6 +788,7 @@ class FirehoseCommandHandler:
     def _cmd_article_body(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
         board, offset = _read_text16(data, offset)
         article_num, offset = _read_u64(data, offset)
 
@@ -800,6 +818,7 @@ class FirehoseCommandHandler:
     def _cmd_user_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
         pubkey_len, offset = _read_u8(data, offset)
         pubkey = data[offset:offset + pubkey_len]
         offset += pubkey_len
@@ -826,6 +845,7 @@ class FirehoseCommandHandler:
     def _cmd_user_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
         flags, offset = _read_u8(data, offset)
 
         include_revoked = bool(flags & 0x01)
@@ -884,6 +904,7 @@ class FirehoseCommandHandler:
     def _cmd_event_body(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
         event_id, offset = _read_id32(data, offset)
 
         rec = self._firehose.get_event_by_id(origin, event_id)
