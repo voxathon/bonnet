@@ -828,6 +828,19 @@ class BonnetFirehoseServer:
             tags, offset = self._read_text16(resp, offset)
             content_type, offset = self._read_text16(resp, offset)
 
+            root_id_len = resp[offset]
+            offset += 1 + root_id_len
+            reply_id_len = resp[offset]
+            offset += 1 + reply_id_len
+            has_replacement = resp[offset]
+            offset += 1
+            if has_replacement:
+                offset += 32
+            pin_state, offset = self._read_text16(resp, offset)
+            thread_state, offset = self._read_text16(resp, offset)
+            body_len = struct.unpack(">I", resp[offset:offset + 4])[0]
+            offset += 4 + body_len
+
             from datetime import datetime
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
             lines.append(f"#{article_num:4} | {subject} | {ts}")
