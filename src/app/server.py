@@ -32,6 +32,7 @@ from core.record import (
 )
 from net.firehose_commands import FirehoseCommandHandler, FirehoseContext
 from net.firehose_http_server import FirehoseHTTPServer
+from net.firehose_sync import SyncManager as FirehoseSyncManager, HttpSyncClient
 from net.replay import ReplayLedger
 from net.rate_limiter import RateLimiter
 from app.cli import FirehoseLocalConnection
@@ -109,6 +110,14 @@ class BonnetFirehoseServer:
             result_limit=config.search_result_limit,
         )
 
+        self.sync_manager = FirehoseSyncManager(
+            self.firehose, self.server_identity, config.hostname,
+            dispatcher=self.dispatcher,
+        )
+        if config.peers:
+            for peer in config.peers:
+                log_msg(f"INIT: configured peer '{peer.origin}' at {peer.hostname}:{peer.port} (verify_tls={peer.verify_tls})")
+
         self.command_handler = FirehoseCommandHandler(
             firehose=self.firehose,
             server_identity=self.server_identity,
@@ -123,6 +132,7 @@ class BonnetFirehoseServer:
             search=self.search,
             hostname=config.hostname,
             dispatcher=self.dispatcher,
+            sync_manager=self.sync_manager,
         )
         log_msg("INIT: FirehoseCommandHandler initialized")
 
@@ -181,6 +191,13 @@ class BonnetFirehoseServer:
         server = uvicorn.Server(uv_config)
 
         repl_task = asyncio.create_task(self.repl_loop())
+
+        for peer in self.config.peers:
+            base_url = f"https://{peer.hostname}:{peer.port}"
+            client = HttpSyncClient(base_url, verify_tls=peer.verify_tls)
+            self.sync_manager.start_origin(peer.origin, client, self.config.sync_interval_seconds)
+            log_msg(f"SYNC: started background sync for peer '{peer.origin}' from {base_url}")
+
         try:
             await server.serve()
         finally:
@@ -189,6 +206,7 @@ class BonnetFirehoseServer:
                 await repl_task
             except asyncio.CancelledError:
                 pass
+            await self.sync_manager.stop_all()
 
     # ------------------------------------------------------------------
     # REPL

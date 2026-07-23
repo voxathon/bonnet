@@ -26,6 +26,13 @@ ca_bundle = true
 
 [sync]
 interval_seconds = 300
+allow_private_dial = true
+
+[[sync.peers]]
+origin = "10.0.0.15"
+hostname = "10.0.0.15"
+port = 2272
+verify_tls = false
 
 # ACL rules (PROTOCOL.md §16): explicit deny-wins, conjunctive dimensions.
 # Supported matchers: pubkey, role, origin, anonymous, unknown, wildcard.

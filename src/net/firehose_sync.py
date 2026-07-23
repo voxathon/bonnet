@@ -54,6 +54,42 @@ class SyncClient:
         pass
 
 
+class HttpSyncClient(SyncClient):
+    """Concrete SyncClient using FirehoseHTTPClient over HTTP.
+
+    Connects anonymously, performs TOFU key pinning via discovery,
+    and wraps the firehose protocol commands EVENT_HEAD and EVENT_RANGE.
+    """
+
+    def __init__(self, base_url: str, verify_tls: bool = False):
+        from client.firehose_client import FirehoseHTTPClient
+        self._client = FirehoseHTTPClient(base_url, verify=verify_tls)
+        self._connected = False
+
+    async def _ensure_connected(self) -> None:
+        if not self._connected:
+            await self._client.connect_anonymous()
+            self._connected = True
+
+    async def fetch_head(self, origin: str) -> tuple[Head, bytes]:
+        from client.firehose_protocol import build_event_head, parse_event_head_response_raw
+        await self._ensure_connected()
+        cmd = build_event_head(origin)
+        resp = await self._client._send_command(cmd)
+        head = parse_event_head_response_raw(resp)
+        return head, encode_head(head)
+
+    async def fetch_range(self, origin: str, start_seq: int, max_count: int) -> list[tuple[Record, Witness]]:
+        from client.firehose_protocol import build_event_range, parse_event_range_response
+        await self._ensure_connected()
+        cmd = build_event_range(origin, start_seq, max_count)
+        resp = await self._client._send_command(cmd)
+        return parse_event_range_response(resp)
+
+    async def close(self) -> None:
+        await self._client.close()
+
+
 # ---------------------------------------------------------------------------
 # Sync manager
 # ---------------------------------------------------------------------------
@@ -61,12 +97,16 @@ class SyncClient:
 class SyncManager:
     """Manages background firehose synchronization from remote origins.
 
-    The sync manager runs periodic tasks that:
-    1. Fetch the signed head for a subscribed origin.
-    2. Compare against the local highest sequence.
-    3. Request the missing contiguous range.
-    4. Verify and accept the range.
-    5. Create local relay witnesses.
+    Supports both periodic sync loops (start_origin) and on-demand sync
+    triggered by read requests for remote origins (queue_sync). Both paths
+    feed into a single asyncio.Queue consumed by a background worker.
+
+    The sync manager:
+    1. Fetches the signed head for an origin.
+    2. Compares against the local highest sequence.
+    3. Requests the missing contiguous range.
+    4. Verifies and accepts the range.
+    5. Creates local relay witnesses.
     """
 
     def __init__(
@@ -74,27 +114,48 @@ class SyncManager:
         firehose: FirehoseStore,
         server_identity: Identity,
         hostname: str,
+        dispatcher=None,
     ):
         self._firehose = firehose
         self._identity = server_identity
         self._hostname = hostname
+        self._dispatcher = dispatcher
         self._lock = threading.RLock()
         self._running = False
         self._tasks: dict[str, asyncio.Task] = {}
+        self._clients: dict[str, SyncClient] = {}
+        self._inflight: set[str] = set()
+        self._sync_queue: asyncio.Queue = asyncio.Queue()
+        self._worker_task: Optional[asyncio.Task] = None
 
     def start_origin(self, origin: str, client: SyncClient, interval: int = 300) -> None:
-        """Start syncing an origin in the background."""
+        """Start syncing an origin in the background (periodic + on-demand)."""
         with self._lock:
             if origin in self._tasks:
                 return
+            self._clients[origin] = client
             self._tasks[origin] = asyncio.ensure_future(
                 self._sync_loop(origin, client, interval)
             )
+            if self._worker_task is None:
+                self._worker_task = asyncio.ensure_future(self._sync_worker())
+                self._running = True
+
+    def queue_sync(self, origin: str) -> None:
+        """Queue an on-demand sync for an origin. No-op if origin is not
+        a configured peer or a sync is already in flight."""
+        if origin not in self._clients:
+            return
+        if origin in self._inflight:
+            return
+        self._inflight.add(origin)
+        self._sync_queue.put_nowait(origin)
 
     def stop_origin(self, origin: str) -> None:
         """Stop syncing an origin."""
         with self._lock:
             task = self._tasks.pop(origin, None)
+            self._clients.pop(origin, None)
             if task:
                 task.cancel()
 
@@ -102,6 +163,12 @@ class SyncManager:
         with self._lock:
             tasks = list(self._tasks.values())
             self._tasks.clear()
+            self._clients.clear()
+            if self._worker_task:
+                self._worker_task.cancel()
+                tasks.append(self._worker_task)
+                self._worker_task = None
+            self._running = False
         for t in tasks:
             t.cancel()
         for t in tasks:
@@ -109,6 +176,24 @@ class SyncManager:
                 await t
             except asyncio.CancelledError:
                 pass
+
+    async def _sync_worker(self) -> None:
+        """Background worker consuming on-demand sync requests."""
+        while True:
+            try:
+                origin = await self._sync_queue.get()
+                client = self._clients.get(origin)
+                if client is None:
+                    continue
+                try:
+                    await self._sync_once(origin, client)
+                except Exception:
+                    pass
+                finally:
+                    self._inflight.discard(origin)
+                    self._sync_queue.task_done()
+            except asyncio.CancelledError:
+                break
 
     async def _sync_loop(self, origin: str, client: SyncClient, interval: int) -> None:
         while True:
@@ -162,6 +247,12 @@ class SyncManager:
                     local_witness = self._create_local_witness(rec, upstream_witness)
                     if local_witness:
                         self._firehose.store_witness(local_witness)
+
+            if self._dispatcher:
+                try:
+                    self._dispatcher.dispatch_origin(origin)
+                except Exception:
+                    pass
 
         return result
 
