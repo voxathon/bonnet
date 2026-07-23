@@ -9,9 +9,19 @@ from __future__ import annotations
 
 import os
 import tomllib
+from dataclasses import dataclass, field
 from typing import Optional
 
 from core.acl import ACLEvaluator, ACLRule, PrincipalMatcher
+
+
+@dataclass
+class PeerConfig:
+    """Configuration for a firehose federation peer."""
+    origin: str
+    hostname: str
+    port: int = 2272
+    verify_tls: bool = False
 
 
 def _normalize_origin(origin: str) -> str:
@@ -47,6 +57,7 @@ class FirehoseConfig:
         rg_path: str = "",
         sync_interval_seconds: int = 300,
         allow_private_dial: bool = False,
+        peers: list = None,
         acl: ACLEvaluator = None,
         admin_pubkey_hex: str = "",
     ):
@@ -72,6 +83,7 @@ class FirehoseConfig:
         self.rg_path = rg_path
         self.sync_interval_seconds = sync_interval_seconds
         self.allow_private_dial = allow_private_dial
+        self.peers = peers or []
         self.acl = acl or ACLEvaluator([])
         self.admin_pubkey_hex = admin_pubkey_hex
 
@@ -154,6 +166,15 @@ class FirehoseConfig:
             rg_path=search.get("rg_path", ""),
             sync_interval_seconds=sync.get("interval_seconds", 300),
             allow_private_dial=sync.get("allow_private_dial", False),
+            peers=[
+                PeerConfig(
+                    origin=p.get("origin", ""),
+                    hostname=p.get("hostname", ""),
+                    port=p.get("port", 2272),
+                    verify_tls=p.get("verify_tls", False),
+                )
+                for p in sync.get("peers", [])
+            ],
             acl=acl,
             admin_pubkey_hex=admin_pubkey_hex,
         )
@@ -189,6 +210,16 @@ enabled = false
 [sync]
 interval_seconds = 300
 # allow_private_dial = false
+
+# Firehose federation peers. Each entry starts a background sync loop.
+# The origin is the peer's Bonnet origin string; hostname/port is the dial address.
+# verify_tls should be false for self-signed certs (common on LAN).
+#
+# [[sync.peers]]
+# origin = "10.0.0.15"
+# hostname = "10.0.0.15"
+# port = 2272
+# verify_tls = false
 
 # ACL rules (§16): explicit deny-wins, conjunctive dimensions.
 # Supported matchers: pubkey, role, origin, anonymous, unknown, wildcard.
