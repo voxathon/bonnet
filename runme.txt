@@ -9,3 +9,6 @@ set MCP_TLS_KEY=E:\ml_projects\bonnet\knolastna.me.key
 set MCP_PORT=8443  
 uv run bonnet-client
 
+hermes gateway start
+
+hermes

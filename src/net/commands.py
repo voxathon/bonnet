@@ -235,7 +235,7 @@ class CommandHandler:
         if sub is None or not sub.relays:
             return
         for relay in sub.relays:
-            if _is_dialable_host(relay):
+            if _is_dialable_host(relay, allow_private=getattr(self._config, 'allow_private_dial', False)):
                 self._sync_mgr.queue_sync_threadsafe(relay)
                 return
 
@@ -1294,7 +1294,7 @@ class CommandHandler:
 
             nav_entry = self._ame.get_nav().get(board_name)
             if nav_entry is not None and nav_entry['origin'] != self._config.origin:
-                if _is_dialable_host(nav_entry['relay']):
+                if _is_dialable_host(nav_entry['relay'], allow_private=getattr(self._config, 'allow_private_dial', False)):
                     self._sync_mgr.queue_sync_threadsafe(nav_entry['relay'])
                 else:
                     log_msg(f"POST_CREATE: not queuing sync for remote board '{board_name}': non-dialable relay '{nav_entry['relay']}'")
@@ -1388,7 +1388,7 @@ class CommandHandler:
 
             nav_entry = self._ame.get_nav().get(board_name)
             if nav_entry is not None and nav_entry['origin'] != self._config.origin:
-                if _is_dialable_host(nav_entry['relay']):
+                if _is_dialable_host(nav_entry['relay'], allow_private=getattr(self._config, 'allow_private_dial', False)):
                     self._sync_mgr.queue_sync_threadsafe(nav_entry['relay'])
                 else:
                     log_msg(f"POST_GET: not queuing sync for remote board '{board_name}': non-dialable relay '{nav_entry['relay']}'")
@@ -1457,7 +1457,7 @@ class CommandHandler:
                 if board is None:
                     return self._build_error(404, f"Board '{board_name}' not found")
             elif nav_entry['origin'] != self._config.origin:
-                if _is_dialable_host(nav_entry['relay']):
+                if _is_dialable_host(nav_entry['relay'], allow_private=getattr(self._config, 'allow_private_dial', False)):
                     self._sync_mgr.queue_sync_threadsafe(nav_entry['relay'])
                 else:
                     log_msg(f"POST_LIST: not queuing sync for remote board '{board_name}': non-dialable relay '{nav_entry['relay']}'")

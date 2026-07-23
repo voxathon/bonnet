@@ -26,13 +26,17 @@ _HOSTNAME_RE = re.compile(
 )
 
 
-def _is_dialable_host(hostname):
+def _is_dialable_host(hostname, allow_private=False):
     """Return True if `hostname` is a safe outbound dial/relay target (string gate).
 
     Rejects empty strings, IP literals in private/loopback/link-local/reserved/
     multicast/unspecified ranges (SSRF defense), the special-use name `localhost`
     and the `.localhost` TLD, and strings that are not valid hostnames. Public IPs
     and well-formed public-style hostnames are accepted.
+
+    When allow_private=True, the private/loopback/link-local/reserved/multicast/
+    unspecified IP rejection is skipped. The `localhost`/`.localhost` string
+    rejection remains as a sanity check.
 
     This is the cheap string/ingest gate used in `_sync_boards` and the
     `queue_sync` call sites. It validates the *string form* only -- it does NOT
@@ -54,7 +58,8 @@ def _is_dialable_host(hostname):
     except ValueError:
         ip = None
     if ip is not None:
-        # Reject anything that is not a globally routable address.
+        if allow_private:
+            return True
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved \
                 or ip.is_multicast or ip.is_unspecified:
             return False
@@ -67,7 +72,7 @@ def _is_dialable_host(hostname):
     return _HOSTNAME_RE.match(host) is not None
 
 
-def _resolves_to_global_only(hostname):
+def _resolves_to_global_only(hostname, allow_private=False):
     """Return True only if `hostname` resolves and EVERY resolved address is
     globally routable (SSRF dial-site gate).
 
@@ -77,6 +82,9 @@ def _resolves_to_global_only(hostname):
     is_multicast/is_unspecified). On resolution failure (gaierror/OSError),
     empty results, or any non-global address, returns False. No caching; re-
     resolved per dial (IP pinning belongs with the #3 TOFU-overhaul follow-up).
+
+    When allow_private=True, the global-routability check on resolved IPs is
+    skipped — only DNS resolution success is required.
     """
     if not hostname or not isinstance(hostname, str):
         return False
@@ -102,7 +110,8 @@ def _resolves_to_global_only(hostname):
             return False
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved \
                 or ip.is_multicast or ip.is_unspecified:
-            return False
+            if not allow_private:
+                return False
     return True
 
 
@@ -173,6 +182,7 @@ class SyncManager:
         self._backoff_max = backoff_max if isinstance(backoff_max, (int, float)) else 3600
         max_events = getattr(engine.config, 'sync_max_events_per_cycle', 5000)
         self._sync_max_events_per_cycle = max_events if isinstance(max_events, (int, float)) else 5000
+        self._allow_private_dial = getattr(engine.config, 'allow_private_dial', False)
         self._peer_backoff: dict = {}  # peer -> current backoff seconds (0 = no backoff)
         self._peer_last_success: dict = {}
         self._peer_last_failure: dict = {}
@@ -211,14 +221,14 @@ class SyncManager:
             # From feed subscriptions
             for sub in getattr(self._config, 'feed_subscriptions', []):
                 for relay in sub.relays:
-                    if _is_dialable_host(relay):
+                    if _is_dialable_host(relay, allow_private=self._allow_private_dial):
                         relay_candidates.add(relay)
 
             # From nav (known board relays)
             try:
                 peers = self._ame.list_peers()
                 for peer in peers:
-                    if _is_dialable_host(peer):
+                    if _is_dialable_host(peer, allow_private=self._allow_private_dial):
                         relay_candidates.add(peer)
             except Exception:
                 pass
@@ -293,7 +303,7 @@ class SyncManager:
     async def _do_sync_from_peer(self, peer_hostname):
         # SSRF dial-site gate: require BOTH the cheap string check AND a DNS
         # resolution check that every resolved address is globally routable.
-        if not _is_dialable_host(peer_hostname) or not _resolves_to_global_only(peer_hostname):
+        if not _is_dialable_host(peer_hostname, allow_private=self._allow_private_dial) or not _resolves_to_global_only(peer_hostname, allow_private=self._allow_private_dial):
             log_msg(f"SYNC: refusing to dial non-dialable/non-global peer hostname '{peer_hostname}' (SSRF guard)")
             return
 
@@ -392,7 +402,7 @@ class SyncManager:
             # SSRF guard: reject entries whose origin or the relay we will store
             # (peer_hostname) is not a dialable host, so poisoned relays/origins
             # never reach nav (#2).
-            if not _is_dialable_host(origin) or not _is_dialable_host(peer_hostname):
+            if not _is_dialable_host(origin, allow_private=self._allow_private_dial) or not _is_dialable_host(peer_hostname, allow_private=self._allow_private_dial):
                 log_msg(f"SYNC: skipping board '{name}' from {peer_hostname}: non-dialable origin='{origin}'/relay='{peer_hostname}'")
                 skipped += 1
                 continue
