@@ -84,6 +84,7 @@ def _build_engine(temp_dir):
     config = MagicMock()
     config.origin = "local.test"
     config.data_dir = temp_dir
+    config.allow_private_dial = False
 
     engine = MagicMock()
     engine.ume = MagicMock()
@@ -411,6 +412,7 @@ def _build_engine_with_real_ume(temp_dir):
     config = MagicMock()
     config.origin = "local.test"
     config.data_dir = temp_dir
+    config.allow_private_dial = False
 
     engine = MagicMock()
     engine.ume = ume
