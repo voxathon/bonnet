@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from core.logging import log_msg
+
 from core.crypto import Identity
 from core.record import (
     Record, Head, Witness, Intent, MetadataMap,
@@ -609,6 +611,11 @@ class FirehoseStore:
                         key = origin_pubkey
 
                     if not verify_record_signature(key, unsigned, rec.origin_signature):
+                        log_msg(f"ACCEPT_RANGE: origin='{origin}' seq={rec.origin_seq} sig_verify FAILED")
+                        log_msg(f"ACCEPT_RANGE:   key_used={key.hex()[:32]}...")
+                        log_msg(f"ACCEPT_RANGE:   head_origin_pubkey={origin_pubkey.hex()[:32]}...")
+                        log_msg(f"ACCEPT_RANGE:   record_origin_sig={rec.origin_signature.hex()[:32]}...")
+                        log_msg(f"ACCEPT_RANGE:   record_actor_pubkey={rec.actor_pubkey.hex()[:32]}...")
                         self._conn.execute("ROLLBACK")
                         raise SignatureInvalid(
                             f"origin signature verification failed at seq {rec.origin_seq}"

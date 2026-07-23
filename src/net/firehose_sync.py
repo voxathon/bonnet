@@ -241,6 +241,15 @@ class SyncManager:
         if not all_records:
             return AcceptResult(accepted=False, reason="no records fetched")
 
+        log_msg(f"SYNC_ONCE: origin='{origin}' head.origin_pubkey={head.origin_pubkey.hex()[:16]}...")
+
+        self._firehose.init_origin_key(origin, head.origin_pubkey)
+        existing_key = self._firehose.get_key_for_seq(origin, 1)
+        if existing_key is not None:
+            log_msg(f"SYNC_ONCE: origin='{origin}' key_epoch for seq 1: {existing_key.hex()[:16]}...")
+        else:
+            log_msg(f"SYNC_ONCE: origin='{origin}' no key epoch found, using head.origin_pubkey as fallback")
+
         result = self._firehose.accept_remote_range(
             origin=origin,
             records=all_records,
