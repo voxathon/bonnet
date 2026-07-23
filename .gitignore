@@ -11,6 +11,10 @@ bin/
 bonnet
 instructions/
 data
+boards
+logs
+event_bodies
+hermes
 
 # Virtual environments
 .venv
@@ -218,6 +222,9 @@ dmypy.json
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Hermes (external tooling)
+hermes/
 
 # Opencode
 opencode.json
