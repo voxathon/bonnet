@@ -822,6 +822,8 @@ class BonnetFirehoseServer:
             offset += 8
             ap_len = resp[offset]
             offset += 1 + ap_len
+            author_username, offset = self._read_text16(resp, offset)
+            author_registrar, offset = self._read_text16(resp, offset)
             subject, offset = self._read_text16(resp, offset)
             tags, offset = self._read_text16(resp, offset)
             content_type, offset = self._read_text16(resp, offset)
