@@ -159,6 +159,14 @@ class BonnetFirehoseServer:
         self.dispatcher.dispatch_origin(config.origin)
         log_msg(f"INIT: dispatched local origin '{config.origin}'")
 
+        for row in self.firehose._conn.execute(
+            "SELECT DISTINCT origin FROM origin_state WHERE origin != ?", (config.origin,)
+        ).fetchall():
+            remote = row[0]
+            count = self.dispatcher.dispatch_origin(remote)
+            if count:
+                log_msg(f"INIT: dispatched remote origin '{remote}' ({count} records)")
+
         self.local_conn = FirehoseLocalConnection(
             self.server_identity.public_key, config.origin,
         )
