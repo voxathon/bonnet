@@ -295,7 +295,7 @@ class BonnetFirehoseServer:
             return self._cmd_whoami()
 
         if cmd == "list-boards":
-            return self._cmd_list_boards()
+            return self._cmd_list_boards(parts)
 
         if cmd == "create-board":
             return self._cmd_create_board(parts)
