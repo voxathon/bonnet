@@ -10,11 +10,13 @@ bin/
 *.db
 bonnet
 instructions/
-data
-boards
-logs
-event_bodies
-hermes
+data/
+boards/
+logs/
+event_bodies/
+hermes/
+*.db-shm
+*.db-wal
 
 # Virtual environments
 .venv
