@@ -215,6 +215,13 @@ class SyncManager:
 
         if head.latest_origin_seq <= local_seq:
             log_msg(f"SYNC_ONCE: origin='{origin}' already up to date")
+            if self._dispatcher:
+                try:
+                    dispatched = self._dispatcher.dispatch_origin(origin)
+                    if dispatched:
+                        log_msg(f"SYNC_ONCE: origin='{origin}' dispatched {dispatched} pending records (catch-up)")
+                except Exception as e:
+                    log_msg(f"SYNC_ONCE: origin='{origin}' dispatch failed: {e}")
             return AcceptResult(accepted=False, reason="already up to date")
 
         start = local_seq + 1
@@ -247,6 +254,9 @@ class SyncManager:
         existing_key = self._firehose.get_key_for_seq(origin, 1)
         if existing_key is not None:
             log_msg(f"SYNC_ONCE: origin='{origin}' key_epoch for seq 1: {existing_key.hex()[:16]}...")
+            if existing_key != head.origin_pubkey:
+                log_msg(f"SYNC_ONCE: origin='{origin}' KEY MISMATCH — pinned={existing_key.hex()[:16]}... head={head.origin_pubkey.hex()[:16]}... — refusing to sync (stale key epoch, operator must reset)")
+                return AcceptResult(accepted=False, reason="key epoch mismatch — operator must reset_origin_key")
         else:
             log_msg(f"SYNC_ONCE: origin='{origin}' no key epoch found, using head.origin_pubkey as fallback")
 
