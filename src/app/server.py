@@ -100,6 +100,23 @@ class BonnetFirehoseServer:
         elif not acl._rules:
             acl = ACLEvaluator(default_rules_for_admin(self.server_identity.public_key.hex()))
             log_msg("INIT: no ACL rules configured, defaulting to server identity as admin")
+        else:
+            has_server_admin = any(
+                r.matcher.pubkey == self.server_identity.public_key and r.effect == "allow"
+                for r in acl._rules if r.matcher.pubkey is not None
+            )
+            if not has_server_admin:
+                from core.acl import ACLRule, PrincipalMatcher
+                acl.add_rule(ACLRule(
+                    effect="allow",
+                    matcher=PrincipalMatcher(pubkey=self.server_identity.public_key),
+                    actions=["read", "write"],
+                    commands=["*"],
+                    kinds=["*"],
+                    boards=["*"],
+                    objects=["*"],
+                ))
+                log_msg("INIT: added server identity to ACL as admin (not in config)")
 
         self.validator = KindValidator()
         self.search = SearchService(
@@ -313,6 +330,9 @@ class BonnetFirehoseServer:
         if cmd == "debug-nav":
             return self._cmd_debug_nav(parts)
 
+        if cmd == "debug-acl":
+            return self._cmd_debug_acl()
+
         return f"Unknown command: {cmd}. Type 'help' for commands."
 
     def _cmd_help(self) -> str:
@@ -339,6 +359,7 @@ class BonnetFirehoseServer:
   get-event <origin> <event-id-hex>
                                 Show full event details
   debug-nav [origin]            Dump nav.db state
+  debug-acl                     Dump ACL state
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:
@@ -1341,6 +1362,72 @@ class BonnetFirehoseServer:
             f"Origin term:  {'yes' if is_origin_witness(witness) else 'no'}",
             f"Event hash:   {witness.event_hash.hex()}",
         ])
+
+        return "\n".join(lines)
+
+    def _cmd_debug_acl(self) -> str:
+        lines = []
+        ctx = self.local_conn.to_context()
+        auth_ctx = ctx.to_auth_context()
+
+        lines.append("=== FirehoseContext ===")
+        lines.append(f"  peer_pubkey: {ctx.peer_pubkey.hex()}")
+        lines.append(f"  is_anonymous: {ctx.is_anonymous}")
+        lines.append(f"  is_unknown: {ctx.is_unknown}")
+        lines.append(f"  is_registered: {ctx.is_registered}")
+        lines.append(f"  role: '{ctx.role}'")
+        lines.append(f"  origin: '{ctx.origin}'")
+
+        lines.append("")
+        lines.append("=== ACL Rules ===")
+        acl = self.command_handler._acl
+        lines.append(f"  rule count: {len(acl._rules)}")
+        for i, rule in enumerate(acl._rules):
+            m = rule.matcher
+            matcher_desc = []
+            if m.wildcard:
+                matcher_desc.append("wildcard")
+            if m.anonymous:
+                matcher_desc.append("anonymous")
+            if m.unknown:
+                matcher_desc.append("unknown")
+            if m.pubkey is not None:
+                matcher_desc.append(f"pubkey={m.pubkey.hex()[:16]}...")
+            if m.role is not None:
+                matcher_desc.append(f"role={m.role}")
+            if m.origin is not None:
+                matcher_desc.append(f"origin={m.origin}")
+            lines.append(f"  [{i}] effect={rule.effect} match=[{', '.join(matcher_desc)}] actions={rule.actions} commands={rule.commands} kinds={rule.kinds} boards={rule.boards} objects={rule.objects}")
+
+        lines.append("")
+        lines.append("=== ACL Checks ===")
+        from net.firehose_commands import CMD_NAMES
+        for opcode, cmd_name in sorted(CMD_NAMES.items(), key=lambda x: x[1]):
+            action = "write" if opcode == 0x01 else "read"
+            result = acl.check(auth_ctx, action, command=cmd_name)
+            if not result:
+                lines.append(f"  DENIED: {cmd_name} ({action})")
+            # only show denied ones to keep output concise
+
+        if not any(False for _ in []):
+            all_allowed = True
+            for opcode, cmd_name in sorted(CMD_NAMES.items(), key=lambda x: x[1]):
+                action = "write" if opcode == 0x01 else "read"
+                if not acl.check(auth_ctx, action, command=cmd_name):
+                    all_allowed = False
+            if all_allowed:
+                lines.append("  (all commands allowed)")
+
+        lines.append("")
+        lines.append(f"=== Server identity ===")
+        lines.append(f"  pubkey: {self.server_identity.public_key.hex()}")
+        lines.append(f"  config.origin: '{self.config.origin}'")
+
+        has_server_admin = any(
+            r.matcher.pubkey == self.server_identity.public_key and r.effect == "allow"
+            for r in acl._rules if r.matcher.pubkey is not None
+        )
+        lines.append(f"  has admin ACL rule for server pubkey: {has_server_admin}")
 
         return "\n".join(lines)
 
