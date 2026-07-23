@@ -48,6 +48,12 @@ kinds = ["*"]
 boards = ["*"]
 objects = ["*"]
 
+[[sync.peers]]
+origin = "10.0.0.15"
+hostname = "10.0.0.15"
+port = 2272
+verify_tls = false
+
 [[acl]]
 effect = "allow"
 match.role = "moderator"
