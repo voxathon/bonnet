@@ -391,7 +391,8 @@ class BonnetFirehoseServer:
                                 Publish an article (interactive)
   register-user <name>          Register a user identity
   list-boards [origin]          List boards
-  get-article <board> <num>     Get article by number
+  get-article [origin] <board> <num>
+                                Get article by number
   list-articles <board> [off] [n]
                                 List articles
   search-articles <board> <query>
@@ -705,17 +706,34 @@ class BonnetFirehoseServer:
 
     def _cmd_get_article(self, parts) -> str:
         if len(parts) < 3:
-            return "Usage: get-article <board> <num>"
+            return "Usage: get-article [origin] <board> <num>"
 
+        origin = self.config.origin
         board = parts[1]
+        article_num_str = parts[2]
+
+        known_origins = set()
         try:
-            article_num = int(parts[2])
+            for row in self.firehose._conn.execute(
+                "SELECT DISTINCT origin FROM origin_state"
+            ).fetchall():
+                known_origins.add(row[0])
+        except Exception:
+            pass
+
+        if parts[1] in known_origins and len(parts) >= 4:
+            origin = parts[1]
+            board = parts[2]
+            article_num_str = parts[3]
+
+        try:
+            article_num = int(article_num_str)
         except ValueError:
             return "Invalid article number"
 
         from net.firehose_commands import OP_ARTICLE_GET
         req = struct.pack(">B", OP_ARTICLE_GET)
-        req += self._enc_text16(self.config.origin)
+        req += self._enc_text16(origin)
         req += self._enc_text16(board)
         req += struct.pack(">B", 0x01)  # by article_num
         req += struct.pack(">Q", article_num)
