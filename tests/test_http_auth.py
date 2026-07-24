@@ -85,7 +85,7 @@ def request_msg(valid_nonce):
         headers={
             "Content-Type": "application/vnd.bonnet.command",
             "Content-Digest": compute_content_digest(body),
-            "Bonnet-Version": "2",
+            "Bonnet-Protocol": "bonnet-firehose-1",
             "Bonnet-Nonce": valid_nonce,
         },
         body=body,
@@ -101,7 +101,7 @@ def response_msg(valid_nonce):
         headers={
             "Content-Type": "application/vnd.bonnet.command",
             "Content-Digest": compute_content_digest(body),
-            "Bonnet-Version": "2",
+            "Bonnet-Protocol": "bonnet-firehose-1",
             "Bonnet-Origin": "bonnet.example.com",
         },
         status_code=200,
@@ -150,21 +150,21 @@ class TestContentDigest:
 class TestSignatureInput:
     def test_parse_roundtrip(self):
         header = (
-            'bonnet=("@method" "@authority" "content-digest" "bonnet-version" "bonnet-nonce");'
-            'created=1234;keyid="ed25519:abc";alg="ed25519";tag="bonnet-v2";nonce="xyz"'
+            'bonnet=("@method" "@authority" "content-digest" "bonnet-protocol" "bonnet-nonce");'
+            'created=1234;keyid="ed25519:abc";alg="ed25519";tag="bonnet-firehose-1";nonce="xyz"'
         )
         parsed = parse_signature_input(header)
         assert parsed.label == "bonnet"
-        assert parsed.components == ["@method", "@authority", "content-digest", "bonnet-version", "bonnet-nonce"]
+        assert parsed.components == ["@method", "@authority", "content-digest", "bonnet-protocol", "bonnet-nonce"]
         assert parsed.params["created"] == 1234
         assert parsed.params["keyid"] == "ed25519:abc"
         assert parsed.params["alg"] == "ed25519"
-        assert parsed.params["tag"] == "bonnet-v2"
+        assert parsed.params["tag"] == "bonnet-firehose-1"
         assert parsed.params["nonce"] == "xyz"
 
     def test_serialize_roundtrip(self):
         components = ["@method", "@authority", "content-digest"]
-        params = {"created": 1234, "keyid": "ed25519:abc", "alg": "ed25519", "tag": "bonnet-v2"}
+        params = {"created": 1234, "keyid": "ed25519:abc", "alg": "ed25519", "tag": "bonnet-firehose-1"}
         header = serialize_signature_input("bonnet", components, params)
         parsed = parse_signature_input(header)
         assert parsed.label == "bonnet"
@@ -361,7 +361,7 @@ class TestRejections:
         # Sign with a minimal set missing required components
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
         # Manually sign with incomplete components
-        components = ["@method", "@authority"]  # missing content-digest, bonnet-version, bonnet-nonce
+        components = ["@method", "@authority"]  # missing content-digest, bonnet-protocol, bonnet-nonce
         params = {
             "created": int(time.time()),
             "keyid": "ed25519:" + pub.hex(),

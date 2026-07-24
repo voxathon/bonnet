@@ -1,6 +1,6 @@
 """Bonnet RFC 9421 HTTP Message Signatures profile — Ed25519 only, async-native.
 
-Implements exactly what PROTOCOL_RENOVATION_PLAN §7-8 requires:
+Implements exactly what the Bonnet Firehose Protocol requires:
   - Ed25519 sign/verify via pynacl (raw 32-byte keys, no PEM)
   - Content-Digest (RFC 9530, SHA-256)
   - Signature-Input / Signature header parsing and serialization
@@ -8,7 +8,7 @@ Implements exactly what PROTOCOL_RENOVATION_PLAN §7-8 requires:
   - Mandatory covered-component enforcement
   - created / expires / clock-skew validation
   - nonce matching and base64url-32-byte validation
-  - tag="bonnet-v2" filtering
+  - tag="bonnet-firehose-1" filtering
   - keyid format validation (ed25519:<hex> for requests, origin:<name> for responses)
   - All public sign/verify methods are async (crypto offloaded via asyncio.to_thread)
 """
@@ -26,7 +26,7 @@ from typing import Optional, Sequence
 import nacl.signing
 import nacl.exceptions
 
-BONNET_TAG = "bonnet-v2"
+BONNET_TAG = "bonnet-firehose-1"
 BONNET_LABEL = "bonnet"
 ED25519_ALG = "ed25519"
 DEFAULT_MAX_LIFETIME = 60
@@ -35,12 +35,12 @@ DEFAULT_CLOCK_SKEW = 30
 REQUEST_REQUIRED_COMPONENTS = frozenset({
     "@method", "@authority", "@target-uri",
     "content-type", "content-digest",
-    "bonnet-version", "bonnet-nonce",
+    "bonnet-protocol", "bonnet-nonce",
 })
 
 RESPONSE_REQUIRED_COMPONENTS = frozenset({
     "@status", "content-type", "content-digest",
-    "bonnet-version", "bonnet-origin",
+    "bonnet-protocol", "bonnet-origin",
 })
 
 
@@ -514,7 +514,7 @@ def _ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> None
 # ---------------------------------------------------------------------------
 
 class BonnetSigner:
-    """Signs HTTP messages with the Bonnet v2 RFC 9421 profile."""
+    """Signs HTTP messages with the Bonnet firehose RFC 9421 profile."""
 
     def __init__(
         self,
@@ -534,11 +534,11 @@ class BonnetSigner:
         self._request_components = request_components or [
             "@method", "@authority", "@target-uri",
             "content-type", "content-digest",
-            "bonnet-version", "bonnet-nonce",
+            "bonnet-protocol", "bonnet-nonce",
         ]
         self._response_components = response_components or [
             "@status", "content-type", "content-digest",
-            "bonnet-version", "bonnet-origin",
+            "bonnet-protocol", "bonnet-origin",
             "bonnet-request-nonce",
         ]
 
@@ -605,7 +605,7 @@ class BonnetSigner:
 # ---------------------------------------------------------------------------
 
 class BonnetVerifier:
-    """Verifies HTTP messages signed with the Bonnet v2 RFC 9421 profile."""
+    """Verifies HTTP messages signed with the Bonnet firehose RFC 9421 profile."""
 
     def __init__(
         self,
