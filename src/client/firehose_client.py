@@ -505,18 +505,33 @@ class FirehoseHTTPClient:
     async def get_article(self, origin: str, board: str, article_num: int, include_body: bool = False) -> ArticleView:
         cmd = build_article_get(origin, board, SELECTOR_BY_NUM, article_num, include_body)
         resp = await self._send_command(cmd)
-        return parse_article_get_response(resp)
+        view = parse_article_get_response(resp)
+        if view.body_state == "unavailable" and origin and origin != self._server_origin:
+            view.body_state = "remote"
+        return view
 
     async def get_article_by_id(self, origin: str, board: str, article_id: bytes, include_body: bool = False) -> ArticleView:
         cmd = build_article_get(origin, board, SELECTOR_BY_ID, article_id, include_body)
         resp = await self._send_command(cmd)
-        return parse_article_get_response(resp)
+        view = parse_article_get_response(resp)
+        if view.body_state == "unavailable" and origin and origin != self._server_origin:
+            view.body_state = "remote"
+        return view
 
     async def list_articles(self, origin: str, board: str, offset: int = 0, limit: int = 100,
                             include_cancelled: bool = False, include_superseded: bool = False) -> QueryResponse:
         cmd = build_article_list(origin, board, offset, limit, include_cancelled, include_superseded)
         resp = await self._send_command(cmd)
-        return parse_article_list_response(resp, aggregate=(origin == ""))
+        result = parse_article_list_response(resp, aggregate=(origin == ""))
+        if origin and origin != self._server_origin:
+            for item in result.results:
+                if item.body_state == "unavailable":
+                    item.body_state = "remote"
+        elif origin == "":
+            for item in result.results:
+                if item.body_state == "unavailable" and item.origin and item.origin != self._server_origin:
+                    item.body_state = "remote"
+        return result
 
     async def search_articles(self, origin: str, board: str, meta_query: str = "", body_query: str = "",
                               offset: int = 0, limit: int = 100,
