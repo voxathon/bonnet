@@ -242,6 +242,10 @@ class SyncManager:
 
     async def _sync_once(self, origin: str, client: SyncClient) -> AcceptResult:
         """Perform one sync cycle for an origin."""
+        if origin not in self._clients:
+            log_msg(f"SYNC_ONCE: origin='{origin}' is not a configured peer, refusing to accept records")
+            return AcceptResult(accepted=False, reason="origin not in peer allowlist")
+
         head, head_bytes = await client.fetch_head(origin)
 
         local_seq = self._firehose.get_highest_seq(origin)
@@ -345,9 +349,94 @@ class SyncManager:
     # ------------------------------------------------------------------
 
     def sync_manual(self, origin: str, client: SyncClient) -> AcceptResult:
-        """Synchronously sync an origin once. For tests/operator use."""
+        """Synchronously sync an origin once. For tests/operator use.
+
+        Bypasses the peer allowlist check since this is an explicit operator
+        action, not an automated sync.
+        """
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(self._sync_once(origin, client))
+            return loop.run_until_complete(self._sync_once_unchecked(origin, client))
         finally:
             loop.close()
+
+    async def _sync_once_unchecked(self, origin: str, client: SyncClient) -> AcceptResult:
+        """Same as _sync_once but skips the peer allowlist check."""
+        head, head_bytes = await client.fetch_head(origin)
+
+        local_seq = self._firehose.get_highest_seq(origin)
+
+        log_msg(f"SYNC_ONCE: origin='{origin}' remote_seq={head.latest_origin_seq} local_seq={local_seq}")
+
+        if head.latest_origin_seq <= local_seq:
+            log_msg(f"SYNC_ONCE: origin='{origin}' already up to date")
+            if self._dispatcher:
+                try:
+                    dispatched = self._dispatcher.dispatch_origin(origin)
+                    if dispatched:
+                        log_msg(f"SYNC_ONCE: origin='{origin}' dispatched {dispatched} pending records (catch-up)")
+                except Exception as e:
+                    log_msg(f"SYNC_ONCE: origin='{origin}' dispatch failed: {e}")
+            return AcceptResult(accepted=False, reason="already up to date")
+
+        start = local_seq + 1
+        count = head.latest_origin_seq - local_seq
+
+        all_records = []
+        all_witnesses = []
+        current_start = start
+        remaining = count
+
+        while remaining > 0:
+            batch = min(remaining, 100)
+            items = await client.fetch_range(origin, current_start, batch)
+            if not items:
+                log_msg(f"SYNC_ONCE: origin='{origin}' fetch_range returned empty at seq {current_start}")
+                break
+            all_records.extend(r for r, w in items)
+            all_witnesses.extend(w for r, w in items)
+            current_start += len(items)
+            remaining -= len(items)
+
+        log_msg(f"SYNC_ONCE: origin='{origin}' fetched {len(all_records)} records (expected {count})")
+
+        if not all_records:
+            return AcceptResult(accepted=False, reason="no records fetched")
+
+        log_msg(f"SYNC_ONCE: origin='{origin}' head.origin_pubkey={head.origin_pubkey.hex()[:16]}...")
+
+        self._firehose.init_origin_key(origin, head.origin_pubkey)
+        existing_key = self._firehose.get_key_for_seq(origin, 1)
+        if existing_key is not None:
+            log_msg(f"SYNC_ONCE: origin='{origin}' key_epoch for seq 1: {existing_key.hex()[:16]}...")
+            if existing_key != head.origin_pubkey:
+                log_msg(f"SYNC_ONCE: origin='{origin}' KEY MISMATCH — pinned={existing_key.hex()[:16]}... head={head.origin_pubkey.hex()[:16]}... — refusing to sync (stale key epoch, operator must reset)")
+                return AcceptResult(accepted=False, reason="key epoch mismatch — operator must reset_origin_key")
+        else:
+            log_msg(f"SYNC_ONCE: origin='{origin}' no key epoch found, using head.origin_pubkey as fallback")
+
+        result = self._firehose.accept_remote_range(
+            origin=origin,
+            records=all_records,
+            head=head,
+            origin_pubkey=head.origin_pubkey,
+            source=self._hostname,
+        )
+
+        log_msg(f"SYNC_ONCE: origin='{origin}' accept_remote_range: accepted={result.accepted} count={result.accepted_count} reason='{result.reason}'")
+
+        if result.accepted:
+            for rec, upstream_witness in zip(all_records, all_witnesses):
+                if self._firehose.get_event_by_id(origin, rec.event_id) is not None:
+                    local_witness = self._create_local_witness(rec, upstream_witness)
+                    if local_witness:
+                        self._firehose.store_witness(local_witness)
+
+            if self._dispatcher:
+                try:
+                    dispatched = self._dispatcher.dispatch_origin(origin)
+                    log_msg(f"SYNC_ONCE: origin='{origin}' dispatched {dispatched} records to projections")
+                except Exception as e:
+                    log_msg(f"SYNC_ONCE: origin='{origin}' dispatch failed: {e}")
+
+        return result
