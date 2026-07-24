@@ -674,7 +674,7 @@ class BoardProjection:
                 f"latest_control_seq "
                 f"FROM articles WHERE origin=? AND board=? "
                 f"AND visibility IN ({placeholders}){where_extra} "
-                f"ORDER BY article_num ASC LIMIT ? OFFSET ?",
+                f"ORDER BY created_at DESC, article_num ASC LIMIT ? OFFSET ?",
                 [origin, board] + states + [limit, offset],
             ).fetchall()
             return [
@@ -695,6 +695,79 @@ class BoardProjection:
                 )
                 for r in rows
             ]
+
+    def search_metadata(
+        self,
+        origin: str,
+        board: str,
+        text_query: str = "",
+        actor_pubkey: bytes = None,
+        offset: int = 0,
+        limit: int = 100,
+        include_cancelled: bool = False,
+        include_superseded: bool = False,
+    ) -> tuple[list[ArticleProjection], int]:
+        """Search articles with SQL-level filtering. Returns (results, total_count)."""
+        states = [VISIBILITY_ACTIVE]
+        if include_cancelled:
+            states.append(VISIBILITY_CANCELLED)
+        if include_superseded:
+            states.append(VISIBILITY_SUPERSEDED)
+        placeholders = ",".join("?" * len(states))
+
+        where_parts = [f"origin=?", f"board=?", f"visibility IN ({placeholders})", "body_state != 'purged'"]
+        params = [origin, board] + states
+
+        if text_query:
+            where_parts.append("(subject LIKE ? OR tags LIKE ?)")
+            like = f"%{text_query}%"
+            params.extend([like, like])
+
+        if actor_pubkey is not None:
+            where_parts.append("author_pubkey=?")
+            params.append(actor_pubkey)
+
+        where_clause = " AND ".join(where_parts)
+
+        with self._lock:
+            count_row = self._conn.execute(
+                f"SELECT COUNT(*) FROM articles WHERE {where_clause}",
+                params,
+            ).fetchone()
+            total = count_row[0]
+
+            rows = self._conn.execute(
+                f"SELECT origin, board, article_num, article_id, event_id, "
+                f"visibility, body_state, pin_state, thread_state, "
+                f"subject, tags, options, content_type, "
+                f"author_pubkey, author_username, author_registrar, "
+                f"created_at, body_hash, body_size, "
+                f"root_article_id, reply_to_article_id, replacement_article_id, "
+                f"latest_control_seq "
+                f"FROM articles WHERE {where_clause} "
+                f"ORDER BY created_at DESC, article_num ASC LIMIT ? OFFSET ?",
+                params + [limit, offset],
+            ).fetchall()
+
+            results = [
+                ArticleProjection(
+                    origin=r[0], board=r[1], article_num=r[2],
+                    article_id=bytes(r[3]), event_id=bytes(r[4]),
+                    visibility=r[5], body_state=r[6],
+                    pin_state=r[7], thread_state=r[8],
+                    subject=r[9], tags=r[10], options=r[11],
+                    content_type=r[12],
+                    author_pubkey=bytes(r[13]), author_username=r[14],
+                    author_registrar=r[15],
+                    created_at=r[16], body_hash=bytes(r[17]),
+                    body_size=r[18],
+                    root_article_id=bytes(r[19]), reply_to_article_id=bytes(r[20]),
+                    replacement_article_id=bytes(r[21]) if r[21] else None,
+                    latest_control_seq=r[22],
+                )
+                for r in rows
+            ]
+            return results, total
 
     def article_count(self, origin: str, board: str) -> int:
         with self._lock:

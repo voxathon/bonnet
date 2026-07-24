@@ -122,12 +122,6 @@ class Dispatcher:
                 count += 1
             return count
 
-    def dispatch_all_origins(self) -> int:
-        """Dispatch pending records for all origins. Returns total count."""
-        return self._firehose._conn.execute(
-            "SELECT DISTINCT origin FROM origin_state"
-        ).fetchall().__len__() if self._firehose.get_highest_seq else 0
-
     def _dispatch_record(self, rec: Record) -> None:
         """Route a single record to the appropriate projection(s)."""
         kind = rec.kind

@@ -421,7 +421,7 @@ class BonnetFirehoseServer:
                                 Show full event details
   debug-nav [origin]            Dump nav.db state
   debug-acl                     Dump ACL state
-  rebuild [origin]              Rebuild projections from firehose
+  rebuild [origin]              Rebuild projections from firehose (retries failed records)
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:

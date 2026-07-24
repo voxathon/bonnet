@@ -593,6 +593,8 @@ class FirehoseCommandHandler:
     def _cmd_article_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        if not origin:
+            return _error(0x0003, "Article not found")
         self._maybe_queue_remote_sync(origin)
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _error(0x0003, "Article not found")
@@ -857,6 +859,8 @@ class FirehoseCommandHandler:
     def _cmd_article_query(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        if not origin:
+            return _success(struct.pack(">H", 0))
         self._maybe_queue_remote_sync(origin)
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _success(struct.pack(">H", 0))
@@ -905,6 +909,8 @@ class FirehoseCommandHandler:
     def _cmd_article_body(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        if not origin:
+            return _error(0x0003, "Article body unavailable")
         self._maybe_queue_remote_sync(origin)
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _error(0x0003, "Article body unavailable")
@@ -945,6 +951,8 @@ class FirehoseCommandHandler:
     def _cmd_user_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        if not origin:
+            return _error(0x0001, "User not found")
         self._maybe_queue_remote_sync(origin)
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _error(0x0001, "User not found")
@@ -974,6 +982,8 @@ class FirehoseCommandHandler:
     def _cmd_user_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        if not origin:
+            return _success(struct.pack(">H", 0))
         self._maybe_queue_remote_sync(origin)
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _success(struct.pack(">H", 0))
