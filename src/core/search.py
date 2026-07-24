@@ -79,29 +79,23 @@ class SearchService:
         include_cancelled: bool = False,
         include_superseded: bool = False,
     ) -> SearchResults:
-        """Search article metadata (subject, tags) in one board projection."""
-        all_articles = projection.list_articles(
-            origin, board, offset=0, limit=100000,
+        """Search article metadata (subject, tags) in one board projection.
+
+        Uses SQL-level filtering for text and actor — only matching rows
+        are loaded into Python, bounded by limit.
+        """
+        articles, total = projection.search_metadata(
+            origin, board,
+            text_query=text_query,
+            actor_pubkey=actor_pubkey,
+            offset=offset,
+            limit=limit,
             include_cancelled=include_cancelled,
             include_superseded=include_superseded,
         )
 
-        filtered = []
-        for art in all_articles:
-            if art.body_state == "purged":
-                continue
-            if actor_pubkey is not None and art.author_pubkey != actor_pubkey:
-                continue
-            if text_query:
-                haystack = (art.subject + " " + art.tags).lower()
-                if text_query.lower() not in haystack:
-                    continue
-            filtered.append(art)
-
-        total = len(filtered)
-        page = filtered[offset:offset + limit]
         results = []
-        for art in page:
+        for art in articles:
             excerpt = None
             if art.body_state == "available" and art.body_size > 0:
                 body = self._body_store.get_article_body(
