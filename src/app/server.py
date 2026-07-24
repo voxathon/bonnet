@@ -390,6 +390,9 @@ class BonnetFirehoseServer:
         if cmd == "debug-acl":
             return self._cmd_debug_acl()
 
+        if cmd == "rebuild":
+            return self._cmd_rebuild(parts)
+
         return f"Unknown command: {cmd}. Type 'help' for commands."
 
     def _cmd_help(self) -> str:
@@ -418,6 +421,7 @@ class BonnetFirehoseServer:
                                 Show full event details
   debug-nav [origin]            Dump nav.db state
   debug-acl                     Dump ACL state
+  rebuild [origin]              Rebuild projections from firehose
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:
@@ -1474,6 +1478,11 @@ class BonnetFirehoseServer:
         ])
 
         return "\n".join(lines)
+
+    def _cmd_rebuild(self, parts) -> str:
+        origin = parts[1] if len(parts) > 1 else self.config.origin
+        count = self.dispatcher.rebuild_all(origin)
+        return f"Rebuilt projections for '{origin}': {count} records replayed."
 
     def _cmd_debug_acl(self) -> str:
         lines = []
