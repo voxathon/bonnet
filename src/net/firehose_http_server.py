@@ -152,9 +152,10 @@ class FirehoseHTTPServer:
     # ------------------------------------------------------------------
 
     async def _handle_discovery(self, scope, receive, send):
-        known_origins = []
-        if self._firehose:
-            known_origins = sorted(set(self._firehose.list_origins()))
+        known_origins = [self._config.origin]
+        for peer in getattr(self._config, 'peers', []):
+            known_origins.append(peer.origin)
+        known_origins = sorted(set(known_origins))
 
         body = json.dumps({
             "protocol": "bonnet-firehose-1",

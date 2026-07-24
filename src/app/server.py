@@ -84,6 +84,10 @@ class BonnetFirehoseServer:
         )
         log_msg(f"INIT: BodyStore at boards={config.boards_dir}, events={config.events_bodies_dir}")
 
+        allowed_origins = {config.origin}
+        for peer in config.peers:
+            allowed_origins.add(peer.origin)
+
         self.dispatcher = Dispatcher(
             firehose=self.firehose,
             nav=self.nav,
@@ -91,6 +95,7 @@ class BonnetFirehoseServer:
             policy=self.policy,
             boards_dir=config.boards_dir,
             body_store=self.body_store,
+            allowed_origins=allowed_origins,
         )
         log_msg("INIT: Dispatcher initialized")
 
@@ -153,6 +158,7 @@ class BonnetFirehoseServer:
             dispatcher=self.dispatcher,
             sync_manager=self.sync_manager,
             peer_map=peer_map,
+            allowed_origins=allowed_origins,
         )
         log_msg("INIT: FirehoseCommandHandler initialized")
 
