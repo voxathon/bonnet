@@ -63,12 +63,23 @@ class ArticleView:
     Note: visibility and body_state are independent dimensions. A purged
     article has visibility='active' and body_state='purged'. Clients MUST
     check body_state alongside visibility to determine body availability.
+
+    body_state values:
+      - 'available': body is cached locally on the relay
+      - 'unavailable': body should be local but is missing (sync issue)
+      - 'purged': body was intentionally deleted (purge event)
+      - 'remote': body is on the origin server, not cached locally;
+                  fetch via ARTICLE_BODY (may redirect to origin)
+
+    body_verified: True if the body was fetched and its hash+size verified
+                   against the origin-signed article metadata. False if the
+                   body was not fetched or verification was not performed.
     """
     article_num: int
     article_id: str
     event_id: str
     visibility: str  # active, cancelled, superseded
-    body_state: str  # available, unavailable, purged
+    body_state: str  # available, unavailable, purged, remote
     body_hash: str
     body_size: int
     created_at: int
@@ -84,16 +95,21 @@ class ArticleView:
     pin_state: str = "unpinned"
     thread_state: str = "open"
     body: Optional[bytes] = None
+    body_verified: bool = False
 
 
 @dataclass
 class ArticleListItem:
-    """An article in a list response."""
+    """An article in a list response.
+
+    body_state may be 'remote' for articles from a different origin than
+    the connected server. See ArticleView for the full body_state documentation.
+    """
     article_num: int
     article_id: str
     event_id: str
     visibility: str
-    body_state: str
+    body_state: str  # available, unavailable, purged, remote
     body_hash: str
     body_size: int
     created_at: int

@@ -283,7 +283,14 @@ async def get_article(
         view = await client.get_article(origin, board, article_num, include_body)
         if view and include_body and view.body is None and view.body_size > 0:
             try:
-                view.body = await client.get_article_body(origin, board, article_num)
+                body = await client.get_article_body(origin, board, article_num)
+                view.body = body
+                if view.body_hash and view.body_size:
+                    from core.record import compute_body_hash
+                    actual_hash = compute_body_hash(body).hex()
+                    view.body_verified = (
+                        len(body) == view.body_size and actual_hash == view.body_hash
+                    )
             except Exception:
                 pass
         return view
