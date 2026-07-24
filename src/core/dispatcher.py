@@ -174,6 +174,12 @@ class Dispatcher:
                 bp.update_body_state(
                     rec.origin, rec.board, rec.article_num, "available",
                 )
+            elif self._body_store.article_body_exists(
+                rec.origin, rec.board, rec.article_num,
+            ):
+                bp.update_body_state(
+                    rec.origin, rec.board, rec.article_num, "available",
+                )
 
     def _dispatch_article_control(self, rec: Record) -> None:
         target_origin = rec.target_origin
