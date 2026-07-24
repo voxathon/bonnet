@@ -135,6 +135,8 @@ class BonnetFirehoseServer:
             for peer in config.peers:
                 log_msg(f"INIT: configured peer '{peer.origin}' at {peer.hostname}:{peer.port} (verify_tls={peer.verify_tls})")
 
+        peer_map = {peer.origin: peer for peer in config.peers}
+
         self.command_handler = FirehoseCommandHandler(
             firehose=self.firehose,
             server_identity=self.server_identity,
@@ -150,6 +152,7 @@ class BonnetFirehoseServer:
             hostname=config.hostname,
             dispatcher=self.dispatcher,
             sync_manager=self.sync_manager,
+            peer_map=peer_map,
         )
         log_msg("INIT: FirehoseCommandHandler initialized")
 
@@ -170,6 +173,7 @@ class BonnetFirehoseServer:
             replay_ledger=self.replay_ledger,
             rate_limiter=self.rate_limiter,
             users_projection=self.users,
+            firehose_store=self.firehose,
         )
         log_msg("INIT: FirehoseHTTPServer initialized")
 
@@ -674,7 +678,8 @@ class BonnetFirehoseServer:
     # ------------------------------------------------------------------
 
     def _cmd_list_boards(self, parts=None) -> str:
-        origin = parts[1] if parts and len(parts) > 1 else self.config.origin
+        aggregate = not parts or len(parts) <= 1
+        origin = parts[1] if parts and len(parts) > 1 else ""
 
         from net.firehose_commands import OP_BOARD_LIST
         req = struct.pack(">B", OP_BOARD_LIST) + self._enc_text16(origin)
@@ -687,6 +692,8 @@ class BonnetFirehoseServer:
         offset = 3
         lines = []
         for _ in range(count):
+            if aggregate:
+                board_origin, offset = self._read_text16(resp, offset)
             name, offset = self._read_text16(resp, offset)
             closed = resp[offset]
             offset += 1
@@ -694,7 +701,10 @@ class BonnetFirehoseServer:
             offset += 1 + owner_len
             display, offset = self._read_text16(resp, offset)
             status = " [closed]" if closed else ""
-            lines.append(f"  /{name}{status}  {display}")
+            if aggregate:
+                lines.append(f"  {board_origin}/{name}{status}  {display}")
+            else:
+                lines.append(f"  /{name}{status}  {display}")
 
         if not lines:
             return "No boards."
@@ -851,7 +861,7 @@ class BonnetFirehoseServer:
         if len(parts) < 2:
             return "Usage: list-articles [origin] <board> [offset] [limit]"
 
-        origin = self.config.origin
+        origin = ""
         board = parts[1]
         offset = 0
         limit = 50
@@ -874,6 +884,8 @@ class BonnetFirehoseServer:
             offset = int(parts[2]) if len(parts) > 2 else 0
             limit = int(parts[3]) if len(parts) > 3 else 50
 
+        aggregate = (origin == "")
+
         from net.firehose_commands import OP_ARTICLE_LIST
         req = struct.pack(">B", OP_ARTICLE_LIST)
         req += self._enc_text16(origin)
@@ -890,6 +902,8 @@ class BonnetFirehoseServer:
         offset = 3
         lines = []
         for _ in range(count):
+            if aggregate:
+                art_origin, offset = self._read_text16(resp, offset)
             article_num = struct.unpack(">Q", resp[offset:offset + 8])[0]
             offset += 8
             aid_len = resp[offset]
@@ -929,7 +943,10 @@ class BonnetFirehoseServer:
 
             from datetime import datetime
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
-            lines.append(f"#{article_num:4} | {subject} | {ts}")
+            if aggregate:
+                lines.append(f"{art_origin} #{article_num:4} | {subject} | {ts}")
+            else:
+                lines.append(f"#{article_num:4} | {subject} | {ts}")
 
         if not lines:
             return "No articles."
@@ -941,14 +958,31 @@ class BonnetFirehoseServer:
 
     def _cmd_search_articles(self, parts) -> str:
         if len(parts) < 3:
-            return "Usage: search-articles <board> <query>"
+            return "Usage: search-articles [origin] <board> <query>"
 
+        origin = ""
         board = parts[1]
         query = " ".join(parts[2:])
 
+        known_origins = set()
+        try:
+            for row in self.firehose._conn.execute(
+                "SELECT DISTINCT origin FROM origin_state"
+            ).fetchall():
+                known_origins.add(row[0])
+        except Exception:
+            pass
+
+        if parts[1] in known_origins and len(parts) >= 4:
+            origin = parts[1]
+            board = parts[2]
+            query = " ".join(parts[3:])
+
+        aggregate = (origin == "")
+
         from net.firehose_commands import OP_ARTICLE_SEARCH
         req = struct.pack(">B", OP_ARTICLE_SEARCH)
-        req += self._enc_text16(self.config.origin)
+        req += self._enc_text16(origin)
         req += self._enc_text16(board)
         req += self._enc_text16(query)
         req += self._enc_text16("")  # no body search
@@ -966,6 +1000,8 @@ class BonnetFirehoseServer:
         offset = 8
         lines = []
         for _ in range(count):
+            if aggregate:
+                result_origin, offset = self._read_text16(resp, offset)
             article_num = struct.unpack(">Q", resp[offset:offset + 8])[0]
             offset += 8
             aid_len = resp[offset]
@@ -984,7 +1020,10 @@ class BonnetFirehoseServer:
 
             from datetime import datetime
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
-            lines.append(f"#{article_num:4} | {subject} | {ts}")
+            if aggregate:
+                lines.append(f"{result_origin} #{article_num:4} | {subject} | {ts}")
+            else:
+                lines.append(f"#{article_num:4} | {subject} | {ts}")
 
         if not lines:
             return "No matches."

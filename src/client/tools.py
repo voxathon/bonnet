@@ -233,9 +233,9 @@ async def create_board(
 
 @mcp.tool
 async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardInfo]:
-    """List all boards on an origin with metadata (name, closed state, owner, display name).
+    """List all boards with metadata (name, closed state, owner, display name).
 
-    origin: origin to query (defaults to server's origin).
+    origin: origin to query (empty = aggregate across all known origins).
     """
     client = _make_client()
     try:
@@ -243,8 +243,9 @@ async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardIn
             await _connect_authenticated(client, auth)
         else:
             await _connect_anonymous(client)
-        origin = origin or client._server_origin or ""
-        return await client.list_boards(origin)
+        if origin:
+            return await client.list_boards(origin)
+        return await client.list_boards("")
     finally:
         await client.close()
 
@@ -279,7 +280,13 @@ async def get_article(
         else:
             await _connect_anonymous(client)
         origin = origin or client._server_origin or ""
-        return await client.get_article(origin, board, article_num, include_body)
+        view = await client.get_article(origin, board, article_num, include_body)
+        if view and include_body and view.body is None and view.body_size > 0:
+            try:
+                view.body = await client.get_article_body(origin, board, article_num)
+            except Exception:
+                pass
+        return view
     finally:
         await client.close()
 
@@ -294,7 +301,7 @@ async def list_articles(
     origin: str = "",
     auth: str | None = None,
 ) -> QueryResponse:
-    """List articles on a board with pagination and state filtering.
+    """List articles on a board, sorted by created_at descending.
 
     By default only active articles are returned. Set include_cancelled or
     include_superseded to also include those states.
@@ -302,7 +309,7 @@ async def list_articles(
     board: board name.
     offset: pagination offset.
     limit: max articles to return.
-    origin: origin to query (defaults to server's origin).
+    origin: origin to query (empty = aggregate across all known origins).
     """
     if offset < 0:
         raise ValueError("offset must be non-negative")
@@ -314,9 +321,12 @@ async def list_articles(
             await _connect_authenticated(client, auth)
         else:
             await _connect_anonymous(client)
-        origin = origin or client._server_origin or ""
+        if origin:
+            return await client.list_articles(
+                origin, board, offset, limit, include_cancelled, include_superseded,
+            )
         return await client.list_articles(
-            origin, board, offset, limit, include_cancelled, include_superseded,
+            "", board, offset, limit, include_cancelled, include_superseded,
         )
     finally:
         await client.close()
@@ -331,11 +341,11 @@ async def search_articles(
     origin: str = "",
     auth: str | None = None,
 ) -> SearchResponse:
-    """Search article metadata (subject, tags) on a board.
+    """Search article metadata (subject, tags) on a board. Results sorted by created_at descending.
 
     query: substring to search for in subject and tags.
     board: board name.
-    origin: origin to query (defaults to server's origin).
+    origin: origin to query (empty = aggregate across all known origins).
     """
     if offset < 0:
         raise ValueError("offset must be non-negative")
@@ -347,8 +357,9 @@ async def search_articles(
             await _connect_authenticated(client, auth)
         else:
             await _connect_anonymous(client)
-        origin = origin or client._server_origin or ""
-        return await client.search_articles(origin, board, query, "", offset, limit)
+        if origin:
+            return await client.search_articles(origin, board, query, "", offset, limit)
+        return await client.search_articles("", board, query, "", offset, limit)
     finally:
         await client.close()
 

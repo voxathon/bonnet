@@ -107,6 +107,11 @@ def _error(code: int, message: str) -> bytes:
     return b"\x01" + struct.pack(">H", code) + struct.pack(">H", len(msg_bytes)) + msg_bytes
 
 
+def _enc_text16(s: str) -> bytes:
+    encoded = s.encode("utf-8")
+    return struct.pack(">H", len(encoded)) + encoded
+
+
 def _read_text16(data: bytes, offset: int) -> tuple[str, int]:
     if offset + 2 > len(data):
         raise ValueError("truncated text16")
@@ -207,6 +212,7 @@ class FirehoseCommandHandler:
         hostname: str = "",
         dispatcher=None,
         sync_manager=None,
+        peer_map: dict = None,
     ):
         self._firehose = firehose
         self._identity = server_identity
@@ -222,6 +228,7 @@ class FirehoseCommandHandler:
         self._hostname = hostname or config_origin
         self._dispatcher = dispatcher
         self._sync_manager = sync_manager
+        self._peer_map = peer_map or {}
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
 
     def close(self) -> None:
@@ -242,7 +249,7 @@ class FirehoseCommandHandler:
         if origin == self._origin:
             return
         if self._sync_manager is not None:
-            self._sync_manager.queue_sync(origin)
+            self._sync_manager.queue_sync_threadsafe(origin)
 
     def handle(self, body: bytes, ctx: FirehoseContext) -> bytes:
         if not body:
@@ -545,8 +552,22 @@ class FirehoseCommandHandler:
     def _cmd_board_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
-        self._maybe_queue_remote_sync(origin)
 
+        if origin == "":
+            boards = self._nav.list_boards()
+            out = struct.pack(">H", len(boards))
+            for b in boards:
+                out += _enc_text16(b["origin"])
+                name_bytes = b["board"].encode("utf-8")
+                out += struct.pack(">H", len(name_bytes)) + name_bytes
+                out += struct.pack(">B", 1 if b["closed"] else 0)
+                owner = b["owner_pubkey"]
+                out += struct.pack(">B", len(owner)) + owner
+                display = b["display_name"].encode("utf-8")
+                out += struct.pack(">H", len(display)) + display
+            return _success(out)
+
+        self._maybe_queue_remote_sync(origin)
         boards = self._nav.list_boards(origin)
         out = struct.pack(">H", len(boards))
         for b in boards:
@@ -664,7 +685,6 @@ class FirehoseCommandHandler:
     def _cmd_article_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
-        self._maybe_queue_remote_sync(origin)
         board, offset = _read_text16(data, offset)
         list_offset, offset = _read_u32(data, offset)
         limit, offset = _read_u16(data, offset)
@@ -674,6 +694,31 @@ class FirehoseCommandHandler:
         include_superseded = bool(flags & 0x02)
         include_purged = bool(flags & 0x04)
 
+        if origin == "":
+            all_boards = self._nav.list_boards()
+            origins_with_board = [b["origin"] for b in all_boards if b["board"] == board]
+
+            all_articles = []
+            for orig in origins_with_board:
+                bp = self._get_board_projection(orig, board)
+                articles = bp.list_articles(
+                    orig, board, offset=0, limit=list_offset + limit,
+                    include_cancelled=include_cancelled,
+                    include_superseded=include_superseded,
+                )
+                for art in articles:
+                    all_articles.append((art, orig))
+
+            all_articles.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
+            page = all_articles[list_offset:list_offset + limit]
+
+            out = struct.pack(">H", len(page))
+            for art, orig in page:
+                out += _enc_text16(orig)
+                out += self._encode_article_view(art, include_body=False)
+            return _success(out)
+
+        self._maybe_queue_remote_sync(origin)
         bp = self._get_board_projection(origin, board)
         articles = bp.list_articles(
             origin, board, offset=list_offset, limit=limit,
@@ -693,7 +738,6 @@ class FirehoseCommandHandler:
     def _cmd_article_search(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
-        self._maybe_queue_remote_sync(origin)
         board, offset = _read_text16(data, offset)
         meta_query, offset = _read_text16(data, offset)
         body_query, offset = _read_text16(data, offset)
@@ -704,6 +748,55 @@ class FirehoseCommandHandler:
         include_cancelled = bool(flags & 0x01)
         include_superseded = bool(flags & 0x02)
 
+        if origin == "":
+            all_boards = self._nav.list_boards()
+            origins_with_board = [b["origin"] for b in all_boards if b["board"] == board]
+
+            all_results = []
+            total = 0
+            truncated = False
+            for orig in origins_with_board:
+                bp = self._get_board_projection(orig, board)
+                if body_query:
+                    results = self._search.search_bodies(
+                        bp, orig, board, body_query,
+                        offset=0, limit=list_offset + limit,
+                        include_cancelled=include_cancelled,
+                        include_superseded=include_superseded,
+                    )
+                else:
+                    results = self._search.search_metadata(
+                        bp, orig, board, text_query=meta_query,
+                        offset=0, limit=list_offset + limit,
+                        include_cancelled=include_cancelled,
+                        include_superseded=include_superseded,
+                    )
+                for r in results.results:
+                    all_results.append((r, orig))
+                total += results.total
+                if results.truncated:
+                    truncated = True
+
+            all_results.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
+            page = all_results[list_offset:list_offset + limit]
+
+            out = struct.pack(">H", len(page))
+            out += struct.pack(">I", total)
+            out += struct.pack(">B", 1 if truncated else 0)
+            for r, orig in page:
+                out += _enc_text16(orig)
+                out += struct.pack(">Q", r.article_num)
+                out += struct.pack(">B", len(r.article_id)) + r.article_id
+                subj_bytes = r.subject.encode("utf-8")
+                out += struct.pack(">B", len(subj_bytes)) + subj_bytes
+                out += struct.pack(">B", len(r.author_pubkey)) + r.author_pubkey
+                out += struct.pack(">q", r.created_at)
+                out += struct.pack(">B", 1 if r.body_available else 0)
+                excerpt = r.excerpt.encode("utf-8") if r.excerpt else b""
+                out += struct.pack(">H", len(excerpt)) + excerpt
+            return _success(out)
+
+        self._maybe_queue_remote_sync(origin)
         bp = self._get_board_projection(origin, board)
 
         if body_query:
@@ -727,7 +820,8 @@ class FirehoseCommandHandler:
         for r in results.results:
             out += struct.pack(">Q", r.article_num)
             out += struct.pack(">B", len(r.article_id)) + r.article_id
-            out += struct.pack(">B", len(r.subject.encode("utf-8"))) + r.subject.encode("utf-8")
+            subj_bytes = r.subject.encode("utf-8")
+            out += struct.pack(">B", len(subj_bytes)) + subj_bytes
             out += struct.pack(">B", len(r.author_pubkey)) + r.author_pubkey
             out += struct.pack(">q", r.created_at)
             out += struct.pack(">B", 1 if r.body_available else 0)
@@ -807,6 +901,14 @@ class FirehoseCommandHandler:
             origin, board, article_num, art.body_hash, art.body_size,
         )
         if body is None:
+            if origin != self._origin:
+                peer = self._peer_map.get(origin)
+                if peer:
+                    out = _enc_text16(origin)
+                    out += _enc_text16(peer.hostname)
+                    out += struct.pack(">H", peer.port)
+                    out += struct.pack(">B", 1 if peer.verify_tls else 0)
+                    return b"\x02" + out
             return _error(0x0003, "Body unavailable")
 
         return _success(struct.pack(">I", len(body)) + body)

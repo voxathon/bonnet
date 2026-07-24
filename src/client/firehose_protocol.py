@@ -107,6 +107,15 @@ class ProtocolError(Exception):
     pass
 
 
+class BodyRedirectError(Exception):
+    def __init__(self, origin: str, hostname: str, port: int, verify_tls: bool):
+        self.origin = origin
+        self.hostname = hostname
+        self.port = port
+        self.verify_tls = verify_tls
+        super().__init__(f"body redirect: origin='{origin}' hostname='{hostname}' port={port}")
+
+
 # ---------------------------------------------------------------------------
 # Response parser
 # ---------------------------------------------------------------------------
@@ -258,11 +267,14 @@ def build_board_list(origin: str) -> bytes:
     return struct.pack(">B", OP_BOARD_LIST) + _enc_text16(origin)
 
 
-def parse_board_list_response(resp: bytes) -> list[BoardInfo]:
+def parse_board_list_response(resp: bytes, aggregate: bool = False) -> list[BoardInfo]:
     status, payload = parse_response(resp)
     count, offset = _read_u16(payload, 0)
     boards = []
     for _ in range(count):
+        board_origin = ""
+        if aggregate:
+            board_origin, offset = _read_text16(payload, offset)
         name, offset = _read_text16(payload, offset)
         closed, offset = _read_u8(payload, offset)
         owner_len, offset = _read_u8(payload, offset)
@@ -270,8 +282,11 @@ def parse_board_list_response(resp: bytes) -> list[BoardInfo]:
         offset += owner_len
         display, offset = _read_text16(payload, offset)
         boards.append(BoardInfo(
-            name=name, closed=bool(closed),
-            owner_pubkey=owner, display_name=display,
+            name=name,
+            closed=bool(closed),
+            owner_pubkey=owner,
+            display_name=display,
+            origin=board_origin,
         ))
     return boards
 
@@ -398,12 +413,16 @@ def build_article_list(origin: str, board: str, offset: int = 0, limit: int = 10
     return out
 
 
-def parse_article_list_response(resp: bytes) -> QueryResponse:
+def parse_article_list_response(resp: bytes, aggregate: bool = False) -> QueryResponse:
     status, payload = parse_response(resp)
     count, offset = _read_u16(payload, 0)
     items = []
     for _ in range(count):
+        item_origin = ""
+        if aggregate:
+            item_origin, offset = _read_text16(payload, offset)
         item, offset = _decode_article_list_item(payload, offset)
+        item.origin = item_origin
         items.append(item)
     return QueryResponse(results=items)
 
@@ -503,13 +522,16 @@ def build_article_search(origin: str, board: str, meta_query: str = "", body_que
     return out
 
 
-def parse_article_search_response(resp: bytes) -> SearchResponse:
+def parse_article_search_response(resp: bytes, aggregate: bool = False) -> SearchResponse:
     status, payload = parse_response(resp)
     count, offset = _read_u16(payload, 0)
     total, offset = _read_u32(payload, offset)
     truncated, offset = _read_u8(payload, offset)
     results = []
     for _ in range(count):
+        result_origin = ""
+        if aggregate:
+            result_origin, offset = _read_text16(payload, offset)
         article_num, offset = _read_u64(payload, offset)
         aid_len, offset = _read_u8(payload, offset)
         article_id = payload[offset:offset + aid_len]
@@ -531,6 +553,7 @@ def parse_article_search_response(resp: bytes) -> SearchResponse:
             created_at=created_at,
             body_available=bool(body_avail),
             excerpt=excerpt,
+            origin=result_origin,
         ))
     return SearchResponse(results=results, total=total, truncated=bool(truncated))
 
@@ -588,7 +611,18 @@ def build_article_body(origin: str, board: str, article_num: int) -> bytes:
 
 
 def parse_article_body_response(resp: bytes) -> bytes:
-    status, payload = parse_response(resp)
+    if not resp:
+        raise ProtocolError("empty response")
+    status = resp[0]
+    payload = resp[1:]
+    if status == 0x02:
+        origin, offset = _read_text16(payload, 0)
+        hostname, offset = _read_text16(payload, offset)
+        port, offset = _read_u16(payload, offset)
+        verify_tls = payload[offset]
+        raise BodyRedirectError(origin, hostname, port, bool(verify_tls))
+    if status == STATUS_ERROR:
+        parse_response(resp)
     body_len, offset = _read_u32(payload, 0)
     return payload[4:4 + body_len]
 
