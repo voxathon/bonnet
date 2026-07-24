@@ -56,7 +56,6 @@ class FirehoseConfig:
         search_result_limit: int = 100,
         rg_path: str = "",
         sync_interval_seconds: int = 300,
-        allow_private_dial: bool = False,
         peers: list = None,
         acl: ACLEvaluator = None,
         admin_pubkey_hex: str = "",
@@ -82,7 +81,6 @@ class FirehoseConfig:
         self.search_result_limit = search_result_limit
         self.rg_path = rg_path
         self.sync_interval_seconds = sync_interval_seconds
-        self.allow_private_dial = allow_private_dial
         self.peers = peers or []
         self.acl = acl or ACLEvaluator([])
         self.admin_pubkey_hex = admin_pubkey_hex
@@ -165,7 +163,6 @@ class FirehoseConfig:
             search_result_limit=search.get("result_limit", 100),
             rg_path=search.get("rg_path", ""),
             sync_interval_seconds=sync.get("interval_seconds", 300),
-            allow_private_dial=sync.get("allow_private_dial", False),
             peers=[
                 PeerConfig(
                     origin=p.get("origin", ""),
@@ -209,7 +206,6 @@ enabled = false
 
 [sync]
 interval_seconds = 300
-# allow_private_dial = false
 
 # Firehose federation peers. Each entry starts a background sync loop.
 # The origin is the peer's Bonnet origin string; hostname/port is the dial address.
