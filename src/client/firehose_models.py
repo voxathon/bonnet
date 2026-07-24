@@ -108,6 +108,7 @@ class ArticleListItem:
     replacement_article_id: str = ""
     pin_state: str = "unpinned"
     thread_state: str = "open"
+    origin: str = ""
 
 
 @dataclass
@@ -120,6 +121,7 @@ class SearchResult:
     created_at: int
     body_available: bool
     excerpt: Optional[str] = None
+    origin: str = ""
 
 
 @dataclass
@@ -143,6 +145,7 @@ class BoardInfo:
     closed: bool
     owner_pubkey: str
     display_name: str
+    origin: str = ""
 
 
 @dataclass
@@ -178,3 +181,4 @@ class DiscoveryInfo:
     anonymous_private_key: str
     command_endpoint: str
     capabilities: list[str]
+    known_origins: list = field(default_factory=list)

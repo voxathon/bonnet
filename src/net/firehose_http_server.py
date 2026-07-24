@@ -69,11 +69,13 @@ class FirehoseHTTPServer:
         replay_ledger: Optional[ReplayLedger] = None,
         rate_limiter: Optional[RateLimiter] = None,
         users_projection=None,
+        firehose_store=None,
     ):
         self._handler = command_handler
         self._server_identity = server_identity
         self._config = config
         self._users = users_projection
+        self._firehose = firehose_store
 
         if anonymous_identity is None:
             anonymous_identity = Identity.generate()
@@ -150,6 +152,10 @@ class FirehoseHTTPServer:
     # ------------------------------------------------------------------
 
     async def _handle_discovery(self, scope, receive, send):
+        known_origins = []
+        if self._firehose:
+            known_origins = sorted(set(self._firehose.list_origins()))
+
         body = json.dumps({
             "protocol": "bonnet-firehose-1",
             "origin": self._config.origin,
@@ -158,11 +164,13 @@ class FirehoseHTTPServer:
             "anonymous_key": self._anonymous_public_key.hex(),
             "anonymous_private_key": self._anonymous_identity.private_key.hex(),
             "command_endpoint": "/command",
+            "known_origins": known_origins,
             "capabilities": [
                 "global-firehose",
                 "generic-record-kinds",
                 "relay-hop-witness",
                 "per-board-body-search",
+                "origin-directory-v1",
             ],
         }).encode("utf-8")
 
