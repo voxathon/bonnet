@@ -572,6 +572,8 @@ class FirehoseCommandHandler:
             return _success(out)
 
         self._maybe_queue_remote_sync(origin)
+        if origin and self._allowed_origins and origin not in self._allowed_origins:
+            return _success(struct.pack(">H", 0))
         boards = self._nav.list_boards(origin)
         out = struct.pack(">H", len(boards))
         for b in boards:
@@ -592,6 +594,8 @@ class FirehoseCommandHandler:
         offset = 0
         origin, offset = _read_text16(data, offset)
         self._maybe_queue_remote_sync(origin)
+        if origin and self._allowed_origins and origin not in self._allowed_origins:
+            return _error(0x0003, "Article not found")
         board, offset = _read_text16(data, offset)
         selector_type, offset = _read_u8(data, offset)
 
@@ -727,6 +731,8 @@ class FirehoseCommandHandler:
             return _success(out)
 
         self._maybe_queue_remote_sync(origin)
+        if origin and self._allowed_origins and origin not in self._allowed_origins:
+            return _success(struct.pack(">H", 0))
         bp = self._get_board_projection(origin, board)
         articles = bp.list_articles(
             origin, board, offset=list_offset, limit=limit,
@@ -809,6 +815,9 @@ class FirehoseCommandHandler:
             return _success(out)
 
         self._maybe_queue_remote_sync(origin)
+        if origin and self._allowed_origins and origin not in self._allowed_origins:
+            out = struct.pack(">H", 0) + struct.pack(">I", 0) + struct.pack(">B", 0)
+            return _success(out)
         bp = self._get_board_projection(origin, board)
 
         if body_query:
@@ -849,6 +858,8 @@ class FirehoseCommandHandler:
         offset = 0
         origin, offset = _read_text16(data, offset)
         self._maybe_queue_remote_sync(origin)
+        if origin and self._allowed_origins and origin not in self._allowed_origins:
+            return _success(struct.pack(">H", 0))
         board, offset = _read_text16(data, offset)
         filter_count, offset = _read_u8(data, offset)
 
@@ -895,6 +906,8 @@ class FirehoseCommandHandler:
         offset = 0
         origin, offset = _read_text16(data, offset)
         self._maybe_queue_remote_sync(origin)
+        if origin and self._allowed_origins and origin not in self._allowed_origins:
+            return _error(0x0003, "Article body unavailable")
         board, offset = _read_text16(data, offset)
         article_num, offset = _read_u64(data, offset)
 
@@ -933,6 +946,8 @@ class FirehoseCommandHandler:
         offset = 0
         origin, offset = _read_text16(data, offset)
         self._maybe_queue_remote_sync(origin)
+        if origin and self._allowed_origins and origin not in self._allowed_origins:
+            return _error(0x0001, "User not found")
         pubkey_len, offset = _read_u8(data, offset)
         pubkey = data[offset:offset + pubkey_len]
         offset += pubkey_len
@@ -960,6 +975,8 @@ class FirehoseCommandHandler:
         offset = 0
         origin, offset = _read_text16(data, offset)
         self._maybe_queue_remote_sync(origin)
+        if origin and self._allowed_origins and origin not in self._allowed_origins:
+            return _success(struct.pack(">H", 0))
         flags, offset = _read_u8(data, offset)
 
         include_revoked = bool(flags & 0x01)
@@ -989,6 +1006,8 @@ class FirehoseCommandHandler:
         offset += pubkey_len
 
         punishments = self._policy.list_punishments_for_pubkey(pubkey, include_revoked=False)
+        if self._allowed_origins:
+            punishments = [p for p in punishments if p["origin"] in self._allowed_origins]
 
         now = int(time.time())
         active_ban = None
