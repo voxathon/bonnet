@@ -129,9 +129,15 @@ class SyncManager:
         self._inflight: set[str] = set()
         self._sync_queue: asyncio.Queue = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._peer_backoff: dict[str, float] = {}
+        self._peer_last_failure: dict[str, float] = {}
+        self._backoff_max = 3600
 
     def start_origin(self, origin: str, client: SyncClient, interval: int = 300) -> None:
         """Start syncing an origin in the background (periodic + on-demand)."""
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
         with self._lock:
             if origin in self._tasks:
                 return
@@ -143,15 +149,29 @@ class SyncManager:
                 self._worker_task = asyncio.ensure_future(self._sync_worker())
                 self._running = True
 
-    def queue_sync(self, origin: str) -> None:
-        """Queue an on-demand sync for an origin. No-op if origin is not
-        a configured peer or a sync is already in flight."""
-        if origin not in self._clients:
-            return
-        if origin in self._inflight:
+    async def queue_sync(self, origin: str) -> None:
+        """Queue an on-demand sync. Must be called from the event loop thread."""
+        if origin not in self._clients or origin in self._inflight:
             return
         self._inflight.add(origin)
-        self._sync_queue.put_nowait(origin)
+        await self._sync_queue.put(origin)
+
+    def queue_sync_threadsafe(self, origin: str) -> None:
+        """Thread-safe queue — call from sync context (asyncio.to_thread)."""
+        if origin not in self._clients or origin in self._inflight:
+            return
+        if self._loop is not None:
+            asyncio.run_coroutine_threadsafe(self.queue_sync(origin), self._loop)
+
+    def _record_peer_success(self, origin: str) -> None:
+        self._peer_backoff[origin] = 0
+
+    def _record_peer_failure(self, origin: str) -> None:
+        current = self._peer_backoff.get(origin, 0)
+        new_backoff = (current * 2) if current > 0 else 30
+        self._peer_backoff[origin] = min(new_backoff, self._backoff_max)
+        self._peer_last_failure[origin] = time.time()
+        log_msg(f"SYNC: backoff for '{origin}' increased to {self._peer_backoff[origin]}s")
 
     def stop_origin(self, origin: str) -> None:
         """Stop syncing an origin."""
@@ -189,8 +209,10 @@ class SyncManager:
                     continue
                 try:
                     await self._sync_once(origin, client)
+                    self._record_peer_success(origin)
                 except Exception as e:
                     log_msg(f"SYNC_WORKER: error syncing origin '{origin}': {e}")
+                    self._record_peer_failure(origin)
                 finally:
                     self._inflight.discard(origin)
                     self._sync_queue.task_done()
@@ -198,12 +220,25 @@ class SyncManager:
                 break
 
     async def _sync_loop(self, origin: str, client: SyncClient, interval: int) -> None:
+        import random
         while True:
+            backoff = self._peer_backoff.get(origin, 0)
+            if backoff > 0:
+                last_fail = self._peer_last_failure.get(origin, 0)
+                if time.time() - last_fail < backoff:
+                    jitter = backoff * (0.75 + random.random() * 0.5)
+                    await asyncio.sleep(jitter)
+                    continue
+
             try:
                 await self._sync_once(origin, client)
+                self._record_peer_success(origin)
             except Exception as e:
                 log_msg(f"SYNC_LOOP: error syncing origin '{origin}': {e}")
-            await asyncio.sleep(interval)
+                self._record_peer_failure(origin)
+
+            jitter = interval * (0.75 + random.random() * 0.5)
+            await asyncio.sleep(jitter)
 
     async def _sync_once(self, origin: str, client: SyncClient) -> AcceptResult:
         """Perform one sync cycle for an origin."""

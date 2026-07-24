@@ -49,7 +49,7 @@ from client.firehose_protocol import (
     build_ban_status, parse_ban_status_response,
     build_event_body, parse_event_body_response,
     SELECTOR_BY_NUM, SELECTOR_BY_ID,
-    ProtocolError,
+    ProtocolError, BodyRedirectError,
 )
 
 
@@ -123,6 +123,7 @@ class FirehoseHTTPClient:
             anonymous_private_key=data.get("anonymous_private_key", ""),
             command_endpoint=data.get("command_endpoint", "/command"),
             capabilities=data.get("capabilities", []),
+            known_origins=data.get("known_origins", []),
         )
         self._server_pubkey = bytes.fromhex(info.public_key)
         self._server_origin = info.origin
@@ -499,7 +500,7 @@ class FirehoseHTTPClient:
     async def list_boards(self, origin: str) -> list[BoardInfo]:
         cmd = build_board_list(origin)
         resp = await self._send_command(cmd)
-        return parse_board_list_response(resp)
+        return parse_board_list_response(resp, aggregate=(origin == ""))
 
     async def get_article(self, origin: str, board: str, article_num: int, include_body: bool = False) -> ArticleView:
         cmd = build_article_get(origin, board, SELECTOR_BY_NUM, article_num, include_body)
@@ -515,7 +516,7 @@ class FirehoseHTTPClient:
                             include_cancelled: bool = False, include_superseded: bool = False) -> QueryResponse:
         cmd = build_article_list(origin, board, offset, limit, include_cancelled, include_superseded)
         resp = await self._send_command(cmd)
-        return parse_article_list_response(resp)
+        return parse_article_list_response(resp, aggregate=(origin == ""))
 
     async def search_articles(self, origin: str, board: str, meta_query: str = "", body_query: str = "",
                               offset: int = 0, limit: int = 100,
@@ -523,7 +524,7 @@ class FirehoseHTTPClient:
         cmd = build_article_search(origin, board, meta_query, body_query, offset, limit,
                                    include_cancelled, include_superseded)
         resp = await self._send_command(cmd)
-        return parse_article_search_response(resp)
+        return parse_article_search_response(resp, aggregate=(origin == ""))
 
     async def query_articles(self, origin: str, board: str, filters: list,
                              offset: int = 0, limit: int = 100) -> QueryResponse:
@@ -536,9 +537,20 @@ class FirehoseHTTPClient:
         return parse_article_query_response(resp)
 
     async def get_article_body(self, origin: str, board: str, article_num: int) -> bytes:
-        cmd = build_article_body(origin, board, article_num)
-        resp = await self._send_command(cmd)
-        return parse_article_body_response(resp)
+        try:
+            cmd = build_article_body(origin, board, article_num)
+            resp = await self._send_command(cmd)
+            return parse_article_body_response(resp)
+        except BodyRedirectError as redirect:
+            origin_client = FirehoseHTTPClient(
+                f"https://{redirect.hostname}:{redirect.port}",
+                verify=redirect.verify_tls,
+            )
+            try:
+                await origin_client.connect_anonymous()
+                return await origin_client.get_article_body(origin, board, article_num)
+            finally:
+                await origin_client.close()
 
     async def get_user(self, origin: str, pubkey: bytes) -> UserInfo:
         cmd = build_user_get(origin, pubkey)

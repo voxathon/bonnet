@@ -918,3 +918,9 @@ class FirehoseStore:
                 (origin, seq),
             )
             self._conn.commit()
+
+    def list_origins(self) -> list[str]:
+        with self._lock:
+            return [r[0] for r in self._conn.execute(
+                "SELECT origin FROM origin_state ORDER BY origin"
+            ).fetchall()]
