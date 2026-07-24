@@ -61,6 +61,7 @@ class Dispatcher:
         policy: PolicyProjection,
         boards_dir: str,
         body_store: BodyStore,
+        allowed_origins: set = None,
     ):
         self._firehose = firehose
         self._nav = nav
@@ -68,6 +69,7 @@ class Dispatcher:
         self._policy = policy
         self._boards_dir = boards_dir
         self._body_store = body_store
+        self._allowed_origins = allowed_origins or set()
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
         self._boards_lock = threading.RLock()
         self._dispatch_lock = threading.RLock()
@@ -100,6 +102,9 @@ class Dispatcher:
 
         Returns the number of records dispatched.
         """
+        if self._allowed_origins and origin not in self._allowed_origins:
+            return 0
+
         with self._dispatch_lock:
             checkpoint = self._firehose.get_checkpoint(origin)
             highest = self._firehose.get_highest_seq(origin)

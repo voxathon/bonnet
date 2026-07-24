@@ -213,6 +213,7 @@ class FirehoseCommandHandler:
         dispatcher=None,
         sync_manager=None,
         peer_map: dict = None,
+        allowed_origins: set = None,
     ):
         self._firehose = firehose
         self._identity = server_identity
@@ -229,6 +230,7 @@ class FirehoseCommandHandler:
         self._dispatcher = dispatcher
         self._sync_manager = sync_manager
         self._peer_map = peer_map or {}
+        self._allowed_origins = allowed_origins or set()
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
 
     def close(self) -> None:
@@ -555,6 +557,8 @@ class FirehoseCommandHandler:
 
         if origin == "":
             boards = self._nav.list_boards()
+            if self._allowed_origins:
+                boards = [b for b in boards if b["origin"] in self._allowed_origins]
             out = struct.pack(">H", len(boards))
             for b in boards:
                 out += _enc_text16(b["origin"])
@@ -696,7 +700,11 @@ class FirehoseCommandHandler:
 
         if origin == "":
             all_boards = self._nav.list_boards()
-            origins_with_board = [b["origin"] for b in all_boards if b["board"] == board]
+            origins_with_board = [
+                b["origin"] for b in all_boards
+                if b["board"] == board
+                and (not self._allowed_origins or b["origin"] in self._allowed_origins)
+            ]
 
             all_articles = []
             for orig in origins_with_board:
@@ -750,7 +758,11 @@ class FirehoseCommandHandler:
 
         if origin == "":
             all_boards = self._nav.list_boards()
-            origins_with_board = [b["origin"] for b in all_boards if b["board"] == board]
+            origins_with_board = [
+                b["origin"] for b in all_boards
+                if b["board"] == board
+                and (not self._allowed_origins or b["origin"] in self._allowed_origins)
+            ]
 
             all_results = []
             total = 0
