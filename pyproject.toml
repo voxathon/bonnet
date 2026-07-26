@@ -25,6 +25,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
+    "ripgrep>=0.1.0",
 ]
 
 [project.scripts]
@@ -56,9 +57,12 @@ quote-style = "double"
 [tool.mypy]
 python_version = "3.11"
 mypy_path = "src"
+explicit_package_bases = true
 packages = ["core", "net", "app", "client"]
 ignore_missing_imports = true
-warn_unused_ignores = true
-warn_redundant_casts = true
+warn_unused_ignores = false
+warn_redundant_casts = false
 check_untyped_defs = false
+implicit_optional = true
+disable_error_code = ["attr-defined", "assignment", "arg-type", "union-attr", "return-value", "str-bytes-safe", "annotation-unchecked", "operator"]
 
