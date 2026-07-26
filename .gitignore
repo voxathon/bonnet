@@ -17,6 +17,7 @@ event_bodies/
 hermes/
 *.db-shm
 *.db-wal
+ignore_this_garbage/
 
 # Virtual environments
 .venv
