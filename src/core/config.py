@@ -59,6 +59,7 @@ class FirehoseConfig:
         peers: list = None,
         acl: ACLEvaluator = None,
         admin_pubkey_hex: str = "",
+        host: str = "0.0.0.0",
     ):
         self.origin = _normalize_origin(origin)
         self.hostname = hostname or self.origin
@@ -84,6 +85,44 @@ class FirehoseConfig:
         self.peers = peers or []
         self.acl = acl or ACLEvaluator([])
         self.admin_pubkey_hex = admin_pubkey_hex
+        self.host = host
+
+    def validate(self) -> None:
+        """Raise ValueError if configuration is invalid."""
+        if not self.origin:
+            raise ValueError("config: origin must not be empty")
+        if not (1 <= self.port <= 65535):
+            raise ValueError(f"config: port {self.port} out of range [1, 65535]")
+        if self.max_request_size <= 0:
+            raise ValueError(f"config: max_request_size must be positive, got {self.max_request_size}")
+        if self.max_article_body_size <= 0:
+            raise ValueError(f"config: max_article_body_size must be positive, got {self.max_article_body_size}")
+        if self.rate_limit_requests <= 0:
+            raise ValueError(f"config: rate_limit_requests must be positive, got {self.rate_limit_requests}")
+        if self.rate_limit_window <= 0:
+            raise ValueError(f"config: rate_limit_window must be positive, got {self.rate_limit_window}")
+        if self.signature_lifetime_seconds > 60:
+            raise ValueError(f"config: signature_lifetime_seconds must not exceed 60, got {self.signature_lifetime_seconds}")
+        if self.clock_skew_seconds > 30:
+            raise ValueError(f"config: clock_skew_seconds must not exceed 30, got {self.clock_skew_seconds}")
+        if self.search_max_count <= 0 or self.search_timeout_seconds <= 0 or self.search_result_limit <= 0:
+            raise ValueError("config: search limits must be positive")
+        if self.sync_interval_seconds <= 0:
+            raise ValueError(f"config: sync_interval_seconds must be positive, got {self.sync_interval_seconds}")
+        if self.tls_enabled:
+            if self.tls_cert_path and not os.path.exists(self.tls_cert_path):
+                raise ValueError(f"config: TLS cert_path does not exist: {self.tls_cert_path}")
+            if self.tls_key_path and not os.path.exists(self.tls_key_path):
+                raise ValueError(f"config: TLS key_path does not exist: {self.tls_key_path}")
+        seen_origins = set()
+        for peer in self.peers:
+            if not peer.origin:
+                raise ValueError("config: peer origin must not be empty")
+            if peer.origin in seen_origins:
+                raise ValueError(f"config: duplicate peer origin '{peer.origin}'")
+            seen_origins.add(peer.origin)
+            if not (1 <= peer.port <= 65535):
+                raise ValueError(f"config: peer '{peer.origin}' port {peer.port} out of range")
 
     @property
     def identity_path(self) -> str:
@@ -111,12 +150,12 @@ class FirehoseConfig:
 
     @property
     def http_host(self) -> str:
-        return "0.0.0.0"
+        return self.host
 
     @staticmethod
     def load(path: str) -> "FirehoseConfig":
         if not os.path.exists(path):
-            return FirehoseConfig._create_default(path)
+            raise FileNotFoundError(f"config file not found: {path}")
 
         with open(path, "rb") as f:
             data = tomllib.load(f)
@@ -174,10 +213,18 @@ class FirehoseConfig:
             ],
             acl=acl,
             admin_pubkey_hex=admin_pubkey_hex,
+            host=server.get("host", "0.0.0.0"),
         )
 
     @staticmethod
-    def _create_default(path: str) -> "FirehoseConfig":
+    def create_default_config(path: str) -> "FirehoseConfig":
+        """Write a sample config file and return the default config."""
+        config = FirehoseConfig(acl=ACLEvaluator([]))
+        config._write_default(path)
+        return config
+
+    @staticmethod
+    def _write_default(path: str) -> None:
         default_content = """[server]
 origin = "localhost"
 hostname = ""
@@ -249,4 +296,3 @@ interval_seconds = 300
             os.makedirs(config_dir, exist_ok=True)
         with open(path, "w") as f:
             f.write(default_content)
-        return FirehoseConfig(acl=ACLEvaluator([]))

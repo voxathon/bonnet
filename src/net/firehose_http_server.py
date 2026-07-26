@@ -148,7 +148,6 @@ class FirehoseHTTPServer:
             if msg["type"] == "lifespan.startup":
                 await send({"type": "lifespan.startup.complete"})
             elif msg["type"] == "lifespan.shutdown":
-                self._replay_ledger.close()
                 await send({"type": "lifespan.shutdown.complete"})
                 return
 
