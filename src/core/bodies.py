@@ -9,12 +9,10 @@ availability rules. Body reads recheck size and hash before serving.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import threading
-from typing import Optional
 
-from core.record import compute_body_hash, DOMAIN_BODY, ID_SIZE
+from core.record import compute_body_hash
 
 
 class BodyError(Exception):
@@ -160,7 +158,7 @@ class BodyStore:
     def get_article_body(
         self, origin: str, board: str, article_num: int,
         expected_hash: bytes, expected_size: int,
-    ) -> Optional[bytes]:
+    ) -> bytes | None:
         """Read and verify an article body. Returns None if missing or corrupt."""
         path = self._article_body_path(origin, board, article_num)
         with self._lock:
@@ -277,7 +275,7 @@ class BodyStore:
     def get_event_body(
         self, origin: str, event_id: bytes,
         expected_hash: bytes, expected_size: int,
-    ) -> Optional[bytes]:
+    ) -> bytes | None:
         path = self._event_body_path(origin, event_id)
         with self._lock:
             if not os.path.exists(path):

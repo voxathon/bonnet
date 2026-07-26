@@ -9,33 +9,38 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
-
-from core.crypto import Identity
-from core.config import FirehoseConfig
-from core.binutil import set_rg_path
-from core.logging import init_logging, log_msg
-from core.firehose import FirehoseStore
-from core.bodies import BodyStore
-from core.board_projection import board_db_path
-from core.global_projections import NavProjection, UserProjection, PolicyProjection
-from core.dispatcher import Dispatcher
-from core.acl import ACLEvaluator, ACLRule, PrincipalMatcher, default_rules_for_admin
-from core.kind_validator import KindValidator
-from core.search import SearchService
-from core.record import (
-    Intent, MetadataMap, ZERO_ID,
-    encode_intent, sign_intent, compute_body_hash,
-    metadata_text, metadata_text_list, metadata_bytes, metadata_u64,
-)
-from net.firehose_commands import FirehoseCommandHandler, FirehoseContext
-from net.firehose_http_server import FirehoseHTTPServer
-from net.firehose_sync import SyncManager as FirehoseSyncManager, HttpSyncClient
-from net.replay import ReplayLedger
-from net.rate_limiter import RateLimiter
-from app.cli import FirehoseLocalConnection
-
 import struct
+
+from app.cli import FirehoseLocalConnection
+from core.acl import ACLEvaluator, default_rules_for_admin
+from core.binutil import set_rg_path
+from core.bodies import BodyStore
+from core.config import FirehoseConfig
+from core.crypto import Identity
+from core.dispatcher import Dispatcher
+from core.firehose import FirehoseStore
+from core.global_projections import NavProjection, PolicyProjection, UserProjection
+from core.kind_validator import KindValidator
+from core.logging import log_msg
+from core.record import (
+    ZERO_ID,
+    Intent,
+    MetadataMap,
+    compute_body_hash,
+    encode_intent,
+    metadata_bytes,
+    metadata_text,
+    metadata_text_list,
+    metadata_u64,
+    sign_intent,
+)
+from core.search import SearchService
+from net.firehose_commands import FirehoseCommandHandler
+from net.firehose_http_server import FirehoseHTTPServer
+from net.firehose_sync import HttpSyncClient
+from net.firehose_sync import SyncManager as FirehoseSyncManager
+from net.rate_limiter import RateLimiter
+from net.replay import ReplayLedger
 
 
 class BonnetFirehoseServer:
@@ -74,7 +79,7 @@ class BonnetFirehoseServer:
         self.nav = NavProjection(config.nav_db_path)
         self.users = UserProjection(config.users_db_path)
         self.policy = PolicyProjection(config.policy_db_path)
-        log_msg(f"INIT: projections initialized (nav, users, policy)")
+        log_msg("INIT: projections initialized (nav, users, policy)")
 
         self.body_store = BodyStore(
             boards_dir=config.boards_dir,
@@ -209,10 +214,17 @@ class BonnetFirehoseServer:
                 return
 
             import os as _os
+
             from core.record import (
-                Intent, MetadataMap, ZERO_ID,
-                encode_intent, sign_intent, compute_body_hash,
-                metadata_text, metadata_bytes, metadata_u64,
+                ZERO_ID,
+                Intent,
+                MetadataMap,
+                compute_body_hash,
+                encode_intent,
+                metadata_bytes,
+                metadata_text,
+                metadata_u64,
+                sign_intent,
             )
 
             event_id = _os.urandom(32)
@@ -780,7 +792,6 @@ class BonnetFirehoseServer:
         return self._format_article_view(resp[1:], board)
 
     def _format_article_view(self, data: bytes, board: str) -> str:
-        from core.record import ZERO_ID
 
         offset = 0
         article_num = struct.unpack(">Q", data[offset:offset + 8])[0]
@@ -1070,7 +1081,6 @@ class BonnetFirehoseServer:
 
         board = parts[1]
 
-        from core.record import ZERO_ID
         from net.firehose_commands import OP_ARTICLE_QUERY
 
         filters = []
@@ -1401,15 +1411,15 @@ class BonnetFirehoseServer:
         ts = datetime.fromtimestamp(rec.created_at).strftime("%Y-%m-%d %H:%M:%S")
 
         lines = [
-            f"=== Event ===",
+            "=== Event ===",
             f"Origin:       {rec.origin}",
             f"Sequence:     {rec.origin_seq}",
             f"Event ID:     {rec.event_id.hex()}",
             f"Kind:         {rec.kind}",
             f"Schema:       {rec.schema_version}",
             f"Created:      {ts}",
-            f"",
-            f"=== Actor ===",
+            "",
+            "=== Actor ===",
             f"Pubkey:       {rec.actor_pubkey.hex()}",
         ]
 
@@ -1419,8 +1429,8 @@ class BonnetFirehoseServer:
             lines.append(f"Registrar:    {rec.actor_registrar}")
 
         lines.extend([
-            f"",
-            f"=== Content ===",
+            "",
+            "=== Content ===",
             f"Board:        {rec.board or '(none)'}",
             f"Article ID:   {rec.article_id.hex() if rec.article_id != ZERO_ID else '(none)'}",
             f"Article Num:  {rec.article_num if rec.article_num else '(none)'}",
@@ -1428,8 +1438,8 @@ class BonnetFirehoseServer:
 
         if rec.target_origin:
             lines.extend([
-                f"",
-                f"=== Target ===",
+                "",
+                "=== Target ===",
                 f"Origin:       {rec.target_origin}",
                 f"Board:        {rec.target_board}",
                 f"Article ID:   {rec.target_article_id.hex() if rec.target_article_id != ZERO_ID else '(none)'}",
@@ -1437,22 +1447,22 @@ class BonnetFirehoseServer:
             ])
 
         lines.extend([
-            f"",
-            f"=== Body ===",
+            "",
+            "=== Body ===",
             f"Hash:         {rec.body_hash.hex()}",
             f"Size:         {rec.body_size} bytes",
         ])
 
         lines.extend([
-            f"",
-            f"=== Signatures ===",
+            "",
+            "=== Signatures ===",
             f"Actor sig:    {rec.actor_signature.hex()}",
             f"Origin sig:   {rec.origin_signature.hex()}",
         ])
 
         if rec.metadata.fields:
             lines.extend([
-                f"",
+                "",
                 f"=== Metadata ({len(rec.metadata.fields)} fields) ===",
             ])
             for f in rec.metadata.fields:
@@ -1480,8 +1490,8 @@ class BonnetFirehoseServer:
         zero_key = b"\x00" * 32
         from_pubkey = witness.received_from_pubkey.hex() if witness.received_from_pubkey != zero_key else "(origin)"
         lines.extend([
-            f"",
-            f"=== Witness ===",
+            "",
+            "=== Witness ===",
             f"Relay pubkey: {witness.relay_pubkey.hex()}",
             f"Relay host:   {witness.relay_hostname}",
             f"From pubkey:  {from_pubkey}",
@@ -1635,7 +1645,7 @@ class BonnetFirehoseServer:
                 lines.append("  (all commands allowed)")
 
         lines.append("")
-        lines.append(f"=== Server identity ===")
+        lines.append("=== Server identity ===")
         lines.append(f"  pubkey: {self.server_identity.public_key.hex()}")
         lines.append(f"  config.origin: '{self.config.origin}'")
 

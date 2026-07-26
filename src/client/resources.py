@@ -4,10 +4,9 @@ Read-only URI-addressed data exposed as FastMCP resources.
 All resources connect anonymously.
 """
 
-from fastmcp import FastMCP
 
-from client.tools import mcp, _make_client, _connect_anonymous
-from client.firehose_models import BoardInfo, ArticleView, ArticleListItem, UserInfo, HeadInfo
+from client.firehose_models import ArticleListItem, ArticleView, BoardInfo, HeadInfo, UserInfo
+from client.tools import _connect_anonymous, _make_client, mcp
 
 
 @mcp.resource("bonnet://boards")

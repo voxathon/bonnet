@@ -1,48 +1,81 @@
-# -*- coding: utf-8 -*-
 """Phase 5 tests: firehose client protocol builders/parsers and models.
 
 Tests round-trip encoding/decoding of all 13 command builders and response
 parsers. Uses mock data — no HTTP required.
 """
 
-import os
 import struct
+
 import pytest
 
+from client.firehose_protocol import (
+    OP_ARTICLE_BODY,
+    OP_ARTICLE_GET,
+    OP_ARTICLE_LIST,
+    OP_ARTICLE_SEARCH,
+    OP_BAN_STATUS,
+    OP_BOARD_LIST,
+    OP_EVENT_BODY,
+    OP_EVENT_GET,
+    OP_EVENT_HEAD,
+    OP_EVENT_RANGE,
+    OP_PUBLISH_RECORD,
+    OP_USER_GET,
+    OP_USER_LIST,
+    SELECTOR_BY_ID,
+    SELECTOR_BY_NUM,
+    ProtocolError,
+    build_article_body,
+    build_article_get,
+    build_article_list,
+    build_article_search,
+    build_ban_status,
+    build_board_list,
+    build_event_body,
+    build_event_get,
+    build_event_head,
+    build_event_range,
+    build_publish_record,
+    build_user_get,
+    build_user_list,
+    parse_article_body_response,
+    parse_article_get_response,
+    parse_article_list_response,
+    parse_article_search_response,
+    parse_ban_status_response,
+    parse_board_list_response,
+    parse_event_body_response,
+    parse_event_get_response,
+    parse_event_head_response,
+    parse_event_range_response,
+    parse_publish_response,
+    parse_publish_response_raw,
+    parse_response,
+    parse_user_get_response,
+    parse_user_list_response,
+)
 from core.crypto import Identity
 from core.record import (
-    Intent, Record, Head, Witness, MetadataMap,
-    encode_intent, encode_record, encode_head, encode_witness,
-    encode_unsigned_record, encode_unsigned_head, encode_unsigned_witness,
-    compute_event_hash, compute_body_hash,
-    sign_intent, sign_record, sign_head, sign_witness,
-    metadata_text, metadata_text_list, metadata_bytes, metadata_u64, metadata_i64,
-    ZERO_ID, ZERO_HASH, ID_SIZE, SIG_SIZE,
+    ZERO_HASH,
+    ZERO_ID,
+    Head,
+    Intent,
+    MetadataMap,
+    Record,
+    Witness,
+    compute_body_hash,
+    compute_event_hash,
+    encode_head,
+    encode_intent,
+    encode_record,
+    encode_unsigned_head,
+    encode_unsigned_record,
+    encode_witness,
+    metadata_text,
+    sign_head,
+    sign_intent,
+    sign_record,
 )
-from client.firehose_protocol import (
-    build_publish_record, parse_publish_response, parse_publish_response_raw,
-    build_event_head, parse_event_head_response, parse_event_head_response_raw,
-    build_event_range, parse_event_range_response,
-    build_event_get, parse_event_get_response,
-    build_board_list, parse_board_list_response,
-    build_article_get, parse_article_get_response,
-    build_article_list, parse_article_list_response,
-    build_article_search, parse_article_search_response,
-    build_article_body, parse_article_body_response,
-    build_user_get, parse_user_get_response,
-    build_user_list, parse_user_list_response,
-    build_ban_status, parse_ban_status_response,
-    build_event_body, parse_event_body_response,
-    SELECTOR_BY_NUM, SELECTOR_BY_ID,
-    ProtocolError, parse_response,
-    OP_PUBLISH_RECORD, OP_EVENT_HEAD, OP_EVENT_RANGE, OP_EVENT_GET,
-    OP_BOARD_LIST, OP_ARTICLE_GET, OP_ARTICLE_LIST, OP_ARTICLE_SEARCH,
-    OP_ARTICLE_BODY, OP_USER_GET, OP_USER_LIST, OP_BAN_STATUS, OP_EVENT_BODY,
-)
-from client.firehose_models import (
-    PublishResult, HeadInfo, ArticleView, BanStatus, DiscoveryInfo,
-)
-
 
 # ---------------------------------------------------------------------------
 # Test identities

@@ -6,22 +6,25 @@ Tests marked xfail document bugs scheduled for Phase 2 fixes.
 
 import pytest
 
-from core.crypto import Identity
-from core.record import (
-    Intent, MetadataMap,
-    encode_intent, sign_intent,
-    metadata_text, metadata_bytes, metadata_i64,
-    compute_body_hash,
-    ZERO_ID, ZERO_HASH,
-)
-from core.firehose import FirehoseStore, KIND_ARTICLE
+from core.board_projection import BoardProjection
 from core.bodies import BodyStore
-from core.board_projection import BoardProjection, board_db_path
-from core.global_projections import (
-    NavProjection, UserProjection, PolicyProjection,
-)
+from core.crypto import Identity
 from core.dispatcher import Dispatcher
-
+from core.firehose import KIND_ARTICLE, FirehoseStore
+from core.global_projections import (
+    NavProjection,
+    PolicyProjection,
+    UserProjection,
+)
+from core.record import (
+    Intent,
+    MetadataMap,
+    compute_body_hash,
+    encode_intent,
+    metadata_bytes,
+    metadata_text,
+    sign_intent,
+)
 
 ORIGIN_A = Identity.from_private_key(bytes(range(1, 33)))
 ORIGIN_B = Identity.from_private_key(bytes(range(33, 65)))

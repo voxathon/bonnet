@@ -2,13 +2,11 @@
 
 import argparse
 import asyncio
-import os
 import signal
-import sys
 
+from app.server import BonnetFirehoseServer
 from core.config import FirehoseConfig
 from core.logging import init_logging
-from app.server import BonnetFirehoseServer
 
 
 def main():

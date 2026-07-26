@@ -1,10 +1,11 @@
 """Tests for src/core/config.py — FirehoseConfig loading and defaults."""
 
 import os
+
 import pytest
 
-from core.config import FirehoseConfig, PeerConfig, _normalize_origin
 from core.acl import ACLEvaluator
+from core.config import FirehoseConfig, PeerConfig, _normalize_origin
 
 
 def _write_config(tmp_path, content):

@@ -14,14 +14,13 @@ Environment variables:
 
 import os
 
-from fastmcp import FastMCP
-from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_http_request
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse, JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 
-from client.tools import mcp, current_username, current_password
 from client import resources  # noqa: F401 — registers @mcp.resource decorators
+from client.tools import current_password, current_username, mcp
 
 
 @mcp.custom_route("/health", methods=["GET"])

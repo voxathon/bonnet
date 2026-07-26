@@ -9,11 +9,9 @@ and §12.9 (origin key rotation proof).
 from __future__ import annotations
 
 import hashlib
-import re
 import struct
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Optional
 
 from core.crypto import Identity
 
@@ -257,43 +255,43 @@ class MetadataField:
 class MetadataMap:
     fields: list[MetadataField] = field(default_factory=list)
 
-    def get(self, field_id: int) -> Optional[MetadataField]:
+    def get(self, field_id: int) -> MetadataField | None:
         for f in self.fields:
             if f.field_id == field_id:
                 return f
         return None
 
-    def get_bytes(self, field_id: int) -> Optional[bytes]:
+    def get_bytes(self, field_id: int) -> bytes | None:
         f = self.get(field_id)
         if f is None or f.value_type != VT_BYTES:
             return None
         return f.value
 
-    def get_text(self, field_id: int) -> Optional[str]:
+    def get_text(self, field_id: int) -> str | None:
         f = self.get(field_id)
         if f is None or f.value_type != VT_TEXT:
             return None
         return f.value.decode("utf-8")
 
-    def get_u64(self, field_id: int) -> Optional[int]:
+    def get_u64(self, field_id: int) -> int | None:
         f = self.get(field_id)
         if f is None or f.value_type != VT_U64:
             return None
         return struct.unpack(">Q", f.value)[0]
 
-    def get_i64(self, field_id: int) -> Optional[int]:
+    def get_i64(self, field_id: int) -> int | None:
         f = self.get(field_id)
         if f is None or f.value_type != VT_I64:
             return None
         return struct.unpack(">q", f.value)[0]
 
-    def get_bool(self, field_id: int) -> Optional[bool]:
+    def get_bool(self, field_id: int) -> bool | None:
         f = self.get(field_id)
         if f is None or f.value_type != VT_BOOL:
             return None
         return f.value == b"\x01"
 
-    def get_id_list(self, field_id: int) -> Optional[list[bytes]]:
+    def get_id_list(self, field_id: int) -> list[bytes] | None:
         f = self.get(field_id)
         if f is None or f.value_type != VT_ID_LIST:
             return None
@@ -301,7 +299,7 @@ class MetadataMap:
         count = r.u16()
         return [r.id32() for _ in range(count)]
 
-    def get_text_list(self, field_id: int) -> Optional[list[str]]:
+    def get_text_list(self, field_id: int) -> list[str] | None:
         f = self.get(field_id)
         if f is None or f.value_type != VT_TEXT_LIST:
             return None
@@ -418,7 +416,7 @@ def _validate_value(vtype: int, v: bytes) -> None:
             raise NonCanonical(f"U64 value must be 8 bytes, got {len(v)}")
         val = struct.unpack(">Q", v)[0]
         if val > MAX_U63:
-            raise NonCanonical(f"U64 value exceeds 2^63-1")
+            raise NonCanonical("U64 value exceeds 2^63-1")
     elif vtype == VT_I64:
         if len(v) != 8:
             raise NonCanonical(f"I64 value must be 8 bytes, got {len(v)}")

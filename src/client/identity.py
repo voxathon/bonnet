@@ -1,11 +1,11 @@
+import hashlib
+import os
 import sqlite3
 import threading
-import os
 from pathlib import Path
 
 import bcrypt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-import hashlib
 from nacl.signing import SigningKey
 
 

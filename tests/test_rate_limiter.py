@@ -1,11 +1,9 @@
 """Tests for src/net/rate_limiter.py — sliding-window rate limiter."""
 
-import time
 import threading
-import pytest
+import time
 
 from net.rate_limiter import RateLimiter
-
 
 # ---------------------------------------------------------------------------
 # Basic check

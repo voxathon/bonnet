@@ -1,44 +1,52 @@
-# -*- coding: utf-8 -*-
 """Phase 4 tests: firehose command handler and federation sync.
 
 Tests PROTOCOL.md §18 (discovery), §19 (command transport), §17 (sync).
 """
 
-import asyncio
-import os
 import struct
+
 import pytest
 
-from core.crypto import Identity
-from core.record import (
-    Intent, Record, Head, Witness, MetadataMap,
-    encode_record, decode_record, encode_intent, decode_intent,
-    encode_head, decode_head, encode_witness, decode_witness,
-    encode_unsigned_record, encode_unsigned_witness,
-    compute_event_hash, compute_body_hash,
-    sign_intent, sign_record, sign_head, sign_witness,
-    verify_record_signature, verify_head_signature, verify_witness_signature,
-    make_origin_witness, is_origin_witness,
-    metadata_text, metadata_text_list, metadata_bytes, metadata_u64, metadata_i64,
-    ZERO_ID, ZERO_HASH, ID_SIZE, SIG_SIZE,
-)
-from core.firehose import FirehoseStore, KIND_ARTICLE
-from core.acl import ACLEvaluator, ACLRule, PrincipalMatcher, AuthContext, default_rules_for_admin
-from core.kind_validator import KindValidator
-from core.board_projection import BoardProjection, board_db_path
-from core.global_projections import NavProjection, UserProjection, PolicyProjection
+from core.acl import ACLEvaluator, ACLRule, PrincipalMatcher, default_rules_for_admin
 from core.bodies import BodyStore
-from core.search import SearchService
+from core.crypto import Identity
 from core.dispatcher import Dispatcher
-from net.firehose_commands import (
-    FirehoseCommandHandler, FirehoseContext,
-    OP_PUBLISH_RECORD, OP_EVENT_HEAD, OP_EVENT_RANGE, OP_EVENT_GET,
-    OP_BOARD_LIST, OP_ARTICLE_GET, OP_ARTICLE_LIST, OP_ARTICLE_SEARCH,
-    OP_ARTICLE_BODY, OP_USER_GET, OP_USER_LIST, OP_BAN_STATUS, OP_EVENT_BODY,
-    _success, _error,
+from core.firehose import FirehoseStore
+from core.global_projections import NavProjection, PolicyProjection, UserProjection
+from core.kind_validator import KindValidator
+from core.record import (
+    Head,
+    Intent,
+    MetadataMap,
+    compute_body_hash,
+    compute_event_hash,
+    decode_head,
+    decode_record,
+    decode_witness,
+    encode_head,
+    encode_intent,
+    encode_record,
+    is_origin_witness,
+    make_origin_witness,
+    metadata_bytes,
+    metadata_text,
+    sign_intent,
 )
-from net.firehose_sync import SyncManager, SyncClient
-
+from core.search import SearchService
+from net.firehose_commands import (
+    OP_ARTICLE_BODY,
+    OP_ARTICLE_GET,
+    OP_ARTICLE_LIST,
+    OP_ARTICLE_SEARCH,
+    OP_BAN_STATUS,
+    OP_EVENT_GET,
+    OP_EVENT_HEAD,
+    OP_EVENT_RANGE,
+    OP_PUBLISH_RECORD,
+    FirehoseCommandHandler,
+    FirehoseContext,
+)
+from net.firehose_sync import SyncClient, SyncManager
 
 # ---------------------------------------------------------------------------
 # Test identities

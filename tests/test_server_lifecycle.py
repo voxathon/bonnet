@@ -1,10 +1,10 @@
 """Tests for server lifecycle: construction, root registration, and close."""
 
 import os
+
 import pytest
 
 from core.config import FirehoseConfig
-from core.crypto import Identity
 
 
 @pytest.fixture

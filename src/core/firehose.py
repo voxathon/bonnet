@@ -13,35 +13,39 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import struct
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
-
-from core.logging import log_msg
 
 from core.crypto import Identity
+from core.logging import log_msg
 from core.record import (
-    Record, Head, Witness, Intent, MetadataMap,
-    encode_record, decode_record, encode_unsigned_record,
-    encode_intent, decode_intent,
-    encode_head, decode_head, encode_unsigned_head,
-    encode_witness, decode_witness, encode_unsigned_witness,
-    compute_event_hash, compute_head_hash,
-    sign_record, verify_record_signature,
-    sign_head, verify_head_signature,
-    verify_intent_signature,
-    reconstruct_intent_from_record,
-    verify_witness_signature,
-    sign_key_rotation_proof, verify_key_rotation_proof,
-    DOMAIN_KEY_ROTATION_PROOF,
-    RECORD_FORMAT, HEAD_FORMAT, WITNESS_FORMAT,
-    ZERO_ID, ZERO_HASH, ID_SIZE, KEY_SIZE, SIG_SIZE,
-    enc_text16, enc_key32,
+    HEAD_FORMAT,
     MAX_U63,
+    RECORD_FORMAT,
+    WITNESS_FORMAT,
+    ZERO_HASH,
+    ZERO_ID,
+    Head,
+    Intent,
+    Record,
+    Witness,
+    compute_event_hash,
+    compute_head_hash,
+    decode_record,
+    encode_head,
+    encode_intent,
+    encode_record,
+    encode_unsigned_head,
+    encode_unsigned_record,
+    reconstruct_intent_from_record,
+    sign_head,
+    sign_record,
+    verify_head_signature,
+    verify_intent_signature,
+    verify_key_rotation_proof,
+    verify_record_signature,
 )
-
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -446,7 +450,7 @@ class FirehoseStore:
                 self._conn.execute("ROLLBACK")
                 raise
 
-    def get_key_for_seq(self, origin: str, seq: int) -> Optional[bytes]:
+    def get_key_for_seq(self, origin: str, seq: int) -> bytes | None:
         """Return the public key valid for the given origin sequence."""
         with self._lock:
             row = self._conn.execute(
@@ -458,7 +462,7 @@ class FirehoseStore:
             ).fetchone()
             return bytes(row[0]) if row else None
 
-    def get_current_key(self, origin: str) -> Optional[bytes]:
+    def get_current_key(self, origin: str) -> bytes | None:
         """Return the current (latest epoch) public key for an origin."""
         with self._lock:
             row = self._conn.execute(
@@ -470,7 +474,7 @@ class FirehoseStore:
             return bytes(row[0]) if row else None
 
     def _apply_rotation_locked(
-        self, origin: str, seq: int, intent: Intent, origin_identity: Optional[Identity],
+        self, origin: str, seq: int, intent: Intent, origin_identity: Identity | None,
     ) -> None:
         """Process a bonnet.origin.key.rotate record at sequence N."""
         new_pubkey = intent.metadata.get_bytes(1)
@@ -737,7 +741,7 @@ class FirehoseStore:
     # Head queries
     # -----------------------------------------------------------------------
 
-    def get_head(self, origin: str) -> Optional[Head]:
+    def get_head(self, origin: str) -> Head | None:
         """Return the latest head for an origin, or None."""
         with self._lock:
             row = self._conn.execute(
@@ -802,7 +806,7 @@ class FirehoseStore:
     # Event queries
     # -----------------------------------------------------------------------
 
-    def get_event_by_id(self, origin: str, event_id: bytes) -> Optional[Record]:
+    def get_event_by_id(self, origin: str, event_id: bytes) -> Record | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT encoded_record FROM events WHERE origin=? AND event_id=?",
@@ -855,7 +859,7 @@ class FirehoseStore:
             )
             self._conn.commit()
 
-    def get_witness(self, event_origin: str, event_id: bytes, relay_pubkey: bytes) -> Optional[Witness]:
+    def get_witness(self, event_origin: str, event_id: bytes, relay_pubkey: bytes) -> Witness | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT event_hash, relay_hostname, received_from_pubkey, "

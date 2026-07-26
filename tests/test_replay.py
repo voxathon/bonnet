@@ -7,10 +7,11 @@ Exit gate (§13 Phase 3):
   - Ledger survives process restart (persistent SQLite)
 """
 
-import os
-import time
 import base64
+import os
 import threading
+import time
+
 import pytest
 
 from net.replay import ReplayLedger

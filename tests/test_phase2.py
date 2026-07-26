@@ -1,31 +1,36 @@
-# -*- coding: utf-8 -*-
 """Phase 2 tests: body storage, board projections, global projections, dispatcher.
 
 Tests PROTOCOL.md §13 (state reduction), §14.2 (board projection),
 §14.3 (bodies), §14.4 (global projections).
 """
 
-import os
-import threading
 import pytest
 
+from core.board_projection import BoardProjection
+from core.bodies import BodyError, BodyStore
 from core.crypto import Identity
-from core.record import (
-    Intent, Record, Head, MetadataMap,
-    encode_record, encode_intent, encode_unsigned_record,
-    compute_event_hash, compute_body_hash,
-    sign_intent, sign_record, sign_head,
-    metadata_text, metadata_text_list, metadata_bytes, metadata_u64, metadata_i64,
-    ZERO_ID, ZERO_HASH, ID_SIZE,
-)
-from core.firehose import FirehoseStore, KIND_ARTICLE
-from core.bodies import BodyStore, BodyError
-from core.board_projection import BoardProjection, board_db_path
-from core.global_projections import (
-    NavProjection, UserProjection, PolicyProjection,
-)
 from core.dispatcher import Dispatcher
-
+from core.firehose import FirehoseStore
+from core.global_projections import (
+    NavProjection,
+    PolicyProjection,
+    UserProjection,
+)
+from core.record import (
+    ZERO_HASH,
+    Intent,
+    MetadataMap,
+    Record,
+    compute_body_hash,
+    encode_intent,
+    encode_unsigned_record,
+    metadata_bytes,
+    metadata_i64,
+    metadata_text,
+    metadata_u64,
+    sign_intent,
+    sign_record,
+)
 
 # ---------------------------------------------------------------------------
 # Test identities

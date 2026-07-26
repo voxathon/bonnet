@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
-from core.acl import ACLEvaluator, ACLRule, PrincipalMatcher
+from core.acl import ACLEvaluator
 
 
 @dataclass
@@ -153,7 +152,7 @@ class FirehoseConfig:
         return self.host
 
     @staticmethod
-    def load(path: str) -> "FirehoseConfig":
+    def load(path: str) -> FirehoseConfig:
         if not os.path.exists(path):
             raise FileNotFoundError(f"config file not found: {path}")
 
@@ -217,7 +216,7 @@ class FirehoseConfig:
         )
 
     @staticmethod
-    def create_default_config(path: str) -> "FirehoseConfig":
+    def create_default_config(path: str) -> FirehoseConfig:
         """Write a sample config file and return the default config."""
         config = FirehoseConfig(acl=ACLEvaluator([]))
         config._write_default(path)

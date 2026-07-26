@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Phase 0 conformance tests for the Bonnet Firehose Protocol canonical codec.
 
 Tests against PROTOCOL.md §4-§10 and §12.9. All golden vectors use fixed
@@ -14,45 +13,77 @@ import pytest
 
 from core.crypto import Identity
 from core.record import (
-    # Constants
-    INTENT_FORMAT, RECORD_FORMAT, HEAD_FORMAT, WITNESS_FORMAT,
-    ID_SIZE, KEY_SIZE, SIG_SIZE, ZERO_ID, ZERO_HASH, MAX_U63,
-    DOMAIN_BODY, DOMAIN_INTENT_SIG, DOMAIN_ORIGIN_SIG, DOMAIN_EVENT_HASH,
-    DOMAIN_HEAD_SIG, DOMAIN_HEAD_HASH, DOMAIN_WITNESS_SIG,
-    DOMAIN_KEY_ROTATION_PROOF,
-    VT_BYTES, VT_TEXT, VT_U64, VT_I64, VT_BOOL, VT_ID_LIST, VT_TEXT_LIST,
+    DOMAIN_BODY,
+    DOMAIN_EVENT_HASH,
+    MAX_U63,
+    SIG_SIZE,
+    VT_TEXT,
+    VT_TEXT_LIST,
+    ZERO_HASH,
+    ZERO_ID,
     # Errors
-    CodecError, TruncatedInput, TrailingInput, LengthExceeded,
-    NonCanonical, InvalidValue,
-    # Primitives
-    enc_u8, enc_u16, enc_u32, enc_u64, enc_i64,
-    enc_id32, enc_key32, enc_sig64, enc_text16, enc_blob32,
-    # Metadata
-    MetadataField, MetadataMap,
-    metadata_text, metadata_u64, metadata_i64, metadata_bool,
-    metadata_bytes, metadata_id_list, metadata_text_list,
-    metadata_field_bytes,
-    encode_metadata, decode_metadata,
-    # Hash/signature domains
-    compute_body_hash, compute_event_hash, compute_head_hash,
-    sign_intent, verify_intent_signature,
-    sign_record, verify_record_signature,
-    sign_head, verify_head_signature,
-    sign_witness, verify_witness_signature,
-    sign_key_rotation_proof, verify_key_rotation_proof,
+    Head,
     # Intent
-    Intent, encode_intent, decode_intent,
+    Intent,
+    InvalidValue,
+    LengthExceeded,
+    # Metadata
+    MetadataField,
+    MetadataMap,
+    NonCanonical,
     # Record
-    Record, encode_record, encode_unsigned_record, decode_record,
-    decode_unsigned_record, reconstruct_intent_from_record,
-    # Head
-    Head, encode_head, encode_unsigned_head, decode_head, decode_unsigned_head,
+    Record,
+    TrailingInput,
+    TruncatedInput,
     # Witness
-    Witness, encode_witness, encode_unsigned_witness,
-    decode_witness, decode_unsigned_witness,
-    is_origin_witness, make_origin_witness,
+    Witness,
+    # Hash/signature domains
+    compute_body_hash,
+    compute_event_hash,
+    compute_head_hash,
+    decode_head,
+    decode_intent,
+    decode_metadata,
+    decode_record,
+    decode_unsigned_record,
+    decode_witness,
+    enc_i64,
+    enc_id32,
+    enc_sig64,
+    enc_text16,
+    # Primitives
+    enc_u8,
+    enc_u16,
+    enc_u64,
+    encode_head,
+    encode_intent,
+    encode_metadata,
+    encode_record,
+    encode_unsigned_head,
+    encode_unsigned_record,
+    encode_unsigned_witness,
+    encode_witness,
+    is_origin_witness,
+    make_origin_witness,
+    metadata_bool,
+    metadata_bytes,
+    metadata_i64,
+    metadata_id_list,
+    metadata_text,
+    metadata_text_list,
+    metadata_u64,
+    reconstruct_intent_from_record,
+    sign_head,
+    sign_intent,
+    sign_key_rotation_proof,
+    sign_record,
+    sign_witness,
+    verify_head_signature,
+    verify_intent_signature,
+    verify_key_rotation_proof,
+    verify_record_signature,
+    verify_witness_signature,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixed test identities (deterministic Ed25519 keys)
@@ -215,7 +246,7 @@ class TestMetadata:
     def test_nfc_text_rejected_on_decode(self):
         # é can be encoded as decomposed (NFD) — two codepoints U+0065 U+0301
         nfd_bytes = "e\u0301".encode("utf-8")
-        nfc_bytes = "é".encode("utf-8")
+        nfc_bytes = "é".encode()
         assert nfd_bytes != nfc_bytes
         field = MetadataField(1, VT_TEXT, nfd_bytes)
         m = MetadataMap([field])

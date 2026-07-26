@@ -1,31 +1,23 @@
 """Tests for depeering and origin lifecycle: depeer, purge-origin, reset-key."""
 
 import os
-import json
+
 import pytest
 
-from core.crypto import Identity
-from core.config import FirehoseConfig
-from core.record import (
-    Intent, MetadataMap,
-    encode_intent, sign_intent,
-    metadata_text, metadata_bytes, metadata_u64,
-    compute_body_hash,
-    ZERO_ID,
-)
-from core.firehose import FirehoseStore, KIND_ARTICLE
 from core.bodies import BodyStore
-from core.global_projections import NavProjection, UserProjection, PolicyProjection
-from core.dispatcher import Dispatcher
-from core.acl import ACLEvaluator, default_rules_for_admin
-from core.kind_validator import KindValidator
-from core.search import SearchService
-from net.firehose_commands import FirehoseCommandHandler
-from net.firehose_sync import SyncManager, SyncClient
-from net.rate_limiter import RateLimiter
-from net.replay import ReplayLedger
-from net.firehose_http_server import FirehoseHTTPServer
-
+from core.config import FirehoseConfig
+from core.crypto import Identity
+from core.firehose import KIND_ARTICLE, FirehoseStore
+from core.record import (
+    Intent,
+    MetadataMap,
+    compute_body_hash,
+    encode_intent,
+    metadata_bytes,
+    metadata_text,
+    sign_intent,
+)
+from net.firehose_sync import SyncClient
 
 ORIGIN = Identity.from_private_key(bytes(range(1, 33)))
 ACTOR = Identity.from_private_key(bytes(range(10, 42)))
@@ -67,7 +59,7 @@ def _append(firehose, origin_identity, intent, body=b""):
 
 class MockSyncClient(SyncClient):
     async def fetch_head(self, origin):
-        from core.record import Head, ZERO_HASH
+        from core.record import ZERO_HASH, Head
         return Head(
             origin=origin, latest_origin_seq=0,
             latest_event_hash=ZERO_HASH, event_count=0,

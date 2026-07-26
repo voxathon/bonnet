@@ -1,18 +1,18 @@
+from .firehose_client import FirehoseHTTPClient
 from .firehose_models import (
-    PublishResult,
+    ArticleListItem,
+    ArticleView,
+    BanStatus,
+    BoardInfo,
+    DiscoveryInfo,
     EventInfo,
     HeadInfo,
-    ArticleView,
-    ArticleListItem,
-    SearchResult,
-    SearchResponse,
+    PublishResult,
     QueryResponse,
-    BoardInfo,
+    SearchResponse,
+    SearchResult,
     UserInfo,
-    BanStatus,
-    DiscoveryInfo,
 )
-from .firehose_client import FirehoseHTTPClient
 from .firehose_protocol import ProtocolError
 from .identity import IdentityStore
 from .server import run

@@ -13,33 +13,29 @@ from __future__ import annotations
 import struct
 import threading
 import time
-from typing import Optional
 
-from core.crypto import Identity
-from core.record import (
-    Intent, Record, Head, Witness, MetadataMap,
-    encode_record, decode_record, encode_intent, decode_intent,
-    encode_head, decode_head, encode_unsigned_head,
-    encode_witness, decode_witness, encode_unsigned_witness,
-    compute_event_hash, compute_head_hash, compute_body_hash,
-    sign_intent, verify_intent_signature,
-    sign_record, verify_record_signature,
-    sign_head, verify_head_signature,
-    sign_witness, verify_witness_signature,
-    reconstruct_intent_from_record,
-    make_origin_witness, is_origin_witness,
-    ZERO_ID, ZERO_HASH, ID_SIZE, SIG_SIZE,
-    enc_text16, enc_u8, enc_u16, enc_u32, enc_u64, enc_i64,
-)
-from core.firehose import (
-    FirehoseStore, FirehoseError, EventIdCollision, ArticleIdCollision,
-    KIND_ARTICLE,
-)
 from core.acl import ACLEvaluator, AuthContext
-from core.kind_validator import KindValidator, ValidationError
 from core.board_projection import BoardProjection, board_db_path
-from core.global_projections import NavProjection, UserProjection, PolicyProjection
 from core.bodies import BodyStore
+from core.crypto import Identity
+from core.firehose import (
+    KIND_ARTICLE,
+    FirehoseError,
+    FirehoseStore,
+)
+from core.global_projections import NavProjection, PolicyProjection, UserProjection
+from core.kind_validator import KindValidator, ValidationError
+from core.record import (
+    SIG_SIZE,
+    ZERO_ID,
+    compute_body_hash,
+    compute_event_hash,
+    decode_intent,
+    encode_head,
+    encode_record,
+    encode_witness,
+    make_origin_witness,
+)
 from core.search import SearchService
 
 KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
