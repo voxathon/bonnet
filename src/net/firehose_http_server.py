@@ -33,6 +33,10 @@ from core.logging import log_msg
 FIREHOSE_TAG = "bonnet-firehose-1"
 FIREHOSE_LABEL = "bonnet"
 
+
+class _BodyTooLarge(Exception):
+    pass
+
 REQUEST_REQUIRED_COMPONENTS = frozenset({
     "@method", "@authority", "@target-uri",
     "content-type", "content-digest",
@@ -119,6 +123,7 @@ class FirehoseHTTPServer:
         )
 
         self._max_request_size = getattr(config, 'max_request_size', 10 * 1024 * 1024)
+        self._cleanup_counter = 0
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
@@ -192,6 +197,8 @@ class FirehoseHTTPServer:
             await self._signer.sign_response(msg, request_nonce="")
         except Exception as e:
             log_msg(f"DISCOVERY: failed to sign: {e}")
+            await self._send_raw(send, 500, [], b"")
+            return
 
         headers = self._msg_to_headers(msg)
         await self._send_raw(send, 200, headers, body)
@@ -203,13 +210,14 @@ class FirehoseHTTPServer:
     async def _handle_command(self, scope, receive, send):
         remote_addr = self._get_remote_addr(scope)
 
-        body = await self._read_body(receive)
+        body = None
+        try:
+            body = await self._read_body(receive, self._max_request_size)
+        except _BodyTooLarge:
+            await self._send_protocol_error(send, 413, "Request too large", remote_addr, "")
+            return
         if body is None:
             await self._send_protocol_error(send, 400, "Failed to read body", remote_addr, "")
-            return
-
-        if len(body) > self._max_request_size:
-            await self._send_protocol_error(send, 413, "Request too large", remote_addr, "")
             return
 
         if len(body) == 0:
@@ -286,6 +294,16 @@ class FirehoseHTTPServer:
             await self._send_protocol_error(send, 429, "Too many requests", remote_addr, request_nonce)
             return
 
+        if not is_anonymous:
+            addr_key = self._rate_limiter.address_key(remote_addr)
+            if not self._rate_limiter.check(addr_key):
+                await self._send_protocol_error(send, 429, "Too many requests", remote_addr, request_nonce)
+                return
+
+        if self._cleanup_counter % 64 == 0:
+            self._rate_limiter.cleanup()
+        self._cleanup_counter += 1
+
         from net.firehose_commands import FirehoseContext
 
         role = ""
@@ -323,7 +341,8 @@ class FirehoseHTTPServer:
             response_body = await asyncio.to_thread(self._handler.handle, body, ctx)
         except Exception as e:
             log_msg(f"HTTP_COMMAND: dispatch error: {type(e).__name__}: {e}")
-            response_body = b"\x01" + struct.pack(">H", 0) + struct.pack(">H", len(str(e))) + str(e).encode("utf-8")
+            msg = b"Internal error"
+            response_body = b"\x01" + struct.pack(">H", 0) + struct.pack(">H", len(msg)) + msg
 
         await self._send_signed_response(send, response_body, request_nonce)
 
@@ -402,12 +421,22 @@ class FirehoseHTTPServer:
     # ASGI helpers
     # ------------------------------------------------------------------
 
-    async def _read_body(self, receive) -> Optional[bytes]:
+    async def _read_body(self, receive, max_size: int) -> Optional[bytes]:
+        """Read the request body, aborting if it exceeds max_size.
+
+        Returns the body bytes, or None if the client disconnected.
+        Raises _BodyTooLarge if the cumulative size exceeds max_size.
+        """
         chunks = []
+        total = 0
         while True:
             msg = await receive()
             if msg["type"] == "http.request":
-                chunks.append(msg.get("body", b""))
+                chunk = msg.get("body", b"")
+                total += len(chunk)
+                if total > max_size:
+                    raise _BodyTooLarge()
+                chunks.append(chunk)
                 if not msg.get("more_body", False):
                     return b"".join(chunks)
             elif msg["type"] == "http.disconnect":

@@ -457,7 +457,7 @@ def _validate_nonce(nonce: str) -> None:
         raise InvalidParameter(f"nonce must decode to 32 bytes, got {len(raw)}")
 
 
-def _check_temporal(params: dict, max_lifetime: int, clock_skew: int) -> None:
+def _check_temporal(params: dict, max_lifetime: int, clock_skew: int, is_response: bool = False) -> None:
     now = int(time.time())
     created = params.get("created")
     if created is None:
@@ -466,6 +466,8 @@ def _check_temporal(params: dict, max_lifetime: int, clock_skew: int) -> None:
     if created > now + clock_skew:
         raise FutureSignature(f"created {created} is too far in the future")
     expires = params.get("expires")
+    if expires is None and not is_response:
+        raise InvalidParameter("Missing 'expires' parameter")
     if expires is not None:
         expires = int(expires)
         if expires < now - clock_skew:
@@ -485,8 +487,6 @@ def _check_required_components(
 ) -> None:
     for req in required:
         if req == "bonnet-username" and not msg.has_header("bonnet-username"):
-            continue
-        if req == "bonnet-request-nonce" and not msg.has_header("bonnet-request-nonce"):
             continue
         if req not in components:
             raise MissingComponent(f"Required component '{req}' not covered by signature")
@@ -690,7 +690,7 @@ class BonnetVerifier:
             raise InvalidParameter("Missing 'keyid' parameter")
         _validate_keyid(keyid, is_response)
 
-        _check_temporal(si.params, self._max_lifetime, self._clock_skew)
+        _check_temporal(si.params, self._max_lifetime, self._clock_skew, is_response=is_response)
 
         nonce = si.params.get("nonce")
         if nonce is None:
