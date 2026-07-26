@@ -927,3 +927,82 @@ class FirehoseStore:
             return [r[0] for r in self._conn.execute(
                 "SELECT origin FROM origin_state ORDER BY origin"
             ).fetchall()]
+
+    # -----------------------------------------------------------------------
+    # Origin lifecycle (depeer/purge/reset-key)
+    # -----------------------------------------------------------------------
+
+    def get_origin_summary(self, origin: str) -> dict:
+        """Return a summary of stored data for an origin."""
+        with self._lock:
+            event_count = self._conn.execute(
+                "SELECT COUNT(*) FROM events WHERE origin=?", (origin,)
+            ).fetchone()[0]
+            head_count = self._conn.execute(
+                "SELECT COUNT(*) FROM origin_heads WHERE origin=?", (origin,)
+            ).fetchone()[0]
+            witness_count = self._conn.execute(
+                "SELECT COUNT(*) FROM relay_witnesses WHERE event_origin=?", (origin,)
+            ).fetchone()[0]
+            conflict_count = self._conn.execute(
+                "SELECT COUNT(*) FROM event_conflicts WHERE origin=?", (origin,)
+            ).fetchone()[0]
+            board_count = self._conn.execute(
+                "SELECT COUNT(DISTINCT board) FROM events WHERE origin=? AND board != ''", (origin,)
+            ).fetchone()[0]
+            checkpoint = self.get_checkpoint(origin)
+            return {
+                "origin": origin,
+                "event_count": event_count,
+                "head_count": head_count,
+                "witness_count": witness_count,
+                "conflict_count": conflict_count,
+                "board_count": board_count,
+                "checkpoint": checkpoint,
+            }
+
+    def delete_origin_data(self, origin: str) -> dict:
+        """Delete all firehose data for an origin. Returns per-table counts."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                counts = {}
+                for table, col in [
+                    ("events", "origin"),
+                    ("origin_heads", "origin"),
+                    ("origin_state", "origin"),
+                    ("relay_witnesses", "event_origin"),
+                    ("event_conflicts", "origin"),
+                    ("origin_key_epochs", "origin"),
+                    ("board_counters", "origin"),
+                    ("projection_checkpoints", "origin"),
+                ]:
+                    c = self._conn.execute(
+                        f"DELETE FROM {table} WHERE {col}=?", (origin,)
+                    ).rowcount
+                    counts[table] = c
+                self._conn.execute("COMMIT")
+                return counts
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def reset_origin_key(self, origin: str) -> None:
+        """Clear key epoch pinning and origin_state for an origin.
+
+        Forces re-TOFU on next sync. Does not touch events, projections,
+        or bodies.
+        """
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "DELETE FROM origin_key_epochs WHERE origin=?", (origin,)
+                )
+                self._conn.execute(
+                    "DELETE FROM origin_state WHERE origin=?", (origin,)
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
