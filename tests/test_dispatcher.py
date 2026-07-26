@@ -99,7 +99,6 @@ def stack(tmp_path):
 # Checkpoint advancement on failure
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="Phase 2: dispatcher advances checkpoint past failed records")
 def test_checkpoint_stays_before_failed_record(stack):
     """When a projection raises, the checkpoint must not advance past it."""
     d, firehose, nav, users, policy, bs = stack
@@ -132,7 +131,6 @@ def test_checkpoint_stays_before_failed_record(stack):
     assert checkpoint == 1, f"checkpoint should be 1 (before failed record 2), got {checkpoint}"
 
 
-@pytest.mark.xfail(strict=True, reason="Phase 2: dispatcher continues past failed records")
 def test_later_records_not_dispatched_after_failure(stack):
     """Records after a failed projection must not be dispatched."""
     d, firehose, nav, users, policy, bs = stack
@@ -164,7 +162,6 @@ def test_later_records_not_dispatched_after_failure(stack):
     assert call_count[0] == 2, f"should have processed only 2 records (1 success + 1 fail), got {call_count[0]}"
 
 
-@pytest.mark.xfail(strict=True, reason="Phase 2: checkpoint advances past failure, blocking retry")
 def test_retry_after_fault_removed(stack):
     """After the fault is cleared, retrying dispatch should apply the failed record."""
     d, firehose, nav, users, policy, bs = stack
@@ -205,7 +202,6 @@ def test_retry_after_fault_removed(stack):
 # Multi-origin rebuild isolation
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="Phase 2: rebuild_all clears ALL global projections, not just the specified origin")
 def test_rebuild_preserves_other_origins(stack):
     """Rebuilding one origin must not clear projections for another origin."""
     d, firehose, nav, users, policy, bs = stack

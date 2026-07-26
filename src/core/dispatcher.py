@@ -118,6 +118,7 @@ class Dispatcher:
                     self._dispatch_record(rec)
                 except Exception as e:
                     log_msg(f"DISPATCH: origin='{origin}' seq={rec.origin_seq} kind='{rec.kind}' FAILED: {e}")
+                    break
                 self._firehose.set_checkpoint(origin, rec.origin_seq)
                 count += 1
             return count
@@ -208,7 +209,7 @@ class Dispatcher:
             bp = self._get_board_projection(rec.origin, rec.board)
             bp.apply_unknown(rec)
         else:
-            self._nav._mark_applied(rec) if self._nav.is_applied(rec.event_id) is False else None
+            self._nav.apply_unknown(rec)
 
     # ------------------------------------------------------------------
     # Rebuild
@@ -220,9 +221,9 @@ class Dispatcher:
         Returns the number of records replayed.
         """
         with self._dispatch_lock:
-            self._nav.clear()
-            self._users.clear()
-            self._policy.clear()
+            self._nav.clear_origin(origin)
+            self._users.clear_origin(origin)
+            self._policy.clear_origin(origin)
 
             with self._boards_lock:
                 for key, bp in list(self._board_projections.items()):
