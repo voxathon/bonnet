@@ -1,11 +1,11 @@
 import pytest
-import os
 from client.identity import IdentityStore
 
 pytestmark = pytest.mark.slow
 
-def test_identity_store():
-    store = IdentityStore("test_identities.db")
+
+def test_identity_store(tmp_path):
+    store = IdentityStore(str(tmp_path / "identities.db"))
     try:
         # Register User
         priv, pub = store.register("alice", "secretpassword")
@@ -25,5 +25,3 @@ def test_identity_store():
             store.get_private_key("alice", "wrongpassword")
     finally:
         store.close()
-        if os.path.exists("test_identities.db"):
-            os.remove("test_identities.db")
