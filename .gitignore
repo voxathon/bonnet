@@ -27,6 +27,7 @@ env/
 htmlcov/
 coverage.xml
 .hypothesis/
+docs/archive/*
 
 # SQLite databases and sidecar files
 *.db
