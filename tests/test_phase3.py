@@ -1,27 +1,33 @@
-# -*- coding: utf-8 -*-
 """Phase 3 tests: compositional ACL, kind validation, and search.
 
 Tests PROTOCOL.md §12 (kind schemas), §15 (search), §16 (ACL model).
 """
 
-import os
 import pytest
 
-from core.crypto import Identity
-from core.record import (
-    Intent, MetadataMap, ZERO_ID,
-    metadata_text, metadata_text_list, metadata_bytes, metadata_u64, metadata_i64,
-    compute_body_hash,
-)
 from core.acl import (
-    ACLEvaluator, ACLRule, PrincipalMatcher, AuthContext,
+    ACLEvaluator,
+    ACLRule,
+    AuthContext,
+    PrincipalMatcher,
     default_rules_for_admin,
 )
-from core.kind_validator import KindValidator, ValidationError
 from core.board_projection import BoardProjection
 from core.bodies import BodyStore
+from core.crypto import Identity
+from core.kind_validator import KindValidator, ValidationError
+from core.record import (
+    ZERO_ID,
+    Intent,
+    MetadataMap,
+    compute_body_hash,
+    metadata_bytes,
+    metadata_i64,
+    metadata_text,
+    metadata_text_list,
+    metadata_u64,
+)
 from core.search import SearchService
-
 
 # ---------------------------------------------------------------------------
 # Test identities
@@ -504,14 +510,12 @@ class TestSearchService:
         bp.close()
 
     def _make_article_rec(self, seq, article_num, subject="Test", tags="", body=b"hello world"):
-        from core.record import Record, encode_unsigned_record, sign_record
-        from core.crypto import Identity
+        from core.record import Record
 
         origin = Identity.from_private_key(bytes(range(1, 33)))
         aid = _rid(seq + 10)
         eid = _rid(seq)
 
-        from core.record import metadata_text_list
         m = MetadataMap([
             metadata_text(1, subject),
             metadata_text(4, "text/plain"),
@@ -571,8 +575,7 @@ class TestSearchService:
 
     def test_metadata_search_filter_by_actor(self, search_env):
         bp, body_store, search = search_env
-        from core.record import Record, encode_unsigned_record, sign_record
-        from core.crypto import Identity
+        from core.record import Record
 
         origin = Identity.from_private_key(bytes(range(1, 33)))
         other_pub = bytes(range(50, 82))

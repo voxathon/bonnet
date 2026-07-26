@@ -8,17 +8,17 @@ tracking, pending controls, cross-dispatcher serialization, and crash replay.
 from __future__ import annotations
 
 import threading
-from typing import Optional
 
-from core.firehose import FirehoseStore
-from core.record import Record, ZERO_ID, ID_SIZE
 from core.board_projection import BoardProjection, board_db_path
-from core.global_projections import (
-    NavProjection, UserProjection, PolicyProjection,
-)
 from core.bodies import BodyStore
+from core.firehose import FirehoseStore
+from core.global_projections import (
+    NavProjection,
+    PolicyProjection,
+    UserProjection,
+)
 from core.logging import log_msg
-
+from core.record import ZERO_ID, Record
 
 # ---------------------------------------------------------------------------
 # Kind constants (mirror of record/firehose kinds)

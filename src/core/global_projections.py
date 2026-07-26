@@ -14,10 +14,8 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Optional
 
-from core.record import Record, ZERO_ID, ID_SIZE
-
+from core.record import Record
 
 # ---------------------------------------------------------------------------
 # Kind constants
@@ -259,7 +257,7 @@ class NavProjection(_BaseProjection):
                 for r in rows
             ]
 
-    def get_board(self, origin: str, board: str) -> Optional[dict]:
+    def get_board(self, origin: str, board: str) -> dict | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT origin, board, owner_pubkey, display_name, closed, created_seq "
@@ -366,7 +364,7 @@ class UserProjection(_BaseProjection):
                 self._rollback()
                 raise
 
-    def get_user_by_pubkey(self, origin: str, pubkey: bytes) -> Optional[dict]:
+    def get_user_by_pubkey(self, origin: str, pubkey: bytes) -> dict | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT origin, user_pubkey, username, flags, reg_seq, created_at, revoked, revoked_seq "

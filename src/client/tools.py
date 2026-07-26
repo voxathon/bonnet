@@ -7,14 +7,18 @@ Uses IdentityStore for local key management (username:password → Ed25519).
 import contextvars
 import os
 import time
-from typing import Optional
 
 from fastmcp import FastMCP
 
-from client.firehose_client import FirehoseHTTPClient, FirehoseClientError
+from client.firehose_client import FirehoseHTTPClient
 from client.firehose_models import (
-    PublishResult, HeadInfo, ArticleView, ArticleListItem,
-    SearchResult, SearchResponse, QueryResponse, BoardInfo, UserInfo, BanStatus,
+    ArticleView,
+    BanStatus,
+    BoardInfo,
+    HeadInfo,
+    QueryResponse,
+    SearchResponse,
+    UserInfo,
 )
 from client.identity import IdentityStore
 from core.crypto import Identity
@@ -22,10 +26,10 @@ from core.record import ZERO_ID
 
 mcp = FastMCP("Bonnet BBS")
 
-current_username: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+current_username: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "username", default=None
 )
-current_password: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+current_password: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "password", default=""
 )
 

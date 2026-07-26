@@ -20,11 +20,11 @@ import base64
 import hashlib
 import time
 import urllib.parse
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
 
-import nacl.signing
 import nacl.exceptions
+import nacl.signing
 
 BONNET_TAG = "bonnet-firehose-1"
 BONNET_LABEL = "bonnet"
@@ -108,7 +108,7 @@ class HTTPMessage:
     method: str = ""
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
-    status_code: Optional[int] = None
+    status_code: int | None = None
     body: bytes = b""
 
     @property
@@ -140,7 +140,7 @@ class VerifyResult:
     keyid: str
     covered_components: list[str]
     parameters: dict
-    nonce: Optional[str] = None
+    nonce: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -547,8 +547,8 @@ class BonnetSigner:
         msg: HTTPMessage,
         *,
         nonce: str,
-        created: Optional[int] = None,
-        expires: Optional[int] = None,
+        created: int | None = None,
+        expires: int | None = None,
         include_username: bool = False,
         extra_components: Sequence[str] = (),
     ) -> None:
@@ -563,8 +563,8 @@ class BonnetSigner:
         msg: HTTPMessage,
         *,
         request_nonce: str = "",
-        created: Optional[int] = None,
-        expires: Optional[int] = None,
+        created: int | None = None,
+        expires: int | None = None,
     ) -> None:
         msg.set_header("Bonnet-Request-Nonce", request_nonce)
         components = list(self._response_components)
@@ -575,8 +575,8 @@ class BonnetSigner:
         msg: HTTPMessage,
         components: list[str],
         nonce: str,
-        created: Optional[int],
-        expires: Optional[int],
+        created: int | None,
+        expires: int | None,
     ) -> None:
         if created is None:
             created = int(time.time())
@@ -635,8 +635,8 @@ class BonnetVerifier:
         self,
         msg: HTTPMessage,
         *,
-        expected_origin: Optional[str] = None,
-        expected_request_nonce: Optional[str] = None,
+        expected_origin: str | None = None,
+        expected_request_nonce: str | None = None,
         require_components: bool = True,
     ) -> VerifyResult:
         result = await self._verify(msg, is_response=True, require_components=require_components)

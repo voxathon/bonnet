@@ -7,23 +7,30 @@ These are pure functions with no networking dependencies.
 from __future__ import annotations
 
 import struct
-from typing import Optional
 
-from core.record import (
-    Intent, Record, Head, Witness, MetadataMap,
-    encode_intent, decode_intent,
-    encode_record, decode_record,
-    encode_head, decode_head,
-    encode_witness, decode_witness,
-    compute_event_hash, compute_body_hash,
-    sign_intent, sign_record,
-    ZERO_ID, ZERO_HASH, ID_SIZE, SIG_SIZE,
-)
 from client.firehose_models import (
-    PublishResult, EventInfo, HeadInfo, ArticleView, ArticleListItem,
-    SearchResult, SearchResponse, QueryResponse, BoardInfo, UserInfo, BanStatus,
+    ArticleListItem,
+    ArticleView,
+    BanStatus,
+    BoardInfo,
+    HeadInfo,
+    PublishResult,
+    QueryResponse,
+    SearchResponse,
+    SearchResult,
+    UserInfo,
 )
-
+from core.record import (
+    ZERO_ID,
+    Head,
+    Intent,
+    Record,
+    Witness,
+    decode_head,
+    decode_record,
+    decode_witness,
+    encode_intent,
+)
 
 # ---------------------------------------------------------------------------
 # Opcodes

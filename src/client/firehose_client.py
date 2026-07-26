@@ -10,48 +10,80 @@ from __future__ import annotations
 
 import base64
 import os
-import struct
 import time
-from typing import Optional
 
 import httpx
 
+from client.firehose_models import (
+    ArticleView,
+    BanStatus,
+    BoardInfo,
+    DiscoveryInfo,
+    HeadInfo,
+    PublishResult,
+    QueryResponse,
+    SearchResponse,
+    UserInfo,
+)
+from client.firehose_protocol import (
+    SELECTOR_BY_ID,
+    SELECTOR_BY_NUM,
+    BodyRedirectError,
+    build_article_body,
+    build_article_get,
+    build_article_list,
+    build_article_query,
+    build_article_search,
+    build_ban_status,
+    build_board_list,
+    build_event_body,
+    build_event_get,
+    build_event_head,
+    build_event_range,
+    build_publish_record,
+    build_user_get,
+    build_user_list,
+    parse_article_body_response,
+    parse_article_get_response,
+    parse_article_list_response,
+    parse_article_query_response,
+    parse_article_search_response,
+    parse_ban_status_response,
+    parse_board_list_response,
+    parse_event_body_response,
+    parse_event_get_response,
+    parse_event_head_response,
+    parse_event_range_response,
+    parse_publish_response,
+    parse_publish_response_raw,
+    parse_user_get_response,
+    parse_user_list_response,
+)
 from core.crypto import Identity
 from core.record import (
-    Intent, MetadataMap, ZERO_ID,
-    encode_intent, sign_intent, compute_body_hash,
-    encode_record, compute_event_hash,
-    metadata_text, metadata_text_list, metadata_bytes, metadata_u64, metadata_i64,
+    ZERO_ID,
+    Intent,
+    MetadataMap,
+    compute_body_hash,
+    compute_event_hash,
+    encode_intent,
+    encode_record,
+    metadata_bytes,
+    metadata_i64,
+    metadata_text,
+    metadata_text_list,
+    metadata_u64,
+    sign_intent,
 )
 from core.trust import TrustStore
 from net.http_auth import (
-    BonnetSigner, BonnetVerifier, KeyResolver, HTTPMessage,
-    compute_content_digest, validate_content_digest,
+    BonnetSigner,
+    BonnetVerifier,
+    HTTPMessage,
+    KeyResolver,
     SignatureError,
+    compute_content_digest,
 )
-from client.firehose_models import (
-    PublishResult, EventInfo, HeadInfo, ArticleView, ArticleListItem,
-    SearchResult, SearchResponse, QueryResponse, BoardInfo, UserInfo, BanStatus, DiscoveryInfo,
-)
-from client.firehose_protocol import (
-    build_publish_record, parse_publish_response, parse_publish_response_raw,
-    build_event_head, parse_event_head_response, parse_event_head_response_raw,
-    build_event_range, parse_event_range_response,
-    build_event_get, parse_event_get_response,
-    build_board_list, parse_board_list_response,
-    build_article_get, parse_article_get_response,
-    build_article_list, parse_article_list_response,
-    build_article_search, parse_article_search_response,
-    build_article_query, parse_article_query_response,
-    build_article_body, parse_article_body_response,
-    build_user_get, parse_user_get_response,
-    build_user_list, parse_user_list_response,
-    build_ban_status, parse_ban_status_response,
-    build_event_body, parse_event_body_response,
-    SELECTOR_BY_NUM, SELECTOR_BY_ID,
-    ProtocolError, BodyRedirectError,
-)
-
 
 FIREHOSE_TAG = "bonnet-firehose-1"
 FIREHOSE_LABEL = "bonnet"
@@ -89,15 +121,15 @@ class FirehoseHTTPClient:
         self._timeout = timeout
         self._verify = verify
         self._http = httpx.AsyncClient(timeout=timeout, verify=verify)
-        self._identity: Optional[Identity] = None
-        self._server_pubkey: Optional[bytes] = None
-        self._server_origin: Optional[str] = None
-        self._anonymous_key: Optional[bytes] = None
-        self._anonymous_private_key: Optional[bytes] = None
-        self._discovery: Optional[DiscoveryInfo] = None
-        self._signer: Optional[BonnetSigner] = None
-        self._verifier: Optional[BonnetVerifier] = None
-        self._trust_store: Optional[TrustStore] = None
+        self._identity: Identity | None = None
+        self._server_pubkey: bytes | None = None
+        self._server_origin: str | None = None
+        self._anonymous_key: bytes | None = None
+        self._anonymous_private_key: bytes | None = None
+        self._discovery: DiscoveryInfo | None = None
+        self._signer: BonnetSigner | None = None
+        self._verifier: BonnetVerifier | None = None
+        self._trust_store: TrustStore | None = None
         if trust_store_path:
             self._trust_store = TrustStore(trust_store_path)
         self._username: str = ""

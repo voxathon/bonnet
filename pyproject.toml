@@ -15,6 +15,7 @@ dependencies = [
     "uvicorn>=0.30.0",
     "bcrypt>=5.0.0",
     "cryptography>=42.0.0",
+    "ruff>=0.16.0",
 ]
 
 [dependency-groups]
@@ -47,7 +48,7 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP"]
-ignore = ["E501"]
+ignore = ["E501", "F841"]
 
 [tool.ruff.format]
 quote-style = "double"

@@ -7,12 +7,13 @@ Exit gate (§13 Phase 3):
 
 import os
 import struct
-import time
 import threading
+import time
+
 import pytest
 
-from core.trust import TrustStore, TRUST_MODE_TOFU, TRUST_MODE_CONFIGURED
 from core.crypto import Identity
+from core.trust import TRUST_MODE_CONFIGURED, TRUST_MODE_TOFU, TrustStore
 
 
 @pytest.fixture
@@ -93,7 +94,7 @@ class TestRotation:
 
         store.tofu_pin("bbs.example.com", old_pub)
 
-        origin_bytes = "bbs.example.com".encode("utf-8")
+        origin_bytes = b"bbs.example.com"
         payload = struct.pack("B", len(origin_bytes)) + origin_bytes + old_pub + new_pub
         signature = old_ident.sign(payload)
 
@@ -107,7 +108,7 @@ class TestRotation:
 
         store.tofu_pin("bbs.example.com", old_pub)
 
-        origin_bytes = "bbs.example.com".encode("utf-8")
+        origin_bytes = b"bbs.example.com"
         payload = struct.pack("B", len(origin_bytes)) + origin_bytes + wrong_ident.public_key + new_pub
         signature = wrong_ident.sign(payload)
 
@@ -128,7 +129,7 @@ class TestRotation:
         old_ident, old_pub = keypair
         new_pub = Identity.generate().public_key
 
-        origin_bytes = "unknown.example.com".encode("utf-8")
+        origin_bytes = b"unknown.example.com"
         payload = struct.pack("B", len(origin_bytes)) + origin_bytes + old_pub + new_pub
         signature = old_ident.sign(payload)
 
@@ -143,7 +144,7 @@ class TestRotation:
 
         time.sleep(1.1)
 
-        origin_bytes = "bbs.example.com".encode("utf-8")
+        origin_bytes = b"bbs.example.com"
         payload = struct.pack("B", len(origin_bytes)) + origin_bytes + old_pub + new_pub
         signature = old_ident.sign(payload)
 
