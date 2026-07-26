@@ -142,14 +142,14 @@ class TestBodyStore:
     def test_write_and_read_article_body(self, body_store):
         body = b"hello article body"
         body_hash = compute_body_hash(body)
-        body_store.write_article_body("bbs.a", "general", 1, body)
+        body_store.write_article_body("bbs.a", "general", 1, body, body_hash, len(body))
         result = body_store.get_article_body("bbs.a", "general", 1, body_hash, len(body))
         assert result == body
 
     def test_read_corrupt_article_body_returns_none(self, body_store):
         body = b"hello article body"
         body_hash = compute_body_hash(body)
-        body_store.write_article_body("bbs.a", "general", 1, body)
+        body_store.write_article_body("bbs.a", "general", 1, body, body_hash, len(body))
         # Corrupt the file
         path = body_store._article_body_path("bbs.a", "general", 1)
         with open(path, "wb") as f:
@@ -163,7 +163,8 @@ class TestBodyStore:
 
     def test_delete_article_body(self, body_store):
         body = b"delete me"
-        body_store.write_article_body("bbs.a", "general", 1, body)
+        body_hash = compute_body_hash(body)
+        body_store.write_article_body("bbs.a", "general", 1, body, body_hash, len(body))
         assert body_store.article_body_exists("bbs.a", "general", 1)
         assert body_store.delete_article_body("bbs.a", "general", 1)
         assert not body_store.article_body_exists("bbs.a", "general", 1)

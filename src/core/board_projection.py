@@ -95,6 +95,7 @@ class BoardProjection:
             os.makedirs(d, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._init_schema()
 
     def close(self) -> None:
