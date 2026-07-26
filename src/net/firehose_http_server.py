@@ -12,23 +12,29 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import struct
 import time
-from typing import Optional
 
+from core.crypto import Identity
+from core.logging import log_msg
 from net.http_auth import (
-    BonnetSigner, BonnetVerifier, KeyResolver, HTTPMessage,
-    compute_content_digest, validate_content_digest,
-    SignatureError, MalformedSignature, InvalidSignature,
-    ExpiredSignature, FutureSignature, MissingComponent,
-    InvalidParameter, DigestMismatch,
+    BonnetSigner,
+    BonnetVerifier,
+    DigestMismatch,
+    ExpiredSignature,
+    FutureSignature,
+    HTTPMessage,
+    InvalidParameter,
+    InvalidSignature,
+    KeyResolver,
+    MalformedSignature,
+    MissingComponent,
+    SignatureError,
+    compute_content_digest,
+    validate_content_digest,
 )
 from net.rate_limiter import RateLimiter
 from net.replay import ReplayLedger
-from core.crypto import Identity
-from core.logging import log_msg
-
 
 FIREHOSE_TAG = "bonnet-firehose-1"
 FIREHOSE_LABEL = "bonnet"
@@ -69,9 +75,9 @@ class FirehoseHTTPServer:
         command_handler,
         server_identity: Identity,
         config,
-        anonymous_identity: Optional[Identity] = None,
-        replay_ledger: Optional[ReplayLedger] = None,
-        rate_limiter: Optional[RateLimiter] = None,
+        anonymous_identity: Identity | None = None,
+        replay_ledger: ReplayLedger | None = None,
+        rate_limiter: RateLimiter | None = None,
         users_projection=None,
         firehose_store=None,
     ):
@@ -420,7 +426,7 @@ class FirehoseHTTPServer:
     # ASGI helpers
     # ------------------------------------------------------------------
 
-    async def _read_body(self, receive, max_size: int) -> Optional[bytes]:
+    async def _read_body(self, receive, max_size: int) -> bytes | None:
         """Read the request body, aborting if it exceeds max_size.
 
         Returns the body bytes, or None if the client disconnected.

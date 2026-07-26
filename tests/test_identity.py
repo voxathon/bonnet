@@ -1,4 +1,5 @@
 import pytest
+
 from client.identity import IdentityStore
 
 pytestmark = pytest.mark.slow

@@ -1,13 +1,12 @@
 """Tests for federation sync: SSRF validation, backoff, resource cleanup."""
 
 import asyncio
+
 import pytest
 
-from net.firehose_sync import is_safe_dial_target, SyncManager, SyncClient
 from core.crypto import Identity
-from core.firehose import FirehoseStore, AcceptResult
-from core.record import Head, ZERO_HASH
-
+from core.firehose import FirehoseStore
+from net.firehose_sync import SyncClient, SyncManager, is_safe_dial_target
 
 ORIGIN_PUB = Identity.from_private_key(bytes(range(1, 33))).public_key
 

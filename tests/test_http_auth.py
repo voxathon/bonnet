@@ -6,13 +6,13 @@ import base64
 import hashlib
 import os
 import time
-import copy
 
 import pytest
-
 from nacl.signing import SigningKey
 
 from net.http_auth import (
+    BONNET_TAG,
+    ED25519_ALG,
     BonnetSigner,
     BonnetVerifier,
     DigestMismatch,
@@ -24,8 +24,9 @@ from net.http_auth import (
     KeyResolver,
     MalformedSignature,
     MissingComponent,
-    SignatureError,
     VerifyResult,
+    _validate_keyid,
+    _validate_nonce,
     build_signature_base,
     compute_content_digest,
     parse_signature,
@@ -34,11 +35,7 @@ from net.http_auth import (
     serialize_signature,
     serialize_signature_input,
     validate_content_digest,
-    BONNET_TAG,
-    ED25519_ALG,
 )
-from net.http_auth import _serialize_sig_params, _validate_nonce, _validate_keyid
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

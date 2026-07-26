@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Phase 1 tests for the FirehoseStore (PROTOCOL.md §14.1, §17.1).
 
 Tests: sequence allocation, article-number allocation, idempotent resubmit,
@@ -7,30 +6,43 @@ key epoch tracking, remote range acceptance, rollback rejection, equivocation
 conflict storage, witness storage, and projection checkpoints.
 """
 
-import os
 import threading
+
 import pytest
 
 from core.crypto import Identity
-from core.record import (
-    Intent, Record, Head, Witness, MetadataMap,
-    encode_record, decode_record, encode_intent,
-    encode_head, encode_unsigned_head, encode_unsigned_witness,
-    encode_unsigned_record,
-    compute_event_hash, compute_head_hash, compute_body_hash,
-    sign_intent, sign_record, sign_head, sign_witness,
-    verify_record_signature, verify_head_signature,
-    reconstruct_intent_from_record,
-    metadata_text, metadata_text_list, metadata_bytes,
-    ZERO_ID, ZERO_HASH, ID_SIZE, SIG_SIZE,
-)
 from core.firehose import (
-    FirehoseStore, AcceptResult,
-    FirehoseError, EventIdCollision, ArticleIdCollision,
-    ChainBreak, SignatureInvalid, RollbackDetected, HeadMismatch,
-    KIND_ARTICLE, KIND_ORIGIN_KEY_ROTATE,
+    KIND_ARTICLE,
+    KIND_ORIGIN_KEY_ROTATE,
+    ArticleIdCollision,
+    ChainBreak,
+    EventIdCollision,
+    FirehoseStore,
+    HeadMismatch,
+    SignatureInvalid,
 )
-
+from core.record import (
+    ZERO_HASH,
+    Head,
+    Intent,
+    MetadataMap,
+    Record,
+    Witness,
+    compute_body_hash,
+    compute_event_hash,
+    encode_intent,
+    encode_record,
+    encode_unsigned_head,
+    encode_unsigned_record,
+    encode_unsigned_witness,
+    metadata_bytes,
+    metadata_text,
+    sign_head,
+    sign_intent,
+    sign_record,
+    sign_witness,
+    verify_head_signature,
+)
 
 # ---------------------------------------------------------------------------
 # Fixed test identities
@@ -343,7 +355,7 @@ class TestKeyEpochs:
             intent = _make_article_intent("bbs.a", _random_id(i + 1), _random_id(i + 10))
             store.append_record(ORIGIN_A, intent, _sign_intent(intent), b"test body")
 
-        from core.record import sign_key_rotation_proof, verify_key_rotation_proof
+        from core.record import sign_key_rotation_proof
         proof = sign_key_rotation_proof(NEW_ORIGIN, "bbs.a", ORIGIN_A_PUB, NEW_ORIGIN_PUB)
 
         rot_intent = Intent(

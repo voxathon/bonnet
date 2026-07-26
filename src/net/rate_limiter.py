@@ -14,10 +14,9 @@ PROTOCOL_RENOVATION_PLAN §10:
 
 from __future__ import annotations
 
-import time
-import threading
 import collections
-from typing import Optional
+import threading
+import time
 
 
 class RateLimiter:

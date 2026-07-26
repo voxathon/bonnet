@@ -14,10 +14,8 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
-from typing import Optional
 
-from core.record import Record, ZERO_ID, ID_SIZE
-
+from core.record import ZERO_ID, Record
 
 # ---------------------------------------------------------------------------
 # Kind constants
@@ -596,7 +594,7 @@ class BoardProjection:
     # Queries
     # ------------------------------------------------------------------
 
-    def get_article_by_num(self, origin: str, board: str, article_num: int) -> Optional[ArticleProjection]:
+    def get_article_by_num(self, origin: str, board: str, article_num: int) -> ArticleProjection | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT origin, board, article_num, article_id, event_id, "
@@ -627,7 +625,7 @@ class BoardProjection:
                 latest_control_seq=row[22],
             )
 
-    def get_article_by_id(self, origin: str, board: str, article_id: bytes) -> Optional[ArticleProjection]:
+    def get_article_by_id(self, origin: str, board: str, article_id: bytes) -> ArticleProjection | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT origin, board, article_num, article_id, event_id, "
@@ -726,7 +724,7 @@ class BoardProjection:
             states.append(VISIBILITY_SUPERSEDED)
         placeholders = ",".join("?" * len(states))
 
-        where_parts = [f"origin=?", f"board=?", f"visibility IN ({placeholders})", "body_state != 'purged'"]
+        where_parts = ["origin=?", "board=?", f"visibility IN ({placeholders})", "body_state != 'purged'"]
         params = [origin, board] + states
 
         if text_query:

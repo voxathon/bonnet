@@ -7,7 +7,6 @@ publication results. These are derived API views, not protocol primitives.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -94,7 +93,7 @@ class ArticleView:
     replacement_article_id: str = ""
     pin_state: str = "unpinned"
     thread_state: str = "open"
-    body: Optional[bytes] = None
+    body: bytes | None = None
     body_verified: bool = False
 
 
@@ -136,7 +135,7 @@ class SearchResult:
     author_pubkey: str
     created_at: int
     body_available: bool
-    excerpt: Optional[str] = None
+    excerpt: str | None = None
     origin: str = ""
 
 

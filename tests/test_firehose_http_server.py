@@ -6,47 +6,35 @@ FirehoseHTTPClient signing and verifying requests end-to-end.
 """
 
 import os
-import struct
 import time
 
 import httpx
 import pytest
 
-from core.crypto import Identity
-from core.record import (
-    Intent, MetadataMap,
-    encode_intent, sign_intent,
-    metadata_text, metadata_bytes,
-    compute_body_hash,
-    ZERO_ID,
+from client.firehose_client import FirehoseHTTPClient
+from client.firehose_protocol import (
+    build_board_list,
+    build_event_head,
+    parse_board_list_response,
 )
-from core.firehose import FirehoseStore, KIND_ARTICLE
-from core.bodies import BodyStore
-from core.board_projection import board_db_path
-from core.global_projections import NavProjection, UserProjection, PolicyProjection
-from core.dispatcher import Dispatcher
 from core.acl import ACLEvaluator, ACLRule, PrincipalMatcher, default_rules_for_admin
+from core.bodies import BodyStore
+from core.config import FirehoseConfig
+from core.crypto import Identity
+from core.dispatcher import Dispatcher
+from core.firehose import FirehoseStore
+from core.global_projections import NavProjection, PolicyProjection, UserProjection
 from core.kind_validator import KindValidator
 from core.search import SearchService
-from core.config import FirehoseConfig
-from net.firehose_http_server import FirehoseHTTPServer, FIREHOSE_TAG, FIREHOSE_LABEL
 from net.firehose_commands import (
-    FirehoseCommandHandler, FirehoseContext,
-    OP_EVENT_HEAD, OP_BOARD_LIST,
-    _success, _error,
+    FirehoseCommandHandler,
+)
+from net.firehose_http_server import FirehoseHTTPServer
+from net.http_auth import (
+    compute_content_digest,
 )
 from net.rate_limiter import RateLimiter
 from net.replay import ReplayLedger
-from net.http_auth import (
-    BonnetSigner, BonnetVerifier,
-    compute_content_digest,
-)
-from client.firehose_client import FirehoseHTTPClient, FirehoseClientError
-from client.firehose_protocol import (
-    build_event_head,
-    build_board_list, parse_board_list_response,
-)
-
 
 ORIGIN = "bbs.test"
 SERVER_IDENTITY = Identity.from_private_key(bytes(range(1, 33)))
@@ -355,7 +343,7 @@ async def test_replay_detected(server_stack):
     cmd = build_event_head(ORIGIN)
     msg = __import__("net.http_auth", fromlist=["HTTPMessage"]).HTTPMessage(
         method="POST",
-        url=f"https://bbs.test/command",
+        url="https://bbs.test/command",
         headers={
             "Content-Type": "application/vnd.bonnet.command",
             "Content-Digest": compute_content_digest(cmd),

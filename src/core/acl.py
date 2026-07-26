@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass, field
-from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -32,14 +30,14 @@ class ACLError(Exception):
 
 @dataclass
 class PrincipalMatcher:
-    pubkey: Optional[bytes] = None
-    role: Optional[str] = None
-    origin: Optional[str] = None
+    pubkey: bytes | None = None
+    role: str | None = None
+    origin: str | None = None
     anonymous: bool = False
     unknown: bool = False
     wildcard: bool = False
 
-    def matches(self, ctx: "AuthContext") -> bool:
+    def matches(self, ctx: AuthContext) -> bool:
         if self.anonymous:
             return ctx.is_anonymous
         if self.unknown:
@@ -55,7 +53,7 @@ class PrincipalMatcher:
         return False
 
     @staticmethod
-    def from_dict(data: dict) -> "PrincipalMatcher":
+    def from_dict(data: dict) -> PrincipalMatcher:
         m = PrincipalMatcher()
         if "pubkey" in data:
             pk = data["pubkey"]
@@ -84,10 +82,10 @@ class ACLRule:
     effect: str  # "allow" or "deny"
     matcher: PrincipalMatcher
     actions: list = field(default_factory=list)  # ["read", "write"]
-    commands: Optional[list] = None  # ["PUBLISH_RECORD", ...] or ["*"]
-    kinds: Optional[list] = None
-    boards: Optional[list] = None
-    objects: Optional[list] = None
+    commands: list | None = None  # ["PUBLISH_RECORD", ...] or ["*"]
+    kinds: list | None = None
+    boards: list | None = None
+    objects: list | None = None
 
     def action_matches(self, action: str) -> bool:
         return action in self.actions or "*" in self.actions
@@ -113,7 +111,7 @@ class ACLRule:
         return _list_matches(self.objects, object_name)
 
     @staticmethod
-    def from_dict(data: dict) -> "ACLRule":
+    def from_dict(data: dict) -> ACLRule:
         effect = data.get("effect", "allow")
         if effect not in ("allow", "deny"):
             raise ACLError(f"invalid effect: {effect}")
@@ -241,7 +239,7 @@ class ACLEvaluator:
         return has_allow
 
     @staticmethod
-    def from_toml(data: dict) -> "ACLEvaluator":
+    def from_toml(data: dict) -> ACLEvaluator:
         rules = []
         for acl_data in data.get("acl", []):
             rules.append(ACLRule.from_dict(acl_data))

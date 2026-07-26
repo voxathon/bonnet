@@ -1,5 +1,5 @@
-import os
 import logging
+import os
 from datetime import datetime
 
 _log_file_path = None

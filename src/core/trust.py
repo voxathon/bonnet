@@ -28,12 +28,10 @@ Rotation verification mirrors SyncDB.rotate_peer_pubkey:
 from __future__ import annotations
 
 import os
-import struct
 import sqlite3
+import struct
 import threading
 import time
-from typing import Optional
-
 
 TRUST_MODE_TOFU = "tofu"
 TRUST_MODE_CONFIGURED = "configured"
@@ -68,7 +66,7 @@ class TrustStore:
         """)
         self._conn.commit()
 
-    def get_pin(self, origin: str) -> Optional[bytes]:
+    def get_pin(self, origin: str) -> bytes | None:
         """Return the pinned public key for origin, or None if not pinned."""
         with self._lock:
             cursor = self._conn.execute(
@@ -80,7 +78,7 @@ class TrustStore:
                 return bytes(row[0])
             return None
 
-    def get_pin_info(self, origin: str) -> Optional[dict]:
+    def get_pin_info(self, origin: str) -> dict | None:
         """Return full pin record: publickey, first_seen, last_rotated, trust_mode."""
         with self._lock:
             cursor = self._conn.execute(

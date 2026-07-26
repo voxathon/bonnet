@@ -1,6 +1,6 @@
-# -*- coding: utf-8 -*-
 
 import pytest
+
 from core.crypto import Identity
 
 

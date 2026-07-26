@@ -9,15 +9,10 @@ whether stale bytes remain on disk.
 from __future__ import annotations
 
 import os
-import subprocess
-import json
-import time
 from dataclasses import dataclass
-from typing import Optional
 
-from core.board_projection import BoardProjection, ArticleProjection
+from core.board_projection import BoardProjection
 from core.bodies import BodyStore
-
 
 # ---------------------------------------------------------------------------
 # Search result
@@ -189,7 +184,7 @@ class SearchService:
         if not os.path.exists(path):
             return ""
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 content = f.read()
             idx = content.lower().find(pattern.lower())
             if idx < 0:

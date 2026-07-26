@@ -14,28 +14,24 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
-import struct
-import time
 import threading
-from typing import Optional
+import time
 from urllib.parse import urlparse
 
 from core.crypto import Identity
+from core.firehose import (
+    AcceptResult,
+    FirehoseStore,
+)
 from core.logging import log_msg
 from core.record import (
-    Record, Head, Witness,
-    encode_record, decode_record,
-    encode_head, decode_head,
-    encode_unsigned_witness, encode_witness,
-    compute_event_hash, compute_head_hash,
-    verify_record_signature, verify_head_signature,
-    verify_witness_signature,
-    ZERO_ID, ZERO_HASH, SIG_SIZE,
-)
-from core.firehose import (
-    FirehoseStore, AcceptResult,
-    FirehoseError, ChainBreak, SignatureInvalid, HeadMismatch,
-    EventIdCollision, ArticleIdCollision,
+    Head,
+    Record,
+    Witness,
+    compute_event_hash,
+    encode_head,
+    encode_record,
+    encode_unsigned_witness,
 )
 
 
@@ -176,8 +172,8 @@ class SyncManager:
         self._clients: dict[str, SyncClient] = {}
         self._inflight: set[str] = set()
         self._sync_queue: asyncio.Queue = asyncio.Queue()
-        self._worker_task: Optional[asyncio.Task] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._worker_task: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._peer_backoff: dict[str, float] = {}
         self._peer_last_failure: dict[str, float] = {}
         self._backoff_max = 3600
@@ -418,7 +414,7 @@ class SyncManager:
             )
         return last_result
 
-    def _create_local_witness(self, rec: Record, upstream: Witness) -> Optional[Witness]:
+    def _create_local_witness(self, rec: Record, upstream: Witness) -> Witness | None:
         """Create a local relay witness naming the upstream as immediate source."""
         encoded = encode_record(rec)
         event_hash = compute_event_hash(encoded)
