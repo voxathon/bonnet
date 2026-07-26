@@ -43,16 +43,29 @@ FIREHOSE_LABEL = "bonnet"
 class _BodyTooLarge(Exception):
     pass
 
-REQUEST_REQUIRED_COMPONENTS = frozenset({
-    "@method", "@authority", "@target-uri",
-    "content-type", "content-digest",
-    "bonnet-protocol", "bonnet-nonce",
-})
 
-RESPONSE_REQUIRED_COMPONENTS = frozenset({
-    "@status", "content-type", "content-digest",
-    "bonnet-protocol", "bonnet-origin", "bonnet-request-nonce",
-})
+REQUEST_REQUIRED_COMPONENTS = frozenset(
+    {
+        "@method",
+        "@authority",
+        "@target-uri",
+        "content-type",
+        "content-digest",
+        "bonnet-protocol",
+        "bonnet-nonce",
+    }
+)
+
+RESPONSE_REQUIRED_COMPONENTS = frozenset(
+    {
+        "@status",
+        "content-type",
+        "content-digest",
+        "bonnet-protocol",
+        "bonnet-origin",
+        "bonnet-request-nonce",
+    }
+)
 
 
 class FirehoseKeyResolver(KeyResolver):
@@ -94,12 +107,12 @@ class FirehoseHTTPServer:
 
         self._replay_ledger = replay_ledger or ReplayLedger(
             config.replay_db_path,
-            clock_skew_seconds=getattr(config, 'clock_skew_seconds', 30),
+            clock_skew_seconds=getattr(config, "clock_skew_seconds", 30),
         )
 
         self._rate_limiter = rate_limiter or RateLimiter(
-            max_requests=getattr(config, 'rate_limit_requests', 100),
-            window_seconds=getattr(config, 'rate_limit_window', 1),
+            max_requests=getattr(config, "rate_limit_requests", 100),
+            window_seconds=getattr(config, "rate_limit_window", 1),
         )
 
         self._signer = BonnetSigner(
@@ -108,13 +121,20 @@ class FirehoseHTTPServer:
             tag=FIREHOSE_TAG,
             label=FIREHOSE_LABEL,
             request_components=[
-                "@method", "@authority", "@target-uri",
-                "content-type", "content-digest",
-                "bonnet-protocol", "bonnet-nonce",
+                "@method",
+                "@authority",
+                "@target-uri",
+                "content-type",
+                "content-digest",
+                "bonnet-protocol",
+                "bonnet-nonce",
             ],
             response_components=[
-                "@status", "content-type", "content-digest",
-                "bonnet-protocol", "bonnet-origin",
+                "@status",
+                "content-type",
+                "content-digest",
+                "bonnet-protocol",
+                "bonnet-origin",
                 "bonnet-request-nonce",
             ],
         )
@@ -122,13 +142,13 @@ class FirehoseHTTPServer:
         self._verifier = BonnetVerifier(
             key_resolver=FirehoseKeyResolver(self._anonymous_public_key),
             tag=FIREHOSE_TAG,
-            max_lifetime=getattr(config, 'signature_lifetime_seconds', 60),
-            clock_skew=getattr(config, 'clock_skew_seconds', 30),
+            max_lifetime=getattr(config, "signature_lifetime_seconds", 60),
+            clock_skew=getattr(config, "clock_skew_seconds", 30),
             request_required_components=REQUEST_REQUIRED_COMPONENTS,
             response_required_components=RESPONSE_REQUIRED_COMPONENTS,
         )
 
-        self._max_request_size = getattr(config, 'max_request_size', 10 * 1024 * 1024)
+        self._max_request_size = getattr(config, "max_request_size", 10 * 1024 * 1024)
         self._cleanup_counter = 0
 
     async def __call__(self, scope, receive, send):
@@ -163,27 +183,29 @@ class FirehoseHTTPServer:
 
     async def _handle_discovery(self, scope, receive, send):
         known_origins = [self._config.origin]
-        for peer in getattr(self._config, 'peers', []):
+        for peer in getattr(self._config, "peers", []):
             known_origins.append(peer.origin)
         known_origins = sorted(set(known_origins))
 
-        body = json.dumps({
-            "protocol": "bonnet-firehose-1",
-            "origin": self._config.origin,
-            "hostname": self._config.hostname,
-            "public_key": self._server_identity.public_key.hex(),
-            "anonymous_key": self._anonymous_public_key.hex(),
-            "anonymous_private_key": self._anonymous_identity.private_key.hex(),
-            "command_endpoint": "/command",
-            "known_origins": known_origins,
-            "capabilities": [
-                "global-firehose",
-                "generic-record-kinds",
-                "relay-hop-witness",
-                "per-board-body-search",
-                "origin-directory-v1",
-            ],
-        }).encode("utf-8")
+        body = json.dumps(
+            {
+                "protocol": "bonnet-firehose-1",
+                "origin": self._config.origin,
+                "hostname": self._config.hostname,
+                "public_key": self._server_identity.public_key.hex(),
+                "anonymous_key": self._anonymous_public_key.hex(),
+                "anonymous_private_key": self._anonymous_identity.private_key.hex(),
+                "command_endpoint": "/command",
+                "known_origins": known_origins,
+                "capabilities": [
+                    "global-firehose",
+                    "generic-record-kinds",
+                    "relay-hop-witness",
+                    "per-board-body-search",
+                    "origin-directory-v1",
+                ],
+            }
+        ).encode("utf-8")
 
         msg = HTTPMessage(
             method="GET",
@@ -287,7 +309,9 @@ class FirehoseHTTPServer:
             if expires is None:
                 expires = int(time.time()) + 60
             if not self._replay_ledger.check_and_insert(peer_public_key, nonce, int(expires)):
-                await self._send_protocol_error(send, 409, "Replay detected", remote_addr, request_nonce)
+                await self._send_protocol_error(
+                    send, 409, "Replay detected", remote_addr, request_nonce
+                )
                 return
 
         if is_anonymous:
@@ -296,13 +320,17 @@ class FirehoseHTTPServer:
             rl_key = self._rate_limiter.identity_key(peer_public_key)
 
         if not self._rate_limiter.check(rl_key):
-            await self._send_protocol_error(send, 429, "Too many requests", remote_addr, request_nonce)
+            await self._send_protocol_error(
+                send, 429, "Too many requests", remote_addr, request_nonce
+            )
             return
 
         if not is_anonymous:
             addr_key = self._rate_limiter.address_key(remote_addr)
             if not self._rate_limiter.check(addr_key):
-                await self._send_protocol_error(send, 429, "Too many requests", remote_addr, request_nonce)
+                await self._send_protocol_error(
+                    send, 429, "Too many requests", remote_addr, request_nonce
+                )
                 return
 
         if self._cleanup_counter % 64 == 0:
@@ -379,8 +407,9 @@ class FirehoseHTTPServer:
         headers = self._msg_to_headers(msg)
         await self._send_raw(send, 200, headers, response_body)
 
-    async def _send_protocol_error(self, send, status_code: int, message: str,
-                                   remote_addr: str, request_nonce: str = ""):
+    async def _send_protocol_error(
+        self, send, status_code: int, message: str, remote_addr: str, request_nonce: str = ""
+    ):
         body = message.encode("utf-8")
 
         msg = HTTPMessage(
@@ -416,7 +445,9 @@ class FirehoseHTTPServer:
                 if isinstance(k, bytes):
                     raw_headers.append((k, v if isinstance(v, bytes) else v.encode("utf-8")))
                 else:
-                    raw_headers.append((k.encode("utf-8"), v.encode("utf-8") if isinstance(v, str) else v))
+                    raw_headers.append(
+                        (k.encode("utf-8"), v.encode("utf-8") if isinstance(v, str) else v)
+                    )
             else:
                 raw_headers.append(item)
         await send({"type": "http.response.start", "status": status_code, "headers": raw_headers})

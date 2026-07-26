@@ -100,6 +100,7 @@ def _enc_text16(s: str) -> bytes:
 # Helpers to build mock server responses
 # ---------------------------------------------------------------------------
 
+
 def _success(payload: bytes = b"") -> bytes:
     return b"\x00" + payload
 
@@ -109,25 +110,41 @@ def _error_resp(code: int, msg: str) -> bytes:
     return b"\x01" + struct.pack(">H", code) + struct.pack(">H", len(msg_bytes)) + msg_bytes
 
 
-def _make_record(origin="bbs.test", seq=1, eid=None, kind="bonnet.article",
-                 article_num=1, board="general", actor=ACTOR) -> Record:
+def _make_record(
+    origin="bbs.test",
+    seq=1,
+    eid=None,
+    kind="bonnet.article",
+    article_num=1,
+    board="general",
+    actor=ACTOR,
+) -> Record:
     eid = eid or _rid(seq)
     body = b"test body"
     intent = Intent(
-        event_id=eid, kind=kind, origin=origin,
-        actor_pubkey=actor.public_key, board=board,
+        event_id=eid,
+        kind=kind,
+        origin=origin,
+        actor_pubkey=actor.public_key,
+        board=board,
         article_id=_rid(seq + 10) if kind == "bonnet.article" else ZERO_ID,
-        metadata=MetadataMap([
-            metadata_text(1, "Test Subject"),
-            metadata_text(4, "text/plain"),
-        ]),
+        metadata=MetadataMap(
+            [
+                metadata_text(1, "Test Subject"),
+                metadata_text(4, "text/plain"),
+            ]
+        ),
         body_hash=compute_body_hash(body) if body else ZERO_HASH,
         body_size=len(body) if body else 0,
     )
     actor_sig = sign_intent(actor, encode_intent(intent))
     rec = Record(
-        origin=origin, origin_seq=seq, previous_event_hash=ZERO_HASH,
-        event_id=eid, kind=kind, actor_pubkey=actor.public_key,
+        origin=origin,
+        origin_seq=seq,
+        previous_event_hash=ZERO_HASH,
+        event_id=eid,
+        kind=kind,
+        actor_pubkey=actor.public_key,
         board=board,
         article_id=intent.article_id,
         article_num=article_num if kind == "bonnet.article" else 0,
@@ -145,15 +162,21 @@ def _make_witness(rec: Record, hostname="bbs.test") -> Witness:
     encoded = encode_record(rec)
     event_hash = compute_event_hash(encoded)
     from core.record import make_origin_witness
+
     return make_origin_witness(
-        origin=rec.origin, event_id=rec.event_id, event_hash=event_hash,
-        origin_identity=ORIGIN, hostname=hostname, seen_at=1700000000,
+        origin=rec.origin,
+        event_id=rec.event_id,
+        event_hash=event_hash,
+        origin_identity=ORIGIN,
+        hostname=hostname,
+        seen_at=1700000000,
     )
 
 
 # ---------------------------------------------------------------------------
 # Response parser tests
 # ---------------------------------------------------------------------------
+
 
 class TestResponseParser:
     def test_success(self):
@@ -174,17 +197,25 @@ class TestResponseParser:
 # PUBLISH_RECORD
 # ---------------------------------------------------------------------------
 
+
 class TestPublishRecord:
     def test_build_and_parse(self):
         body = b"hello world"
         intent = Intent(
-            event_id=_rid(1), kind="bonnet.article", origin="bbs.test",
-            actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(2),
-            metadata=MetadataMap([
-                metadata_text(1, "Subject"),
-                metadata_text(4, "text/plain"),
-            ]),
-            body_hash=compute_body_hash(body), body_size=len(body),
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Subject"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
         )
         actor_sig = sign_intent(ACTOR, encode_intent(intent))
         cmd = build_publish_record(intent, actor_sig, body)
@@ -195,8 +226,10 @@ class TestPublishRecord:
         encoded_rec = encode_record(rec)
         encoded_w = encode_witness(witness)
         resp = _success(
-            struct.pack(">I", len(encoded_rec)) + encoded_rec +
-            struct.pack(">H", len(encoded_w)) + encoded_w
+            struct.pack(">I", len(encoded_rec))
+            + encoded_rec
+            + struct.pack(">H", len(encoded_w))
+            + encoded_w
         )
 
         result = parse_publish_response(resp)
@@ -210,8 +243,10 @@ class TestPublishRecord:
         encoded_rec = encode_record(rec)
         encoded_w = encode_witness(witness)
         resp = _success(
-            struct.pack(">I", len(encoded_rec)) + encoded_rec +
-            struct.pack(">H", len(encoded_w)) + encoded_w
+            struct.pack(">I", len(encoded_rec))
+            + encoded_rec
+            + struct.pack(">H", len(encoded_w))
+            + encoded_w
         )
         raw_rec, raw_w = parse_publish_response_raw(resp)
         assert raw_rec.event_id == rec.event_id
@@ -221,6 +256,7 @@ class TestPublishRecord:
 # ---------------------------------------------------------------------------
 # EVENT_HEAD
 # ---------------------------------------------------------------------------
+
 
 class TestEventHead:
     def test_build(self):
@@ -248,6 +284,7 @@ class TestEventHead:
 # EVENT_RANGE
 # ---------------------------------------------------------------------------
 
+
 class TestEventRange:
     def test_build(self):
         cmd = build_event_range("bbs.test", 1, 50, 1024)
@@ -274,6 +311,7 @@ class TestEventRange:
 # EVENT_GET
 # ---------------------------------------------------------------------------
 
+
 class TestEventGet:
     def test_build(self):
         eid = _rid(5)
@@ -286,10 +324,7 @@ class TestEventGet:
         w = _make_witness(rec)
         er = encode_record(rec)
         ew = encode_witness(w)
-        resp = _success(
-            struct.pack(">I", len(er)) + er +
-            struct.pack(">H", len(ew)) + ew
-        )
+        resp = _success(struct.pack(">I", len(er)) + er + struct.pack(">H", len(ew)) + ew)
         raw_rec, raw_w = parse_event_get_response(resp)
         assert raw_rec.event_id == rec.event_id
         assert raw_w.relay_pubkey == ORIGIN_PUB
@@ -298,6 +333,7 @@ class TestEventGet:
 # ---------------------------------------------------------------------------
 # BOARD_LIST
 # ---------------------------------------------------------------------------
+
 
 class TestBoardList:
     def test_build(self):
@@ -328,6 +364,7 @@ class TestBoardList:
 # ---------------------------------------------------------------------------
 # ARTICLE_GET
 # ---------------------------------------------------------------------------
+
 
 class TestArticleGet:
     def test_build_by_num(self):
@@ -385,6 +422,7 @@ class TestArticleGet:
 # ARTICLE_LIST
 # ---------------------------------------------------------------------------
 
+
 class TestArticleList:
     def test_build(self):
         cmd = build_article_list("bbs.test", "general", 0, 10, include_cancelled=True)
@@ -428,6 +466,7 @@ class TestArticleList:
 # ARTICLE_SEARCH
 # ---------------------------------------------------------------------------
 
+
 class TestArticleSearch:
     def test_build(self):
         cmd = build_article_search("bbs.test", "general", "hello", "", 0, 10)
@@ -461,6 +500,7 @@ class TestArticleSearch:
 # ARTICLE_BODY
 # ---------------------------------------------------------------------------
 
+
 class TestArticleBody:
     def test_build(self):
         cmd = build_article_body("bbs.test", "general", 1)
@@ -476,6 +516,7 @@ class TestArticleBody:
 # ---------------------------------------------------------------------------
 # USER_GET
 # ---------------------------------------------------------------------------
+
 
 class TestUserGet:
     def test_build(self):
@@ -504,6 +545,7 @@ class TestUserGet:
 # USER_LIST
 # ---------------------------------------------------------------------------
 
+
 class TestUserList:
     def test_build(self):
         cmd = build_user_list("bbs.test", include_revoked=True)
@@ -530,6 +572,7 @@ class TestUserList:
 # ---------------------------------------------------------------------------
 # BAN_STATUS
 # ---------------------------------------------------------------------------
+
 
 class TestBanStatus:
     def test_build(self):
@@ -558,6 +601,7 @@ class TestBanStatus:
 # ---------------------------------------------------------------------------
 # EVENT_BODY
 # ---------------------------------------------------------------------------
+
 
 class TestEventBody:
     def test_build(self):

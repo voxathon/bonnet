@@ -57,14 +57,23 @@ VT_BOOL = 0x05
 VT_ID_LIST = 0x06
 VT_TEXT_LIST = 0x07
 
-_VALID_VALUE_TYPES = frozenset({
-    VT_BYTES, VT_TEXT, VT_U64, VT_I64, VT_BOOL, VT_ID_LIST, VT_TEXT_LIST,
-})
+_VALID_VALUE_TYPES = frozenset(
+    {
+        VT_BYTES,
+        VT_TEXT,
+        VT_U64,
+        VT_I64,
+        VT_BOOL,
+        VT_ID_LIST,
+        VT_TEXT_LIST,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
+
 
 class CodecError(Exception):
     """Base for all encoding/decoding errors."""
@@ -93,6 +102,7 @@ class InvalidValue(CodecError):
 # ---------------------------------------------------------------------------
 # Primitive encoders (§5)
 # ---------------------------------------------------------------------------
+
 
 def enc_u8(v: int) -> bytes:
     if not 0 <= v <= 0xFF:
@@ -160,6 +170,7 @@ def enc_blob32(v: bytes, max_len: int = 0xFFFFFFFF) -> bytes:
 # Primitive decoders (§5)
 # ---------------------------------------------------------------------------
 
+
 class _Reader:
     __slots__ = ("data", "offset")
 
@@ -169,8 +180,10 @@ class _Reader:
 
     def read(self, n: int) -> bytes:
         if self.offset + n > len(self.data):
-            raise TruncatedInput(f"need {n} bytes at offset {self.offset}, have {len(self.data) - self.offset}")
-        chunk = self.data[self.offset:self.offset + n]
+            raise TruncatedInput(
+                f"need {n} bytes at offset {self.offset}, have {len(self.data) - self.offset}"
+            )
+        chunk = self.data[self.offset : self.offset + n]
         self.offset += n
         return chunk
 
@@ -225,7 +238,9 @@ class _Reader:
 
     def expect_end(self) -> None:
         if self.offset < len(self.data):
-            raise TrailingInput(f"{len(self.data) - self.offset} trailing bytes at offset {self.offset}")
+            raise TrailingInput(
+                f"{len(self.data) - self.offset} trailing bytes at offset {self.offset}"
+            )
 
 
 def _is_nfc(utf8_bytes: bytes) -> bool:
@@ -243,6 +258,7 @@ def _normalize_text(s: str) -> str:
 # ---------------------------------------------------------------------------
 # Metadata map (§6)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class MetadataField:
@@ -359,7 +375,9 @@ def encode_metadata(m: MetadataMap) -> bytes:
     prev_id = -1
     for f in fields:
         if f.field_id <= prev_id:
-            raise NonCanonical(f"metadata field IDs must be strictly increasing; {f.field_id} after {prev_id}")
+            raise NonCanonical(
+                f"metadata field IDs must be strictly increasing; {f.field_id} after {prev_id}"
+            )
         if f.value_type not in _VALID_VALUE_TYPES:
             raise InvalidValue(f"invalid value type 0x{f.value_type:02x}")
         if len(f.value) > 0xFFFFFFFF:
@@ -385,7 +403,9 @@ def decode_metadata(data: bytes) -> MetadataMap:
     for _ in range(count):
         fid = r.u16()
         if fid <= prev_id:
-            raise NonCanonical(f"metadata field IDs must be strictly increasing; {fid} after {prev_id}")
+            raise NonCanonical(
+                f"metadata field IDs must be strictly increasing; {fid} after {prev_id}"
+            )
         vtype = r.u8()
         if vtype not in _VALID_VALUE_TYPES:
             raise InvalidValue(f"invalid metadata value type 0x{vtype:02x}")
@@ -458,6 +478,7 @@ def _validate_value(vtype: int, v: bytes) -> None:
 # Hash and signature domain functions (§4)
 # ---------------------------------------------------------------------------
 
+
 def compute_body_hash(body: bytes) -> bytes:
     return hashlib.sha256(DOMAIN_BODY + body).digest()
 
@@ -482,7 +503,9 @@ def sign_record(identity: Identity, encoded_unsigned_record: bytes) -> bytes:
     return identity.sign(DOMAIN_ORIGIN_SIG + encoded_unsigned_record)
 
 
-def verify_record_signature(origin_pubkey: bytes, encoded_unsigned_record: bytes, signature: bytes) -> bool:
+def verify_record_signature(
+    origin_pubkey: bytes, encoded_unsigned_record: bytes, signature: bytes
+) -> bool:
     return Identity.verify(origin_pubkey, DOMAIN_ORIGIN_SIG + encoded_unsigned_record, signature)
 
 
@@ -490,7 +513,9 @@ def sign_head(identity: Identity, encoded_unsigned_head: bytes) -> bytes:
     return identity.sign(DOMAIN_HEAD_SIG + encoded_unsigned_head)
 
 
-def verify_head_signature(origin_pubkey: bytes, encoded_unsigned_head: bytes, signature: bytes) -> bool:
+def verify_head_signature(
+    origin_pubkey: bytes, encoded_unsigned_head: bytes, signature: bytes
+) -> bool:
     return Identity.verify(origin_pubkey, DOMAIN_HEAD_SIG + encoded_unsigned_head, signature)
 
 
@@ -498,23 +523,34 @@ def sign_witness(identity: Identity, encoded_unsigned_witness: bytes) -> bytes:
     return identity.sign(DOMAIN_WITNESS_SIG + encoded_unsigned_witness)
 
 
-def verify_witness_signature(relay_pubkey: bytes, encoded_unsigned_witness: bytes, signature: bytes) -> bool:
+def verify_witness_signature(
+    relay_pubkey: bytes, encoded_unsigned_witness: bytes, signature: bytes
+) -> bool:
     return Identity.verify(relay_pubkey, DOMAIN_WITNESS_SIG + encoded_unsigned_witness, signature)
 
 
-def sign_key_rotation_proof(new_identity: Identity, origin: str, old_pubkey: bytes, new_pubkey: bytes) -> bytes:
-    payload = enc_text16(origin, MAX_ORIGIN_HOSTNAME) + enc_key32(old_pubkey) + enc_key32(new_pubkey)
+def sign_key_rotation_proof(
+    new_identity: Identity, origin: str, old_pubkey: bytes, new_pubkey: bytes
+) -> bytes:
+    payload = (
+        enc_text16(origin, MAX_ORIGIN_HOSTNAME) + enc_key32(old_pubkey) + enc_key32(new_pubkey)
+    )
     return new_identity.sign(DOMAIN_KEY_ROTATION_PROOF + payload)
 
 
-def verify_key_rotation_proof(new_pubkey: bytes, origin: str, old_pubkey: bytes, proof: bytes) -> bool:
-    payload = enc_text16(origin, MAX_ORIGIN_HOSTNAME) + enc_key32(old_pubkey) + enc_key32(new_pubkey)
+def verify_key_rotation_proof(
+    new_pubkey: bytes, origin: str, old_pubkey: bytes, proof: bytes
+) -> bool:
+    payload = (
+        enc_text16(origin, MAX_ORIGIN_HOSTNAME) + enc_key32(old_pubkey) + enc_key32(new_pubkey)
+    )
     return Identity.verify(new_pubkey, DOMAIN_KEY_ROTATION_PROOF + payload, proof)
 
 
 # ---------------------------------------------------------------------------
 # Actor Intent (§7)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class Intent:
@@ -593,6 +629,7 @@ def decode_intent(data: bytes) -> Intent:
 # ---------------------------------------------------------------------------
 # Origin Record (§8)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class Record:
@@ -750,6 +787,7 @@ def reconstruct_intent_from_record(rec: Record) -> Intent:
 # Origin Head (§9)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Head:
     head_format: int = HEAD_FORMAT
@@ -821,6 +859,7 @@ def decode_unsigned_head(data: bytes) -> tuple[Head, bytes]:
 # ---------------------------------------------------------------------------
 # Relay Witness (§10)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class Witness:

@@ -16,7 +16,9 @@ def main():
     parser.add_argument("--host", default=None, help="Override bind host")
     parser.add_argument("--cert", default=None, help="TLS certificate path")
     parser.add_argument("--key", default=None, help="TLS key path")
-    parser.add_argument("--create-config", action="store_true", help="Write a sample config file and exit")
+    parser.add_argument(
+        "--create-config", action="store_true", help="Write a sample config file and exit"
+    )
     args = parser.parse_args()
 
     if args.create_config:
@@ -38,9 +40,7 @@ def main():
     signal.signal(signal.SIGTERM, handle_sigterm)
 
     try:
-        asyncio.run(
-            server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key)
-        )
+        asyncio.run(server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key))
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:

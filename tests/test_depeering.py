@@ -31,24 +31,36 @@ def _rid(seed):
 
 def _make_article_intent(origin, eid, board="general", body=b"hello", aid_seed=99):
     return Intent(
-        event_id=eid, kind=KIND_ARTICLE, origin=origin,
-        actor_pubkey=ACTOR_PUB, board=board, article_id=_rid(aid_seed),
-        metadata=MetadataMap([
-            metadata_text(1, "Test"),
-            metadata_text(4, "text/plain"),
-        ]),
-        body_hash=compute_body_hash(body), body_size=len(body),
+        event_id=eid,
+        kind=KIND_ARTICLE,
+        origin=origin,
+        actor_pubkey=ACTOR_PUB,
+        board=board,
+        article_id=_rid(aid_seed),
+        metadata=MetadataMap(
+            [
+                metadata_text(1, "Test"),
+                metadata_text(4, "text/plain"),
+            ]
+        ),
+        body_hash=compute_body_hash(body),
+        body_size=len(body),
     )
 
 
 def _make_board_create_intent(origin, eid, board, owner_pubkey):
     return Intent(
-        event_id=eid, kind="bonnet.board.create", origin=origin,
-        actor_pubkey=ACTOR_PUB, board=board,
-        metadata=MetadataMap([
-            metadata_bytes(1, owner_pubkey),
-            metadata_text(2, "Test Board"),
-        ]),
+        event_id=eid,
+        kind="bonnet.board.create",
+        origin=origin,
+        actor_pubkey=ACTOR_PUB,
+        board=board,
+        metadata=MetadataMap(
+            [
+                metadata_bytes(1, owner_pubkey),
+                metadata_text(2, "Test Board"),
+            ]
+        ),
     )
 
 
@@ -60,10 +72,14 @@ def _append(firehose, origin_identity, intent, body=b""):
 class MockSyncClient(SyncClient):
     async def fetch_head(self, origin):
         from core.record import ZERO_HASH, Head
+
         return Head(
-            origin=origin, latest_origin_seq=0,
-            latest_event_hash=ZERO_HASH, event_count=0,
-            generated_at=0, origin_pubkey=ORIGIN_PUB,
+            origin=origin,
+            latest_origin_seq=0,
+            latest_event_hash=ZERO_HASH,
+            event_count=0,
+            generated_at=0,
+            origin_pubkey=ORIGIN_PUB,
             origin_signature=b"\x00" * 64,
             head_hash=ZERO_HASH,
         ), b""
@@ -82,6 +98,7 @@ def server(tmp_path):
     os.makedirs(tmp_path / "event_bodies", exist_ok=True)
 
     from app.server import BonnetFirehoseServer
+
     config = FirehoseConfig(
         origin="bbs.test",
         hostname="bbs.test",
@@ -102,6 +119,7 @@ def server(tmp_path):
 # ---------------------------------------------------------------------------
 # FirehoseStore methods
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def firehose_with_remote_data(tmp_path):
@@ -180,6 +198,7 @@ def test_delete_origin_data_preserves_local(firehose_with_remote_data):
 # BodyStore.delete_origin_bodies
 # ---------------------------------------------------------------------------
 
+
 def test_delete_origin_bodies(tmp_path):
     bs = BodyStore(
         boards_dir=str(tmp_path / "boards"),
@@ -201,6 +220,7 @@ def test_delete_origin_bodies(tmp_path):
 # depeer REPL command
 # ---------------------------------------------------------------------------
 
+
 def test_depeer_rejects_local_origin(server):
     result = server._cmd_depeer(["depeer", "bbs.test"])
     assert "Cannot depeer" in result
@@ -214,6 +234,7 @@ def test_depeer_unknown_origin(server):
 # ---------------------------------------------------------------------------
 # purge-origin REPL command
 # ---------------------------------------------------------------------------
+
 
 def test_purge_origin_rejects_local(server):
     result = server._cmd_purge_origin(["purge-origin", "bbs.test"])
@@ -248,12 +269,19 @@ def test_purge_origin_removes_data(server, tmp_path):
         intent.body_size = len(body)
         sig = sign_intent(ACTOR, encode_intent(intent))
         server.body_store.stage_article_body(
-            "peer.test", "general", intent.event_id, body,
-            intent.body_hash, intent.body_size,
+            "peer.test",
+            "general",
+            intent.event_id,
+            body,
+            intent.body_hash,
+            intent.body_size,
         )
         server.firehose.append_record(remote_identity, intent, sig, body)
         server.body_store.finalize_article_body(
-            "peer.test", "general", intent.event_id, i + 1,
+            "peer.test",
+            "general",
+            intent.event_id,
+            i + 1,
         )
 
     server.dispatcher.dispatch_origin("peer.test")
@@ -272,6 +300,7 @@ def test_purge_origin_preserves_local(server):
 # ---------------------------------------------------------------------------
 # reset-key REPL command
 # ---------------------------------------------------------------------------
+
 
 def test_reset_key_rejects_local(server):
     result = server._cmd_reset_key(["reset-key", "bbs.test"])

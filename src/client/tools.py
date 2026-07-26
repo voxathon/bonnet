@@ -35,7 +35,11 @@ current_password: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 
 identity_store: IdentityStore | None = None
 bonnet_url: str = os.environ.get("BONNET_URL", "https://localhost:2272")
-bonnet_verify: bool | str = os.environ.get("BONNET_VERIFY_TLS", "true").lower() not in ("false", "0", "no")
+bonnet_verify: bool | str = os.environ.get("BONNET_VERIFY_TLS", "true").lower() not in (
+    "false",
+    "0",
+    "no",
+)
 
 auth_tokens: dict[str, dict] = {}
 TOKEN_EXPIRY_SECONDS = 24 * 60 * 60
@@ -123,6 +127,7 @@ def _validate_event_id(eid_hex: str) -> bytes:
 # ---------------------------------------------------------------------------
 # Auth / identity tools
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool
 async def login(username: str, password: str) -> str:
@@ -215,9 +220,12 @@ async def list_users(origin: str = "", auth: str | None = None) -> list[UserInfo
 # Board tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool
 async def create_board(
-    name: str, display_name: str = "", auth: str | None = None,
+    name: str,
+    display_name: str = "",
+    auth: str | None = None,
 ) -> str:
     """Create a new board. Requires admin privileges.
 
@@ -228,7 +236,9 @@ async def create_board(
     try:
         await _connect_authenticated(client, auth)
         result = await client.publish_board_create(
-            name, client._identity.public_key, display_name,
+            name,
+            client._identity.public_key,
+            display_name,
         )
         return f"Board '{name}' created — event seq {result.origin_seq}"
     finally:
@@ -257,6 +267,7 @@ async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardIn
 # ---------------------------------------------------------------------------
 # Article tools (read)
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool
 async def get_article(
@@ -291,6 +302,7 @@ async def get_article(
                 view.body = body
                 if view.body_hash and view.body_size:
                     from core.record import compute_body_hash
+
                     actual_hash = compute_body_hash(body).hex()
                     view.body_verified = (
                         len(body) == view.body_size and actual_hash == view.body_hash
@@ -334,10 +346,20 @@ async def list_articles(
             await _connect_anonymous(client)
         if origin:
             return await client.list_articles(
-                origin, board, offset, limit, include_cancelled, include_superseded,
+                origin,
+                board,
+                offset,
+                limit,
+                include_cancelled,
+                include_superseded,
             )
         return await client.list_articles(
-            "", board, offset, limit, include_cancelled, include_superseded,
+            "",
+            board,
+            offset,
+            limit,
+            include_cancelled,
+            include_superseded,
         )
     finally:
         await client.close()
@@ -434,6 +456,7 @@ async def query_articles(
 # Article tools (write)
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool
 async def publish_article(
     board: str,
@@ -456,6 +479,7 @@ async def publish_article(
     reply_to_article_id: hex article ID of the article being replied to (optional).
     """
     import os as _os
+
     article_id = _os.urandom(32)
     tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     body = content.encode("utf-8")
@@ -485,7 +509,10 @@ async def publish_article(
     try:
         await _connect_authenticated(client, auth)
         result = await client.publish_article(
-            board, article_id, body, subject,
+            board,
+            article_id,
+            body,
+            subject,
             tags=tags_list or None,
             root_article_id=root_id,
             reply_to_article_id=reply_id,
@@ -516,6 +543,7 @@ async def supersede_article(
     tags: comma-separated tags (optional).
     """
     import os as _os
+
     supersedes_id = _validate_article_id(target_article_id)
     article_id = _os.urandom(32)
     tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
@@ -525,7 +553,10 @@ async def supersede_article(
     try:
         await _connect_authenticated(client, auth)
         result = await client.publish_supersede(
-            board, article_id, body, subject,
+            board,
+            article_id,
+            body,
+            subject,
             supersedes_article_id=supersedes_id,
             tags=tags_list or None,
         )
@@ -662,6 +693,7 @@ async def unpin_article(
 # Ban status
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool
 async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
     """Check if a user is currently banned.
@@ -684,6 +716,7 @@ async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
 # ---------------------------------------------------------------------------
 # Firehose / federation tools
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool
 async def event_head(origin: str = "", auth: str | None = None) -> HeadInfo | None:
@@ -739,8 +772,12 @@ async def event_range(
                 "article_num": rec.article_num,
                 "target_origin": rec.target_origin,
                 "target_board": rec.target_board,
-                "target_article_id": rec.target_article_id.hex() if rec.target_article_id != ZERO_ID else "",
-                "target_event_id": rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else "",
+                "target_article_id": rec.target_article_id.hex()
+                if rec.target_article_id != ZERO_ID
+                else "",
+                "target_event_id": rec.target_event_id.hex()
+                if rec.target_event_id != ZERO_ID
+                else "",
                 "created_at": rec.created_at,
             }
             for rec, witness in results
@@ -783,7 +820,9 @@ async def get_event(
             "article_num": rec.article_num,
             "target_origin": rec.target_origin,
             "target_board": rec.target_board,
-            "target_article_id": rec.target_article_id.hex() if rec.target_article_id != ZERO_ID else "",
+            "target_article_id": rec.target_article_id.hex()
+            if rec.target_article_id != ZERO_ID
+            else "",
             "target_event_id": rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else "",
             "body_hash": rec.body_hash.hex(),
             "body_size": rec.body_size,

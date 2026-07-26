@@ -48,24 +48,35 @@ def _rid(seed: int) -> bytes:
 
 def _make_article_intent(origin, eid, aid, board="general", body=b"hello world"):
     return Intent(
-        event_id=eid, kind="bonnet.article", origin=origin,
-        actor_pubkey=ACTOR_PUB, board=board, article_id=aid,
-        metadata=MetadataMap([
-            metadata_text(1, "Test Article"),
-            metadata_text(4, "text/plain"),
-        ]),
-        body_hash=compute_body_hash(body), body_size=len(body),
+        event_id=eid,
+        kind="bonnet.article",
+        origin=origin,
+        actor_pubkey=ACTOR_PUB,
+        board=board,
+        article_id=aid,
+        metadata=MetadataMap(
+            [
+                metadata_text(1, "Test Article"),
+                metadata_text(4, "text/plain"),
+            ]
+        ),
+        body_hash=compute_body_hash(body),
+        body_size=len(body),
     )
 
 
 def _make_record(origin, seq, prev_hash, eid, kind, actor=ACTOR, **kwargs):
-    intent = Intent(event_id=eid, kind=kind, origin=origin,
-                    actor_pubkey=actor.public_key, **kwargs)
+    intent = Intent(event_id=eid, kind=kind, origin=origin, actor_pubkey=actor.public_key, **kwargs)
     actor_sig = sign_intent(actor, encode_intent(intent))
     rec = Record(
-        origin=origin, origin_seq=seq, previous_event_hash=prev_hash,
-        event_id=eid, kind=kind, actor_pubkey=actor.public_key,
-        actor_signature=actor_sig, **kwargs,
+        origin=origin,
+        origin_seq=seq,
+        previous_event_hash=prev_hash,
+        event_id=eid,
+        kind=kind,
+        actor_pubkey=actor.public_key,
+        actor_signature=actor_sig,
+        **kwargs,
     )
     unsigned = encode_unsigned_record(rec)
     rec.origin_signature = sign_record(ORIGIN_A, unsigned)
@@ -75,6 +86,7 @@ def _make_record(origin, seq, prev_hash, eid, kind, actor=ACTOR, **kwargs):
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def body_store(tmp_path):
@@ -129,8 +141,12 @@ def dispatcher(tmp_path, firehose):
         events_dir=str(tmp_path / "events_bodies"),
     )
     d = Dispatcher(
-        firehose=firehose, nav=nav, users=users, policy=policy,
-        boards_dir=str(tmp_path / "boards"), body_store=bs,
+        firehose=firehose,
+        nav=nav,
+        users=users,
+        policy=policy,
+        boards_dir=str(tmp_path / "boards"),
+        body_store=bs,
     )
     yield d, firehose, nav, users, policy, bs
     d.close()
@@ -142,6 +158,7 @@ def dispatcher(tmp_path, firehose):
 # ---------------------------------------------------------------------------
 # Body storage tests
 # ---------------------------------------------------------------------------
+
 
 class TestBodyStore:
     def test_write_and_read_article_body(self, body_store):
@@ -190,8 +207,12 @@ class TestBodyStore:
     def test_stage_wrong_hash_rejected(self, body_store):
         with pytest.raises(BodyError):
             body_store.stage_article_body(
-                "bbs.a", "general", _rid(1), b"body",
-                b"\xff" * 32, 4,
+                "bbs.a",
+                "general",
+                _rid(1),
+                b"body",
+                b"\xff" * 32,
+                4,
             )
 
     def test_write_and_read_event_body(self, body_store):
@@ -227,6 +248,7 @@ class TestBodyStore:
 # Board projection tests
 # ---------------------------------------------------------------------------
 
+
 class TestBoardProjection:
     def _make_article_record(self, origin="bbs.a", seq=1, eid=None, aid=None, board="general"):
         eid = eid or _rid(seq)
@@ -235,11 +257,19 @@ class TestBoardProjection:
         intent = _make_article_intent(origin, eid, aid, board, body)
         actor_sig = sign_intent(ACTOR, encode_intent(intent))
         rec = Record(
-            origin=origin, origin_seq=seq, previous_event_hash=ZERO_HASH,
-            event_id=eid, kind="bonnet.article", actor_pubkey=ACTOR_PUB,
-            board=board, article_id=aid, article_num=seq,
-            metadata=intent.metadata, body_hash=intent.body_hash,
-            body_size=intent.body_size, actor_signature=actor_sig,
+            origin=origin,
+            origin_seq=seq,
+            previous_event_hash=ZERO_HASH,
+            event_id=eid,
+            kind="bonnet.article",
+            actor_pubkey=ACTOR_PUB,
+            board=board,
+            article_id=aid,
+            article_num=seq,
+            metadata=intent.metadata,
+            body_hash=intent.body_hash,
+            body_size=intent.body_size,
+            actor_signature=actor_sig,
         )
         unsigned = encode_unsigned_record(rec)
         rec.origin_signature = sign_record(ORIGIN_A, unsigned)
@@ -267,9 +297,14 @@ class TestBoardProjection:
         board_proj.apply_article(rec)
 
         cancel_rec = Record(
-            origin="bbs.a", origin_seq=2, event_id=_rid(2),
-            kind="bonnet.article.cancel", actor_pubkey=ACTOR_PUB,
-            board="general", target_origin="bbs.a", target_board="general",
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.article.cancel",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
             target_article_id=rec.article_id,
         )
         board_proj.apply_cancel(cancel_rec)
@@ -277,9 +312,14 @@ class TestBoardProjection:
         assert art.visibility == "cancelled"
 
         restore_rec = Record(
-            origin="bbs.a", origin_seq=3, event_id=_rid(3),
-            kind="bonnet.article.restore", actor_pubkey=ACTOR_PUB,
-            board="general", target_origin="bbs.a", target_board="general",
+            origin="bbs.a",
+            origin_seq=3,
+            event_id=_rid(3),
+            kind="bonnet.article.restore",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
             target_article_id=rec.article_id,
         )
         board_proj.apply_restore(restore_rec)
@@ -291,9 +331,14 @@ class TestBoardProjection:
         board_proj.apply_article(rec)
 
         purge_rec = Record(
-            origin="bbs.a", origin_seq=2, event_id=_rid(2),
-            kind="bonnet.article.purge", actor_pubkey=ACTOR_PUB,
-            board="general", target_origin="bbs.a", target_board="general",
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.article.purge",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
             target_article_id=rec.article_id,
         )
         board_proj.apply_purge(purge_rec)
@@ -305,9 +350,14 @@ class TestBoardProjection:
         board_proj.apply_article(rec)
 
         cancel_rec = Record(
-            origin="bbs.evil", origin_seq=99, event_id=_rid(99),
-            kind="bonnet.article.cancel", actor_pubkey=ACTOR_PUB,
-            board="general", target_origin="bbs.a", target_board="general",
+            origin="bbs.evil",
+            origin_seq=99,
+            event_id=_rid(99),
+            kind="bonnet.article.cancel",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
             target_article_id=rec.article_id,
         )
         board_proj.apply_cancel(cancel_rec)
@@ -317,9 +367,14 @@ class TestBoardProjection:
     def test_control_before_target_is_pending(self, board_proj):
         aid = _rid(50)
         cancel_rec = Record(
-            origin="bbs.a", origin_seq=1, event_id=_rid(1),
-            kind="bonnet.article.cancel", actor_pubkey=ACTOR_PUB,
-            board="general", target_origin="bbs.a", target_board="general",
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.article.cancel",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
             target_article_id=aid,
         )
         board_proj.apply_cancel(cancel_rec)
@@ -337,9 +392,14 @@ class TestBoardProjection:
             board_proj.apply_article(rec)
 
         cancel_rec = Record(
-            origin="bbs.a", origin_seq=4, event_id=_rid(4),
-            kind="bonnet.article.cancel", actor_pubkey=ACTOR_PUB,
-            board="general", target_origin="bbs.a", target_board="general",
+            origin="bbs.a",
+            origin_seq=4,
+            event_id=_rid(4),
+            kind="bonnet.article.cancel",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
             target_article_id=_rid(11),
         )
         board_proj.apply_cancel(cancel_rec)
@@ -355,9 +415,14 @@ class TestBoardProjection:
         board_proj.apply_article(rec)
 
         pin_rec = Record(
-            origin="bbs.a", origin_seq=2, event_id=_rid(2),
-            kind="bonnet.article.pin", actor_pubkey=ACTOR_PUB,
-            board="general", target_origin="bbs.a", target_board="general",
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.article.pin",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
             target_article_id=rec.article_id,
             metadata=MetadataMap([metadata_i64(1, 42)]),
         )
@@ -367,9 +432,14 @@ class TestBoardProjection:
         assert "42" in art.pin_state
 
         unpin_rec = Record(
-            origin="bbs.a", origin_seq=3, event_id=_rid(3),
-            kind="bonnet.article.unpin", actor_pubkey=ACTOR_PUB,
-            board="general", target_origin="bbs.a", target_board="general",
+            origin="bbs.a",
+            origin_seq=3,
+            event_id=_rid(3),
+            kind="bonnet.article.unpin",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
             target_article_id=rec.article_id,
         )
         board_proj.apply_unpin(unpin_rec)
@@ -381,9 +451,14 @@ class TestBoardProjection:
         board_proj.apply_article(rec)
 
         close_rec = Record(
-            origin="bbs.a", origin_seq=2, event_id=_rid(2),
-            kind="bonnet.thread.close", actor_pubkey=ACTOR_PUB,
-            board="general", target_origin="bbs.a", target_board="general",
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.thread.close",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
             target_article_id=rec.article_id,
         )
         board_proj.apply_thread_close(close_rec)
@@ -391,9 +466,14 @@ class TestBoardProjection:
         assert art.thread_state == "closed"
 
         reopen_rec = Record(
-            origin="bbs.a", origin_seq=3, event_id=_rid(3),
-            kind="bonnet.thread.reopen", actor_pubkey=ACTOR_PUB,
-            board="general", target_origin="bbs.a", target_board="general",
+            origin="bbs.a",
+            origin_seq=3,
+            event_id=_rid(3),
+            kind="bonnet.thread.reopen",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
             target_article_id=rec.article_id,
         )
         board_proj.apply_thread_reopen(reopen_rec)
@@ -418,16 +498,22 @@ class TestBoardProjection:
 # Nav projection tests
 # ---------------------------------------------------------------------------
 
+
 class TestNavProjection:
     def test_board_create(self, nav_proj):
         rec = Record(
-            origin="bbs.a", origin_seq=1, event_id=_rid(1),
-            kind="bonnet.board.create", actor_pubkey=ACTOR_PUB,
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
             board="general",
-            metadata=MetadataMap([
-                metadata_bytes(1, ACTOR_PUB),
-                metadata_text(2, "General Discussion"),
-            ]),
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, ACTOR_PUB),
+                    metadata_text(2, "General Discussion"),
+                ]
+            ),
         )
         nav_proj.apply_board_create(rec)
         board = nav_proj.get_board("bbs.a", "general")
@@ -438,22 +524,34 @@ class TestNavProjection:
 
     def test_board_close_and_reopen(self, nav_proj):
         create_rec = Record(
-            origin="bbs.a", origin_seq=1, event_id=_rid(1),
-            kind="bonnet.board.create", actor_pubkey=ACTOR_PUB,
-            board="general", metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
         )
         nav_proj.apply_board_create(create_rec)
 
         close_rec = Record(
-            origin="bbs.a", origin_seq=2, event_id=_rid(2),
-            kind="bonnet.board.close", actor_pubkey=ACTOR_PUB, board="general",
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.board.close",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
         )
         nav_proj.apply_board_close(close_rec)
         assert nav_proj.get_board("bbs.a", "general")["closed"] is True
 
         reopen_rec = Record(
-            origin="bbs.a", origin_seq=3, event_id=_rid(3),
-            kind="bonnet.board.reopen", actor_pubkey=ACTOR_PUB, board="general",
+            origin="bbs.a",
+            origin_seq=3,
+            event_id=_rid(3),
+            kind="bonnet.board.reopen",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
         )
         nav_proj.apply_board_reopen(reopen_rec)
         assert nav_proj.get_board("bbs.a", "general")["closed"] is False
@@ -461,9 +559,13 @@ class TestNavProjection:
     def test_list_boards(self, nav_proj):
         for i in range(3):
             rec = Record(
-                origin="bbs.a", origin_seq=i + 1, event_id=_rid(i + 1),
-                kind="bonnet.board.create", actor_pubkey=ACTOR_PUB,
-                board=f"board{i}", metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+                origin="bbs.a",
+                origin_seq=i + 1,
+                event_id=_rid(i + 1),
+                kind="bonnet.board.create",
+                actor_pubkey=ACTOR_PUB,
+                board=f"board{i}",
+                metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
             )
             nav_proj.apply_board_create(rec)
         boards = nav_proj.list_boards("bbs.a")
@@ -474,17 +576,23 @@ class TestNavProjection:
 # User projection tests
 # ---------------------------------------------------------------------------
 
+
 class TestUserProjection:
     def test_register_and_get(self, user_proj):
         user_pubkey = _rid(20)
         rec = Record(
-            origin="bbs.a", origin_seq=1, event_id=_rid(1),
-            kind="bonnet.user.register", actor_pubkey=ACTOR_PUB,
-            metadata=MetadataMap([
-                metadata_text(1, "alice"),
-                metadata_bytes(2, user_pubkey),
-                metadata_u64(3, 0),
-            ]),
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.user.register",
+            actor_pubkey=ACTOR_PUB,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "alice"),
+                    metadata_bytes(2, user_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
         )
         user_proj.apply_user_register(rec)
         user = user_proj.get_user_by_pubkey("bbs.a", user_pubkey)
@@ -495,20 +603,29 @@ class TestUserProjection:
     def test_revoke(self, user_proj):
         user_pubkey = _rid(20)
         reg_rec = Record(
-            origin="bbs.a", origin_seq=1, event_id=_rid(1),
-            kind="bonnet.user.register", actor_pubkey=ACTOR_PUB,
-            metadata=MetadataMap([
-                metadata_text(1, "bob"),
-                metadata_bytes(2, user_pubkey),
-                metadata_u64(3, 0),
-            ]),
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.user.register",
+            actor_pubkey=ACTOR_PUB,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "bob"),
+                    metadata_bytes(2, user_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
         )
         user_proj.apply_user_register(reg_rec)
 
         revoke_rec = Record(
-            origin="bbs.a", origin_seq=2, event_id=_rid(2),
-            kind="bonnet.user.revoke", actor_pubkey=ACTOR_PUB,
-            target_origin="bbs.a", target_event_id=_rid(1),
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.user.revoke",
+            actor_pubkey=ACTOR_PUB,
+            target_origin="bbs.a",
+            target_event_id=_rid(1),
             metadata=MetadataMap([metadata_bytes(1, user_pubkey)]),
         )
         user_proj.apply_user_revoke(revoke_rec)
@@ -520,20 +637,29 @@ class TestUserProjection:
         for i in range(3):
             user_pubkey = _rid(20 + i)
             rec = Record(
-                origin="bbs.a", origin_seq=i + 1, event_id=_rid(i + 1),
-                kind="bonnet.user.register", actor_pubkey=ACTOR_PUB,
-                metadata=MetadataMap([
-                    metadata_text(1, f"user{i}"),
-                    metadata_bytes(2, user_pubkey),
-                    metadata_u64(3, 0),
-                ]),
+                origin="bbs.a",
+                origin_seq=i + 1,
+                event_id=_rid(i + 1),
+                kind="bonnet.user.register",
+                actor_pubkey=ACTOR_PUB,
+                metadata=MetadataMap(
+                    [
+                        metadata_text(1, f"user{i}"),
+                        metadata_bytes(2, user_pubkey),
+                        metadata_u64(3, 0),
+                    ]
+                ),
             )
             user_proj.apply_user_register(rec)
 
         revoke_rec = Record(
-            origin="bbs.a", origin_seq=4, event_id=_rid(4),
-            kind="bonnet.user.revoke", actor_pubkey=ACTOR_PUB,
-            target_origin="bbs.a", target_event_id=_rid(1),
+            origin="bbs.a",
+            origin_seq=4,
+            event_id=_rid(4),
+            kind="bonnet.user.revoke",
+            actor_pubkey=ACTOR_PUB,
+            target_origin="bbs.a",
+            target_event_id=_rid(1),
             metadata=MetadataMap([metadata_bytes(1, _rid(20))]),
         )
         user_proj.apply_user_revoke(revoke_rec)
@@ -549,14 +675,20 @@ class TestUserProjection:
 # Policy projection tests
 # ---------------------------------------------------------------------------
 
+
 class TestPolicyProjection:
     def test_rule_publish_and_list(self, policy_proj):
         rec = Record(
-            origin="bbs.a", origin_seq=1, event_id=_rid(1),
-            kind="bonnet.rule.publish", actor_pubkey=ACTOR_PUB,
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.rule.publish",
+            actor_pubkey=ACTOR_PUB,
             board="moderation.rules",
             metadata=MetadataMap([metadata_text(1, "no-spam")]),
-            body_hash=_rid(99), body_size=100, created_at=1700000000,
+            body_hash=_rid(99),
+            body_size=100,
+            created_at=1700000000,
         )
         policy_proj.apply_rule(rec)
         rules = policy_proj.list_rules("bbs.a")
@@ -566,13 +698,18 @@ class TestPolicyProjection:
     def test_punishment_and_revoke(self, policy_proj):
         punished = _rid(30)
         issue_rec = Record(
-            origin="bbs.a", origin_seq=1, event_id=_rid(1),
-            kind="bonnet.punishment.issue", actor_pubkey=ACTOR_PUB,
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.punishment.issue",
+            actor_pubkey=ACTOR_PUB,
             board="moderation.actions",
-            metadata=MetadataMap([
-                metadata_bytes(1, punished),
-                metadata_i64(2, -1),
-            ]),
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, punished),
+                    metadata_i64(2, -1),
+                ]
+            ),
             created_at=1700000000,
         )
         policy_proj.apply_punishment(issue_rec)
@@ -582,10 +719,14 @@ class TestPolicyProjection:
         assert puns[0]["expires_at"] == -1
 
         revoke_rec = Record(
-            origin="bbs.a", origin_seq=2, event_id=_rid(2),
-            kind="bonnet.punishment.revoke", actor_pubkey=ACTOR_PUB,
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.punishment.revoke",
+            actor_pubkey=ACTOR_PUB,
             board="moderation.actions",
-            target_origin="bbs.a", target_event_id=_rid(1),
+            target_origin="bbs.a",
+            target_event_id=_rid(1),
         )
         policy_proj.apply_punishment_revoke(revoke_rec)
 
@@ -600,6 +741,7 @@ class TestPolicyProjection:
 # Dispatcher tests
 # ---------------------------------------------------------------------------
 
+
 class TestDispatcher:
     def test_dispatch_article_and_query(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher
@@ -608,8 +750,9 @@ class TestDispatcher:
         body = b"hello world"
         intent = _make_article_intent("bbs.a", _rid(1), _rid(2), body=body)
         sig = sign_intent(ACTOR, encode_intent(intent))
-        bs.stage_article_body("bbs.a", "general", intent.event_id, body,
-                              intent.body_hash, intent.body_size)
+        bs.stage_article_body(
+            "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
+        )
         rec = firehose.append_record(ORIGIN_A, intent, sig, body)
 
         count = d.dispatch_origin("bbs.a")
@@ -634,9 +777,14 @@ class TestDispatcher:
         firehose.append_record(ORIGIN_A, intent, sig, b"hello world")
 
         cancel_intent = Intent(
-            event_id=_rid(3), kind="bonnet.article.cancel", origin="bbs.a",
-            actor_pubkey=ACTOR_PUB, board="general",
-            target_origin="bbs.a", target_board="general", target_article_id=aid,
+            event_id=_rid(3),
+            kind="bonnet.article.cancel",
+            origin="bbs.a",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
+            target_article_id=aid,
         )
         cancel_sig = sign_intent(ACTOR, encode_intent(cancel_intent))
         firehose.append_record(ORIGIN_A, cancel_intent, cancel_sig, b"")
@@ -653,9 +801,14 @@ class TestDispatcher:
 
         aid = _rid(50)
         cancel_intent = Intent(
-            event_id=_rid(1), kind="bonnet.article.cancel", origin="bbs.a",
-            actor_pubkey=ACTOR_PUB, board="general",
-            target_origin="bbs.a", target_board="general", target_article_id=aid,
+            event_id=_rid(1),
+            kind="bonnet.article.cancel",
+            origin="bbs.a",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
+            target_article_id=aid,
         )
         cancel_sig = sign_intent(ACTOR, encode_intent(cancel_intent))
         firehose.append_record(ORIGIN_A, cancel_intent, cancel_sig, b"")
@@ -676,12 +829,17 @@ class TestDispatcher:
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
 
         board_intent = Intent(
-            event_id=_rid(1), kind="bonnet.board.create", origin="bbs.a",
-            actor_pubkey=ACTOR_PUB, board="newboard",
-            metadata=MetadataMap([
-                metadata_bytes(1, ACTOR_PUB),
-                metadata_text(2, "New Board"),
-            ]),
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            origin="bbs.a",
+            actor_pubkey=ACTOR_PUB,
+            board="newboard",
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, ACTOR_PUB),
+                    metadata_text(2, "New Board"),
+                ]
+            ),
         )
         sig = sign_intent(ACTOR, encode_intent(board_intent))
         firehose.append_record(ORIGIN_A, board_intent, sig, b"")
@@ -698,13 +856,17 @@ class TestDispatcher:
 
         user_pubkey = _rid(20)
         reg_intent = Intent(
-            event_id=_rid(1), kind="bonnet.user.register", origin="bbs.a",
+            event_id=_rid(1),
+            kind="bonnet.user.register",
+            origin="bbs.a",
             actor_pubkey=ACTOR_PUB,
-            metadata=MetadataMap([
-                metadata_text(1, "alice"),
-                metadata_bytes(2, user_pubkey),
-                metadata_u64(3, 0),
-            ]),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "alice"),
+                    metadata_bytes(2, user_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
         )
         sig = sign_intent(ACTOR, encode_intent(reg_intent))
         firehose.append_record(ORIGIN_A, reg_intent, sig, b"")
@@ -721,12 +883,17 @@ class TestDispatcher:
 
         punished = _rid(30)
         pun_intent = Intent(
-            event_id=_rid(1), kind="bonnet.punishment.issue", origin="bbs.a",
-            actor_pubkey=ACTOR_PUB, board="moderation.actions",
-            metadata=MetadataMap([
-                metadata_bytes(1, punished),
-                metadata_i64(2, -1),
-            ]),
+            event_id=_rid(1),
+            kind="bonnet.punishment.issue",
+            origin="bbs.a",
+            actor_pubkey=ACTOR_PUB,
+            board="moderation.actions",
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, punished),
+                    metadata_i64(2, -1),
+                ]
+            ),
         )
         sig = sign_intent(ACTOR, encode_intent(pun_intent))
         firehose.append_record(ORIGIN_A, pun_intent, sig, b"banned for spam")
@@ -757,8 +924,9 @@ class TestDispatcher:
         body = b"rebuild me"
         intent = _make_article_intent("bbs.a", _rid(1), _rid(2), body=body)
         sig = sign_intent(ACTOR, encode_intent(intent))
-        bs.stage_article_body("bbs.a", "general", intent.event_id, body,
-                              intent.body_hash, intent.body_size)
+        bs.stage_article_body(
+            "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
+        )
         firehose.append_record(ORIGIN_A, intent, sig, body)
 
         d.dispatch_origin("bbs.a")
@@ -782,8 +950,9 @@ class TestDispatcher:
             body = f"body{i}".encode()
             intent = _make_article_intent("bbs.a", _rid(i + 1), _rid(i + 10), body=body)
             sig = sign_intent(ACTOR, encode_intent(intent))
-            bs.stage_article_body("bbs.a", "general", intent.event_id, body,
-                                  intent.body_hash, intent.body_size)
+            bs.stage_article_body(
+                "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
+            )
             firehose.append_record(ORIGIN_A, intent, sig, body)
 
         # Dispatch record 1, then simulate crash before dispatching 2 and 3
@@ -806,14 +975,20 @@ class TestDispatcher:
         aid = _rid(2)
         intent = _make_article_intent("bbs.a", _rid(1), aid, body=body)
         sig = sign_intent(ACTOR, encode_intent(intent))
-        bs.stage_article_body("bbs.a", "general", intent.event_id, body,
-                              intent.body_hash, intent.body_size)
+        bs.stage_article_body(
+            "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
+        )
         firehose.append_record(ORIGIN_A, intent, sig, body)
 
         purge_intent = Intent(
-            event_id=_rid(3), kind="bonnet.article.purge", origin="bbs.a",
-            actor_pubkey=ACTOR_PUB, board="general",
-            target_origin="bbs.a", target_board="general", target_article_id=aid,
+            event_id=_rid(3),
+            kind="bonnet.article.purge",
+            origin="bbs.a",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
+            target_article_id=aid,
         )
         purge_sig = sign_intent(ACTOR, encode_intent(purge_intent))
         firehose.append_record(ORIGIN_A, purge_intent, purge_sig, b"")

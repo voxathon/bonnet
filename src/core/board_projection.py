@@ -48,6 +48,7 @@ THREAD_CLOSED = "closed"
 # Path helpers
 # ---------------------------------------------------------------------------
 
+
 def _safe_path_component(s: str) -> str:
     return s.encode("utf-8").hex()
 
@@ -62,15 +63,33 @@ def board_db_path(boards_dir: str, origin: str, board: str) -> str:
 # Article projection row
 # ---------------------------------------------------------------------------
 
+
 class ArticleProjection:
     __slots__ = (
-        "origin", "board", "article_num", "article_id", "message_id",
-        "visibility", "body_state", "pin_state", "thread_state",
-        "subject", "tags", "options", "content_type",
-        "author_pubkey", "author_username", "author_registrar",
-        "created_at", "body_hash", "body_size",
-        "root_article_id", "reply_to_article_id", "replacement_article_id",
-        "latest_control_seq", "event_id",
+        "origin",
+        "board",
+        "article_num",
+        "article_id",
+        "message_id",
+        "visibility",
+        "body_state",
+        "pin_state",
+        "thread_state",
+        "subject",
+        "tags",
+        "options",
+        "content_type",
+        "author_pubkey",
+        "author_username",
+        "author_registrar",
+        "created_at",
+        "body_hash",
+        "body_size",
+        "root_article_id",
+        "reply_to_article_id",
+        "replacement_article_id",
+        "latest_control_seq",
+        "event_id",
     )
 
     def __init__(self, **kwargs):
@@ -81,6 +100,7 @@ class ArticleProjection:
 # ---------------------------------------------------------------------------
 # BoardProjection
 # ---------------------------------------------------------------------------
+
 
 class BoardProjection:
     """Per-board SQLite projection database."""
@@ -180,8 +200,7 @@ class BoardProjection:
 
     def _set_checkpoint(self, origin: str, seq: int) -> None:
         self._conn.execute(
-            "INSERT OR REPLACE INTO projection_checkpoint (origin, last_applied_seq) "
-            "VALUES (?, ?)",
+            "INSERT OR REPLACE INTO projection_checkpoint (origin, last_applied_seq) VALUES (?, ?)",
             (origin, seq),
         )
 
@@ -199,6 +218,7 @@ class BoardProjection:
 
     def _mark_applied(self, rec: Record) -> None:
         import time
+
         self._conn.execute(
             "INSERT OR IGNORE INTO applied_events "
             "(event_id, origin, origin_seq, kind, applied_at) "
@@ -233,8 +253,7 @@ class BoardProjection:
                         "UPDATE articles SET visibility='superseded', "
                         "replacement_article_id=?, latest_control_seq=? "
                         "WHERE origin=? AND board=? AND article_id=?",
-                        (rec.article_id, rec.origin_seq,
-                         rec.origin, rec.board, superseded_id),
+                        (rec.article_id, rec.origin_seq, rec.origin, rec.board, superseded_id),
                     )
 
                 body_state = BODY_UNAVAILABLE
@@ -249,12 +268,27 @@ class BoardProjection:
                     "root_article_id, reply_to_article_id, latest_control_seq) "
                     "VALUES (?, ?, ?, ?, ?, 'active', ?, 'unpinned', 'open', "
                     "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (rec.origin, rec.board, rec.article_num, rec.article_id,
-                     rec.event_id, body_state,
-                     subject, tags, options, content_type,
-                     rec.actor_pubkey, rec.actor_username, rec.actor_registrar,
-                     rec.created_at, rec.body_hash, rec.body_size,
-                     root_id, reply_id, rec.origin_seq),
+                    (
+                        rec.origin,
+                        rec.board,
+                        rec.article_num,
+                        rec.article_id,
+                        rec.event_id,
+                        body_state,
+                        subject,
+                        tags,
+                        options,
+                        content_type,
+                        rec.actor_pubkey,
+                        rec.actor_username,
+                        rec.actor_registrar,
+                        rec.created_at,
+                        rec.body_hash,
+                        rec.body_size,
+                        root_id,
+                        reply_id,
+                        rec.origin_seq,
+                    ),
                 )
 
                 self._replay_pending_for_article(rec.origin, rec.board, rec.article_id)
@@ -282,8 +316,7 @@ class BoardProjection:
                     "UPDATE articles SET visibility='cancelled', latest_control_seq=? "
                     "WHERE origin=? AND board=? AND article_id=? "
                     "AND visibility='active'",
-                    (rec.origin_seq, rec.target_origin, rec.target_board,
-                     rec.target_article_id),
+                    (rec.origin_seq, rec.target_origin, rec.target_board, rec.target_article_id),
                 ).rowcount
 
                 if updated == 0:
@@ -312,8 +345,7 @@ class BoardProjection:
                     "UPDATE articles SET visibility='active', latest_control_seq=? "
                     "WHERE origin=? AND board=? AND article_id=? "
                     "AND visibility='cancelled'",
-                    (rec.origin_seq, rec.target_origin, rec.target_board,
-                     rec.target_article_id),
+                    (rec.origin_seq, rec.target_origin, rec.target_board, rec.target_article_id),
                 ).rowcount
 
                 if updated == 0:
@@ -341,8 +373,7 @@ class BoardProjection:
                 updated = self._conn.execute(
                     "UPDATE articles SET body_state='purged', latest_control_seq=? "
                     "WHERE origin=? AND board=? AND article_id=?",
-                    (rec.origin_seq, rec.target_origin, rec.target_board,
-                     rec.target_article_id),
+                    (rec.origin_seq, rec.target_origin, rec.target_board, rec.target_article_id),
                 ).rowcount
 
                 if updated == 0:
@@ -369,10 +400,13 @@ class BoardProjection:
 
                 priority = rec.metadata.get_i64(1) or 0
                 updated = self._conn.execute(
-                    "UPDATE articles SET pin_state=? "
-                    "WHERE origin=? AND board=? AND article_id=?",
-                    (f"pinned({priority})", rec.target_origin, rec.target_board,
-                     rec.target_article_id),
+                    "UPDATE articles SET pin_state=? WHERE origin=? AND board=? AND article_id=?",
+                    (
+                        f"pinned({priority})",
+                        rec.target_origin,
+                        rec.target_board,
+                        rec.target_article_id,
+                    ),
                 ).rowcount
 
                 if updated == 0:
@@ -489,20 +523,30 @@ class BoardProjection:
 
     def _add_pending(self, rec: Record) -> None:
         from core.record import encode_metadata, encode_record
+
         self._conn.execute(
             "INSERT OR IGNORE INTO pending_controls "
             "(event_id, origin, origin_seq, kind, target_origin, target_board, "
             "target_article_id, target_event_id, metadata, encoded_record) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (rec.event_id, rec.origin, rec.origin_seq, rec.kind,
-             rec.target_origin, rec.target_board, rec.target_article_id,
-             rec.target_event_id, encode_metadata(rec.metadata),
-             encode_record(rec)),
+            (
+                rec.event_id,
+                rec.origin,
+                rec.origin_seq,
+                rec.kind,
+                rec.target_origin,
+                rec.target_board,
+                rec.target_article_id,
+                rec.target_event_id,
+                encode_metadata(rec.metadata),
+                encode_record(rec),
+            ),
         )
 
     def _replay_pending_for_article(self, origin: str, board: str, article_id: bytes) -> None:
         """Replay pending controls for a newly appeared article."""
         from core.record import decode_record
+
         rows = self._conn.execute(
             "SELECT event_id, encoded_record FROM pending_controls "
             "WHERE target_origin=? AND target_board=? AND target_article_id=? "
@@ -529,9 +573,7 @@ class BoardProjection:
                     self._apply_thread_close_inline(pending_rec)
                 elif kind == "bonnet.thread.reopen":
                     self._apply_thread_reopen_inline(pending_rec)
-            self._conn.execute(
-                "DELETE FROM pending_controls WHERE event_id=?", (eid,)
-            )
+            self._conn.execute("DELETE FROM pending_controls WHERE event_id=?", (eid,))
 
     def _apply_cancel_inline(self, rec: Record) -> None:
         self._conn.execute(
@@ -557,44 +599,40 @@ class BoardProjection:
     def _apply_pin_inline(self, rec: Record) -> None:
         priority = rec.metadata.get_i64(1) or 0
         self._conn.execute(
-            "UPDATE articles SET pin_state=? "
-            "WHERE origin=? AND board=? AND article_id=?",
+            "UPDATE articles SET pin_state=? WHERE origin=? AND board=? AND article_id=?",
             (f"pinned({priority})", rec.target_origin, rec.target_board, rec.target_article_id),
         )
 
     def _apply_unpin_inline(self, rec: Record) -> None:
         self._conn.execute(
-            "UPDATE articles SET pin_state='unpinned' "
-            "WHERE origin=? AND board=? AND article_id=?",
+            "UPDATE articles SET pin_state='unpinned' WHERE origin=? AND board=? AND article_id=?",
             (rec.target_origin, rec.target_board, rec.target_article_id),
         )
 
     def _apply_thread_close_inline(self, rec: Record) -> None:
         self._conn.execute(
-            "UPDATE articles SET thread_state='closed' "
-            "WHERE origin=? AND board=? AND article_id=?",
+            "UPDATE articles SET thread_state='closed' WHERE origin=? AND board=? AND article_id=?",
             (rec.target_origin, rec.target_board, rec.target_article_id),
         )
 
     def _apply_thread_reopen_inline(self, rec: Record) -> None:
         self._conn.execute(
-            "UPDATE articles SET thread_state='open' "
-            "WHERE origin=? AND board=? AND article_id=?",
+            "UPDATE articles SET thread_state='open' WHERE origin=? AND board=? AND article_id=?",
             (rec.target_origin, rec.target_board, rec.target_article_id),
         )
 
     def pending_count(self) -> int:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM pending_controls"
-            ).fetchone()
+            row = self._conn.execute("SELECT COUNT(*) FROM pending_controls").fetchone()
             return row[0]
 
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
 
-    def get_article_by_num(self, origin: str, board: str, article_num: int) -> ArticleProjection | None:
+    def get_article_by_num(
+        self, origin: str, board: str, article_num: int
+    ) -> ArticleProjection | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT origin, board, article_num, article_id, event_id, "
@@ -610,22 +648,34 @@ class BoardProjection:
             if not row:
                 return None
             return ArticleProjection(
-                origin=row[0], board=row[1], article_num=row[2],
-                article_id=bytes(row[3]), event_id=bytes(row[4]),
-                visibility=row[5], body_state=row[6],
-                pin_state=row[7], thread_state=row[8],
-                subject=row[9], tags=row[10], options=row[11],
+                origin=row[0],
+                board=row[1],
+                article_num=row[2],
+                article_id=bytes(row[3]),
+                event_id=bytes(row[4]),
+                visibility=row[5],
+                body_state=row[6],
+                pin_state=row[7],
+                thread_state=row[8],
+                subject=row[9],
+                tags=row[10],
+                options=row[11],
                 content_type=row[12],
-                author_pubkey=bytes(row[13]), author_username=row[14],
+                author_pubkey=bytes(row[13]),
+                author_username=row[14],
                 author_registrar=row[15],
-                created_at=row[16], body_hash=bytes(row[17]),
+                created_at=row[16],
+                body_hash=bytes(row[17]),
                 body_size=row[18],
-                root_article_id=bytes(row[19]), reply_to_article_id=bytes(row[20]),
+                root_article_id=bytes(row[19]),
+                reply_to_article_id=bytes(row[20]),
                 replacement_article_id=bytes(row[21]) if row[21] else None,
                 latest_control_seq=row[22],
             )
 
-    def get_article_by_id(self, origin: str, board: str, article_id: bytes) -> ArticleProjection | None:
+    def get_article_by_id(
+        self, origin: str, board: str, article_id: bytes
+    ) -> ArticleProjection | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT origin, board, article_num, article_id, event_id, "
@@ -641,24 +691,37 @@ class BoardProjection:
             if not row:
                 return None
             return ArticleProjection(
-                origin=row[0], board=row[1], article_num=row[2],
-                article_id=bytes(row[3]), event_id=bytes(row[4]),
-                visibility=row[5], body_state=row[6],
-                pin_state=row[7], thread_state=row[8],
-                subject=row[9], tags=row[10], options=row[11],
+                origin=row[0],
+                board=row[1],
+                article_num=row[2],
+                article_id=bytes(row[3]),
+                event_id=bytes(row[4]),
+                visibility=row[5],
+                body_state=row[6],
+                pin_state=row[7],
+                thread_state=row[8],
+                subject=row[9],
+                tags=row[10],
+                options=row[11],
                 content_type=row[12],
-                author_pubkey=bytes(row[13]), author_username=row[14],
+                author_pubkey=bytes(row[13]),
+                author_username=row[14],
                 author_registrar=row[15],
-                created_at=row[16], body_hash=bytes(row[17]),
+                created_at=row[16],
+                body_hash=bytes(row[17]),
                 body_size=row[18],
-                root_article_id=bytes(row[19]), reply_to_article_id=bytes(row[20]),
+                root_article_id=bytes(row[19]),
+                reply_to_article_id=bytes(row[20]),
                 replacement_article_id=bytes(row[21]) if row[21] else None,
                 latest_control_seq=row[22],
             )
 
     def list_articles(
-        self, origin: str, board: str,
-        offset: int = 0, limit: int = 100,
+        self,
+        origin: str,
+        board: str,
+        offset: int = 0,
+        limit: int = 100,
         include_cancelled: bool = False,
         include_superseded: bool = False,
         include_purged: bool = False,
@@ -688,17 +751,27 @@ class BoardProjection:
             ).fetchall()
             return [
                 ArticleProjection(
-                    origin=r[0], board=r[1], article_num=r[2],
-                    article_id=bytes(r[3]), event_id=bytes(r[4]),
-                    visibility=r[5], body_state=r[6],
-                    pin_state=r[7], thread_state=r[8],
-                    subject=r[9], tags=r[10], options=r[11],
+                    origin=r[0],
+                    board=r[1],
+                    article_num=r[2],
+                    article_id=bytes(r[3]),
+                    event_id=bytes(r[4]),
+                    visibility=r[5],
+                    body_state=r[6],
+                    pin_state=r[7],
+                    thread_state=r[8],
+                    subject=r[9],
+                    tags=r[10],
+                    options=r[11],
                     content_type=r[12],
-                    author_pubkey=bytes(r[13]), author_username=r[14],
+                    author_pubkey=bytes(r[13]),
+                    author_username=r[14],
                     author_registrar=r[15],
-                    created_at=r[16], body_hash=bytes(r[17]),
+                    created_at=r[16],
+                    body_hash=bytes(r[17]),
                     body_size=r[18],
-                    root_article_id=bytes(r[19]), reply_to_article_id=bytes(r[20]),
+                    root_article_id=bytes(r[19]),
+                    reply_to_article_id=bytes(r[20]),
                     replacement_article_id=bytes(r[21]) if r[21] else None,
                     latest_control_seq=r[22],
                 )
@@ -724,7 +797,12 @@ class BoardProjection:
             states.append(VISIBILITY_SUPERSEDED)
         placeholders = ",".join("?" * len(states))
 
-        where_parts = ["origin=?", "board=?", f"visibility IN ({placeholders})", "body_state != 'purged'"]
+        where_parts = [
+            "origin=?",
+            "board=?",
+            f"visibility IN ({placeholders})",
+            "body_state != 'purged'",
+        ]
         params = [origin, board] + states
 
         if text_query:
@@ -760,17 +838,27 @@ class BoardProjection:
 
             results = [
                 ArticleProjection(
-                    origin=r[0], board=r[1], article_num=r[2],
-                    article_id=bytes(r[3]), event_id=bytes(r[4]),
-                    visibility=r[5], body_state=r[6],
-                    pin_state=r[7], thread_state=r[8],
-                    subject=r[9], tags=r[10], options=r[11],
+                    origin=r[0],
+                    board=r[1],
+                    article_num=r[2],
+                    article_id=bytes(r[3]),
+                    event_id=bytes(r[4]),
+                    visibility=r[5],
+                    body_state=r[6],
+                    pin_state=r[7],
+                    thread_state=r[8],
+                    subject=r[9],
+                    tags=r[10],
+                    options=r[11],
                     content_type=r[12],
-                    author_pubkey=bytes(r[13]), author_username=r[14],
+                    author_pubkey=bytes(r[13]),
+                    author_username=r[14],
                     author_registrar=r[15],
-                    created_at=r[16], body_hash=bytes(r[17]),
+                    created_at=r[16],
+                    body_hash=bytes(r[17]),
                     body_size=r[18],
-                    root_article_id=bytes(r[19]), reply_to_article_id=bytes(r[20]),
+                    root_article_id=bytes(r[19]),
+                    reply_to_article_id=bytes(r[20]),
                     replacement_article_id=bytes(r[21]) if r[21] else None,
                     latest_control_seq=r[22],
                 )
@@ -882,9 +970,13 @@ class BoardProjection:
             elif field_id == 0x07:
                 if op == 0x01:
                     if value:
-                        where_parts.append("root_article_id = x'0000000000000000000000000000000000000000000000000000000000000000'")
+                        where_parts.append(
+                            "root_article_id = x'0000000000000000000000000000000000000000000000000000000000000000'"
+                        )
                     else:
-                        where_parts.append("root_article_id != x'0000000000000000000000000000000000000000000000000000000000000000'")
+                        where_parts.append(
+                            "root_article_id != x'0000000000000000000000000000000000000000000000000000000000000000'"
+                        )
             elif field_id == 0x08:
                 col = "reply_to_article_id"
                 if op == 0x01:
@@ -921,17 +1013,27 @@ class BoardProjection:
             ).fetchall()
             return [
                 ArticleProjection(
-                    origin=r[0], board=r[1], article_num=r[2],
-                    article_id=bytes(r[3]), event_id=bytes(r[4]),
-                    visibility=r[5], body_state=r[6],
-                    pin_state=r[7], thread_state=r[8],
-                    subject=r[9], tags=r[10], options=r[11],
+                    origin=r[0],
+                    board=r[1],
+                    article_num=r[2],
+                    article_id=bytes(r[3]),
+                    event_id=bytes(r[4]),
+                    visibility=r[5],
+                    body_state=r[6],
+                    pin_state=r[7],
+                    thread_state=r[8],
+                    subject=r[9],
+                    tags=r[10],
+                    options=r[11],
                     content_type=r[12],
-                    author_pubkey=bytes(r[13]), author_username=r[14],
+                    author_pubkey=bytes(r[13]),
+                    author_username=r[14],
                     author_registrar=r[15],
-                    created_at=r[16], body_hash=bytes(r[17]),
+                    created_at=r[16],
+                    body_hash=bytes(r[17]),
                     body_size=r[18],
-                    root_article_id=bytes(r[19]), reply_to_article_id=bytes(r[20]),
+                    root_article_id=bytes(r[19]),
+                    reply_to_article_id=bytes(r[20]),
                     replacement_article_id=bytes(r[21]) if r[21] else None,
                     latest_control_seq=r[22],
                 )
@@ -960,8 +1062,7 @@ class BoardProjection:
         """Update body availability state for an article."""
         with self._lock:
             self._conn.execute(
-                "UPDATE articles SET body_state=? "
-                "WHERE origin=? AND board=? AND article_num=?",
+                "UPDATE articles SET body_state=? WHERE origin=? AND board=? AND article_num=?",
                 (state, origin, board, article_num),
             )
             self._conn.commit()

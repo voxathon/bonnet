@@ -32,16 +32,27 @@ ED25519_ALG = "ed25519"
 DEFAULT_MAX_LIFETIME = 60
 DEFAULT_CLOCK_SKEW = 30
 
-REQUEST_REQUIRED_COMPONENTS = frozenset({
-    "@method", "@authority", "@target-uri",
-    "content-type", "content-digest",
-    "bonnet-protocol", "bonnet-nonce",
-})
+REQUEST_REQUIRED_COMPONENTS = frozenset(
+    {
+        "@method",
+        "@authority",
+        "@target-uri",
+        "content-type",
+        "content-digest",
+        "bonnet-protocol",
+        "bonnet-nonce",
+    }
+)
 
-RESPONSE_REQUIRED_COMPONENTS = frozenset({
-    "@status", "content-type", "content-digest",
-    "bonnet-protocol", "bonnet-origin",
-})
+RESPONSE_REQUIRED_COMPONENTS = frozenset(
+    {
+        "@status",
+        "content-type",
+        "content-digest",
+        "bonnet-protocol",
+        "bonnet-origin",
+    }
+)
 
 
 class SignatureError(Exception):
@@ -80,6 +91,7 @@ class DigestMismatch(SignatureError):
 # Content-Digest (RFC 9530)
 # ---------------------------------------------------------------------------
 
+
 def compute_content_digest(body: bytes) -> str:
     digest = hashlib.sha256(body).digest()
     return f"sha-256=:{base64.b64encode(digest).decode()}:"
@@ -89,7 +101,7 @@ def validate_content_digest(body: bytes, header_value: str) -> None:
     prefix = "sha-256=:"
     if not header_value.startswith(prefix) or not header_value.endswith(":"):
         raise DigestMismatch(f"Malformed Content-Digest: {header_value[:60]!r}")
-    b64 = header_value[len(prefix):-1]
+    b64 = header_value[len(prefix) : -1]
     try:
         expected = base64.b64decode(b64, validate=True)
     except Exception:
@@ -102,6 +114,7 @@ def validate_content_digest(body: bytes, header_value: str) -> None:
 # ---------------------------------------------------------------------------
 # Message abstraction
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class HTTPMessage:
@@ -134,6 +147,7 @@ class HTTPMessage:
 # VerifyResult
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class VerifyResult:
     label: str
@@ -147,6 +161,7 @@ class VerifyResult:
 # Key resolver (sync — just a lookup)
 # ---------------------------------------------------------------------------
 
+
 class KeyResolver:
     def resolve_private_key(self, key_id: str) -> bytes:
         raise NotImplementedError
@@ -158,6 +173,7 @@ class KeyResolver:
 # ---------------------------------------------------------------------------
 # Signature-Input parsing / serialization
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ParsedSigInput:
@@ -223,14 +239,14 @@ def parse_signature_input(header: str) -> ParsedSigInput:
     if eq < 0:
         raise MalformedSignature("Signature-Input missing '='")
     label = header[:eq].strip()
-    rest = header[eq + 1:]
+    rest = header[eq + 1 :]
     lp = rest.find("(")
     if lp < 0:
         raise MalformedSignature("Signature-Input missing '('")
     rp = rest.find(")", lp)
     if rp < 0:
         raise MalformedSignature("Signature-Input missing ')'")
-    inner = rest[lp + 1:rp].strip()
+    inner = rest[lp + 1 : rp].strip()
     components: list[str] = []
     j = 0
     while j < len(inner):
@@ -259,7 +275,7 @@ def serialize_signature_input(
     for c in components:
         escaped = c.replace("\\", "\\\\").replace('"', '\\"')
         parts.append(f'"{escaped}"')
-    inner = f'({" ".join(parts)})'
+    inner = f"({' '.join(parts)})"
     param_strs = []
     for k, v in params.items():
         if isinstance(v, int):
@@ -275,12 +291,13 @@ def serialize_signature_input(
 # Signature header parsing / serialization
 # ---------------------------------------------------------------------------
 
+
 def parse_signature(header: str) -> tuple[str, bytes]:
     eq = header.find("=")
     if eq < 0:
         raise MalformedSignature("Signature header missing '='")
     label = header[:eq].strip()
-    rest = header[eq + 1:].strip()
+    rest = header[eq + 1 :].strip()
     if not rest.startswith(":") or not rest.endswith(":"):
         raise MalformedSignature("Signature value not delimited by colons")
     b64 = rest[1:-1]
@@ -299,8 +316,16 @@ def serialize_signature(label: str, raw: bytes) -> str:
 # Component resolution
 # ---------------------------------------------------------------------------
 
-_DERIVED = {"@method", "@target-uri", "@authority", "@scheme",
-            "@request-target", "@path", "@query", "@status"}
+_DERIVED = {
+    "@method",
+    "@target-uri",
+    "@authority",
+    "@scheme",
+    "@request-target",
+    "@path",
+    "@query",
+    "@status",
+}
 
 
 def resolve_component(component_id: str, msg: HTTPMessage) -> str:
@@ -370,6 +395,7 @@ _DERIVED_RESOLVERS = {
 # Signature base construction (RFC 9421 §2.5)
 # ---------------------------------------------------------------------------
 
+
 def build_signature_base(
     components: Sequence[str],
     params: dict,
@@ -397,7 +423,7 @@ def _serialize_sig_params(components: Sequence[str], params: dict) -> str:
     for c in components:
         escaped = c.replace("\\", "\\\\").replace('"', '\\"')
         parts.append(f'"{escaped}"')
-    inner = f'({" ".join(parts)})'
+    inner = f"({' '.join(parts)})"
     param_strs = []
     for k, v in params.items():
         if isinstance(v, int):
@@ -412,6 +438,7 @@ def _serialize_sig_params(components: Sequence[str], params: dict) -> str:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _validate_keyid(keyid: str, is_response: bool) -> None:
     if is_response:
@@ -430,7 +457,9 @@ def _validate_keyid(keyid: str, is_response: bool) -> None:
             if hex_part != hex_part.lower():
                 raise InvalidParameter("keyid hex must be lowercase")
         else:
-            raise InvalidParameter(f"Response keyid must be origin:<name> or ed25519:<hex>, got: {keyid[:40]!r}")
+            raise InvalidParameter(
+                f"Response keyid must be origin:<name> or ed25519:<hex>, got: {keyid[:40]!r}"
+            )
     else:
         if not keyid.startswith("ed25519:"):
             raise InvalidParameter(f"Request keyid must be ed25519:<hex>, got: {keyid[:40]!r}")
@@ -457,7 +486,9 @@ def _validate_nonce(nonce: str) -> None:
         raise InvalidParameter(f"nonce must decode to 32 bytes, got {len(raw)}")
 
 
-def _check_temporal(params: dict, max_lifetime: int, clock_skew: int, is_response: bool = False) -> None:
+def _check_temporal(
+    params: dict, max_lifetime: int, clock_skew: int, is_response: bool = False
+) -> None:
     now = int(time.time())
     created = params.get("created")
     if created is None:
@@ -496,6 +527,7 @@ def _check_required_components(
 # Ed25519 crypto (offloaded to thread pool)
 # ---------------------------------------------------------------------------
 
+
 def _ed25519_sign(private_key: bytes, message: bytes) -> bytes:
     sk = nacl.signing.SigningKey(private_key)
     return sk.sign(message).signature
@@ -512,6 +544,7 @@ def _ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> None
 # ---------------------------------------------------------------------------
 # BonnetSigner (async)
 # ---------------------------------------------------------------------------
+
 
 class BonnetSigner:
     """Signs HTTP messages with the Bonnet firehose RFC 9421 profile."""
@@ -532,13 +565,20 @@ class BonnetSigner:
         self._tag = tag
         self._label = label
         self._request_components = request_components or [
-            "@method", "@authority", "@target-uri",
-            "content-type", "content-digest",
-            "bonnet-protocol", "bonnet-nonce",
+            "@method",
+            "@authority",
+            "@target-uri",
+            "content-type",
+            "content-digest",
+            "bonnet-protocol",
+            "bonnet-nonce",
         ]
         self._response_components = response_components or [
-            "@status", "content-type", "content-digest",
-            "bonnet-protocol", "bonnet-origin",
+            "@status",
+            "content-type",
+            "content-digest",
+            "bonnet-protocol",
+            "bonnet-origin",
             "bonnet-request-nonce",
         ]
 
@@ -590,19 +630,18 @@ class BonnetSigner:
         params["tag"] = self._tag
 
         sig_base = build_signature_base(components, params, msg)
-        signature = await asyncio.to_thread(
-            _ed25519_sign, self._private_key, sig_base.encode()
-        )
+        signature = await asyncio.to_thread(_ed25519_sign, self._private_key, sig_base.encode())
 
-        msg.set_header("Signature-Input",
-                       serialize_signature_input(self._label, components, params))
-        msg.set_header("Signature",
-                       serialize_signature(self._label, signature))
+        msg.set_header(
+            "Signature-Input", serialize_signature_input(self._label, components, params)
+        )
+        msg.set_header("Signature", serialize_signature(self._label, signature))
 
 
 # ---------------------------------------------------------------------------
 # BonnetVerifier (async)
 # ---------------------------------------------------------------------------
+
 
 class BonnetVerifier:
     """Verifies HTTP messages signed with the Bonnet firehose RFC 9421 profile."""

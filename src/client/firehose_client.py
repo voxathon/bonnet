@@ -176,15 +176,27 @@ class FirehoseHTTPClient:
             tag=FIREHOSE_TAG,
             max_lifetime=60,
             clock_skew=30,
-            request_required_components=frozenset({
-                "@method", "@authority", "@target-uri",
-                "content-type", "content-digest",
-                "bonnet-protocol", "bonnet-nonce",
-            }),
-            response_required_components=frozenset({
-                "@status", "content-type", "content-digest",
-                "bonnet-protocol", "bonnet-origin", "bonnet-request-nonce",
-            }),
+            request_required_components=frozenset(
+                {
+                    "@method",
+                    "@authority",
+                    "@target-uri",
+                    "content-type",
+                    "content-digest",
+                    "bonnet-protocol",
+                    "bonnet-nonce",
+                }
+            ),
+            response_required_components=frozenset(
+                {
+                    "@status",
+                    "content-type",
+                    "content-digest",
+                    "bonnet-protocol",
+                    "bonnet-origin",
+                    "bonnet-request-nonce",
+                }
+            ),
         )
 
         try:
@@ -233,13 +245,20 @@ class FirehoseHTTPClient:
             tag=FIREHOSE_TAG,
             label=FIREHOSE_LABEL,
             request_components=[
-                "@method", "@authority", "@target-uri",
-                "content-type", "content-digest",
-                "bonnet-protocol", "bonnet-nonce",
+                "@method",
+                "@authority",
+                "@target-uri",
+                "content-type",
+                "content-digest",
+                "bonnet-protocol",
+                "bonnet-nonce",
             ],
             response_components=[
-                "@status", "content-type", "content-digest",
-                "bonnet-protocol", "bonnet-origin",
+                "@status",
+                "content-type",
+                "content-digest",
+                "bonnet-protocol",
+                "bonnet-origin",
                 "bonnet-request-nonce",
             ],
         )
@@ -259,13 +278,20 @@ class FirehoseHTTPClient:
             tag=FIREHOSE_TAG,
             label=FIREHOSE_LABEL,
             request_components=[
-                "@method", "@authority", "@target-uri",
-                "content-type", "content-digest",
-                "bonnet-protocol", "bonnet-nonce",
+                "@method",
+                "@authority",
+                "@target-uri",
+                "content-type",
+                "content-digest",
+                "bonnet-protocol",
+                "bonnet-nonce",
             ],
             response_components=[
-                "@status", "content-type", "content-digest",
-                "bonnet-protocol", "bonnet-origin",
+                "@status",
+                "content-type",
+                "content-digest",
+                "bonnet-protocol",
+                "bonnet-origin",
                 "bonnet-request-nonce",
             ],
         )
@@ -296,7 +322,10 @@ class FirehoseHTTPClient:
         )
 
         await self._signer.sign_request(
-            msg, nonce=nonce, created=now, expires=expires,
+            msg,
+            nonce=nonce,
+            created=now,
+            expires=expires,
         )
 
         headers = dict(msg.headers)
@@ -340,10 +369,16 @@ class FirehoseHTTPClient:
     # ------------------------------------------------------------------
 
     async def publish_article(
-        self, board: str, article_id: bytes, body: bytes,
-        subject: str, content_type: str = "text/plain",
-        tags: list[str] = None, event_id: bytes = None,
-        actor_username: str = "", actor_registrar: str = "",
+        self,
+        board: str,
+        article_id: bytes,
+        body: bytes,
+        subject: str,
+        content_type: str = "text/plain",
+        tags: list[str] = None,
+        event_id: bytes = None,
+        actor_username: str = "",
+        actor_registrar: str = "",
         root_article_id: bytes = None,
         reply_to_article_id: bytes = None,
         supersedes_article_id: bytes = None,
@@ -383,20 +418,33 @@ class FirehoseHTTPClient:
         return parse_publish_response(resp)
 
     async def publish_supersede(
-        self, board: str, article_id: bytes, body: bytes,
-        subject: str, supersedes_article_id: bytes,
+        self,
+        board: str,
+        article_id: bytes,
+        body: bytes,
+        subject: str,
+        supersedes_article_id: bytes,
         content_type: str = "text/plain",
-        tags: list[str] = None, event_id: bytes = None,
+        tags: list[str] = None,
+        event_id: bytes = None,
     ) -> PublishResult:
         """Publish a new article that supersedes an existing one."""
         return await self.publish_article(
-            board, article_id, body, subject,
-            content_type=content_type, tags=tags, event_id=event_id,
+            board,
+            article_id,
+            body,
+            subject,
+            content_type=content_type,
+            tags=tags,
+            event_id=event_id,
             supersedes_article_id=supersedes_article_id,
         )
 
     async def publish_record(
-        self, intent: Intent, actor_sig: bytes, body: bytes = b"",
+        self,
+        intent: Intent,
+        actor_sig: bytes,
+        body: bytes = b"",
     ) -> tuple:
         """Publish an arbitrary signed record. Returns (Record, Witness)."""
         cmd = build_publish_record(intent, actor_sig, body)
@@ -404,7 +452,10 @@ class FirehoseHTTPClient:
         return parse_publish_response_raw(resp)
 
     async def publish_board_create(
-        self, board: str, owner_pubkey: bytes, display_name: str = "",
+        self,
+        board: str,
+        owner_pubkey: bytes,
+        display_name: str = "",
     ) -> PublishResult:
         """Create a board."""
         if self._identity is None or self._server_origin is None:
@@ -415,10 +466,14 @@ class FirehoseHTTPClient:
             m.fields.append(metadata_text(2, display_name))
 
         intent = Intent(
-            event_id=eid, kind="bonnet.board.create", origin=self._server_origin,
+            event_id=eid,
+            kind="bonnet.board.create",
+            origin=self._server_origin,
             actor_pubkey=self._identity.public_key,
-            actor_username=self._username, actor_registrar=self._server_origin,
-            board=board, metadata=m,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            board=board,
+            metadata=m,
         )
         actor_sig = sign_intent(self._identity, encode_intent(intent))
         cmd = build_publish_record(intent, actor_sig, b"")
@@ -426,22 +481,30 @@ class FirehoseHTTPClient:
         return parse_publish_response(resp)
 
     async def publish_user_register(
-        self, username: str, user_pubkey: bytes, flags: int = 0,
+        self,
+        username: str,
+        user_pubkey: bytes,
+        flags: int = 0,
     ) -> PublishResult:
         """Register a user identity."""
         if self._identity is None or self._server_origin is None:
             raise FirehoseClientError("not connected")
         eid = os.urandom(32)
-        m = MetadataMap([
-            metadata_text(1, username),
-            metadata_bytes(2, user_pubkey),
-            metadata_u64(3, flags),
-        ])
+        m = MetadataMap(
+            [
+                metadata_text(1, username),
+                metadata_bytes(2, user_pubkey),
+                metadata_u64(3, flags),
+            ]
+        )
 
         intent = Intent(
-            event_id=eid, kind="bonnet.user.register", origin=self._server_origin,
+            event_id=eid,
+            kind="bonnet.user.register",
+            origin=self._server_origin,
             actor_pubkey=self._identity.public_key,
-            actor_username=self._username, actor_registrar=self._server_origin,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
             metadata=m,
         )
         actor_sig = sign_intent(self._identity, encode_intent(intent))
@@ -450,38 +513,66 @@ class FirehoseHTTPClient:
         return parse_publish_response(resp)
 
     async def publish_cancel(
-        self, board: str, target_origin: str, target_board: str,
-        target_article_id: bytes, reason: str = "",
+        self,
+        board: str,
+        target_origin: str,
+        target_board: str,
+        target_article_id: bytes,
+        reason: str = "",
     ) -> PublishResult:
         """Cancel an article."""
         return await self._publish_control(
-            "bonnet.article.cancel", board, target_origin, target_board,
-            target_article_id, reason,
+            "bonnet.article.cancel",
+            board,
+            target_origin,
+            target_board,
+            target_article_id,
+            reason,
         )
 
     async def publish_restore(
-        self, board: str, target_origin: str, target_board: str,
-        target_article_id: bytes, reason: str = "",
+        self,
+        board: str,
+        target_origin: str,
+        target_board: str,
+        target_article_id: bytes,
+        reason: str = "",
     ) -> PublishResult:
         """Restore a cancelled article."""
         return await self._publish_control(
-            "bonnet.article.restore", board, target_origin, target_board,
-            target_article_id, reason,
+            "bonnet.article.restore",
+            board,
+            target_origin,
+            target_board,
+            target_article_id,
+            reason,
         )
 
     async def publish_purge(
-        self, board: str, target_origin: str, target_board: str,
-        target_article_id: bytes, reason: str = "",
+        self,
+        board: str,
+        target_origin: str,
+        target_board: str,
+        target_article_id: bytes,
+        reason: str = "",
     ) -> PublishResult:
         """Purge an article's body."""
         return await self._publish_control(
-            "bonnet.article.purge", board, target_origin, target_board,
-            target_article_id, reason,
+            "bonnet.article.purge",
+            board,
+            target_origin,
+            target_board,
+            target_article_id,
+            reason,
         )
 
     async def publish_pin(
-        self, board: str, target_origin: str, target_board: str,
-        target_article_id: bytes, priority: int,
+        self,
+        board: str,
+        target_origin: str,
+        target_board: str,
+        target_article_id: bytes,
+        priority: int,
     ) -> PublishResult:
         """Pin an article."""
         if self._identity is None or self._server_origin is None:
@@ -489,11 +580,17 @@ class FirehoseHTTPClient:
         eid = os.urandom(32)
         m = MetadataMap([metadata_i64(1, priority)])
         intent = Intent(
-            event_id=eid, kind="bonnet.article.pin", origin=self._server_origin,
+            event_id=eid,
+            kind="bonnet.article.pin",
+            origin=self._server_origin,
             actor_pubkey=self._identity.public_key,
-            actor_username=self._username, actor_registrar=self._server_origin,
-            board="", target_origin=target_origin, target_board=target_board,
-            target_article_id=target_article_id, metadata=m,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            board="",
+            target_origin=target_origin,
+            target_board=target_board,
+            target_article_id=target_article_id,
+            metadata=m,
         )
         actor_sig = sign_intent(self._identity, encode_intent(intent))
         cmd = build_publish_record(intent, actor_sig, b"")
@@ -501,18 +598,30 @@ class FirehoseHTTPClient:
         return parse_publish_response(resp)
 
     async def publish_unpin(
-        self, board: str, target_origin: str, target_board: str,
+        self,
+        board: str,
+        target_origin: str,
+        target_board: str,
         target_article_id: bytes,
     ) -> PublishResult:
         """Unpin an article."""
         return await self._publish_control(
-            "bonnet.article.unpin", board, target_origin, target_board,
-            target_article_id, "",
+            "bonnet.article.unpin",
+            board,
+            target_origin,
+            target_board,
+            target_article_id,
+            "",
         )
 
     async def _publish_control(
-        self, kind: str, board: str, target_origin: str, target_board: str,
-        target_article_id: bytes, reason: str,
+        self,
+        kind: str,
+        board: str,
+        target_origin: str,
+        target_board: str,
+        target_article_id: bytes,
+        reason: str,
     ) -> PublishResult:
         """Publish a control event targeting an article."""
         if self._identity is None or self._server_origin is None:
@@ -520,10 +629,15 @@ class FirehoseHTTPClient:
         eid = os.urandom(32)
         body = reason.encode("utf-8") if reason else b""
         intent = Intent(
-            event_id=eid, kind=kind, origin=self._server_origin,
+            event_id=eid,
+            kind=kind,
+            origin=self._server_origin,
             actor_pubkey=self._identity.public_key,
-            actor_username=self._username, actor_registrar=self._server_origin,
-            board="", target_origin=target_origin, target_board=target_board,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            board="",
+            target_origin=target_origin,
+            target_board=target_board,
             target_article_id=target_article_id,
             body_hash=compute_body_hash(body) if body else ZERO_ID,
             body_size=len(body),
@@ -562,7 +676,9 @@ class FirehoseHTTPClient:
         resp = await self._send_command(cmd)
         return parse_board_list_response(resp, aggregate=(origin == ""))
 
-    async def get_article(self, origin: str, board: str, article_num: int, include_body: bool = False) -> ArticleView:
+    async def get_article(
+        self, origin: str, board: str, article_num: int, include_body: bool = False
+    ) -> ArticleView:
         cmd = build_article_get(origin, board, SELECTOR_BY_NUM, article_num, include_body)
         resp = await self._send_command(cmd)
         view = parse_article_get_response(resp)
@@ -570,7 +686,9 @@ class FirehoseHTTPClient:
             view.body_state = "remote"
         return view
 
-    async def get_article_by_id(self, origin: str, board: str, article_id: bytes, include_body: bool = False) -> ArticleView:
+    async def get_article_by_id(
+        self, origin: str, board: str, article_id: bytes, include_body: bool = False
+    ) -> ArticleView:
         cmd = build_article_get(origin, board, SELECTOR_BY_ID, article_id, include_body)
         resp = await self._send_command(cmd)
         view = parse_article_get_response(resp)
@@ -578,9 +696,18 @@ class FirehoseHTTPClient:
             view.body_state = "remote"
         return view
 
-    async def list_articles(self, origin: str, board: str, offset: int = 0, limit: int = 100,
-                            include_cancelled: bool = False, include_superseded: bool = False) -> QueryResponse:
-        cmd = build_article_list(origin, board, offset, limit, include_cancelled, include_superseded)
+    async def list_articles(
+        self,
+        origin: str,
+        board: str,
+        offset: int = 0,
+        limit: int = 100,
+        include_cancelled: bool = False,
+        include_superseded: bool = False,
+    ) -> QueryResponse:
+        cmd = build_article_list(
+            origin, board, offset, limit, include_cancelled, include_superseded
+        )
         resp = await self._send_command(cmd)
         result = parse_article_list_response(resp, aggregate=(origin == ""))
         if origin and origin != self._server_origin:
@@ -589,20 +716,41 @@ class FirehoseHTTPClient:
                     item.body_state = "remote"
         elif origin == "":
             for item in result.results:
-                if item.body_state == "unavailable" and item.origin and item.origin != self._server_origin:
+                if (
+                    item.body_state == "unavailable"
+                    and item.origin
+                    and item.origin != self._server_origin
+                ):
                     item.body_state = "remote"
         return result
 
-    async def search_articles(self, origin: str, board: str, meta_query: str = "", body_query: str = "",
-                              offset: int = 0, limit: int = 100,
-                              include_cancelled: bool = False, include_superseded: bool = False) -> SearchResponse:
-        cmd = build_article_search(origin, board, meta_query, body_query, offset, limit,
-                                   include_cancelled, include_superseded)
+    async def search_articles(
+        self,
+        origin: str,
+        board: str,
+        meta_query: str = "",
+        body_query: str = "",
+        offset: int = 0,
+        limit: int = 100,
+        include_cancelled: bool = False,
+        include_superseded: bool = False,
+    ) -> SearchResponse:
+        cmd = build_article_search(
+            origin,
+            board,
+            meta_query,
+            body_query,
+            offset,
+            limit,
+            include_cancelled,
+            include_superseded,
+        )
         resp = await self._send_command(cmd)
         return parse_article_search_response(resp, aggregate=(origin == ""))
 
-    async def query_articles(self, origin: str, board: str, filters: list,
-                             offset: int = 0, limit: int = 100) -> QueryResponse:
+    async def query_articles(
+        self, origin: str, board: str, filters: list, offset: int = 0, limit: int = 100
+    ) -> QueryResponse:
         """Query articles with structured filters.
 
         filters: list of (field_id, operator, value_type, value_bytes) tuples.
@@ -680,7 +828,7 @@ class FirehoseHTTPClient:
             except Exception:
                 break
 
-            encoded = encode_record(rec) if hasattr(rec, 'origin_seq') else b""
+            encoded = encode_record(rec) if hasattr(rec, "origin_seq") else b""
             event_hash = compute_event_hash(encoded).hex() if encoded else ""
 
             hop = {

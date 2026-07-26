@@ -53,9 +53,7 @@ class BodyStore:
     def _article_body_path(self, origin: str, board: str, article_num: int) -> str:
         origin_hex = _safe_path_component(origin)
         board_hex = _safe_path_component(board)
-        return os.path.join(
-            self._boards_dir, origin_hex, board_hex, "bodies", str(article_num)
-        )
+        return os.path.join(self._boards_dir, origin_hex, board_hex, "bodies", str(article_num))
 
     def _article_body_dir(self, origin: str, board: str) -> str:
         origin_hex = _safe_path_component(origin)
@@ -63,8 +61,11 @@ class BodyStore:
         return os.path.join(self._boards_dir, origin_hex, board_hex, "bodies")
 
     def _atomic_write_verified(
-        self, final_path: str, body: bytes,
-        expected_hash: bytes, expected_size: int,
+        self,
+        final_path: str,
+        body: bytes,
+        expected_hash: bytes,
+        expected_size: int,
     ) -> None:
         """Write body to a temp file, verify, and atomically rename.
 
@@ -90,8 +91,13 @@ class BodyStore:
             raise
 
     def stage_article_body(
-        self, origin: str, board: str, event_id: bytes, body: bytes,
-        expected_hash: bytes, expected_size: int,
+        self,
+        origin: str,
+        board: str,
+        event_id: bytes,
+        body: bytes,
+        expected_hash: bytes,
+        expected_size: int,
     ) -> str:
         """Stage an article body under its event ID before number allocation.
 
@@ -105,9 +111,7 @@ class BodyStore:
 
         origin_hex = _safe_path_component(origin)
         board_hex = _safe_path_component(board)
-        staging_dir = os.path.join(
-            self._boards_dir, origin_hex, board_hex, "bodies", "staging"
-        )
+        staging_dir = os.path.join(self._boards_dir, origin_hex, board_hex, "bodies", "staging")
         os.makedirs(staging_dir, exist_ok=True)
         staging_path = os.path.join(staging_dir, event_id.hex())
 
@@ -117,7 +121,11 @@ class BodyStore:
         return staging_path
 
     def finalize_article_body(
-        self, origin: str, board: str, event_id: bytes, article_num: int,
+        self,
+        origin: str,
+        board: str,
+        event_id: bytes,
+        article_num: int,
     ) -> bool:
         """Move a staged body from event-ID path to article-number path.
 
@@ -125,9 +133,7 @@ class BodyStore:
         """
         origin_hex = _safe_path_component(origin)
         board_hex = _safe_path_component(board)
-        staging_dir = os.path.join(
-            self._boards_dir, origin_hex, board_hex, "bodies", "staging"
-        )
+        staging_dir = os.path.join(self._boards_dir, origin_hex, board_hex, "bodies", "staging")
         staging_path = os.path.join(staging_dir, event_id.hex())
         final_path = self._article_body_path(origin, board, article_num)
 
@@ -140,8 +146,13 @@ class BodyStore:
             return True
 
     def write_article_body(
-        self, origin: str, board: str, article_num: int, body: bytes,
-        expected_hash: bytes, expected_size: int,
+        self,
+        origin: str,
+        board: str,
+        article_num: int,
+        body: bytes,
+        expected_hash: bytes,
+        expected_size: int,
     ) -> None:
         """Write an article body directly to its final path (for remote fetch cache).
 
@@ -156,8 +167,12 @@ class BodyStore:
             self._atomic_write_verified(final_path, body, expected_hash, expected_size)
 
     def get_article_body(
-        self, origin: str, board: str, article_num: int,
-        expected_hash: bytes, expected_size: int,
+        self,
+        origin: str,
+        board: str,
+        article_num: int,
+        expected_hash: bytes,
+        expected_size: int,
     ) -> bytes | None:
         """Read and verify an article body. Returns None if missing or corrupt."""
         path = self._article_body_path(origin, board, article_num)
@@ -173,13 +188,19 @@ class BodyStore:
             return body
 
     def article_body_exists(
-        self, origin: str, board: str, article_num: int,
+        self,
+        origin: str,
+        board: str,
+        article_num: int,
     ) -> bool:
         path = self._article_body_path(origin, board, article_num)
         return os.path.exists(path)
 
     def delete_article_body(
-        self, origin: str, board: str, article_num: int,
+        self,
+        origin: str,
+        board: str,
+        article_num: int,
     ) -> bool:
         """Delete an article body file (for PURGE). Returns True if deleted."""
         path = self._article_body_path(origin, board, article_num)
@@ -190,8 +211,13 @@ class BodyStore:
             return False
 
     def search_article_bodies(
-        self, origin: str, board: str, pattern: str,
-        max_count: int = 1000, timeout_seconds: int = 10, result_limit: int = 100,
+        self,
+        origin: str,
+        board: str,
+        pattern: str,
+        max_count: int = 1000,
+        timeout_seconds: int = 10,
+        result_limit: int = 100,
         rg_path: str = None,
     ) -> list[int]:
         """Run ripgrep over one board's bodies directory.
@@ -202,6 +228,7 @@ class BodyStore:
         import subprocess
 
         from core.binutil import resolve_rg
+
         rg = rg_path or resolve_rg()
         if rg is None:
             raise BodyError("ripgrep not available")
@@ -210,8 +237,16 @@ class BodyStore:
         if not os.path.isdir(bodies_dir):
             return []
 
-        argv = [rg, "--json", "--line-buffered", "--max-count", str(max_count),
-                "--", pattern, bodies_dir]
+        argv = [
+            rg,
+            "--json",
+            "--line-buffered",
+            "--max-count",
+            str(max_count),
+            "--",
+            pattern,
+            bodies_dir,
+        ]
         try:
             proc = subprocess.run(argv, capture_output=True, timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
@@ -259,8 +294,12 @@ class BodyStore:
         return os.path.join(self._events_dir, origin_hex, "bodies", event_id.hex())
 
     def write_event_body(
-        self, origin: str, event_id: bytes, body: bytes,
-        expected_hash: bytes, expected_size: int,
+        self,
+        origin: str,
+        event_id: bytes,
+        body: bytes,
+        expected_hash: bytes,
+        expected_size: int,
     ) -> None:
         """Write an event body (non-article body) to its flat path."""
         if len(body) != expected_size:
@@ -273,8 +312,11 @@ class BodyStore:
             self._atomic_write_verified(path, body, expected_hash, expected_size)
 
     def get_event_body(
-        self, origin: str, event_id: bytes,
-        expected_hash: bytes, expected_size: int,
+        self,
+        origin: str,
+        event_id: bytes,
+        expected_hash: bytes,
+        expected_size: int,
     ) -> bytes | None:
         path = self._event_body_path(origin, event_id)
         with self._lock:
@@ -307,9 +349,7 @@ class BodyStore:
         """Remove orphaned staging files for a board. Returns count deleted."""
         origin_hex = _safe_path_component(origin)
         board_hex = _safe_path_component(board)
-        staging_dir = os.path.join(
-            self._boards_dir, origin_hex, board_hex, "bodies", "staging"
-        )
+        staging_dir = os.path.join(self._boards_dir, origin_hex, board_hex, "bodies", "staging")
         count = 0
         with self._lock:
             if not os.path.isdir(staging_dir):
@@ -334,6 +374,7 @@ class BodyStore:
         Returns the total number of files deleted.
         """
         import shutil
+
         origin_hex = _safe_path_component(origin)
         count = 0
         with self._lock:

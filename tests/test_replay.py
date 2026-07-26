@@ -97,6 +97,7 @@ class TestExpiryCleanup:
 
         # Check that old nonces are cleaned (count should be low)
         import sqlite3
+
         conn = sqlite3.connect(db_path)
         count = conn.execute("SELECT COUNT(*) FROM request_nonces").fetchone()[0]
         conn.close()
@@ -119,6 +120,7 @@ class TestExpiryCleanup:
         # Reopen — startup_cleanup runs
         rl2 = ReplayLedger(db_path, clock_skew_seconds=0)
         import sqlite3
+
         conn = sqlite3.connect(db_path)
         count = conn.execute("SELECT COUNT(*) FROM request_nonces").fetchone()[0]
         conn.close()

@@ -27,6 +27,7 @@ def server(config):
     os.makedirs(config.events_bodies_dir, exist_ok=True)
 
     from app.server import BonnetFirehoseServer
+
     s = BonnetFirehoseServer(config)
     yield s
     try:
@@ -38,6 +39,7 @@ def server(config):
 # ---------------------------------------------------------------------------
 # Construction
 # ---------------------------------------------------------------------------
+
 
 def test_server_constructs(server):
     """Server constructs with all components wired."""
@@ -69,6 +71,7 @@ def test_server_identity_persisted(server, config):
 # Root registration
 # ---------------------------------------------------------------------------
 
+
 def test_root_user_registered(server):
     """Root user is registered on first startup."""
     user = server.users.get_user_by_pubkey("bbs.test", server.server_identity.public_key)
@@ -82,6 +85,7 @@ def test_root_registration_idempotent(server, config):
     server_identity = server.server_identity
 
     from app.server import BonnetFirehoseServer
+
     server2 = BonnetFirehoseServer(config)
     try:
         user = server2.users.get_user_by_pubkey("bbs.test", server_identity.public_key)
@@ -98,6 +102,7 @@ def test_root_registration_idempotent(server, config):
 # ---------------------------------------------------------------------------
 # Close
 # ---------------------------------------------------------------------------
+
 
 def test_double_close_safe(server):
     """close() can be called twice without raising."""
@@ -120,6 +125,7 @@ def test_close_releases_resources(server):
 # Identity persistence across restart
 # ---------------------------------------------------------------------------
 
+
 def test_identity_stable_across_restart(config):
     """Server identity is the same after restart."""
     os.makedirs(config.data_dir, exist_ok=True)
@@ -127,6 +133,7 @@ def test_identity_stable_across_restart(config):
     os.makedirs(config.events_bodies_dir, exist_ok=True)
 
     from app.server import BonnetFirehoseServer
+
     s1 = BonnetFirehoseServer(config)
     pubkey1 = s1.server_identity.public_key
     s1.close()

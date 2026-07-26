@@ -18,6 +18,7 @@ from core.bodies import BodyStore
 # Search result
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SearchResult:
     article_num: int
@@ -44,6 +45,7 @@ class SearchResults:
 # ---------------------------------------------------------------------------
 # Search service
 # ---------------------------------------------------------------------------
+
 
 class SearchService:
     """Metadata and body search over board projections."""
@@ -80,7 +82,8 @@ class SearchService:
         are loaded into Python, bounded by limit.
         """
         articles, total = projection.search_metadata(
-            origin, board,
+            origin,
+            board,
             text_query=text_query,
             actor_pubkey=actor_pubkey,
             offset=offset,
@@ -94,25 +97,30 @@ class SearchService:
             excerpt = None
             if art.body_state == "available" and art.body_size > 0:
                 body = self._body_store.get_article_body(
-                    art.origin, art.board, art.article_num,
-                    art.body_hash, art.body_size,
+                    art.origin,
+                    art.board,
+                    art.article_num,
+                    art.body_hash,
+                    art.body_size,
                 )
                 if body:
                     text = body.decode("utf-8", errors="replace")
                     excerpt = text[:80]
-            results.append(SearchResult(
-                article_num=art.article_num,
-                article_id=art.article_id,
-                origin=art.origin,
-                board=art.board,
-                subject=art.subject,
-                author_pubkey=art.author_pubkey,
-                created_at=art.created_at,
-                visibility=art.visibility,
-                body_state=art.body_state,
-                body_available=(art.body_state == "available"),
-                excerpt=excerpt,
-            ))
+            results.append(
+                SearchResult(
+                    article_num=art.article_num,
+                    article_id=art.article_id,
+                    origin=art.origin,
+                    board=art.board,
+                    subject=art.subject,
+                    author_pubkey=art.author_pubkey,
+                    created_at=art.created_at,
+                    visibility=art.visibility,
+                    body_state=art.body_state,
+                    body_available=(art.body_state == "available"),
+                    excerpt=excerpt,
+                )
+            )
         return SearchResults(results=results, total=total, truncated=(offset + limit) < total)
 
     def search_bodies(
@@ -129,7 +137,9 @@ class SearchService:
     ) -> SearchResults:
         """Search article body text using ripgrep over one board's bodies/."""
         article_nums = self._body_store.search_article_bodies(
-            origin, board, pattern,
+            origin,
+            board,
+            pattern,
             max_count=self._max_count,
             timeout_seconds=self._timeout_seconds,
             result_limit=self._result_limit,
@@ -155,19 +165,21 @@ class SearchService:
 
             excerpt = self._get_excerpt(origin, board, article_num, pattern)
 
-            results.append(SearchResult(
-                article_num=art.article_num,
-                article_id=art.article_id,
-                origin=art.origin,
-                board=art.board,
-                subject=art.subject,
-                author_pubkey=art.author_pubkey,
-                created_at=art.created_at,
-                visibility=art.visibility,
-                body_state=art.body_state,
-                body_available=(art.body_state == "available"),
-                excerpt=excerpt,
-            ))
+            results.append(
+                SearchResult(
+                    article_num=art.article_num,
+                    article_id=art.article_id,
+                    origin=art.origin,
+                    board=art.board,
+                    subject=art.subject,
+                    author_pubkey=art.author_pubkey,
+                    created_at=art.created_at,
+                    visibility=art.visibility,
+                    body_state=art.body_state,
+                    body_available=(art.body_state == "available"),
+                    excerpt=excerpt,
+                )
+            )
 
             if len(results) >= limit:
                 break

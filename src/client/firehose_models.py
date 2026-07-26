@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 @dataclass
 class PublishResult:
     """Result of PUBLISH_RECORD."""
+
     origin_seq: int
     event_id: str
     kind: str
@@ -25,6 +26,7 @@ class PublishResult:
 @dataclass
 class EventInfo:
     """A firehose event returned by EVENT_GET or EVENT_RANGE."""
+
     origin_seq: int
     event_id: str
     kind: str
@@ -47,6 +49,7 @@ class EventInfo:
 @dataclass
 class HeadInfo:
     """Signed firehose head."""
+
     origin: str
     latest_origin_seq: int
     latest_event_hash: str
@@ -74,6 +77,7 @@ class ArticleView:
                    against the origin-signed article metadata. False if the
                    body was not fetched or verification was not performed.
     """
+
     article_num: int
     article_id: str
     event_id: str
@@ -104,6 +108,7 @@ class ArticleListItem:
     body_state may be 'remote' for articles from a different origin than
     the connected server. See ArticleView for the full body_state documentation.
     """
+
     article_num: int
     article_id: str
     event_id: str
@@ -129,6 +134,7 @@ class ArticleListItem:
 @dataclass
 class SearchResult:
     """A single search match."""
+
     article_num: int
     article_id: str
     subject: str
@@ -142,6 +148,7 @@ class SearchResult:
 @dataclass
 class SearchResponse:
     """Search response with metadata."""
+
     results: list[SearchResult]
     total: int
     truncated: bool
@@ -150,12 +157,14 @@ class SearchResponse:
 @dataclass
 class QueryResponse:
     """Query response wrapping article list."""
+
     results: list[ArticleListItem]
 
 
 @dataclass
 class BoardInfo:
     """A board in the directory."""
+
     name: str
     closed: bool
     owner_pubkey: str
@@ -166,6 +175,7 @@ class BoardInfo:
 @dataclass
 class UserInfo:
     """A registered user."""
+
     pubkey: str
     username: str
     flags: int
@@ -179,6 +189,7 @@ class UserInfo:
 @dataclass
 class BanStatus:
     """Ban status query result."""
+
     banned: bool
     punishment_event_id: str = ""
     source_origin: str = ""
@@ -188,6 +199,7 @@ class BanStatus:
 @dataclass
 class DiscoveryInfo:
     """Server discovery document."""
+
     protocol: str
     origin: str
     hostname: str

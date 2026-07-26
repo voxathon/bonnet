@@ -7,7 +7,7 @@ class Identity:
         pass
 
     @staticmethod
-    def generate() -> 'Identity':
+    def generate() -> "Identity":
         ident = Identity()
         ident._signing_key = nacl.signing.SigningKey.generate()
         ident._private_key = bytes(ident._signing_key)
@@ -15,7 +15,7 @@ class Identity:
         return ident
 
     @staticmethod
-    def from_private_key(privkey: bytes) -> 'Identity':
+    def from_private_key(privkey: bytes) -> "Identity":
         if len(privkey) != 32:
             raise ValueError("Private key must be exactly 32 bytes")
         ident = Identity()

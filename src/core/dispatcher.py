@@ -117,7 +117,9 @@ class Dispatcher:
                 try:
                     self._dispatch_record(rec)
                 except Exception as e:
-                    log_msg(f"DISPATCH: origin='{origin}' seq={rec.origin_seq} kind='{rec.kind}' FAILED: {e}")
+                    log_msg(
+                        f"DISPATCH: origin='{origin}' seq={rec.origin_seq} kind='{rec.kind}' FAILED: {e}"
+                    )
                     break
                 self._firehose.set_checkpoint(origin, rec.origin_seq)
                 count += 1
@@ -129,9 +131,15 @@ class Dispatcher:
 
         if kind == KIND_ARTICLE:
             self._dispatch_article(rec)
-        elif kind in (KIND_ARTICLE_CANCEL, KIND_ARTICLE_RESTORE, KIND_ARTICLE_PURGE,
-                      KIND_ARTICLE_PIN, KIND_ARTICLE_UNPIN,
-                      KIND_THREAD_CLOSE, KIND_THREAD_REOPEN):
+        elif kind in (
+            KIND_ARTICLE_CANCEL,
+            KIND_ARTICLE_RESTORE,
+            KIND_ARTICLE_PURGE,
+            KIND_ARTICLE_PIN,
+            KIND_ARTICLE_UNPIN,
+            KIND_THREAD_CLOSE,
+            KIND_THREAD_REOPEN,
+        ):
             self._dispatch_article_control(rec)
         elif kind == KIND_BOARD_CREATE:
             self._nav.apply_board_create(rec)
@@ -164,16 +172,27 @@ class Dispatcher:
 
         if rec.article_num > 0 and rec.body_size > 0:
             if self._body_store.finalize_article_body(
-                rec.origin, rec.board, rec.event_id, rec.article_num,
+                rec.origin,
+                rec.board,
+                rec.event_id,
+                rec.article_num,
             ):
                 bp.update_body_state(
-                    rec.origin, rec.board, rec.article_num, "available",
+                    rec.origin,
+                    rec.board,
+                    rec.article_num,
+                    "available",
                 )
             elif self._body_store.article_body_exists(
-                rec.origin, rec.board, rec.article_num,
+                rec.origin,
+                rec.board,
+                rec.article_num,
             ):
                 bp.update_body_state(
-                    rec.origin, rec.board, rec.article_num, "available",
+                    rec.origin,
+                    rec.board,
+                    rec.article_num,
+                    "available",
                 )
 
     def _dispatch_article_control(self, rec: Record) -> None:
@@ -192,7 +211,9 @@ class Dispatcher:
                 proj = bp.get_article_by_id(target_origin, target_board, rec.target_article_id)
                 if proj:
                     self._body_store.delete_article_body(
-                        target_origin, target_board, proj.article_num,
+                        target_origin,
+                        target_board,
+                        proj.article_num,
                     )
         elif kind == KIND_ARTICLE_PIN:
             bp.apply_pin(rec)

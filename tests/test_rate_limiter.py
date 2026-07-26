@@ -9,6 +9,7 @@ from net.rate_limiter import RateLimiter
 # Basic check
 # ---------------------------------------------------------------------------
 
+
 def test_allows_under_limit():
     rl = RateLimiter(max_requests=5, window_seconds=60)
     for _ in range(5):
@@ -34,6 +35,7 @@ def test_different_keys_independent():
 # Window expiry
 # ---------------------------------------------------------------------------
 
+
 def test_window_expiry_allows_after_window():
     rl = RateLimiter(max_requests=1, window_seconds=0.1)
     assert rl.check("key1") is True
@@ -55,6 +57,7 @@ def test_window_boundary():
 # Key construction
 # ---------------------------------------------------------------------------
 
+
 def test_identity_key():
     rl = RateLimiter()
     key = rl.identity_key(bytes(range(32)))
@@ -71,6 +74,7 @@ def test_address_key():
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
+
 
 def test_cleanup_removes_stale_buckets():
     rl = RateLimiter(max_requests=10, window_seconds=0.1)
@@ -105,6 +109,7 @@ def test_cleanup_removes_expired_buckets():
 # High cardinality
 # ---------------------------------------------------------------------------
 
+
 def test_high_cardinality_cleanup():
     rl = RateLimiter(max_requests=1, window_seconds=0.05)
     for i in range(100):
@@ -119,6 +124,7 @@ def test_high_cardinality_cleanup():
 # ---------------------------------------------------------------------------
 # Concurrency
 # ---------------------------------------------------------------------------
+
 
 def test_concurrent_checks_safe():
     rl = RateLimiter(max_requests=100, window_seconds=60)

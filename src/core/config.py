@@ -17,6 +17,7 @@ from core.acl import ACLEvaluator
 @dataclass
 class PeerConfig:
     """Configuration for a firehose federation peer."""
+
     origin: str
     hostname: str
     port: int = 2272
@@ -93,21 +94,39 @@ class FirehoseConfig:
         if not (1 <= self.port <= 65535):
             raise ValueError(f"config: port {self.port} out of range [1, 65535]")
         if self.max_request_size <= 0:
-            raise ValueError(f"config: max_request_size must be positive, got {self.max_request_size}")
+            raise ValueError(
+                f"config: max_request_size must be positive, got {self.max_request_size}"
+            )
         if self.max_article_body_size <= 0:
-            raise ValueError(f"config: max_article_body_size must be positive, got {self.max_article_body_size}")
+            raise ValueError(
+                f"config: max_article_body_size must be positive, got {self.max_article_body_size}"
+            )
         if self.rate_limit_requests <= 0:
-            raise ValueError(f"config: rate_limit_requests must be positive, got {self.rate_limit_requests}")
+            raise ValueError(
+                f"config: rate_limit_requests must be positive, got {self.rate_limit_requests}"
+            )
         if self.rate_limit_window <= 0:
-            raise ValueError(f"config: rate_limit_window must be positive, got {self.rate_limit_window}")
+            raise ValueError(
+                f"config: rate_limit_window must be positive, got {self.rate_limit_window}"
+            )
         if self.signature_lifetime_seconds > 60:
-            raise ValueError(f"config: signature_lifetime_seconds must not exceed 60, got {self.signature_lifetime_seconds}")
+            raise ValueError(
+                f"config: signature_lifetime_seconds must not exceed 60, got {self.signature_lifetime_seconds}"
+            )
         if self.clock_skew_seconds > 30:
-            raise ValueError(f"config: clock_skew_seconds must not exceed 30, got {self.clock_skew_seconds}")
-        if self.search_max_count <= 0 or self.search_timeout_seconds <= 0 or self.search_result_limit <= 0:
+            raise ValueError(
+                f"config: clock_skew_seconds must not exceed 30, got {self.clock_skew_seconds}"
+            )
+        if (
+            self.search_max_count <= 0
+            or self.search_timeout_seconds <= 0
+            or self.search_result_limit <= 0
+        ):
             raise ValueError("config: search limits must be positive")
         if self.sync_interval_seconds <= 0:
-            raise ValueError(f"config: sync_interval_seconds must be positive, got {self.sync_interval_seconds}")
+            raise ValueError(
+                f"config: sync_interval_seconds must be positive, got {self.sync_interval_seconds}"
+            )
         if self.tls_enabled:
             if self.tls_cert_path and not os.path.exists(self.tls_cert_path):
                 raise ValueError(f"config: TLS cert_path does not exist: {self.tls_cert_path}")
@@ -177,6 +196,7 @@ class FirehoseConfig:
 
         if not acl._rules and admin_pubkey_hex:
             from core.acl import default_rules_for_admin
+
             acl = ACLEvaluator(default_rules_for_admin(admin_pubkey_hex))
 
         return FirehoseConfig(

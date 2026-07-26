@@ -40,31 +40,46 @@ def _rid(seed: int) -> bytes:
 
 def _make_article_intent(origin, eid, board="general", body=b"hello", aid_seed=99):
     return Intent(
-        event_id=eid, kind=KIND_ARTICLE, origin=origin,
-        actor_pubkey=ACTOR_PUB, board=board, article_id=_rid(aid_seed),
-        metadata=MetadataMap([
-            metadata_text(1, "Test"),
-            metadata_text(4, "text/plain"),
-        ]),
-        body_hash=compute_body_hash(body), body_size=len(body),
+        event_id=eid,
+        kind=KIND_ARTICLE,
+        origin=origin,
+        actor_pubkey=ACTOR_PUB,
+        board=board,
+        article_id=_rid(aid_seed),
+        metadata=MetadataMap(
+            [
+                metadata_text(1, "Test"),
+                metadata_text(4, "text/plain"),
+            ]
+        ),
+        body_hash=compute_body_hash(body),
+        body_size=len(body),
     )
 
 
 def _make_board_create_intent(origin, eid, board, owner_pubkey):
     return Intent(
-        event_id=eid, kind="bonnet.board.create", origin=origin,
-        actor_pubkey=ACTOR_PUB, board=board,
-        metadata=MetadataMap([
-            metadata_bytes(1, owner_pubkey),
-            metadata_text(2, "Test Board"),
-        ]),
+        event_id=eid,
+        kind="bonnet.board.create",
+        origin=origin,
+        actor_pubkey=ACTOR_PUB,
+        board=board,
+        metadata=MetadataMap(
+            [
+                metadata_bytes(1, owner_pubkey),
+                metadata_text(2, "Test Board"),
+            ]
+        ),
     )
 
 
 def _make_unknown_intent(origin, eid, kind="bonnet.custom.event"):
     return Intent(
-        event_id=eid, kind=kind, origin=origin,
-        actor_pubkey=ACTOR_PUB, board="",
+        event_id=eid,
+        kind=kind,
+        origin=origin,
+        actor_pubkey=ACTOR_PUB,
+        board="",
     )
 
 
@@ -87,8 +102,12 @@ def stack(tmp_path):
         events_dir=str(tmp_path / "event_bodies"),
     )
     d = Dispatcher(
-        firehose=firehose, nav=nav, users=users, policy=policy,
-        boards_dir=str(tmp_path / "boards"), body_store=bs,
+        firehose=firehose,
+        nav=nav,
+        users=users,
+        policy=policy,
+        boards_dir=str(tmp_path / "boards"),
+        body_store=bs,
     )
     yield d, firehose, nav, users, policy, bs
     d.close()
@@ -102,6 +121,7 @@ def stack(tmp_path):
 # Checkpoint advancement on failure
 # ---------------------------------------------------------------------------
 
+
 def test_checkpoint_stays_before_failed_record(stack):
     """When a projection raises, the checkpoint must not advance past it."""
     d, firehose, nav, users, policy, bs = stack
@@ -111,8 +131,9 @@ def test_checkpoint_stays_before_failed_record(stack):
         body = f"body{i}".encode()
         intent.body_hash = compute_body_hash(body)
         intent.body_size = len(body)
-        bs.stage_article_body("bbs.a", "general", intent.event_id, body,
-                              intent.body_hash, intent.body_size)
+        bs.stage_article_body(
+            "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
+        )
         _append(firehose, ORIGIN_A, intent, body)
 
     original_apply = BoardProjection.apply_article
@@ -143,8 +164,9 @@ def test_later_records_not_dispatched_after_failure(stack):
         body = f"body{i}".encode()
         intent.body_hash = compute_body_hash(body)
         intent.body_size = len(body)
-        bs.stage_article_body("bbs.a", "general", intent.event_id, body,
-                              intent.body_hash, intent.body_size)
+        bs.stage_article_body(
+            "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
+        )
         _append(firehose, ORIGIN_A, intent, body)
 
     original_apply = BoardProjection.apply_article
@@ -162,7 +184,9 @@ def test_later_records_not_dispatched_after_failure(stack):
     finally:
         BoardProjection.apply_article = original_apply
 
-    assert call_count[0] == 2, f"should have processed only 2 records (1 success + 1 fail), got {call_count[0]}"
+    assert call_count[0] == 2, (
+        f"should have processed only 2 records (1 success + 1 fail), got {call_count[0]}"
+    )
 
 
 def test_retry_after_fault_removed(stack):
@@ -174,8 +198,9 @@ def test_retry_after_fault_removed(stack):
         body = f"body{i}".encode()
         intent.body_hash = compute_body_hash(body)
         intent.body_size = len(body)
-        bs.stage_article_body("bbs.a", "general", intent.event_id, body,
-                              intent.body_hash, intent.body_size)
+        bs.stage_article_body(
+            "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
+        )
         _append(firehose, ORIGIN_A, intent, body)
 
     original_apply = BoardProjection.apply_article
@@ -205,6 +230,7 @@ def test_retry_after_fault_removed(stack):
 # Multi-origin rebuild isolation
 # ---------------------------------------------------------------------------
 
+
 def test_rebuild_preserves_other_origins(stack):
     """Rebuilding one origin must not clear projections for another origin."""
     d, firehose, nav, users, policy, bs = stack
@@ -233,13 +259,15 @@ def test_rebuild_preserves_other_origins(stack):
 # Dispatch idempotency
 # ---------------------------------------------------------------------------
 
+
 def test_dispatch_idempotent(stack):
     """Dispatching the same origin twice does not duplicate state."""
     d, firehose, nav, users, policy, bs = stack
 
     intent = _make_article_intent("bbs.a", _rid(1), body=b"idempotent")
-    bs.stage_article_body("bbs.a", "general", intent.event_id, b"idempotent",
-                          intent.body_hash, intent.body_size)
+    bs.stage_article_body(
+        "bbs.a", "general", intent.event_id, b"idempotent", intent.body_hash, intent.body_size
+    )
     _append(firehose, ORIGIN_A, intent, b"idempotent")
 
     count1 = d.dispatch_origin("bbs.a")
@@ -254,6 +282,7 @@ def test_dispatch_idempotent(stack):
 # ---------------------------------------------------------------------------
 # Unknown-kind handling
 # ---------------------------------------------------------------------------
+
 
 def test_unknown_boardless_record_dispatched(stack):
     """Unknown boardless records should be tracked for idempotency without crashing."""
@@ -274,8 +303,11 @@ def test_unknown_boarded_record_dispatched(stack):
     d, firehose, nav, users, policy, bs = stack
 
     intent = Intent(
-        event_id=_rid(1), kind="bonnet.custom.event", origin="bbs.a",
-        actor_pubkey=ACTOR_PUB, board="general",
+        event_id=_rid(1),
+        kind="bonnet.custom.event",
+        origin="bbs.a",
+        actor_pubkey=ACTOR_PUB,
+        board="general",
     )
     _append(firehose, ORIGIN_A, intent)
 
@@ -290,17 +322,21 @@ def test_unknown_boarded_record_dispatched(stack):
 # Rebuild after crash
 # ---------------------------------------------------------------------------
 
+
 def test_rebuild_restores_state(stack):
     """Rebuild clears projections and replays all records from the firehose."""
     d, firehose, nav, users, policy, bs = stack
 
     for i in range(3):
-        intent = _make_article_intent("bbs.a", _rid(i + 1), body=f"body{i}".encode(), aid_seed=i + 10)
+        intent = _make_article_intent(
+            "bbs.a", _rid(i + 1), body=f"body{i}".encode(), aid_seed=i + 10
+        )
         body = f"body{i}".encode()
         intent.body_hash = compute_body_hash(body)
         intent.body_size = len(body)
-        bs.stage_article_body("bbs.a", "general", intent.event_id, body,
-                              intent.body_hash, intent.body_size)
+        bs.stage_article_body(
+            "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
+        )
         _append(firehose, ORIGIN_A, intent, body)
 
     d.dispatch_origin("bbs.a")
@@ -322,8 +358,9 @@ def test_rebuild_is_idempotent(stack):
     body = b"rebuild me"
     intent.body_hash = compute_body_hash(body)
     intent.body_size = len(body)
-    bs.stage_article_body("bbs.a", "general", intent.event_id, body,
-                          intent.body_hash, intent.body_size)
+    bs.stage_article_body(
+        "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
+    )
     _append(firehose, ORIGIN_A, intent, body)
 
     d.dispatch_origin("bbs.a")

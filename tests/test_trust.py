@@ -109,10 +109,15 @@ class TestRotation:
         store.tofu_pin("bbs.example.com", old_pub)
 
         origin_bytes = b"bbs.example.com"
-        payload = struct.pack("B", len(origin_bytes)) + origin_bytes + wrong_ident.public_key + new_pub
+        payload = (
+            struct.pack("B", len(origin_bytes)) + origin_bytes + wrong_ident.public_key + new_pub
+        )
         signature = wrong_ident.sign(payload)
 
-        assert store.verify_rotation("bbs.example.com", wrong_ident.public_key, new_pub, signature) is False
+        assert (
+            store.verify_rotation("bbs.example.com", wrong_ident.public_key, new_pub, signature)
+            is False
+        )
         assert store.get_pin("bbs.example.com") == old_pub
 
     def test_rotation_with_bad_signature_fails(self, store, keypair):
@@ -223,6 +228,7 @@ class TestConcurrentFirstContact:
             def run():
                 barrier.wait()
                 results.append(store.tofu_pin("bbs.example.com", key))
+
             return run
 
         t1 = threading.Thread(target=try_tofu(pub1))

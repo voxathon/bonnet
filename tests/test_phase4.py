@@ -71,6 +71,7 @@ def _enc_text16(s: str) -> bytes:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def firehose(tmp_path):
     f = FirehoseStore(str(tmp_path / "events.db"))
@@ -92,39 +93,57 @@ def stack(tmp_path, firehose):
     boards_dir = str(tmp_path / "boards")
 
     acl = ACLEvaluator(default_rules_for_admin(ACTOR_PUB.hex()))
-    acl.add_rule(ACLRule(
-        effect="allow",
-        matcher=PrincipalMatcher(wildcard=True),
-        actions=["read"],
-        commands=["*"],
-        boards=["*"],
-        objects=["*"],
-    ))
+    acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(wildcard=True),
+            actions=["read"],
+            commands=["*"],
+            boards=["*"],
+            objects=["*"],
+        )
+    )
     validator = KindValidator()
     search = SearchService(
-        boards_dir=boards_dir, body_store=body_store,
-        max_count=100, timeout_seconds=5, result_limit=50,
+        boards_dir=boards_dir,
+        body_store=body_store,
+        max_count=100,
+        timeout_seconds=5,
+        result_limit=50,
     )
 
     dispatcher = Dispatcher(
-        firehose=firehose, nav=nav, users=users, policy=policy,
-        boards_dir=boards_dir, body_store=body_store,
+        firehose=firehose,
+        nav=nav,
+        users=users,
+        policy=policy,
+        boards_dir=boards_dir,
+        body_store=body_store,
     )
 
     handler = FirehoseCommandHandler(
         firehose=firehose,
         server_identity=ORIGIN,
         config_origin="bbs.test",
-        nav=nav, users=users, policy=policy,
+        nav=nav,
+        users=users,
+        policy=policy,
         body_store=body_store,
         boards_dir=boards_dir,
-        acl=acl, validator=validator, search=search,
+        acl=acl,
+        validator=validator,
+        search=search,
         hostname="bbs.test",
     )
 
     yield {
-        "firehose": firehose, "nav": nav, "users": users, "policy": policy,
-        "body_store": body_store, "dispatcher": dispatcher, "handler": handler,
+        "firehose": firehose,
+        "nav": nav,
+        "users": users,
+        "policy": policy,
+        "body_store": body_store,
+        "dispatcher": dispatcher,
+        "handler": handler,
         "acl": acl,
     }
 
@@ -137,7 +156,9 @@ def stack(tmp_path, firehose):
 
 def _actor_ctx():
     return FirehoseContext(
-        peer_pubkey=ACTOR_PUB, is_registered=True, origin="bbs.test",
+        peer_pubkey=ACTOR_PUB,
+        is_registered=True,
+        origin="bbs.test",
     )
 
 
@@ -149,18 +170,26 @@ def _anon_ctx():
 # PUBLISH_RECORD tests
 # ---------------------------------------------------------------------------
 
+
 class TestPublishRecord:
     def test_publish_article(self, stack):
         h = stack["handler"]
         body = b"hello world"
         intent = Intent(
-            event_id=_rid(1), kind="bonnet.article", origin="bbs.test",
-            actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(2),
-            metadata=MetadataMap([
-                metadata_text(1, "Test"),
-                metadata_text(4, "text/plain"),
-            ]),
-            body_hash=compute_body_hash(body), body_size=len(body),
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
         )
         encoded_intent = encode_intent(intent)
         actor_sig = sign_intent(ACTOR, encoded_intent)
@@ -174,26 +203,32 @@ class TestPublishRecord:
         assert resp[0] == 0  # success
 
         rec_len = struct.unpack(">I", resp[1:5])[0]
-        rec_bytes = resp[5:5 + rec_len]
+        rec_bytes = resp[5 : 5 + rec_len]
         rec = decode_record(rec_bytes)
         assert rec.origin_seq == 1
         assert rec.kind == "bonnet.article"
         assert rec.article_num == 1
 
-        witness_len = struct.unpack(">H", resp[5 + rec_len:7 + rec_len])[0]
-        witness_bytes = resp[7 + rec_len:7 + rec_len + witness_len]
+        witness_len = struct.unpack(">H", resp[5 + rec_len : 7 + rec_len])[0]
+        witness_bytes = resp[7 + rec_len : 7 + rec_len + witness_len]
         witness = decode_witness(witness_bytes)
         assert is_origin_witness(witness)
 
     def test_publish_rejects_wrong_origin(self, stack):
         h = stack["handler"]
         intent = Intent(
-            event_id=_rid(1), kind="bonnet.article", origin="bbs.evil",
-            actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(2),
-            metadata=MetadataMap([
-                metadata_text(1, "Test"),
-                metadata_text(4, "text/plain"),
-            ]),
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.evil",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
         )
         encoded_intent = encode_intent(intent)
         actor_sig = sign_intent(ACTOR, encoded_intent)
@@ -211,12 +246,18 @@ class TestPublishRecord:
         h = stack["handler"]
         other = Identity.generate()
         intent = Intent(
-            event_id=_rid(1), kind="bonnet.article", origin="bbs.test",
-            actor_pubkey=other.public_key, board="general", article_id=_rid(2),
-            metadata=MetadataMap([
-                metadata_text(1, "Test"),
-                metadata_text(4, "text/plain"),
-            ]),
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=other.public_key,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
         )
         encoded_intent = encode_intent(intent)
         actor_sig = sign_intent(other, encoded_intent)
@@ -234,12 +275,17 @@ class TestPublishRecord:
     def test_publish_board_create(self, stack):
         h = stack["handler"]
         intent = Intent(
-            event_id=_rid(1), kind="bonnet.board.create", origin="bbs.test",
-            actor_pubkey=ACTOR_PUB, board="newboard",
-            metadata=MetadataMap([
-                metadata_bytes(1, ACTOR_PUB),
-                metadata_text(2, "New Board"),
-            ]),
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="newboard",
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, ACTOR_PUB),
+                    metadata_text(2, "New Board"),
+                ]
+            ),
         )
         encoded_intent = encode_intent(intent)
         actor_sig = sign_intent(ACTOR, encoded_intent)
@@ -258,12 +304,18 @@ class TestPublishRecord:
         h._acl = ACLEvaluator([])
 
         intent = Intent(
-            event_id=_rid(1), kind="bonnet.article", origin="bbs.test",
-            actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(2),
-            metadata=MetadataMap([
-                metadata_text(1, "Test"),
-                metadata_text(4, "text/plain"),
-            ]),
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
         )
         encoded_intent = encode_intent(intent)
         actor_sig = sign_intent(ACTOR, encoded_intent)
@@ -283,13 +335,20 @@ class TestPublishRecord:
 
         body = b"\x00" * 200
         intent = Intent(
-            event_id=_rid(1), kind="bonnet.article", origin="bbs.test",
-            actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(2),
-            metadata=MetadataMap([
-                metadata_text(1, "Test"),
-                metadata_text(4, "text/plain"),
-            ]),
-            body_hash=compute_body_hash(body), body_size=len(body),
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
         )
         encoded_intent = encode_intent(intent)
         actor_sig = sign_intent(ACTOR, encoded_intent)
@@ -308,6 +367,7 @@ class TestPublishRecord:
 # EVENT_HEAD tests
 # ---------------------------------------------------------------------------
 
+
 class TestEventHead:
     def test_head_after_publication(self, stack):
         h = stack["handler"]
@@ -315,13 +375,20 @@ class TestEventHead:
 
         body = b"hello"
         intent = Intent(
-            event_id=_rid(1), kind="bonnet.article", origin="bbs.test",
-            actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(2),
-            metadata=MetadataMap([
-                metadata_text(1, "Test"),
-                metadata_text(4, "text/plain"),
-            ]),
-            body_hash=compute_body_hash(body), body_size=len(body),
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
         )
         fh.append_record(ORIGIN, intent, sign_intent(ACTOR, encode_intent(intent)), body)
 
@@ -330,7 +397,7 @@ class TestEventHead:
         assert resp[0] == 0
 
         head_len = struct.unpack(">H", resp[1:3])[0]
-        head = decode_head(resp[3:3 + head_len])
+        head = decode_head(resp[3 : 3 + head_len])
         assert head.latest_origin_seq == 1
         assert head.origin_pubkey == ORIGIN_PUB
 
@@ -338,6 +405,7 @@ class TestEventHead:
 # ---------------------------------------------------------------------------
 # EVENT_RANGE tests
 # ---------------------------------------------------------------------------
+
 
 class TestEventRange:
     def test_fetch_range(self, stack):
@@ -347,13 +415,20 @@ class TestEventRange:
         for i in range(3):
             body = f"body{i}".encode()
             intent = Intent(
-                event_id=_rid(i + 1), kind="bonnet.article", origin="bbs.test",
-                actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(i + 10),
-                metadata=MetadataMap([
-                    metadata_text(1, f"Article {i}"),
-                    metadata_text(4, "text/plain"),
-                ]),
-                body_hash=compute_body_hash(body), body_size=len(body),
+                event_id=_rid(i + 1),
+                kind="bonnet.article",
+                origin="bbs.test",
+                actor_pubkey=ACTOR_PUB,
+                board="general",
+                article_id=_rid(i + 10),
+                metadata=MetadataMap(
+                    [
+                        metadata_text(1, f"Article {i}"),
+                        metadata_text(4, "text/plain"),
+                    ]
+                ),
+                body_hash=compute_body_hash(body),
+                body_size=len(body),
             )
             fh.append_record(ORIGIN, intent, sign_intent(ACTOR, encode_intent(intent)), body)
 
@@ -374,6 +449,7 @@ class TestEventRange:
 # EVENT_GET tests
 # ---------------------------------------------------------------------------
 
+
 class TestEventGet:
     def test_get_existing_event(self, stack):
         h = stack["handler"]
@@ -382,13 +458,20 @@ class TestEventGet:
         eid = _rid(1)
         body = b"hello"
         intent = Intent(
-            event_id=eid, kind="bonnet.article", origin="bbs.test",
-            actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(2),
-            metadata=MetadataMap([
-                metadata_text(1, "Test"),
-                metadata_text(4, "text/plain"),
-            ]),
-            body_hash=compute_body_hash(body), body_size=len(body),
+            event_id=eid,
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
         )
         fh.append_record(ORIGIN, intent, sign_intent(ACTOR, encode_intent(intent)), body)
 
@@ -400,7 +483,7 @@ class TestEventGet:
         assert resp[0] == 0
 
         rec_len = struct.unpack(">I", resp[1:5])[0]
-        rec = decode_record(resp[5:5 + rec_len])
+        rec = decode_record(resp[5 : 5 + rec_len])
         assert rec.event_id == eid
 
     def test_get_missing_event(self, stack):
@@ -417,6 +500,7 @@ class TestEventGet:
 # Projection read tests
 # ---------------------------------------------------------------------------
 
+
 class TestProjectionReads:
     def _publish_and_dispatch(self, stack):
         h = stack["handler"]
@@ -426,16 +510,24 @@ class TestProjectionReads:
 
         body = b"hello world"
         intent = Intent(
-            event_id=_rid(1), kind="bonnet.article", origin="bbs.test",
-            actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(2),
-            metadata=MetadataMap([
-                metadata_text(1, "Test Article"),
-                metadata_text(4, "text/plain"),
-            ]),
-            body_hash=compute_body_hash(body), body_size=len(body),
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test Article"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
         )
-        bs.stage_article_body("bbs.test", "general", intent.event_id, body,
-                              intent.body_hash, intent.body_size)
+        bs.stage_article_body(
+            "bbs.test", "general", intent.event_id, body, intent.body_hash, intent.body_size
+        )
         fh.append_record(ORIGIN, intent, sign_intent(ACTOR, encode_intent(intent)), body)
         d.dispatch_origin("bbs.test")
 
@@ -512,7 +604,7 @@ class TestProjectionReads:
         assert resp[0] == 0
         body_len = struct.unpack(">I", resp[1:5])[0]
         assert body_len == len(b"hello world")
-        assert resp[5:5 + body_len] == b"hello world"
+        assert resp[5 : 5 + body_len] == b"hello world"
 
     def test_article_search_metadata(self, stack):
         self._publish_and_dispatch(stack)
@@ -547,6 +639,7 @@ class TestProjectionReads:
 # Federation sync tests
 # ---------------------------------------------------------------------------
 
+
 class TestFederationSync:
     def test_sync_from_remote(self, tmp_path):
         """Two firehose stores: one as origin, one as receiver."""
@@ -555,16 +648,26 @@ class TestFederationSync:
 
         body = b"remote article"
         intent = Intent(
-            event_id=_rid(1), kind="bonnet.article", origin="bbs.test",
-            actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(2),
-            metadata=MetadataMap([
-                metadata_text(1, "Remote"),
-                metadata_text(4, "text/plain"),
-            ]),
-            body_hash=compute_body_hash(body), body_size=len(body),
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Remote"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
         )
         rec = origin_store.append_record(
-            ORIGIN, intent, sign_intent(ACTOR, encode_intent(intent)), body,
+            ORIGIN,
+            intent,
+            sign_intent(ACTOR, encode_intent(intent)),
+            body,
         )
 
         head = origin_store.get_head("bbs.test")
@@ -572,8 +675,12 @@ class TestFederationSync:
         event_hash = compute_event_hash(encoded_rec)
 
         origin_witness = make_origin_witness(
-            origin="bbs.test", event_id=rec.event_id, event_hash=event_hash,
-            origin_identity=ORIGIN, hostname="bbs.test", seen_at=1700000000,
+            origin="bbs.test",
+            event_id=rec.event_id,
+            event_hash=event_hash,
+            origin_identity=ORIGIN,
+            hostname="bbs.test",
+            seen_at=1700000000,
         )
 
         receiver_store = FirehoseStore(str(tmp_path / "receiver_events.db"))
@@ -607,7 +714,9 @@ class TestFederationSync:
         class MockClient(SyncClient):
             async def fetch_head(self, origin):
                 return Head(
-                    origin=origin, latest_origin_seq=0, origin_pubkey=ORIGIN_PUB,
+                    origin=origin,
+                    latest_origin_seq=0,
+                    origin_pubkey=ORIGIN_PUB,
                 ), b""
 
             async def fetch_range(self, origin, start, count):
@@ -626,23 +735,37 @@ class TestFederationSync:
 
         body = b"test body"
         intent = Intent(
-            event_id=_rid(1), kind="bonnet.article", origin="bbs.test",
-            actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(2),
-            metadata=MetadataMap([
-                metadata_text(1, "Test"),
-                metadata_text(4, "text/plain"),
-            ]),
-            body_hash=compute_body_hash(body), body_size=len(body),
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
         )
         rec = origin_store.append_record(
-            ORIGIN, intent, sign_intent(ACTOR, encode_intent(intent)), body,
+            ORIGIN,
+            intent,
+            sign_intent(ACTOR, encode_intent(intent)),
+            body,
         )
         head = origin_store.get_head("bbs.test")
         encoded_rec = encode_record(rec)
         event_hash = compute_event_hash(encoded_rec)
         origin_w = make_origin_witness(
-            origin="bbs.test", event_id=rec.event_id, event_hash=event_hash,
-            origin_identity=ORIGIN, hostname="bbs.test", seen_at=1700000000,
+            origin="bbs.test",
+            event_id=rec.event_id,
+            event_hash=event_hash,
+            origin_identity=ORIGIN,
+            hostname="bbs.test",
+            seen_at=1700000000,
         )
 
         receiver_store = FirehoseStore(str(tmp_path / "receiver.db"))

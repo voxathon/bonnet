@@ -114,6 +114,7 @@ BODY_HASH = hashlib.sha256(DOMAIN_BODY + BODY).digest()
 # Primitive encoding tests
 # ---------------------------------------------------------------------------
 
+
 class TestPrimitives:
     def test_u8_roundtrip(self):
         assert enc_u8(0) == b"\x00"
@@ -160,6 +161,7 @@ class TestPrimitives:
 # Metadata map tests (§6)
 # ---------------------------------------------------------------------------
 
+
 class TestMetadata:
     def test_empty_metadata(self):
         m = MetadataMap()
@@ -175,11 +177,13 @@ class TestMetadata:
         assert decoded.get_text(1) == "hello"
 
     def test_multiple_fields_ordered(self):
-        m = MetadataMap([
-            metadata_text(1, "subject"),
-            metadata_u64(2, 42),
-            metadata_bool(3, True),
-        ])
+        m = MetadataMap(
+            [
+                metadata_text(1, "subject"),
+                metadata_u64(2, 42),
+                metadata_bool(3, True),
+            ]
+        )
         encoded = encode_metadata(m)
         decoded = decode_metadata(encoded)
         assert decoded.get_text(1) == "subject"
@@ -187,18 +191,22 @@ class TestMetadata:
         assert decoded.get_bool(3) is True
 
     def test_fields_must_be_strictly_increasing(self):
-        m = MetadataMap([
-            metadata_text(2, "b"),
-            metadata_text(1, "a"),
-        ])
+        m = MetadataMap(
+            [
+                metadata_text(2, "b"),
+                metadata_text(1, "a"),
+            ]
+        )
         with pytest.raises(NonCanonical):
             encode_metadata(m)
 
     def test_duplicate_field_ids_rejected(self):
-        m = MetadataMap([
-            metadata_text(1, "a"),
-            metadata_text(1, "b"),
-        ])
+        m = MetadataMap(
+            [
+                metadata_text(1, "a"),
+                metadata_text(1, "b"),
+            ]
+        )
         with pytest.raises(NonCanonical):
             encode_metadata(m)
 
@@ -230,8 +238,9 @@ class TestMetadata:
             decode_metadata(encode_metadata(m))
 
     def test_text_list_unsorted_rejected_on_decode(self):
-        field = MetadataField(1, VT_TEXT_LIST, struct.pack(">H", 2) +
-                              enc_text16("z") + enc_text16("a"))
+        field = MetadataField(
+            1, VT_TEXT_LIST, struct.pack(">H", 2) + enc_text16("z") + enc_text16("a")
+        )
         m = MetadataMap([field])
         encoded = encode_metadata(m)
         with pytest.raises(NonCanonical):
@@ -282,6 +291,7 @@ class TestMetadata:
 # ---------------------------------------------------------------------------
 # Hash and signature domain tests (§4)
 # ---------------------------------------------------------------------------
+
 
 class TestCryptoDomains:
     def test_body_hash_deterministic(self):
@@ -387,6 +397,7 @@ class TestCryptoDomains:
 # Intent codec tests (§7)
 # ---------------------------------------------------------------------------
 
+
 class TestIntent:
     def _make_intent(self) -> Intent:
         return Intent(
@@ -397,11 +408,13 @@ class TestIntent:
             actor_pubkey=ACTOR_PUB,
             board="general",
             article_id=ARTICLE_ID_1,
-            metadata=MetadataMap([
-                metadata_text(1, "Test Article"),
-                metadata_text_list(2, ["news", "tech"]),
-                metadata_text(4, "text/plain"),
-            ]),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test Article"),
+                    metadata_text_list(2, ["news", "tech"]),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
             body_hash=BODY_HASH,
             body_size=len(BODY),
         )
@@ -450,6 +463,7 @@ class TestIntent:
 # Record codec tests (§8)
 # ---------------------------------------------------------------------------
 
+
 class TestRecord:
     def _make_record(self) -> Record:
         intent = Intent(
@@ -459,10 +473,12 @@ class TestRecord:
             actor_pubkey=ACTOR_PUB,
             board="general",
             article_id=ARTICLE_ID_1,
-            metadata=MetadataMap([
-                metadata_text(1, "Test Article"),
-                metadata_text(4, "text/plain"),
-            ]),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test Article"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
             body_hash=BODY_HASH,
             body_size=len(BODY),
         )
@@ -543,6 +559,7 @@ class TestRecord:
 # Head codec tests (§9)
 # ---------------------------------------------------------------------------
 
+
 class TestHead:
     def test_empty_head(self):
         h = Head(origin="bbs.test", origin_pubkey=ORIGIN_PUB)
@@ -573,7 +590,9 @@ class TestHead:
         assert decoded.latest_event_hash == event_hash
         assert decoded.event_count == 42
         assert decoded.origin_pubkey == ORIGIN_PUB
-        assert verify_head_signature(ORIGIN_PUB, encode_unsigned_head(decoded), decoded.origin_signature)
+        assert verify_head_signature(
+            ORIGIN_PUB, encode_unsigned_head(decoded), decoded.origin_signature
+        )
 
     def test_head_hash(self):
         h = Head(origin="bbs.test", origin_pubkey=ORIGIN_PUB)
@@ -588,6 +607,7 @@ class TestHead:
 # ---------------------------------------------------------------------------
 # Witness codec tests (§10)
 # ---------------------------------------------------------------------------
+
 
 class TestWitness:
     def test_relay_witness_roundtrip(self):
@@ -657,6 +677,7 @@ class TestWitness:
 # Key rotation proof tests (§12.9)
 # ---------------------------------------------------------------------------
 
+
 class TestKeyRotation:
     def test_proof_verifies(self):
         proof = sign_key_rotation_proof(NEW_ORIGIN, "bbs.test", ORIGIN_PUB, NEW_ORIGIN_PUB)
@@ -674,6 +695,7 @@ class TestKeyRotation:
 # ---------------------------------------------------------------------------
 # Golden vector: full publication flow
 # ---------------------------------------------------------------------------
+
 
 class TestGoldenVectors:
     """Deterministic end-to-end encoding and signature vectors."""
@@ -695,11 +717,13 @@ class TestGoldenVectors:
             actor_pubkey=ACTOR_PUB,
             board="general",
             article_id=ARTICLE_ID_1,
-            metadata=MetadataMap([
-                metadata_text(1, "First Post"),
-                metadata_text_list(2, ["intro", "test"]),
-                metadata_text(4, "text/plain"),
-            ]),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "First Post"),
+                    metadata_text_list(2, ["intro", "test"]),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
             body_hash=body_hash,
             body_size=len(body),
         )
@@ -733,7 +757,9 @@ class TestGoldenVectors:
         assert verify_record_signature(ORIGIN_PUB, unsigned_rec, rec.origin_signature)
         reconstructed_intent = reconstruct_intent_from_record(rec)
         assert verify_intent_signature(
-            ACTOR_PUB, encode_intent(reconstructed_intent), rec.actor_signature,
+            ACTOR_PUB,
+            encode_intent(reconstructed_intent),
+            rec.actor_signature,
         )
 
         # Event hash is deterministic
@@ -895,6 +921,7 @@ class TestGoldenVectors:
 # ---------------------------------------------------------------------------
 # Edge cases and rejection tests
 # ---------------------------------------------------------------------------
+
 
 class TestRejections:
     def test_u64_exceeds_u63_rejected(self):

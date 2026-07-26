@@ -84,16 +84,29 @@ CMD_NAMES = {
 }
 
 WRITE_OPS = frozenset({OP_PUBLISH_RECORD})
-READ_OPS = frozenset({
-    OP_EVENT_HEAD, OP_EVENT_RANGE, OP_EVENT_GET,
-    OP_BOARD_LIST, OP_ARTICLE_GET, OP_ARTICLE_LIST, OP_ARTICLE_SEARCH,
-    OP_ARTICLE_QUERY, OP_ARTICLE_BODY, OP_USER_GET, OP_USER_LIST, OP_BAN_STATUS, OP_EVENT_BODY,
-})
+READ_OPS = frozenset(
+    {
+        OP_EVENT_HEAD,
+        OP_EVENT_RANGE,
+        OP_EVENT_GET,
+        OP_BOARD_LIST,
+        OP_ARTICLE_GET,
+        OP_ARTICLE_LIST,
+        OP_ARTICLE_SEARCH,
+        OP_ARTICLE_QUERY,
+        OP_ARTICLE_BODY,
+        OP_USER_GET,
+        OP_USER_LIST,
+        OP_BAN_STATUS,
+        OP_EVENT_BODY,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Response builder helpers
 # ---------------------------------------------------------------------------
+
 
 def _success(payload: bytes = b"") -> bytes:
     return b"\x00" + payload
@@ -112,30 +125,30 @@ def _enc_text16(s: str) -> bytes:
 def _read_text16(data: bytes, offset: int) -> tuple[str, int]:
     if offset + 2 > len(data):
         raise ValueError("truncated text16")
-    n = struct.unpack(">H", data[offset:offset + 2])[0]
+    n = struct.unpack(">H", data[offset : offset + 2])[0]
     offset += 2
     if offset + n > len(data):
         raise ValueError("truncated text16 content")
-    s = data[offset:offset + n].decode("utf-8")
+    s = data[offset : offset + n].decode("utf-8")
     return s, offset + n
 
 
 def _read_u64(data: bytes, offset: int) -> tuple[int, int]:
     if offset + 8 > len(data):
         raise ValueError("truncated u64")
-    return struct.unpack(">Q", data[offset:offset + 8])[0], offset + 8
+    return struct.unpack(">Q", data[offset : offset + 8])[0], offset + 8
 
 
 def _read_u16(data: bytes, offset: int) -> tuple[int, int]:
     if offset + 2 > len(data):
         raise ValueError("truncated u16")
-    return struct.unpack(">H", data[offset:offset + 2])[0], offset + 2
+    return struct.unpack(">H", data[offset : offset + 2])[0], offset + 2
 
 
 def _read_u32(data: bytes, offset: int) -> tuple[int, int]:
     if offset + 4 > len(data):
         raise ValueError("truncated u32")
-    return struct.unpack(">I", data[offset:offset + 4])[0], offset + 4
+    return struct.unpack(">I", data[offset : offset + 4])[0], offset + 4
 
 
 def _read_u8(data: bytes, offset: int) -> tuple[int, int]:
@@ -147,12 +160,13 @@ def _read_u8(data: bytes, offset: int) -> tuple[int, int]:
 def _read_id32(data: bytes, offset: int) -> tuple[bytes, int]:
     if offset + 32 > len(data):
         raise ValueError("truncated id32")
-    return data[offset:offset + 32], offset + 32
+    return data[offset : offset + 32], offset + 32
 
 
 # ---------------------------------------------------------------------------
 # Command context
 # ---------------------------------------------------------------------------
+
 
 class FirehoseContext:
     """Request context passed to each command handler."""
@@ -189,6 +203,7 @@ class FirehoseContext:
 # ---------------------------------------------------------------------------
 # Firehose command handler
 # ---------------------------------------------------------------------------
+
 
 class FirehoseCommandHandler:
     """Dispatches firehose protocol commands (§19)."""
@@ -244,9 +259,7 @@ class FirehoseCommandHandler:
         with self._boards_lock:
             bp = self._board_projections.get(key)
             if bp is None:
-                bp = BoardProjection(
-                    board_db_path(self._boards_dir, origin, board)
-                )
+                bp = BoardProjection(board_db_path(self._boards_dir, origin, board))
                 self._board_projections[key] = bp
             return bp
 
@@ -322,18 +335,18 @@ class FirehoseCommandHandler:
         intent_len, offset = _read_u32(data, offset)
         if offset + intent_len > len(data):
             return _error(0x0006, "Truncated intent")
-        encoded_intent = data[offset:offset + intent_len]
+        encoded_intent = data[offset : offset + intent_len]
         offset += intent_len
 
         if offset + SIG_SIZE > len(data):
             return _error(0x0006, "Missing actor signature")
-        actor_sig = data[offset:offset + SIG_SIZE]
+        actor_sig = data[offset : offset + SIG_SIZE]
         offset += SIG_SIZE
 
         body_len, offset = _read_u32(data, offset)
         if offset + body_len > len(data):
             return _error(0x0006, "Truncated body")
-        body = data[offset:offset + body_len]
+        body = data[offset : offset + body_len]
         offset += body_len
 
         intent = decode_intent(encoded_intent)
@@ -351,19 +364,32 @@ class FirehoseCommandHandler:
 
         kind = intent.kind
         board = intent.board
-        if not self._acl.check(ctx.to_auth_context(), "write",
-                               command="PUBLISH_RECORD", kind=kind, board=board or None):
+        if not self._acl.check(
+            ctx.to_auth_context(), "write", command="PUBLISH_RECORD", kind=kind, board=board or None
+        ):
             return _error(0x0004, "Not permitted")
 
-        if kind in (KIND_ARTICLE_CANCEL, KIND_ARTICLE_RESTORE, KIND_ARTICLE_PURGE,
-                    KIND_ARTICLE_PIN, KIND_ARTICLE_UNPIN,
-                    KIND_THREAD_CLOSE, KIND_THREAD_REOPEN):
-            if intent.target_article_id == ZERO_ID or not intent.target_origin or not intent.target_board:
+        if kind in (
+            KIND_ARTICLE_CANCEL,
+            KIND_ARTICLE_RESTORE,
+            KIND_ARTICLE_PURGE,
+            KIND_ARTICLE_PIN,
+            KIND_ARTICLE_UNPIN,
+            KIND_THREAD_CLOSE,
+            KIND_THREAD_REOPEN,
+        ):
+            if (
+                intent.target_article_id == ZERO_ID
+                or not intent.target_origin
+                or not intent.target_board
+            ):
                 return _error(0x0006, "Control event requires complete target tuple")
 
             bp = self._get_board_projection(intent.target_origin, intent.target_board)
             target = bp.get_article_by_id(
-                intent.target_origin, intent.target_board, intent.target_article_id,
+                intent.target_origin,
+                intent.target_board,
+                intent.target_article_id,
             )
 
             if target is None:
@@ -372,7 +398,9 @@ class FirehoseCommandHandler:
             if kind == KIND_ARTICLE_CANCEL:
                 if target.author_pubkey != intent.actor_pubkey:
                     if ctx.role != "administrator" and ctx.role != "moderator":
-                        return _error(0x0004, "Only the author or a moderator may cancel this article")
+                        return _error(
+                            0x0004, "Only the author or a moderator may cancel this article"
+                        )
                 if target.visibility == "cancelled":
                     return _error(0x0009, "Article is already cancelled")
                 if target.visibility == "superseded":
@@ -380,7 +408,9 @@ class FirehoseCommandHandler:
             elif kind == KIND_ARTICLE_RESTORE:
                 if target.author_pubkey != intent.actor_pubkey:
                     if ctx.role != "administrator" and ctx.role != "moderator":
-                        return _error(0x0004, "Only the author or a moderator may restore this article")
+                        return _error(
+                            0x0004, "Only the author or a moderator may restore this article"
+                        )
                 if target.visibility != "cancelled":
                     return _error(0x0009, "Article is not cancelled")
                 if target.body_state == "purged":
@@ -388,7 +418,9 @@ class FirehoseCommandHandler:
             elif kind == KIND_ARTICLE_PURGE:
                 if target.author_pubkey != intent.actor_pubkey:
                     if ctx.role != "administrator" and ctx.role != "moderator":
-                        return _error(0x0004, "Only the author or a moderator may purge this article")
+                        return _error(
+                            0x0004, "Only the author or a moderator may purge this article"
+                        )
                 if target.body_state == "purged":
                     return _error(0x0009, "Article is already purged")
             elif kind == KIND_ARTICLE_UNPIN:
@@ -414,7 +446,9 @@ class FirehoseCommandHandler:
 
         if intent.body_size > 0:
             if intent.body_size > self._max_body_size:
-                return _error(0x0006, f"Body size {intent.body_size} exceeds maximum {self._max_body_size}")
+                return _error(
+                    0x0006, f"Body size {intent.body_size} exceeds maximum {self._max_body_size}"
+                )
             if len(body) != intent.body_size:
                 return _error(0x0006, "Body length mismatch")
             actual_hash = compute_body_hash(body)
@@ -423,20 +457,30 @@ class FirehoseCommandHandler:
 
         if intent.kind == KIND_ARTICLE and intent.body_size > 0:
             self._body_store.stage_article_body(
-                intent.origin, intent.board, intent.event_id,
-                body, intent.body_hash, intent.body_size,
+                intent.origin,
+                intent.board,
+                intent.event_id,
+                body,
+                intent.body_hash,
+                intent.body_size,
             )
         elif intent.body_size > 0:
             self._body_store.write_event_body(
-                intent.origin, intent.event_id, body,
-                intent.body_hash, intent.body_size,
+                intent.origin,
+                intent.event_id,
+                body,
+                intent.body_hash,
+                intent.body_size,
             )
 
         rec = self._firehose.append_record(self._identity, intent, actor_sig, body, created_at=now)
 
         if intent.kind == KIND_ARTICLE and intent.body_size > 0:
             self._body_store.finalize_article_body(
-                intent.origin, intent.board, intent.event_id, rec.article_num,
+                intent.origin,
+                intent.board,
+                intent.event_id,
+                rec.article_num,
             )
 
         if self._dispatcher:
@@ -457,8 +501,10 @@ class FirehoseCommandHandler:
         encoded_witness = encode_witness(witness)
 
         return _success(
-            struct.pack(">I", len(encoded_rec)) + encoded_rec +
-            struct.pack(">H", len(encoded_witness)) + encoded_witness
+            struct.pack(">I", len(encoded_rec))
+            + encoded_rec
+            + struct.pack(">H", len(encoded_witness))
+            + encoded_witness
         )
 
     # ------------------------------------------------------------------
@@ -549,8 +595,10 @@ class FirehoseCommandHandler:
         encoded_witness = encode_witness(witness)
 
         return _success(
-            struct.pack(">I", len(encoded_rec)) + encoded_rec +
-            struct.pack(">H", len(encoded_witness)) + encoded_witness
+            struct.pack(">I", len(encoded_rec))
+            + encoded_rec
+            + struct.pack(">H", len(encoded_witness))
+            + encoded_witness
         )
 
     # ------------------------------------------------------------------
@@ -647,11 +695,11 @@ class FirehoseCommandHandler:
         out += struct.pack(">q", art.created_at)
         out += struct.pack(">B", len(art.author_pubkey)) + art.author_pubkey
 
-        author_username = getattr(art, 'author_username', '') or ''
+        author_username = getattr(art, "author_username", "") or ""
         au_bytes = author_username.encode("utf-8")
         out += struct.pack(">H", len(au_bytes)) + au_bytes
 
-        author_registrar = getattr(art, 'author_registrar', '') or ''
+        author_registrar = getattr(art, "author_registrar", "") or ""
         ar_bytes = author_registrar.encode("utf-8")
         out += struct.pack(">H", len(ar_bytes)) + ar_bytes
 
@@ -664,32 +712,38 @@ class FirehoseCommandHandler:
         ct_bytes = art.content_type.encode("utf-8")
         out += struct.pack(">H", len(ct_bytes)) + ct_bytes
 
-        root_id = getattr(art, 'root_article_id', ZERO_ID) or ZERO_ID
+        root_id = getattr(art, "root_article_id", ZERO_ID) or ZERO_ID
         out += struct.pack(">B", len(root_id)) + root_id
 
-        reply_id = getattr(art, 'reply_to_article_id', ZERO_ID) or ZERO_ID
+        reply_id = getattr(art, "reply_to_article_id", ZERO_ID) or ZERO_ID
         out += struct.pack(">B", len(reply_id)) + reply_id
 
-        replacement_id = getattr(art, 'replacement_article_id', None)
+        replacement_id = getattr(art, "replacement_article_id", None)
         if replacement_id and len(replacement_id) == 32:
             out += struct.pack(">B", 1) + replacement_id
         else:
             out += struct.pack(">B", 0)
 
-        pin_state = getattr(art, 'pin_state', 'unpinned') or 'unpinned'
+        pin_state = getattr(art, "pin_state", "unpinned") or "unpinned"
         pin_bytes = pin_state.encode("utf-8")
         out += struct.pack(">H", len(pin_bytes)) + pin_bytes
 
-        thread_state = getattr(art, 'thread_state', 'open') or 'open'
+        thread_state = getattr(art, "thread_state", "open") or "open"
         thread_bytes = thread_state.encode("utf-8")
         out += struct.pack(">H", len(thread_bytes)) + thread_bytes
 
         body_bytes = b""
         if include_body and art.body_state == "available" and art.body_size > 0:
-            body_bytes = self._body_store.get_article_body(
-                art.origin, art.board, art.article_num,
-                art.body_hash, art.body_size,
-            ) or b""
+            body_bytes = (
+                self._body_store.get_article_body(
+                    art.origin,
+                    art.board,
+                    art.article_num,
+                    art.body_hash,
+                    art.body_size,
+                )
+                or b""
+            )
 
         out += struct.pack(">I", len(body_bytes)) + body_bytes
         return out
@@ -713,7 +767,8 @@ class FirehoseCommandHandler:
         if origin == "":
             all_boards = self._nav.list_boards()
             origins_with_board = [
-                b["origin"] for b in all_boards
+                b["origin"]
+                for b in all_boards
                 if b["board"] == board
                 and (not self._allowed_origins or b["origin"] in self._allowed_origins)
             ]
@@ -722,7 +777,10 @@ class FirehoseCommandHandler:
             for orig in origins_with_board:
                 bp = self._get_board_projection(orig, board)
                 articles = bp.list_articles(
-                    orig, board, offset=0, limit=list_offset + limit,
+                    orig,
+                    board,
+                    offset=0,
+                    limit=list_offset + limit,
                     include_cancelled=include_cancelled,
                     include_superseded=include_superseded,
                 )
@@ -730,7 +788,7 @@ class FirehoseCommandHandler:
                     all_articles.append((art, orig))
 
             all_articles.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
-            page = all_articles[list_offset:list_offset + limit]
+            page = all_articles[list_offset : list_offset + limit]
 
             out = struct.pack(">H", len(page))
             for art, orig in page:
@@ -743,7 +801,10 @@ class FirehoseCommandHandler:
             return _success(struct.pack(">H", 0))
         bp = self._get_board_projection(origin, board)
         articles = bp.list_articles(
-            origin, board, offset=list_offset, limit=limit,
+            origin,
+            board,
+            offset=list_offset,
+            limit=limit,
             include_cancelled=include_cancelled,
             include_superseded=include_superseded,
         )
@@ -773,7 +834,8 @@ class FirehoseCommandHandler:
         if origin == "":
             all_boards = self._nav.list_boards()
             origins_with_board = [
-                b["origin"] for b in all_boards
+                b["origin"]
+                for b in all_boards
                 if b["board"] == board
                 and (not self._allowed_origins or b["origin"] in self._allowed_origins)
             ]
@@ -785,15 +847,23 @@ class FirehoseCommandHandler:
                 bp = self._get_board_projection(orig, board)
                 if body_query:
                     results = self._search.search_bodies(
-                        bp, orig, board, body_query,
-                        offset=0, limit=list_offset + limit,
+                        bp,
+                        orig,
+                        board,
+                        body_query,
+                        offset=0,
+                        limit=list_offset + limit,
                         include_cancelled=include_cancelled,
                         include_superseded=include_superseded,
                     )
                 else:
                     results = self._search.search_metadata(
-                        bp, orig, board, text_query=meta_query,
-                        offset=0, limit=list_offset + limit,
+                        bp,
+                        orig,
+                        board,
+                        text_query=meta_query,
+                        offset=0,
+                        limit=list_offset + limit,
                         include_cancelled=include_cancelled,
                         include_superseded=include_superseded,
                     )
@@ -804,7 +874,7 @@ class FirehoseCommandHandler:
                     truncated = True
 
             all_results.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
-            page = all_results[list_offset:list_offset + limit]
+            page = all_results[list_offset : list_offset + limit]
 
             out = struct.pack(">H", len(page))
             out += struct.pack(">I", total)
@@ -830,15 +900,23 @@ class FirehoseCommandHandler:
 
         if body_query:
             results = self._search.search_bodies(
-                bp, origin, board, body_query,
-                offset=list_offset, limit=limit,
+                bp,
+                origin,
+                board,
+                body_query,
+                offset=list_offset,
+                limit=limit,
                 include_cancelled=include_cancelled,
                 include_superseded=include_superseded,
             )
         else:
             results = self._search.search_metadata(
-                bp, origin, board, text_query=meta_query,
-                offset=list_offset, limit=limit,
+                bp,
+                origin,
+                board,
+                text_query=meta_query,
+                offset=list_offset,
+                limit=limit,
                 include_cancelled=include_cancelled,
                 include_superseded=include_superseded,
             )
@@ -879,7 +957,7 @@ class FirehoseCommandHandler:
             operator, offset = _read_u8(data, offset)
             value_type, offset = _read_u8(data, offset)
             value_len, offset = _read_u16(data, offset)
-            raw_value = data[offset:offset + value_len]
+            raw_value = data[offset : offset + value_len]
             offset += value_len
 
             if value_type == 0x01:
@@ -900,7 +978,11 @@ class FirehoseCommandHandler:
 
         bp = self._get_board_projection(origin, board)
         articles = bp.query_articles(
-            origin, board, filters, offset=list_offset, limit=limit,
+            origin,
+            board,
+            filters,
+            offset=list_offset,
+            limit=limit,
         )
 
         out = struct.pack(">H", len(articles))
@@ -935,7 +1017,11 @@ class FirehoseCommandHandler:
             return _success(struct.pack(">I", 0))
 
         body = self._body_store.get_article_body(
-            origin, board, article_num, art.body_hash, art.body_size,
+            origin,
+            board,
+            article_num,
+            art.body_hash,
+            art.body_size,
         )
         if body is None:
             if origin != self._origin:
@@ -963,7 +1049,7 @@ class FirehoseCommandHandler:
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _error(0x0001, "User not found")
         pubkey_len, offset = _read_u8(data, offset)
-        pubkey = data[offset:offset + pubkey_len]
+        pubkey = data[offset : offset + pubkey_len]
         offset += pubkey_len
 
         user = self._users.get_user_by_pubkey(origin, pubkey)
@@ -1018,7 +1104,7 @@ class FirehoseCommandHandler:
     def _cmd_ban_status(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         pubkey_len, offset = _read_u8(data, offset)
-        pubkey = data[offset:offset + pubkey_len]
+        pubkey = data[offset : offset + pubkey_len]
         offset += pubkey_len
 
         punishments = self._policy.list_punishments_for_pubkey(pubkey, include_revoked=False)
@@ -1064,7 +1150,10 @@ class FirehoseCommandHandler:
             return _success(struct.pack(">I", 0))
 
         body = self._body_store.get_event_body(
-            origin, event_id, rec.body_hash, rec.body_size,
+            origin,
+            event_id,
+            rec.body_hash,
+            rec.body_size,
         )
         if body is None:
             return _error(0x0003, "Event body unavailable")
