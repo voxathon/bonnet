@@ -8,13 +8,10 @@ Exit gate (§13 Phase 3):
 """
 
 import os
-import sys
 import time
 import base64
 import threading
 import pytest
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from net.replay import ReplayLedger
 

@@ -1,20 +1,14 @@
 """Tests for src/net/http_auth.py — Bonnet RFC 9421 Ed25519 profile.
-
-Run independently:
-  PYTHONPATH=src uv run pytest tests/test_http_auth.py -v
 """
 
 import asyncio
 import base64
 import hashlib
 import os
-import sys
 import time
 import copy
 
 import pytest
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from nacl.signing import SigningKey
 
