@@ -12,10 +12,13 @@ upstream.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import socket
 import struct
 import time
 import threading
 from typing import Optional
+from urllib.parse import urlparse
 
 from core.crypto import Identity
 from core.logging import log_msg
@@ -34,6 +37,48 @@ from core.firehose import (
     FirehoseError, ChainBreak, SignatureInvalid, HeadMismatch,
     EventIdCollision, ArticleIdCollision,
 )
+
+
+def is_safe_dial_target(hostname: str, port: int, allow_private: bool = False) -> bool:
+    """Validate a dial target against SSRF protections (Gate C).
+
+    Rejects non-global addresses by default. When allow_private is True,
+    loopback, private, and link-local addresses are permitted for
+    development or LAN federation.
+    """
+    if not hostname:
+        return False
+    if port < 1 or port > 65535:
+        return False
+
+    try:
+        addr = ipaddress.ip_address(hostname)
+        if not allow_private:
+            if addr.is_loopback or addr.is_private or addr.is_link_local:
+                return False
+            if addr.is_multicast or addr.is_reserved or addr.is_unspecified:
+                return False
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+
+    for family, _, _, _, sockaddr in infos:
+        ip_str = sockaddr[0]
+        try:
+            addr = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if not allow_private:
+            if addr.is_loopback or addr.is_private or addr.is_link_local:
+                return False
+            if addr.is_multicast or addr.is_reserved or addr.is_unspecified:
+                return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -62,8 +107,11 @@ class HttpSyncClient(SyncClient):
     and wraps the firehose protocol commands EVENT_HEAD and EVENT_RANGE.
     """
 
-    def __init__(self, base_url: str, verify_tls: bool = False):
+    def __init__(self, base_url: str, verify_tls: bool = False, allow_private_dial: bool = False):
         from client.firehose_client import FirehoseHTTPClient
+        parsed = urlparse(base_url)
+        if not is_safe_dial_target(parsed.hostname, parsed.port or 443, allow_private=allow_private_dial):
+            raise ValueError(f"unsafe dial target: {parsed.hostname}:{parsed.port or 443}")
         self._client = FirehoseHTTPClient(base_url, verify=verify_tls)
         self._connected = False
 
@@ -177,15 +225,21 @@ class SyncManager:
         """Stop syncing an origin."""
         with self._lock:
             task = self._tasks.pop(origin, None)
-            self._clients.pop(origin, None)
+            client = self._clients.pop(origin, None)
             if task:
                 task.cancel()
+        if client is not None:
+            if self._loop is not None and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(client.close(), self._loop)
+            self._inflight.discard(origin)
 
     async def stop_all(self) -> None:
         with self._lock:
             tasks = list(self._tasks.values())
             self._tasks.clear()
+            clients = list(self._clients.values())
             self._clients.clear()
+            self._inflight.clear()
             if self._worker_task:
                 self._worker_task.cancel()
                 tasks.append(self._worker_task)
@@ -198,6 +252,11 @@ class SyncManager:
                 await t
             except asyncio.CancelledError:
                 pass
+        for client in clients:
+            try:
+                await client.close()
+            except Exception:
+                pass
 
     async def _sync_worker(self) -> None:
         """Background worker consuming on-demand sync requests."""
@@ -207,6 +266,12 @@ class SyncManager:
                 client = self._clients.get(origin)
                 if client is None:
                     continue
+                backoff = self._peer_backoff.get(origin, 0)
+                if backoff > 0:
+                    last_fail = self._peer_last_failure.get(origin, 0)
+                    if time.time() - last_fail < backoff:
+                        log_msg(f"SYNC_WORKER: origin='{origin}' in backoff ({backoff}s), skipping on-demand sync")
+                        continue
                 try:
                     await self._sync_once(origin, client)
                     self._record_peer_success(origin)
@@ -240,9 +305,19 @@ class SyncManager:
             jitter = interval * (0.75 + random.random() * 0.5)
             await asyncio.sleep(jitter)
 
-    async def _sync_once(self, origin: str, client: SyncClient) -> AcceptResult:
-        """Perform one sync cycle for an origin."""
-        if origin not in self._clients:
+    async def _sync_once(self, origin: str, client: SyncClient, skip_allowlist: bool = False) -> AcceptResult:
+        """Perform one sync cycle for an origin.
+
+        When skip_allowlist is False (default), the origin must be a
+        configured peer. When True, the check is bypassed for manual
+        operator-triggered sync.
+
+        Records are fetched and accepted in bounded batches of 100. Each
+        batch is committed before the next is fetched. If a batch conflicts
+        or fails, committed batches are kept and the cycle stops — the next
+        cycle resumes from where it stopped.
+        """
+        if not skip_allowlist and origin not in self._clients:
             log_msg(f"SYNC_ONCE: origin='{origin}' is not a configured peer, refusing to accept records")
             return AcceptResult(accepted=False, reason="origin not in peer allowlist")
 
@@ -263,31 +338,11 @@ class SyncManager:
                     log_msg(f"SYNC_ONCE: origin='{origin}' dispatch failed: {e}")
             return AcceptResult(accepted=False, reason="already up to date")
 
-        start = local_seq + 1
-        count = head.latest_origin_seq - local_seq
-
-        all_records = []
-        all_witnesses = []
-        current_start = start
-        remaining = count
-
-        while remaining > 0:
-            batch = min(remaining, 100)
-            items = await client.fetch_range(origin, current_start, batch)
-            if not items:
-                log_msg(f"SYNC_ONCE: origin='{origin}' fetch_range returned empty at seq {current_start}")
-                break
-            all_records.extend(r for r, w in items)
-            all_witnesses.extend(w for r, w in items)
-            current_start += len(items)
-            remaining -= len(items)
-
-        log_msg(f"SYNC_ONCE: origin='{origin}' fetched {len(all_records)} records (expected {count})")
-
-        if not all_records:
-            return AcceptResult(accepted=False, reason="no records fetched")
-
-        log_msg(f"SYNC_ONCE: origin='{origin}' head.origin_pubkey={head.origin_pubkey.hex()[:16]}...")
+        if head.latest_origin_seq > local_seq + 100000:
+            log_msg(f"SYNC_ONCE: origin='{origin}' remote claims {head.latest_origin_seq} but local is {local_seq} — capping cycle at 10000 records")
+            count = 10000
+        else:
+            count = head.latest_origin_seq - local_seq
 
         self._firehose.init_origin_key(origin, head.origin_pubkey)
         existing_key = self._firehose.get_key_for_seq(origin, 1)
@@ -299,31 +354,69 @@ class SyncManager:
         else:
             log_msg(f"SYNC_ONCE: origin='{origin}' no key epoch found, using head.origin_pubkey as fallback")
 
-        result = self._firehose.accept_remote_range(
-            origin=origin,
-            records=all_records,
-            head=head,
-            origin_pubkey=head.origin_pubkey,
-            source=self._hostname,
-        )
+        total_accepted = 0
+        current_start = local_seq + 1
+        remaining = count
+        last_result = AcceptResult(accepted=False, reason="no records fetched")
 
-        log_msg(f"SYNC_ONCE: origin='{origin}' accept_remote_range: accepted={result.accepted} count={result.accepted_count} reason='{result.reason}'")
+        while remaining > 0:
+            batch_size = min(remaining, 100)
+            items = await client.fetch_range(origin, current_start, batch_size)
+            if not items:
+                log_msg(f"SYNC_ONCE: origin='{origin}' fetch_range returned empty at seq {current_start}")
+                break
 
-        if result.accepted:
-            for rec, upstream_witness in zip(all_records, all_witnesses):
-                if self._firehose.get_event_by_id(origin, rec.event_id) is not None:
-                    local_witness = self._create_local_witness(rec, upstream_witness)
-                    if local_witness:
-                        self._firehose.store_witness(local_witness)
+            batch_records = [r for r, w in items]
+            batch_witnesses = [w for r, w in items]
 
-            if self._dispatcher:
-                try:
-                    dispatched = self._dispatcher.dispatch_origin(origin)
-                    log_msg(f"SYNC_ONCE: origin='{origin}' dispatched {dispatched} records to projections")
-                except Exception as e:
-                    log_msg(f"SYNC_ONCE: origin='{origin}' dispatch failed: {e}")
+            result = self._firehose.accept_remote_range(
+                origin=origin,
+                records=batch_records,
+                head=head,
+                origin_pubkey=head.origin_pubkey,
+                source=self._hostname,
+            )
 
-        return result
+            log_msg(f"SYNC_ONCE: origin='{origin}' batch seq {current_start}-{current_start + len(batch_records) - 1}: accepted={result.accepted} count={result.accepted_count} reason='{result.reason}'")
+
+            if result.accepted:
+                total_accepted += result.accepted_count
+
+                for rec, upstream_witness in zip(batch_records, batch_witnesses):
+                    if self._firehose.get_event_by_id(origin, rec.event_id) is not None:
+                        local_witness = self._create_local_witness(rec, upstream_witness)
+                        if local_witness:
+                            self._firehose.store_witness(local_witness)
+
+                if result.conflicts:
+                    log_msg(f"SYNC_ONCE: origin='{origin}' conflict detected, stopping cycle — {total_accepted} records accepted so far")
+                    last_result = result
+                    break
+
+                last_result = result
+                current_start += len(batch_records)
+                remaining -= len(batch_records)
+            else:
+                log_msg(f"SYNC_ONCE: origin='{origin}' batch rejected, stopping cycle: {result.reason}")
+                last_result = result
+                break
+
+        if total_accepted > 0 and self._dispatcher:
+            try:
+                dispatched = self._dispatcher.dispatch_origin(origin)
+                log_msg(f"SYNC_ONCE: origin='{origin}' dispatched {dispatched} records to projections")
+            except Exception as e:
+                log_msg(f"SYNC_ONCE: origin='{origin}' dispatch failed: {e}")
+
+        if total_accepted > 0:
+            return AcceptResult(
+                accepted=True,
+                accepted_count=total_accepted,
+                idempotent=last_result.idempotent,
+                conflicts=last_result.conflicts,
+                reason=last_result.reason,
+            )
+        return last_result
 
     def _create_local_witness(self, rec: Record, upstream: Witness) -> Optional[Witness]:
         """Create a local relay witness naming the upstream as immediate source."""
@@ -356,87 +449,6 @@ class SyncManager:
         """
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(self._sync_once_unchecked(origin, client))
+            return loop.run_until_complete(self._sync_once(origin, client, skip_allowlist=True))
         finally:
             loop.close()
-
-    async def _sync_once_unchecked(self, origin: str, client: SyncClient) -> AcceptResult:
-        """Same as _sync_once but skips the peer allowlist check."""
-        head, head_bytes = await client.fetch_head(origin)
-
-        local_seq = self._firehose.get_highest_seq(origin)
-
-        log_msg(f"SYNC_ONCE: origin='{origin}' remote_seq={head.latest_origin_seq} local_seq={local_seq}")
-
-        if head.latest_origin_seq <= local_seq:
-            log_msg(f"SYNC_ONCE: origin='{origin}' already up to date")
-            if self._dispatcher:
-                try:
-                    dispatched = self._dispatcher.dispatch_origin(origin)
-                    if dispatched:
-                        log_msg(f"SYNC_ONCE: origin='{origin}' dispatched {dispatched} pending records (catch-up)")
-                except Exception as e:
-                    log_msg(f"SYNC_ONCE: origin='{origin}' dispatch failed: {e}")
-            return AcceptResult(accepted=False, reason="already up to date")
-
-        start = local_seq + 1
-        count = head.latest_origin_seq - local_seq
-
-        all_records = []
-        all_witnesses = []
-        current_start = start
-        remaining = count
-
-        while remaining > 0:
-            batch = min(remaining, 100)
-            items = await client.fetch_range(origin, current_start, batch)
-            if not items:
-                log_msg(f"SYNC_ONCE: origin='{origin}' fetch_range returned empty at seq {current_start}")
-                break
-            all_records.extend(r for r, w in items)
-            all_witnesses.extend(w for r, w in items)
-            current_start += len(items)
-            remaining -= len(items)
-
-        log_msg(f"SYNC_ONCE: origin='{origin}' fetched {len(all_records)} records (expected {count})")
-
-        if not all_records:
-            return AcceptResult(accepted=False, reason="no records fetched")
-
-        log_msg(f"SYNC_ONCE: origin='{origin}' head.origin_pubkey={head.origin_pubkey.hex()[:16]}...")
-
-        self._firehose.init_origin_key(origin, head.origin_pubkey)
-        existing_key = self._firehose.get_key_for_seq(origin, 1)
-        if existing_key is not None:
-            log_msg(f"SYNC_ONCE: origin='{origin}' key_epoch for seq 1: {existing_key.hex()[:16]}...")
-            if existing_key != head.origin_pubkey:
-                log_msg(f"SYNC_ONCE: origin='{origin}' KEY MISMATCH — pinned={existing_key.hex()[:16]}... head={head.origin_pubkey.hex()[:16]}... — refusing to sync (stale key epoch, operator must reset)")
-                return AcceptResult(accepted=False, reason="key epoch mismatch — operator must reset_origin_key")
-        else:
-            log_msg(f"SYNC_ONCE: origin='{origin}' no key epoch found, using head.origin_pubkey as fallback")
-
-        result = self._firehose.accept_remote_range(
-            origin=origin,
-            records=all_records,
-            head=head,
-            origin_pubkey=head.origin_pubkey,
-            source=self._hostname,
-        )
-
-        log_msg(f"SYNC_ONCE: origin='{origin}' accept_remote_range: accepted={result.accepted} count={result.accepted_count} reason='{result.reason}'")
-
-        if result.accepted:
-            for rec, upstream_witness in zip(all_records, all_witnesses):
-                if self._firehose.get_event_by_id(origin, rec.event_id) is not None:
-                    local_witness = self._create_local_witness(rec, upstream_witness)
-                    if local_witness:
-                        self._firehose.store_witness(local_witness)
-
-            if self._dispatcher:
-                try:
-                    dispatched = self._dispatcher.dispatch_origin(origin)
-                    log_msg(f"SYNC_ONCE: origin='{origin}' dispatched {dispatched} records to projections")
-                except Exception as e:
-                    log_msg(f"SYNC_ONCE: origin='{origin}' dispatch failed: {e}")
-
-        return result
