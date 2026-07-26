@@ -215,18 +215,26 @@ verify_tls = true
 # Missing config behavior
 # ---------------------------------------------------------------------------
 
-def test_load_missing_config_creates_default_file(tmp_path):
+def test_load_missing_config_raises(tmp_path):
+    """Loading a missing config raises FileNotFoundError."""
     path = str(tmp_path / "subdir" / "config.toml")
-    c = FirehoseConfig.load(path)
+    with pytest.raises(FileNotFoundError):
+        FirehoseConfig.load(path)
+
+
+def test_create_default_config(tmp_path):
+    """create_default_config writes a valid TOML file."""
+    path = str(tmp_path / "config.toml")
+    config = FirehoseConfig.create_default_config(path)
 
     assert os.path.exists(path)
-    assert c.origin == "localhost"
-    assert len(c.acl._rules) == 0
+    assert config.origin == "localhost"
+    assert len(config.acl._rules) == 0
 
 
-def test_load_missing_config_creates_parent_dir(tmp_path):
+def test_create_default_config_creates_parent_dir(tmp_path):
     path = str(tmp_path / "nested" / "deep" / "config.toml")
-    FirehoseConfig.load(path)
+    FirehoseConfig.create_default_config(path)
     assert os.path.exists(path)
 
 
@@ -257,3 +265,82 @@ boards = ["*"]
 """)
     c = FirehoseConfig.load(path)
     assert len(c.acl._rules) == 2
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+def test_validate_rejects_empty_origin():
+    c = FirehoseConfig(origin="")
+    with pytest.raises(ValueError, match="origin"):
+        c.validate()
+
+
+def test_validate_rejects_bad_port():
+    c = FirehoseConfig(port=0)
+    with pytest.raises(ValueError, match="port"):
+        c.validate()
+    c = FirehoseConfig(port=99999)
+    with pytest.raises(ValueError, match="port"):
+        c.validate()
+
+
+def test_validate_rejects_zero_limits():
+    c = FirehoseConfig(max_request_size=0)
+    with pytest.raises(ValueError, match="max_request_size"):
+        c.validate()
+
+
+def test_validate_rejects_excessive_lifetime():
+    c = FirehoseConfig(signature_lifetime_seconds=120)
+    with pytest.raises(ValueError, match="signature_lifetime"):
+        c.validate()
+
+
+def test_validate_rejects_excessive_clock_skew():
+    c = FirehoseConfig(clock_skew_seconds=60)
+    with pytest.raises(ValueError, match="clock_skew"):
+        c.validate()
+
+
+def test_validate_rejects_duplicate_peers():
+    c = FirehoseConfig(peers=[
+        PeerConfig(origin="a.test", hostname="a.test"),
+        PeerConfig(origin="a.test", hostname="b.test"),
+    ])
+    with pytest.raises(ValueError, match="duplicate"):
+        c.validate()
+
+
+def test_validate_accepts_valid_config():
+    c = FirehoseConfig(
+        origin="bbs.test",
+        port=2272,
+        peers=[PeerConfig(origin="peer.test", hostname="peer.test")],
+    )
+    c.validate()
+
+
+# ---------------------------------------------------------------------------
+# Configurable bind host
+# ---------------------------------------------------------------------------
+
+def test_configurable_host():
+    c = FirehoseConfig(host="127.0.0.1")
+    assert c.http_host == "127.0.0.1"
+
+
+def test_host_default():
+    c = FirehoseConfig()
+    assert c.http_host == "0.0.0.0"
+
+
+def test_host_from_toml(tmp_path):
+    path = _write_config(tmp_path, """
+[server]
+origin = "bbs.test"
+host = "127.0.0.1"
+""")
+    c = FirehoseConfig.load(path)
+    assert c.http_host == "127.0.0.1"

@@ -11,8 +11,6 @@ import asyncio
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) or '.')
-
 from core.crypto import Identity
 from core.config import FirehoseConfig
 from core.binutil import set_rg_path
@@ -272,6 +270,7 @@ class BonnetFirehoseServer:
             log_level="info",
         )
         server = uvicorn.Server(uv_config)
+        self._uvicorn_server = server
 
         repl_task = asyncio.create_task(self.repl_loop())
 
@@ -344,6 +343,8 @@ class BonnetFirehoseServer:
         cmd = parts[0].lower()
 
         if cmd in ("quit", "exit"):
+            if hasattr(self, '_uvicorn_server') and self._uvicorn_server:
+                self._uvicorn_server.should_exit = True
             return None
 
         if cmd == "help":
@@ -1721,11 +1722,25 @@ class BonnetFirehoseServer:
         return "\n".join(lines)
 
     def close(self):
-        self.command_handler.close()
-        self.dispatcher.close()
-        self.firehose.close()
-        self.nav.close()
-        self.users.close()
-        self.policy.close()
-        self.replay_ledger.close()
+        if hasattr(self, '_closed') and self._closed:
+            return
+        self._closed = True
+        first_error = None
+        for closer in [
+            self.command_handler,
+            self.dispatcher,
+            self.firehose,
+            self.nav,
+            self.users,
+            self.policy,
+            self.replay_ledger,
+        ]:
+            try:
+                closer.close()
+            except Exception as e:
+                if first_error is None:
+                    first_error = e
+                log_msg(f"INIT: error during close: {e}")
         log_msg("INIT: shutdown complete")
+        if first_error is not None:
+            raise first_error
