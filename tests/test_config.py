@@ -1,262 +1,383 @@
-# -*- coding: utf-8 -*-
+"""Tests for src/core/config.py — FirehoseConfig loading and defaults."""
 
-import pytest
-import tempfile
 import os
 
-from core.config import Config
+import pytest
+
+from core.acl import ACLEvaluator
+from core.config import FirehoseConfig, PeerConfig, _normalize_origin
 
 
-class TestConfigPaths:
-    def test_data_dir_default(self):
-        """Default data_dir is ./data"""
-        config = Config()
-        assert config.data_dir == "./data"
-        assert config.identity_path == "./data/identity"
-        assert config.userfile_path == "./data/userfile"
-        assert config.nav_db_path == "./data/nav.db"
-
-    def test_data_dir_explicit(self):
-        """Explicit data_dir is used"""
-        config = Config(data_dir="/var/lib/bonnet")
-        assert config.data_dir == "/var/lib/bonnet"
-        assert config.identity_path == "/var/lib/bonnet/identity"
-        assert config.userfile_path == "/var/lib/bonnet/userfile"
-
-    def test_identity_path_override(self):
-        """Explicit identity_path overrides data_dir derivation"""
-        config = Config(data_dir="./data", identity_path="/secure/identity")
-        assert config.data_dir == "./data"
-        assert config.identity_path == "/secure/identity"
-
-    def test_userfile_path_override(self):
-        """Explicit userfile_path overrides data_dir derivation"""
-        config = Config(data_dir="./data", userfile_path="/etc/bonnet/users")
-        assert config.userfile_path == "/etc/bonnet/users"
-
-    def test_relative_path_resolves_from_data_dir(self):
-        """Relative paths resolve from data_dir"""
-        config = Config(data_dir="/var/lib/bonnet", nav_db_path="custom/nav.db")
-        assert config.nav_db_path == "/var/lib/bonnet/custom/nav.db"
-
-    def test_log_dir_default(self):
-        """Default log_dir is ./logs"""
-        config = Config()
-        assert config.log_dir == "./logs"
-
-    def test_log_dir_explicit(self):
-        """Explicit log_dir is used"""
-        config = Config(log_dir="/var/log/bonnet")
-        assert config.log_dir == "/var/log/bonnet"
+def _write_config(tmp_path, content):
+    path = str(tmp_path / "config.toml")
+    with open(path, "w") as f:
+        f.write(content)
+    return path
 
 
-class TestConfigPorts:
-    def test_port_defaults(self):
-        """Default ports are 2272 and 272"""
-        config = Config()
-        assert config.port_standard == 2272
-        assert config.port_privileged == 272
-
-    def test_port_explicit(self):
-        """Explicit ports are used"""
-        config = Config(port_standard=8080, port_privileged=80)
-        assert config.port_standard == 8080
-        assert config.port_privileged == 80
+# ---------------------------------------------------------------------------
+# Origin normalization
+# ---------------------------------------------------------------------------
 
 
-class TestConfigLimits:
-    def test_limits_defaults(self):
-        """Default limits are set"""
-        config = Config()
-        assert config.timeout_seconds == 30
-        assert config.max_connections == 100
-        assert config.max_request_size == 10485760
-        assert config.rate_limit_requests == 100
-        assert config.rate_limit_window == 1
-
-    def test_limits_explicit(self):
-        """Explicit limits are used"""
-        config = Config(
-            timeout_seconds=60,
-            max_connections=200,
-            max_request_size=20971520,
-            rate_limit_requests=50,
-            rate_limit_window=2,
-        )
-        assert config.timeout_seconds == 60
-        assert config.max_connections == 200
-        assert config.max_request_size == 20971520
-        assert config.rate_limit_requests == 50
-        assert config.rate_limit_window == 2
+def test_normalize_origin_lowercases():
+    assert _normalize_origin("BBS.TEST") == "bbs.test"
 
 
-class TestConfigTLS:
-    def test_tls_defaults(self):
-        """TLS is disabled by default"""
-        config = Config()
-        assert config.tls_enabled is False
-        assert config.tls_cert_path == "./certs/bonnet.crt"
-        assert config.tls_key_path == "./certs/bonnet.key"
-
-    def test_tls_enabled(self):
-        """TLS can be enabled"""
-        config = Config(
-            tls_enabled=True, tls_cert_path="/ssl/cert.pem", tls_key_path="/ssl/key.pem"
-        )
-        assert config.tls_enabled is True
-        assert config.tls_cert_path == "/ssl/cert.pem"
-        assert config.tls_key_path == "/ssl/key.pem"
+def test_normalize_origin_strips_trailing_dot():
+    assert _normalize_origin("bbs.test.") == "bbs.test"
 
 
-class TestConfigLoad:
-    def test_load_from_file(self):
-        """Config can be loaded from TOML file"""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write("""
+def test_normalize_origin_strips_whitespace():
+    assert _normalize_origin("  bbs.test  ") == "bbs.test"
+
+
+def test_normalize_origin_empty_returns_empty():
+    assert _normalize_origin("") == ""
+
+
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+
+
+def test_defaults():
+    c = FirehoseConfig()
+    assert c.origin == "localhost"
+    assert c.port == 2272
+    assert c.tls_enabled is False
+    assert c.max_request_size == 10 * 1024 * 1024
+    assert c.max_article_body_size == 1024 * 1024
+    assert c.rate_limit_requests == 100
+    assert c.rate_limit_window == 1
+    assert c.signature_lifetime_seconds == 60
+    assert c.clock_skew_seconds == 30
+    assert c.peers == []
+    assert isinstance(c.acl, ACLEvaluator)
+
+
+def test_path_properties(tmp_path):
+    c = FirehoseConfig(data_dir=str(tmp_path / "data"))
+    assert c.identity_path == os.path.join(str(tmp_path / "data"), "identity")
+    assert c.events_db_path == os.path.join(str(tmp_path / "data"), "events.db")
+    assert c.nav_db_path == os.path.join(str(tmp_path / "data"), "nav.db")
+    assert c.users_db_path == os.path.join(str(tmp_path / "data"), "users.db")
+    assert c.policy_db_path == os.path.join(str(tmp_path / "data"), "policy.db")
+    assert c.replay_db_path == os.path.join(str(tmp_path / "data"), "replay.db")
+
+
+def test_http_host_default():
+    c = FirehoseConfig()
+    assert c.http_host == "0.0.0.0"
+
+
+# ---------------------------------------------------------------------------
+# TOML loading
+# ---------------------------------------------------------------------------
+
+
+def test_load_complete_config(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
 [server]
-origin = "test.example.com"
-data_dir = "/test/data"
-port_standard = 9000
-port_privileged = 90
+origin = "bbs.example"
+hostname = "bbs.example.com"
+data_dir = "./data"
+boards_dir = "./boards"
+events_bodies_dir = "./event_bodies"
+port = 8443
+admin_pubkey = "abcdef0123456789"
 
 [limits]
-timeout_seconds = 45
-max_connections = 50
 max_request_size = 5242880
-rate_limit_requests = 25
+max_article_body_size = 524288
+rate_limit_requests = 50
 rate_limit_window = 2
-
-[tls]
-enabled = true
-cert_path = "/test/cert.pem"
-key_path = "/test/key.pem"
-""")
-            f.flush()
-            path = f.name
-
-        try:
-            config = Config.load(path)
-            assert config.origin == "test.example.com"
-            assert config.data_dir == "/test/data"
-            assert config.port_standard == 9000
-            assert config.port_privileged == 90
-            assert config.timeout_seconds == 45
-            assert config.max_connections == 50
-            assert config.max_request_size == 5242880
-            assert config.rate_limit_requests == 25
-            assert config.rate_limit_window == 2
-            assert config.tls_enabled is True
-            assert config.tls_cert_path == "/test/cert.pem"
-            assert config.tls_key_path == "/test/key.pem"
-        finally:
-            os.unlink(path)
-
-    def test_load_creates_default(self):
-        """Loading non-existent file creates default config"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "new_config.toml")
-            assert not os.path.exists(path)
-
-            config = Config.load(path)
-
-            assert os.path.exists(path)
-            assert config.data_dir == "./data"
-            assert config.port_standard == 2272
-
-    def test_load_keibatsu_paths(self):
-        """Keibatsu paths can be configured"""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write("""
-[keibatsu]
-reports_path = "/custom/reports.db"
-punishments_path = "/custom/punishments.db"
-""")
-            f.flush()
-            path = f.name
-
-        try:
-            config = Config.load(path)
-            assert config.reports_db_path == "/custom/reports.db"
-            assert config.punishments_db_path == "/custom/punishments.db"
-        finally:
-            os.unlink(path)
-
-    def test_load_keibatsu_relative_paths(self):
-        """Keibatsu relative paths resolve from data_dir"""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write("""
-[server]
-data_dir = "/var/lib/bonnet"
-
-[keibatsu]
-reports_path = "data/reports.db"
-""")
-            f.flush()
-            path = f.name
-
-        try:
-            config = Config.load(path)
-            assert config.reports_db_path == "/var/lib/bonnet/data/reports.db"
-        finally:
-            os.unlink(path)
-
-
-class TestConfigSearch:
-    def test_search_defaults(self):
-        config = Config(data_dir="/tmp/x")
-        assert config.search_max_count == 1000
-        assert config.search_timeout_seconds == 10
-        assert config.search_result_limit == 100
-        assert config.search_per_identity_concurrency == 1
-        assert config.search_rate_limit == 10
-        assert config.search_rate_window_seconds == 60
-
-    def test_public_commands_default_denies_content_search(self):
-        config = Config(data_dir="/tmp/x")
-        assert 0x19 in config.public_commands   # QUERY_POSTS stays public
-        assert 0x1A not in config.public_commands   # POST_CONTENT_SEARCH default-deny
-
-    def test_load_search_section_from_toml(self):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write("""
-[server]
-origin = "test.example.com"
 
 [search]
 max_count = 500
 timeout_seconds = 5
 result_limit = 25
-per_identity_concurrency = 2
-rate_limit = 3
-rate_window_seconds = 30
-""")
-            f.flush()
-            path = f.name
-        try:
-            config = Config.load(path)
-            assert config.search_max_count == 500
-            assert config.search_timeout_seconds == 5
-            assert config.search_result_limit == 25
-            assert config.search_per_identity_concurrency == 2
-            assert config.search_rate_limit == 3
-            assert config.search_rate_window_seconds == 30
-            # no public_commands specified -> default set, which denies 0x1A
-            assert 0x1A not in config.public_commands
-        finally:
-            os.unlink(path)
 
-    def test_load_public_commands_by_name_includes_content_search(self):
-        # Operators can opt content search in via TOML using the cmd_map name.
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write("""
+[tls]
+enabled = true
+cert_path = "/certs/bonnet.crt"
+key_path = "/certs/bonnet.key"
+
+[sync]
+interval_seconds = 120
+
+[[sync.peers]]
+origin = "peer.example"
+hostname = "peer.example.com"
+port = 8443
+verify_tls = true
+""",
+    )
+    c = FirehoseConfig.load(path)
+
+    assert c.origin == "bbs.example"
+    assert c.hostname == "bbs.example.com"
+    assert c.port == 8443
+    assert c.admin_pubkey_hex == "abcdef0123456789"
+    assert c.max_request_size == 5242880
+    assert c.max_article_body_size == 524288
+    assert c.rate_limit_requests == 50
+    assert c.rate_limit_window == 2
+    assert c.search_max_count == 500
+    assert c.search_timeout_seconds == 5
+    assert c.search_result_limit == 25
+    assert c.tls_enabled is True
+    assert c.tls_cert_path == "/certs/bonnet.crt"
+    assert c.tls_key_path == "/certs/bonnet.key"
+    assert c.sync_interval_seconds == 120
+    assert len(c.peers) == 1
+    assert c.peers[0].origin == "peer.example"
+    assert c.peers[0].hostname == "peer.example.com"
+    assert c.peers[0].port == 8443
+    assert c.peers[0].verify_tls is True
+
+
+def test_load_defaults_for_omitted_values(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
 [server]
-origin = "test.example.com"
-public_commands = ["POST_CONTENT_SEARCH", "QUERY_POSTS"]
-""")
-            f.flush()
-            path = f.name
-        try:
-            config = Config.load(path)
-            assert config.public_commands == {0x19, 0x1A}
-        finally:
-            os.unlink(path)
+origin = "bbs.test"
+""",
+    )
+    c = FirehoseConfig.load(path)
+
+    assert c.origin == "bbs.test"
+    assert c.port == 2272
+    assert c.tls_enabled is False
+    assert c.max_request_size == 10 * 1024 * 1024
+    assert c.max_article_body_size == 1024 * 1024
+    assert c.rate_limit_requests == 100
+    assert c.peers == []
+
+
+def test_load_normalizes_origin(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "BBS.TEST."
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.origin == "bbs.test"
+
+
+def test_load_hostname_defaults_to_origin(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.hostname == "bbs.test"
+
+
+def test_load_admin_pubkey_creates_default_acl(tmp_path):
+    pubkey = "dd" * 32
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+admin_pubkey = "{pubkey}"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert len(c.acl._rules) >= 1
+    assert any(r.matcher.pubkey == bytes.fromhex(pubkey) for r in c.acl._rules)
+
+
+def test_load_no_admin_no_acl(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert len(c.acl._rules) == 0
+
+
+def test_load_multiple_peers(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "a.test"
+port = 2272
+
+[[sync.peers]]
+origin = "b.test"
+hostname = "b.test"
+port = 9999
+verify_tls = true
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert len(c.peers) == 2
+    assert c.peers[0].origin == "a.test"
+    assert c.peers[1].origin == "b.test"
+    assert c.peers[1].port == 9999
+    assert c.peers[1].verify_tls is True
+
+
+# ---------------------------------------------------------------------------
+# Missing config behavior
+# ---------------------------------------------------------------------------
+
+
+def test_load_missing_config_raises(tmp_path):
+    """Loading a missing config raises FileNotFoundError."""
+    path = str(tmp_path / "subdir" / "config.toml")
+    with pytest.raises(FileNotFoundError):
+        FirehoseConfig.load(path)
+
+
+def test_create_default_config(tmp_path):
+    """create_default_config writes a valid TOML file."""
+    path = str(tmp_path / "config.toml")
+    config = FirehoseConfig.create_default_config(path)
+
+    assert os.path.exists(path)
+    assert config.origin == "localhost"
+    assert len(config.acl._rules) == 0
+
+
+def test_create_default_config_creates_parent_dir(tmp_path):
+    path = str(tmp_path / "nested" / "deep" / "config.toml")
+    FirehoseConfig.create_default_config(path)
+    assert os.path.exists(path)
+
+
+# ---------------------------------------------------------------------------
+# ACL from TOML
+# ---------------------------------------------------------------------------
+
+
+def test_load_acl_from_toml(tmp_path):
+    pubkey = "ab" * 32
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+
+[[acl]]
+effect = "allow"
+match.pubkey = "hex:{pubkey}"
+actions = ["read", "write"]
+commands = ["*"]
+kinds = ["*"]
+boards = ["*"]
+
+[[acl]]
+effect = "allow"
+match.anonymous = true
+actions = ["read"]
+commands = ["BOARD_LIST"]
+boards = ["*"]
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert len(c.acl._rules) == 2
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+
+def test_validate_rejects_empty_origin():
+    c = FirehoseConfig(origin="")
+    with pytest.raises(ValueError, match="origin"):
+        c.validate()
+
+
+def test_validate_rejects_bad_port():
+    c = FirehoseConfig(port=0)
+    with pytest.raises(ValueError, match="port"):
+        c.validate()
+    c = FirehoseConfig(port=99999)
+    with pytest.raises(ValueError, match="port"):
+        c.validate()
+
+
+def test_validate_rejects_zero_limits():
+    c = FirehoseConfig(max_request_size=0)
+    with pytest.raises(ValueError, match="max_request_size"):
+        c.validate()
+
+
+def test_validate_rejects_excessive_lifetime():
+    c = FirehoseConfig(signature_lifetime_seconds=120)
+    with pytest.raises(ValueError, match="signature_lifetime"):
+        c.validate()
+
+
+def test_validate_rejects_excessive_clock_skew():
+    c = FirehoseConfig(clock_skew_seconds=60)
+    with pytest.raises(ValueError, match="clock_skew"):
+        c.validate()
+
+
+def test_validate_rejects_duplicate_peers():
+    c = FirehoseConfig(
+        peers=[
+            PeerConfig(origin="a.test", hostname="a.test"),
+            PeerConfig(origin="a.test", hostname="b.test"),
+        ]
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        c.validate()
+
+
+def test_validate_accepts_valid_config():
+    c = FirehoseConfig(
+        origin="bbs.test",
+        port=2272,
+        peers=[PeerConfig(origin="peer.test", hostname="peer.test")],
+    )
+    c.validate()
+
+
+# ---------------------------------------------------------------------------
+# Configurable bind host
+# ---------------------------------------------------------------------------
+
+
+def test_configurable_host():
+    c = FirehoseConfig(host="127.0.0.1")
+    assert c.http_host == "127.0.0.1"
+
+
+def test_host_default():
+    c = FirehoseConfig()
+    assert c.http_host == "0.0.0.0"
+
+
+def test_host_from_toml(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+host = "127.0.0.1"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.http_host == "127.0.0.1"

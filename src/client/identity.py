@@ -1,11 +1,11 @@
+import hashlib
+import os
 import sqlite3
 import threading
-import os
 from pathlib import Path
 
 import bcrypt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-import hashlib
 from nacl.signing import SigningKey
 
 
@@ -40,13 +40,11 @@ class IdentityStore:
 
     def _derive_aes_key(self, password: str, key_salt: bytes) -> bytes:
         import warnings
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             return bcrypt.kdf(
-                password=password.encode('utf-8'),
-                salt=key_salt,
-                desired_key_bytes=24,
-                rounds=100
+                password=password.encode("utf-8"), salt=key_salt, desired_key_bytes=24, rounds=100
             )
 
     def register(self, username: str, password: str) -> tuple[bytes, bytes]:
@@ -66,12 +64,7 @@ class IdentityStore:
         # since yescrypt requires extra C bindings not available here.
         # We store the resulting hash as a hex string.
         yescrypt_hash = hashlib.scrypt(
-            password.encode('utf-8'),
-            salt=auth_salt,
-            n=65536,
-            r=8,
-            p=2,
-            maxmem=134217728
+            password.encode("utf-8"), salt=auth_salt, n=65536, r=8, p=2, maxmem=134217728
         ).hex()
 
         # 2. Keypair encryption
@@ -105,8 +98,7 @@ class IdentityStore:
         conn = self._get_conn()
         cur = conn.cursor()
         cur.execute(
-            "SELECT key_salt, encrypted_private_key FROM identities WHERE username = ?",
-            (username,)
+            "SELECT key_salt, encrypted_private_key FROM identities WHERE username = ?", (username,)
         )
         row = cur.fetchone()
         if not row:
@@ -136,7 +128,9 @@ class IdentityStore:
     def verify_password(self, username: str, password: str) -> bool:
         conn = self._get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT yescrypt_hash, auth_salt FROM identities WHERE username = ?", (username,))
+        cur.execute(
+            "SELECT yescrypt_hash, auth_salt FROM identities WHERE username = ?", (username,)
+        )
         row = cur.fetchone()
         if not row:
             return False
@@ -146,12 +140,7 @@ class IdentityStore:
 
         try:
             actual_hash = hashlib.scrypt(
-                password.encode('utf-8'),
-                salt=auth_salt,
-                n=65536,
-                r=8,
-                p=2,
-                maxmem=134217728
+                password.encode("utf-8"), salt=auth_salt, n=65536, r=8, p=2, maxmem=134217728
             ).hex()
             return actual_hash == expected_hash
         except ValueError:
@@ -159,9 +148,7 @@ class IdentityStore:
 
     def mark_registered(self, username: str):
         conn = self._get_conn()
-        conn.execute(
-            "UPDATE identities SET registered = 1 WHERE username = ?", (username,)
-        )
+        conn.execute("UPDATE identities SET registered = 1 WHERE username = ?", (username,))
         conn.commit()
 
     def is_registered(self, username: str) -> bool:
