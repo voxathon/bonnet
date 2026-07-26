@@ -325,3 +325,40 @@ class BodyStore:
                 except OSError:
                     pass
         return count
+
+    # ------------------------------------------------------------------
+    # Origin-scoped deletion (depeer/purge)
+    # ------------------------------------------------------------------
+
+    def delete_origin_bodies(self, origin: str) -> int:
+        """Delete all article and event body files for an origin.
+
+        Returns the total number of files deleted.
+        """
+        import shutil
+        origin_hex = _safe_path_component(origin)
+        count = 0
+        with self._lock:
+            boards_origin_dir = os.path.join(self._boards_dir, origin_hex)
+            if os.path.isdir(boards_origin_dir):
+                for root, dirs, files in os.walk(boards_origin_dir):
+                    for name in files:
+                        try:
+                            os.remove(os.path.join(root, name))
+                            count += 1
+                        except OSError:
+                            pass
+                shutil.rmtree(boards_origin_dir, ignore_errors=True)
+
+            events_origin_dir = os.path.join(self._events_dir, origin_hex)
+            if os.path.isdir(events_origin_dir):
+                for root, dirs, files in os.walk(events_origin_dir):
+                    for name in files:
+                        try:
+                            os.remove(os.path.join(root, name))
+                            count += 1
+                        except OSError:
+                            pass
+                shutil.rmtree(events_origin_dir, ignore_errors=True)
+
+        return count
