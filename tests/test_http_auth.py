@@ -1,5 +1,4 @@
-"""Tests for src/net/http_auth.py — Bonnet RFC 9421 Ed25519 profile.
-"""
+"""Tests for src/net/http_auth.py — Bonnet RFC 9421 Ed25519 profile."""
 
 import asyncio
 import base64
@@ -40,6 +39,7 @@ from net.http_auth import (
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def keypair():
@@ -104,6 +104,7 @@ def response_msg(valid_nonce):
 # Content-Digest tests
 # ---------------------------------------------------------------------------
 
+
 class TestContentDigest:
     def test_compute_roundtrip(self):
         body = b"hello world"
@@ -138,6 +139,7 @@ class TestContentDigest:
 # Signature-Input parsing / serialization
 # ---------------------------------------------------------------------------
 
+
 class TestSignatureInput:
     def test_parse_roundtrip(self):
         header = (
@@ -146,7 +148,13 @@ class TestSignatureInput:
         )
         parsed = parse_signature_input(header)
         assert parsed.label == "bonnet"
-        assert parsed.components == ["@method", "@authority", "content-digest", "bonnet-protocol", "bonnet-nonce"]
+        assert parsed.components == [
+            "@method",
+            "@authority",
+            "content-digest",
+            "bonnet-protocol",
+            "bonnet-nonce",
+        ]
         assert parsed.params["created"] == 1234
         assert parsed.params["keyid"] == "ed25519:abc"
         assert parsed.params["alg"] == "ed25519"
@@ -155,7 +163,12 @@ class TestSignatureInput:
 
     def test_serialize_roundtrip(self):
         components = ["@method", "@authority", "content-digest"]
-        params = {"created": 1234, "keyid": "ed25519:abc", "alg": "ed25519", "tag": "bonnet-firehose-1"}
+        params = {
+            "created": 1234,
+            "keyid": "ed25519:abc",
+            "alg": "ed25519",
+            "tag": "bonnet-firehose-1",
+        }
         header = serialize_signature_input("bonnet", components, params)
         parsed = parse_signature_input(header)
         assert parsed.label == "bonnet"
@@ -189,6 +202,7 @@ class TestSignatureInput:
 # Signature header parsing / serialization
 # ---------------------------------------------------------------------------
 
+
 class TestSignatureHeader:
     def test_roundtrip(self):
         raw = os.urandom(64)
@@ -210,6 +224,7 @@ class TestSignatureHeader:
 # Component resolution
 # ---------------------------------------------------------------------------
 
+
 class TestComponentResolution:
     def test_method(self, request_msg):
         assert resolve_component("@method", request_msg) == "POST"
@@ -218,7 +233,9 @@ class TestComponentResolution:
         assert resolve_component("@authority", request_msg) == "bonnet.example.com"
 
     def test_target_uri(self, request_msg):
-        assert resolve_component("@target-uri", request_msg) == "https://bonnet.example.com/v2/command"
+        assert (
+            resolve_component("@target-uri", request_msg) == "https://bonnet.example.com/v2/command"
+        )
 
     def test_header_field(self, request_msg):
         assert resolve_component("content-type", request_msg) == "application/vnd.bonnet.command"
@@ -239,10 +256,17 @@ class TestComponentResolution:
 # Signature base construction
 # ---------------------------------------------------------------------------
 
+
 class TestSignatureBase:
     def test_structure(self, request_msg):
         components = ["@method", "@authority", "content-digest"]
-        params = {"created": 1234, "keyid": "ed25519:abc", "alg": "ed25519", "tag": "bonnet-v2", "nonce": "n"}
+        params = {
+            "created": 1234,
+            "keyid": "ed25519:abc",
+            "alg": "ed25519",
+            "tag": "bonnet-v2",
+            "nonce": "n",
+        }
         base = build_signature_base(components, params, request_msg)
         lines = base.split("\n")
         assert lines[0] == '"@method": POST'
@@ -259,6 +283,7 @@ class TestSignatureBase:
 # ---------------------------------------------------------------------------
 # Sign / verify roundtrip
 # ---------------------------------------------------------------------------
+
 
 class TestSignVerifyRoundtrip:
     @pytest.mark.asyncio
@@ -303,7 +328,9 @@ class TestSignVerifyRoundtrip:
         request_msg.set_header("Bonnet-Username", "alice")
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
         now = int(time.time())
-        await signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60, include_username=True)
+        await signer.sign_request(
+            request_msg, nonce=valid_nonce, created=now, expires=now + 60, include_username=True
+        )
 
         verifier = BonnetVerifier(key_resolver=key_resolver)
         result = await verifier.verify_request(request_msg)
@@ -313,6 +340,7 @@ class TestSignVerifyRoundtrip:
 # ---------------------------------------------------------------------------
 # Rejection tests
 # ---------------------------------------------------------------------------
+
 
 class TestRejections:
     @pytest.mark.asyncio
@@ -338,7 +366,9 @@ class TestRejections:
             await verifier.verify_request(request_msg)
 
     @pytest.mark.asyncio
-    async def test_tampered_signature_rejected(self, keypair, key_resolver, request_msg, valid_nonce):
+    async def test_tampered_signature_rejected(
+        self, keypair, key_resolver, request_msg, valid_nonce
+    ):
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
         now = int(time.time())
@@ -352,12 +382,17 @@ class TestRejections:
             await verifier.verify_request(request_msg)
 
     @pytest.mark.asyncio
-    async def test_missing_required_component(self, keypair, key_resolver, request_msg, valid_nonce):
+    async def test_missing_required_component(
+        self, keypair, key_resolver, request_msg, valid_nonce
+    ):
         priv, pub = keypair
         # Sign with a minimal set missing required components
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
         # Manually sign with incomplete components
-        components = ["@method", "@authority"]  # missing content-digest, bonnet-protocol, bonnet-nonce
+        components = [
+            "@method",
+            "@authority",
+        ]  # missing content-digest, bonnet-protocol, bonnet-nonce
         now = int(time.time())
         params = {
             "created": now,
@@ -368,11 +403,18 @@ class TestRejections:
             "tag": BONNET_TAG,
         }
         sig_base = build_signature_base(components, params, request_msg)
-        sig = signer._ed25519_sign_helper(sig_base) if hasattr(signer, '_ed25519_sign_helper') else None
+        sig = (
+            signer._ed25519_sign_helper(sig_base)
+            if hasattr(signer, "_ed25519_sign_helper")
+            else None
+        )
         # Use the internal function directly
         from net.http_auth import _ed25519_sign
+
         sig = _ed25519_sign(priv, sig_base.encode())
-        request_msg.set_header("Signature-Input", serialize_signature_input("bonnet", components, params))
+        request_msg.set_header(
+            "Signature-Input", serialize_signature_input("bonnet", components, params)
+        )
         request_msg.set_header("Signature", serialize_signature("bonnet", sig))
 
         verifier = BonnetVerifier(key_resolver=key_resolver)
@@ -456,6 +498,7 @@ class TestRejections:
 # keyid and nonce validation
 # ---------------------------------------------------------------------------
 
+
 class TestKeyidValidation:
     def test_valid_request_keyid(self):
         _validate_keyid("ed25519:" + "a" * 64, is_response=False)
@@ -507,6 +550,7 @@ class TestNonceValidation:
 # pynacl raw key compatibility
 # ---------------------------------------------------------------------------
 
+
 class TestPynaclCompat:
     def test_raw_keys_work(self):
         sk = SigningKey.generate()
@@ -517,6 +561,7 @@ class TestPynaclCompat:
 
         msg = b"test message"
         from net.http_auth import _ed25519_sign, _ed25519_verify
+
         sig = _ed25519_sign(priv, msg)
         assert len(sig) == 64
         _ed25519_verify(pub, msg, sig)  # no exception = pass
@@ -525,6 +570,7 @@ class TestPynaclCompat:
         sk1 = SigningKey.generate()
         sk2 = SigningKey.generate()
         from net.http_auth import _ed25519_sign, _ed25519_verify
+
         sig = _ed25519_sign(bytes(sk1), b"msg")
         with pytest.raises(InvalidSignature):
             _ed25519_verify(bytes(sk2.verify_key), b"msg", sig)
@@ -533,6 +579,7 @@ class TestPynaclCompat:
 # ---------------------------------------------------------------------------
 # Async interface tests
 # ---------------------------------------------------------------------------
+
 
 class TestAsyncInterface:
     @pytest.mark.asyncio
@@ -561,13 +608,16 @@ class TestAsyncInterface:
 # Serialize / parse interop with upstream library format
 # ---------------------------------------------------------------------------
 
+
 class TestFormatCompatibility:
     def test_signature_input_format_matches_upstream(self, keypair, request_msg, valid_nonce):
         """Verify our Signature-Input format is structurally compatible with RFC 9421."""
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
         now = int(time.time())
-        asyncio.run(signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60))
+        asyncio.run(
+            signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60)
+        )
 
         si = request_msg.header("Signature-Input")
         # Must start with label=
@@ -586,12 +636,14 @@ class TestFormatCompatibility:
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
         now = int(time.time())
-        asyncio.run(signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60))
+        asyncio.run(
+            signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60)
+        )
 
         sig = request_msg.header("Signature")
         assert sig.startswith("bonnet=:")
         assert sig.endswith(":")
         # The base64 part should decode to 64 bytes (Ed25519 signature)
-        b64_part = sig[len("bonnet=:"):-1]
+        b64_part = sig[len("bonnet=:") : -1]
         raw = base64.b64decode(b64_part)
         assert len(raw) == 64

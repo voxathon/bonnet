@@ -111,19 +111,23 @@ class BonnetFirehoseServer:
         else:
             has_server_admin = any(
                 r.matcher.pubkey == self.server_identity.public_key and r.effect == "allow"
-                for r in acl._rules if r.matcher.pubkey is not None
+                for r in acl._rules
+                if r.matcher.pubkey is not None
             )
             if not has_server_admin:
                 from core.acl import ACLRule, PrincipalMatcher
-                acl.add_rule(ACLRule(
-                    effect="allow",
-                    matcher=PrincipalMatcher(pubkey=self.server_identity.public_key),
-                    actions=["read", "write"],
-                    commands=["*"],
-                    kinds=["*"],
-                    boards=["*"],
-                    objects=["*"],
-                ))
+
+                acl.add_rule(
+                    ACLRule(
+                        effect="allow",
+                        matcher=PrincipalMatcher(pubkey=self.server_identity.public_key),
+                        actions=["read", "write"],
+                        commands=["*"],
+                        kinds=["*"],
+                        boards=["*"],
+                        objects=["*"],
+                    )
+                )
                 log_msg("INIT: added server identity to ACL as admin (not in config)")
 
         self.validator = KindValidator()
@@ -136,12 +140,16 @@ class BonnetFirehoseServer:
         )
 
         self.sync_manager = FirehoseSyncManager(
-            self.firehose, self.server_identity, config.hostname,
+            self.firehose,
+            self.server_identity,
+            config.hostname,
             dispatcher=self.dispatcher,
         )
         if config.peers:
             for peer in config.peers:
-                log_msg(f"INIT: configured peer '{peer.origin}' at {peer.hostname}:{peer.port} (verify_tls={peer.verify_tls})")
+                log_msg(
+                    f"INIT: configured peer '{peer.origin}' at {peer.hostname}:{peer.port} (verify_tls={peer.verify_tls})"
+                )
 
         peer_map = {peer.origin: peer for peer in config.peers}
 
@@ -201,7 +209,8 @@ class BonnetFirehoseServer:
                 log_msg(f"INIT: dispatched remote origin '{remote}' ({count} records)")
 
         self.local_conn = FirehoseLocalConnection(
-            self.server_identity.public_key, config.origin,
+            self.server_identity.public_key,
+            config.origin,
         )
 
         log_msg("INIT: complete")
@@ -209,7 +218,9 @@ class BonnetFirehoseServer:
     def _ensure_root_registered(self) -> None:
         """Publish a bonnet.user.register record for the server identity if not already present."""
         try:
-            existing = self.users.get_user_by_pubkey(self.config.origin, self.server_identity.public_key)
+            existing = self.users.get_user_by_pubkey(
+                self.config.origin, self.server_identity.public_key
+            )
             if existing is not None:
                 return
 
@@ -237,11 +248,13 @@ class BonnetFirehoseServer:
                 actor_registrar=self.config.origin,
                 board="",
                 article_id=ZERO_ID,
-                metadata=MetadataMap(fields=[
-                    metadata_text(1, "root"),
-                    metadata_bytes(2, self.server_identity.public_key),
-                    metadata_u64(3, 1),
-                ]),
+                metadata=MetadataMap(
+                    fields=[
+                        metadata_text(1, "root"),
+                        metadata_bytes(2, self.server_identity.public_key),
+                        metadata_u64(3, 1),
+                    ]
+                ),
                 body_hash=compute_body_hash(b""),
                 body_size=0,
             )
@@ -355,7 +368,7 @@ class BonnetFirehoseServer:
         cmd = parts[0].lower()
 
         if cmd in ("quit", "exit"):
-            if hasattr(self, '_uvicorn_server') and self._uvicorn_server:
+            if hasattr(self, "_uvicorn_server") and self._uvicorn_server:
                 self._uvicorn_server.should_exit = True
             return None
 
@@ -451,9 +464,11 @@ class BonnetFirehoseServer:
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:
-        return (f"Server pubkey: {self.server_identity.public_key.hex()}\n"
-                f"Origin: {self.config.origin}\n"
-                f"Role: administrator")
+        return (
+            f"Server pubkey: {self.server_identity.public_key.hex()}\n"
+            f"Origin: {self.config.origin}\n"
+            f"Role: administrator"
+        )
 
     def _local_handle(self, body: bytes) -> bytes:
         return self.command_handler.handle(body, self.local_conn.to_context())
@@ -462,7 +477,7 @@ class BonnetFirehoseServer:
         if resp[0] == 0x01:
             code = struct.unpack(">H", resp[1:3])[0]
             msg_len = struct.unpack(">H", resp[3:5])[0]
-            msg = resp[5:5 + msg_len].decode("utf-8", errors="replace")
+            msg = resp[5 : 5 + msg_len].decode("utf-8", errors="replace")
             return f"Error 0x{code:04x}: {msg}"
         return "Unknown error"
 
@@ -471,9 +486,9 @@ class BonnetFirehoseServer:
         return struct.pack(">H", len(encoded)) + encoded
 
     def _read_text16(self, data: bytes, offset: int) -> tuple[str, int]:
-        n = struct.unpack(">H", data[offset:offset + 2])[0]
+        n = struct.unpack(">H", data[offset : offset + 2])[0]
         offset += 2
-        return data[offset:offset + n].decode("utf-8"), offset + n
+        return data[offset : offset + n].decode("utf-8"), offset + n
 
     # ------------------------------------------------------------------
     # create-board (interactive)
@@ -495,13 +510,16 @@ class BonnetFirehoseServer:
         except EOFError:
             pass
 
-        m = MetadataMap([
-            metadata_bytes(1, self.server_identity.public_key),
-        ])
+        m = MetadataMap(
+            [
+                metadata_bytes(1, self.server_identity.public_key),
+            ]
+        )
         if display_name:
             m.fields.append(metadata_text(2, display_name))
 
         import os as _os
+
         event_id = _os.urandom(32)
 
         intent = Intent(
@@ -518,6 +536,7 @@ class BonnetFirehoseServer:
         actor_sig = sign_intent(self.server_identity, encode_intent(intent))
 
         from net.firehose_commands import OP_PUBLISH_RECORD
+
         req = struct.pack(">B", OP_PUBLISH_RECORD)
         encoded_intent = encode_intent(intent)
         req += struct.pack(">I", len(encoded_intent)) + encoded_intent
@@ -594,9 +613,11 @@ class BonnetFirehoseServer:
 
         from core.record import ZERO_ID, metadata_bytes
 
-        m = MetadataMap([
-            metadata_text(1, subject),
-        ])
+        m = MetadataMap(
+            [
+                metadata_text(1, subject),
+            ]
+        )
         if tags_list:
             m.fields.append(metadata_text_list(2, tags_list))
         m.fields.append(metadata_text(4, "text/plain"))
@@ -612,7 +633,7 @@ class BonnetFirehoseServer:
 
             reply_to_article_id = target.article_id
 
-            target_root = getattr(target, 'root_article_id', ZERO_ID) or ZERO_ID
+            target_root = getattr(target, "root_article_id", ZERO_ID) or ZERO_ID
             if target_root and target_root != ZERO_ID:
                 root_article_id = target_root
             else:
@@ -629,6 +650,7 @@ class BonnetFirehoseServer:
             m.fields.append(metadata_bytes(7, supersede_target.article_id))
 
         import os as _os
+
         event_id = _os.urandom(32)
         article_id = _os.urandom(32)
 
@@ -649,6 +671,7 @@ class BonnetFirehoseServer:
         actor_sig = sign_intent(self.server_identity, encode_intent(intent))
 
         from net.firehose_commands import OP_PUBLISH_RECORD
+
         req = struct.pack(">B", OP_PUBLISH_RECORD)
         encoded_intent = encode_intent(intent)
         req += struct.pack(">I", len(encoded_intent)) + encoded_intent
@@ -659,7 +682,8 @@ class BonnetFirehoseServer:
         if resp[0] == 0x00:
             rec_len = struct.unpack(">I", resp[1:5])[0]
             from core.record import decode_record
-            rec = decode_record(resp[5:5 + rec_len])
+
+            rec = decode_record(resp[5 : 5 + rec_len])
             return f"Article #{rec.article_num} published.\nSubject: {subject}\nEvent ID: {rec.event_id.hex()}"
 
         return self._parse_response_error(resp)
@@ -675,13 +699,16 @@ class BonnetFirehoseServer:
         username = parts[0]
         user_pubkey = self.server_identity.public_key
 
-        m = MetadataMap([
-            metadata_text(1, username),
-            metadata_bytes(2, user_pubkey),
-            metadata_u64(3, 0),
-        ])
+        m = MetadataMap(
+            [
+                metadata_text(1, username),
+                metadata_bytes(2, user_pubkey),
+                metadata_u64(3, 0),
+            ]
+        )
 
         import os as _os
+
         event_id = _os.urandom(32)
 
         intent = Intent(
@@ -697,6 +724,7 @@ class BonnetFirehoseServer:
         actor_sig = sign_intent(self.server_identity, encode_intent(intent))
 
         from net.firehose_commands import OP_PUBLISH_RECORD
+
         req = struct.pack(">B", OP_PUBLISH_RECORD)
         encoded_intent = encode_intent(intent)
         req += struct.pack(">I", len(encoded_intent)) + encoded_intent
@@ -718,6 +746,7 @@ class BonnetFirehoseServer:
         origin = parts[1] if parts and len(parts) > 1 else ""
 
         from net.firehose_commands import OP_BOARD_LIST
+
         req = struct.pack(">B", OP_BOARD_LIST) + self._enc_text16(origin)
         resp = self._local_handle(req)
 
@@ -778,6 +807,7 @@ class BonnetFirehoseServer:
             return "Invalid article number"
 
         from net.firehose_commands import OP_ARTICLE_GET
+
         req = struct.pack(">B", OP_ARTICLE_GET)
         req += self._enc_text16(origin)
         req += self._enc_text16(board)
@@ -794,15 +824,15 @@ class BonnetFirehoseServer:
     def _format_article_view(self, data: bytes, board: str) -> str:
 
         offset = 0
-        article_num = struct.unpack(">Q", data[offset:offset + 8])[0]
+        article_num = struct.unpack(">Q", data[offset : offset + 8])[0]
         offset += 8
         aid_len = data[offset]
         offset += 1
-        article_id = data[offset:offset + aid_len].hex()
+        article_id = data[offset : offset + aid_len].hex()
         offset += aid_len
         eid_len = data[offset]
         offset += 1
-        event_id = data[offset:offset + eid_len].hex()
+        event_id = data[offset : offset + eid_len].hex()
         offset += eid_len
         visibility = data[offset]
         offset += 1
@@ -810,13 +840,13 @@ class BonnetFirehoseServer:
         offset += 1
         bh_len = data[offset]
         offset += 1 + bh_len
-        body_size = struct.unpack(">Q", data[offset:offset + 8])[0]
+        body_size = struct.unpack(">Q", data[offset : offset + 8])[0]
         offset += 8
-        created_at = struct.unpack(">q", data[offset:offset + 8])[0]
+        created_at = struct.unpack(">q", data[offset : offset + 8])[0]
         offset += 8
         ap_len = data[offset]
         offset += 1
-        author_pubkey = data[offset:offset + ap_len].hex()
+        author_pubkey = data[offset : offset + ap_len].hex()
         offset += ap_len
         author_username, offset = self._read_text16(data, offset)
         author_registrar, offset = self._read_text16(data, offset)
@@ -826,27 +856,30 @@ class BonnetFirehoseServer:
 
         root_len = data[offset]
         offset += 1
-        root_id = data[offset:offset + root_len] if root_len else b""
+        root_id = data[offset : offset + root_len] if root_len else b""
         offset += root_len
 
         reply_len = data[offset]
         offset += 1
-        reply_id = data[offset:offset + reply_len] if reply_len else b""
+        reply_id = data[offset : offset + reply_len] if reply_len else b""
         offset += reply_len
 
         has_replacement = data[offset]
         offset += 1
-        replacement_id = data[offset:offset + 32] if has_replacement else b""
+        replacement_id = data[offset : offset + 32] if has_replacement else b""
         offset += 32 if has_replacement else 0
 
         pin_state, offset = self._read_text16(data, offset)
         thread_state, offset = self._read_text16(data, offset)
 
-        body_len = struct.unpack(">I", data[offset:offset + 4])[0]
+        body_len = struct.unpack(">I", data[offset : offset + 4])[0]
         offset += 4
-        body = data[offset:offset + body_len].decode("utf-8", errors="replace") if body_len else ""
+        body = (
+            data[offset : offset + body_len].decode("utf-8", errors="replace") if body_len else ""
+        )
 
         from datetime import datetime
+
         ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
 
         vis_names = {0: "active", 1: "cancelled", 2: "superseded"}
@@ -861,12 +894,14 @@ class BonnetFirehoseServer:
             lines.append(f"Author: {author_username}@{author_registrar}")
         else:
             lines.append(f"Author: {author_pubkey}")
-        lines.extend([
-            f"Article ID: {article_id}",
-            f"Event ID: {event_id}",
-            f"Visibility: {vis_names.get(visibility, '?')}",
-            f"Body: {body_names.get(body_state, '?')}",
-        ])
+        lines.extend(
+            [
+                f"Article ID: {article_id}",
+                f"Event ID: {event_id}",
+                f"Visibility: {vis_names.get(visibility, '?')}",
+                f"Body: {body_names.get(body_state, '?')}",
+            ]
+        )
         if tags:
             lines.append(f"Tags: {tags}")
         if content_type:
@@ -919,9 +954,10 @@ class BonnetFirehoseServer:
             offset = int(parts[2]) if len(parts) > 2 else 0
             limit = int(parts[3]) if len(parts) > 3 else 50
 
-        aggregate = (origin == "")
+        aggregate = origin == ""
 
         from net.firehose_commands import OP_ARTICLE_LIST
+
         req = struct.pack(">B", OP_ARTICLE_LIST)
         req += self._enc_text16(origin)
         req += self._enc_text16(board)
@@ -939,7 +975,7 @@ class BonnetFirehoseServer:
         for _ in range(count):
             if aggregate:
                 art_origin, offset = self._read_text16(resp, offset)
-            article_num = struct.unpack(">Q", resp[offset:offset + 8])[0]
+            article_num = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             aid_len = resp[offset]
             offset += 1 + aid_len
@@ -951,9 +987,9 @@ class BonnetFirehoseServer:
             offset += 1
             bh_len = resp[offset]
             offset += 1 + bh_len
-            body_size = struct.unpack(">Q", resp[offset:offset + 8])[0]
+            body_size = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
-            created_at = struct.unpack(">q", resp[offset:offset + 8])[0]
+            created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8
             ap_len = resp[offset]
             offset += 1 + ap_len
@@ -973,10 +1009,11 @@ class BonnetFirehoseServer:
                 offset += 32
             pin_state, offset = self._read_text16(resp, offset)
             thread_state, offset = self._read_text16(resp, offset)
-            body_len = struct.unpack(">I", resp[offset:offset + 4])[0]
+            body_len = struct.unpack(">I", resp[offset : offset + 4])[0]
             offset += 4 + body_len
 
             from datetime import datetime
+
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
             if aggregate:
                 lines.append(f"{art_origin} #{article_num:4} | {subject} | {ts}")
@@ -1013,9 +1050,10 @@ class BonnetFirehoseServer:
             board = parts[2]
             query = " ".join(parts[3:])
 
-        aggregate = (origin == "")
+        aggregate = origin == ""
 
         from net.firehose_commands import OP_ARTICLE_SEARCH
+
         req = struct.pack(">B", OP_ARTICLE_SEARCH)
         req += self._enc_text16(origin)
         req += self._enc_text16(board)
@@ -1037,23 +1075,24 @@ class BonnetFirehoseServer:
         for _ in range(count):
             if aggregate:
                 result_origin, offset = self._read_text16(resp, offset)
-            article_num = struct.unpack(">Q", resp[offset:offset + 8])[0]
+            article_num = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             aid_len = resp[offset]
             offset += 1 + aid_len
             subj_len = resp[offset]
             offset += 1
-            subject = resp[offset:offset + subj_len].decode("utf-8")
+            subject = resp[offset : offset + subj_len].decode("utf-8")
             offset += subj_len
             ap_len = resp[offset]
             offset += 1 + ap_len
-            created_at = struct.unpack(">q", resp[offset:offset + 8])[0]
+            created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8
             body_avail = resp[offset]
             offset += 1
             excerpt, offset = self._read_text16(resp, offset)
 
             from datetime import datetime
+
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
             if aggregate:
                 lines.append(f"{result_origin} #{article_num:4} | {subject} | {ts}")
@@ -1073,11 +1112,13 @@ class BonnetFirehoseServer:
 
     def _cmd_query_articles(self, parts) -> str:
         if len(parts) < 2:
-            return ("Usage: query-articles <board> [--author=<hex>] [--user=<name>] "
-                    "[--tag=<tag>] [--since=<ts>] [--before=<ts>] "
-                    "[--state=active|cancelled|superseded] "
-                    "[--root] [--reply-to=<num>] [--pinned] "
-                    "[--offset=N] [--limit=N]")
+            return (
+                "Usage: query-articles <board> [--author=<hex>] [--user=<name>] "
+                "[--tag=<tag>] [--since=<ts>] [--before=<ts>] "
+                "[--state=active|cancelled|superseded] "
+                "[--root] [--reply-to=<num>] [--pinned] "
+                "[--offset=N] [--limit=N]"
+            )
 
         board = parts[1]
 
@@ -1165,7 +1206,7 @@ class BonnetFirehoseServer:
         offset = 3
         lines = []
         for _ in range(count):
-            article_num = struct.unpack(">Q", resp[offset:offset + 8])[0]
+            article_num = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             aid_len = resp[offset]
             offset += 1 + aid_len
@@ -1177,13 +1218,13 @@ class BonnetFirehoseServer:
             offset += 1
             bh_len = resp[offset]
             offset += 1 + bh_len
-            body_size = struct.unpack(">Q", resp[offset:offset + 8])[0]
+            body_size = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
-            created_at = struct.unpack(">q", resp[offset:offset + 8])[0]
+            created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8
             ap_len = resp[offset]
             offset += 1
-            author_pubkey = resp[offset:offset + ap_len]
+            author_pubkey = resp[offset : offset + ap_len]
             offset += ap_len
             author_username, offset = self._read_text16(resp, offset)
             author_registrar, offset = self._read_text16(resp, offset)
@@ -1200,9 +1241,12 @@ class BonnetFirehoseServer:
             thread_state, offset = self._read_text16(resp, offset)
 
             from datetime import datetime
+
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
 
-            author_display = f"{author_username}@{author_registrar}" if author_username else author_pubkey.hex()
+            author_display = (
+                f"{author_username}@{author_registrar}" if author_username else author_pubkey.hex()
+            )
             extras = []
             if visibility != 0:
                 vis_names = {1: "cancelled", 2: "superseded"}
@@ -1227,6 +1271,7 @@ class BonnetFirehoseServer:
         origin = parts[1] if parts and len(parts) > 1 else self.config.origin
 
         from net.firehose_commands import OP_USER_LIST
+
         req = struct.pack(">B", OP_USER_LIST) + self._enc_text16(origin) + struct.pack(">B", 0)
 
         resp = self._local_handle(req)
@@ -1239,10 +1284,10 @@ class BonnetFirehoseServer:
         for _ in range(count):
             pk_len = resp[offset]
             offset += 1
-            pubkey = resp[offset:offset + pk_len].hex()
+            pubkey = resp[offset : offset + pk_len].hex()
             offset += pk_len
             username, offset = self._read_text16(resp, offset)
-            flags = struct.unpack(">Q", resp[offset:offset + 8])[0]
+            flags = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             revoked = resp[offset]
             offset += 1
@@ -1273,6 +1318,7 @@ class BonnetFirehoseServer:
             return "Invalid hex pubkey"
 
         from net.firehose_commands import OP_BAN_STATUS
+
         req = struct.pack(">B", OP_BAN_STATUS) + struct.pack(">B", len(pubkey)) + pubkey
 
         resp = self._local_handle(req)
@@ -1286,10 +1332,10 @@ class BonnetFirehoseServer:
         offset = 2
         eid_len = resp[offset]
         offset += 1
-        event_id = resp[offset:offset + eid_len].hex()
+        event_id = resp[offset : offset + eid_len].hex()
         offset += eid_len
         origin, offset = self._read_text16(resp, offset)
-        expires_at = struct.unpack(">q", resp[offset:offset + 8])[0]
+        expires_at = struct.unpack(">q", resp[offset : offset + 8])[0]
 
         if expires_at < 0:
             exp = "permanent"
@@ -1297,6 +1343,7 @@ class BonnetFirehoseServer:
             exp = "warning"
         else:
             from datetime import datetime
+
             exp = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d %H:%M")
 
         return f"BANNED\nOrigin: {origin}\nExpires: {exp}\nEvent: {event_id}"
@@ -1312,6 +1359,7 @@ class BonnetFirehoseServer:
         origin = parts[1]
 
         from net.firehose_commands import OP_EVENT_HEAD
+
         req = struct.pack(">B", OP_EVENT_HEAD) + self._enc_text16(origin)
 
         resp = self._local_handle(req)
@@ -1320,13 +1368,16 @@ class BonnetFirehoseServer:
 
         head_len = struct.unpack(">H", resp[1:3])[0]
         from core.record import decode_head
-        head = decode_head(resp[3:3 + head_len])
 
-        return (f"Origin: {head.origin}\n"
-                f"Latest seq: {head.latest_origin_seq}\n"
-                f"Event count: {head.event_count}\n"
-                f"Latest hash: {head.latest_event_hash.hex()}\n"
-                f"Pubkey: {head.origin_pubkey.hex()}")
+        head = decode_head(resp[3 : 3 + head_len])
+
+        return (
+            f"Origin: {head.origin}\n"
+            f"Latest seq: {head.latest_origin_seq}\n"
+            f"Event count: {head.event_count}\n"
+            f"Latest hash: {head.latest_event_hash.hex()}\n"
+            f"Pubkey: {head.origin_pubkey.hex()}"
+        )
 
     # ------------------------------------------------------------------
     # event-range
@@ -1344,6 +1395,7 @@ class BonnetFirehoseServer:
             return "Invalid start or count"
 
         from net.firehose_commands import OP_EVENT_RANGE
+
         req = struct.pack(">B", OP_EVENT_RANGE)
         req += self._enc_text16(origin)
         req += struct.pack(">Q", start)
@@ -1358,12 +1410,13 @@ class BonnetFirehoseServer:
         offset = 3
         lines = []
         for _ in range(resp_count):
-            rec_len = struct.unpack(">I", resp[offset:offset + 4])[0]
+            rec_len = struct.unpack(">I", resp[offset : offset + 4])[0]
             offset += 4
             from core.record import decode_record
-            rec = decode_record(resp[offset:offset + rec_len])
+
+            rec = decode_record(resp[offset : offset + rec_len])
             offset += rec_len
-            w_len = struct.unpack(">H", resp[offset:offset + 2])[0]
+            w_len = struct.unpack(">H", resp[offset : offset + 2])[0]
             offset += 2 + w_len
 
             lines.append(f"  seq={rec.origin_seq:4} | {rec.kind:30} | eid={rec.event_id.hex()}")
@@ -1390,6 +1443,7 @@ class BonnetFirehoseServer:
             return "Event ID must be 32 bytes (64 hex chars)"
 
         from net.firehose_commands import OP_EVENT_GET
+
         req = struct.pack(">B", OP_EVENT_GET) + self._enc_text16(origin) + event_id
 
         resp = self._local_handle(req)
@@ -1397,17 +1451,20 @@ class BonnetFirehoseServer:
             return self._parse_response_error(resp)
 
         offset = 1
-        rec_len = struct.unpack(">I", resp[offset:offset + 4])[0]
+        rec_len = struct.unpack(">I", resp[offset : offset + 4])[0]
         offset += 4
         from core.record import decode_record
-        rec = decode_record(resp[offset:offset + rec_len])
+
+        rec = decode_record(resp[offset : offset + rec_len])
         offset += rec_len
-        w_len = struct.unpack(">H", resp[offset:offset + 2])[0]
+        w_len = struct.unpack(">H", resp[offset : offset + 2])[0]
         offset += 2
         from core.record import decode_witness, is_origin_witness
-        witness = decode_witness(resp[offset:offset + w_len])
+
+        witness = decode_witness(resp[offset : offset + w_len])
 
         from datetime import datetime
+
         ts = datetime.fromtimestamp(rec.created_at).strftime("%Y-%m-%d %H:%M:%S")
 
         lines = [
@@ -1428,53 +1485,73 @@ class BonnetFirehoseServer:
         if rec.actor_registrar:
             lines.append(f"Registrar:    {rec.actor_registrar}")
 
-        lines.extend([
-            "",
-            "=== Content ===",
-            f"Board:        {rec.board or '(none)'}",
-            f"Article ID:   {rec.article_id.hex() if rec.article_id != ZERO_ID else '(none)'}",
-            f"Article Num:  {rec.article_num if rec.article_num else '(none)'}",
-        ])
+        lines.extend(
+            [
+                "",
+                "=== Content ===",
+                f"Board:        {rec.board or '(none)'}",
+                f"Article ID:   {rec.article_id.hex() if rec.article_id != ZERO_ID else '(none)'}",
+                f"Article Num:  {rec.article_num if rec.article_num else '(none)'}",
+            ]
+        )
 
         if rec.target_origin:
-            lines.extend([
+            lines.extend(
+                [
+                    "",
+                    "=== Target ===",
+                    f"Origin:       {rec.target_origin}",
+                    f"Board:        {rec.target_board}",
+                    f"Article ID:   {rec.target_article_id.hex() if rec.target_article_id != ZERO_ID else '(none)'}",
+                    f"Event ID:     {rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else '(none)'}",
+                ]
+            )
+
+        lines.extend(
+            [
                 "",
-                "=== Target ===",
-                f"Origin:       {rec.target_origin}",
-                f"Board:        {rec.target_board}",
-                f"Article ID:   {rec.target_article_id.hex() if rec.target_article_id != ZERO_ID else '(none)'}",
-                f"Event ID:     {rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else '(none)'}",
-            ])
+                "=== Body ===",
+                f"Hash:         {rec.body_hash.hex()}",
+                f"Size:         {rec.body_size} bytes",
+            ]
+        )
 
-        lines.extend([
-            "",
-            "=== Body ===",
-            f"Hash:         {rec.body_hash.hex()}",
-            f"Size:         {rec.body_size} bytes",
-        ])
-
-        lines.extend([
-            "",
-            "=== Signatures ===",
-            f"Actor sig:    {rec.actor_signature.hex()}",
-            f"Origin sig:   {rec.origin_signature.hex()}",
-        ])
+        lines.extend(
+            [
+                "",
+                "=== Signatures ===",
+                f"Actor sig:    {rec.actor_signature.hex()}",
+                f"Origin sig:   {rec.origin_signature.hex()}",
+            ]
+        )
 
         if rec.metadata.fields:
-            lines.extend([
-                "",
-                f"=== Metadata ({len(rec.metadata.fields)} fields) ===",
-            ])
+            lines.extend(
+                [
+                    "",
+                    f"=== Metadata ({len(rec.metadata.fields)} fields) ===",
+                ]
+            )
             for f in rec.metadata.fields:
-                type_names = {1: "BYTES", 2: "TEXT", 3: "U64", 4: "I64", 5: "BOOL", 6: "ID_LIST", 7: "TEXT_LIST"}
+                type_names = {
+                    1: "BYTES",
+                    2: "TEXT",
+                    3: "U64",
+                    4: "I64",
+                    5: "BOOL",
+                    6: "ID_LIST",
+                    7: "TEXT_LIST",
+                }
                 type_name = type_names.get(f.value_type, f"0x{f.value_type:02x}")
                 if f.value_type == 2:
                     val = f.value.decode("utf-8", errors="replace")
                 elif f.value_type == 3:
                     import struct as _s
+
                     val = str(_s.unpack(">Q", f.value)[0])
                 elif f.value_type == 4:
                     import struct as _s
+
                     val = str(_s.unpack(">q", f.value)[0])
                 elif f.value_type == 5:
                     val = "true" if f.value == b"\x01" else "false"
@@ -1488,18 +1565,24 @@ class BonnetFirehoseServer:
                 lines.append(f"  [{f.field_id}] {type_name}: {val}")
 
         zero_key = b"\x00" * 32
-        from_pubkey = witness.received_from_pubkey.hex() if witness.received_from_pubkey != zero_key else "(origin)"
-        lines.extend([
-            "",
-            "=== Witness ===",
-            f"Relay pubkey: {witness.relay_pubkey.hex()}",
-            f"Relay host:   {witness.relay_hostname}",
-            f"From pubkey:  {from_pubkey}",
-            f"From host:    {witness.received_from_hostname or '(origin)'}",
-            f"Seen at:      {datetime.fromtimestamp(witness.seen_at).strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Origin term:  {'yes' if is_origin_witness(witness) else 'no'}",
-            f"Event hash:   {witness.event_hash.hex()}",
-        ])
+        from_pubkey = (
+            witness.received_from_pubkey.hex()
+            if witness.received_from_pubkey != zero_key
+            else "(origin)"
+        )
+        lines.extend(
+            [
+                "",
+                "=== Witness ===",
+                f"Relay pubkey: {witness.relay_pubkey.hex()}",
+                f"Relay host:   {witness.relay_hostname}",
+                f"From pubkey:  {from_pubkey}",
+                f"From host:    {witness.received_from_hostname or '(origin)'}",
+                f"Seen at:      {datetime.fromtimestamp(witness.seen_at).strftime('%Y-%m-%d %H:%M:%S')}",
+                f"Origin term:  {'yes' if is_origin_witness(witness) else 'no'}",
+                f"Event hash:   {witness.event_hash.hex()}",
+            ]
+        )
 
         return "\n".join(lines)
 
@@ -1546,6 +1629,7 @@ class BonnetFirehoseServer:
 
         manifest_path = os.path.join(self.config.data_dir, f"purge_manifest_{origin}.json")
         import json
+
         manifest = {
             "origin": origin,
             "summary": summary,
@@ -1623,11 +1707,14 @@ class BonnetFirehoseServer:
                 matcher_desc.append(f"role={m.role}")
             if m.origin is not None:
                 matcher_desc.append(f"origin={m.origin}")
-            lines.append(f"  [{i}] effect={rule.effect} match=[{', '.join(matcher_desc)}] actions={rule.actions} commands={rule.commands} kinds={rule.kinds} boards={rule.boards} objects={rule.objects}")
+            lines.append(
+                f"  [{i}] effect={rule.effect} match=[{', '.join(matcher_desc)}] actions={rule.actions} commands={rule.commands} kinds={rule.kinds} boards={rule.boards} objects={rule.objects}"
+            )
 
         lines.append("")
         lines.append("=== ACL Checks ===")
         from net.firehose_commands import CMD_NAMES
+
         for opcode, cmd_name in sorted(CMD_NAMES.items(), key=lambda x: x[1]):
             action = "write" if opcode == 0x01 else "read"
             result = acl.check(auth_ctx, action, command=cmd_name)
@@ -1651,7 +1738,8 @@ class BonnetFirehoseServer:
 
         has_server_admin = any(
             r.matcher.pubkey == self.server_identity.public_key and r.effect == "allow"
-            for r in acl._rules if r.matcher.pubkey is not None
+            for r in acl._rules
+            if r.matcher.pubkey is not None
         )
         lines.append(f"  has admin ACL rule for server pubkey: {has_server_admin}")
 
@@ -1659,6 +1747,7 @@ class BonnetFirehoseServer:
 
     def _cmd_debug_nav(self, parts) -> str:
         import sqlite3 as _sqlite3
+
         lines = []
         lines.append(f"CWD: {os.getcwd()}")
         lines.append(f"nav_db_path: {self.config.nav_db_path}")
@@ -1672,7 +1761,9 @@ class BonnetFirehoseServer:
         all_boards = self.nav.list_boards()
         lines.append(f"count: {len(all_boards)}")
         for b in all_boards:
-            lines.append(f"  origin={b['origin']} board={b['board']} display={b['display_name']} closed={b['closed']}")
+            lines.append(
+                f"  origin={b['origin']} board={b['board']} display={b['display_name']} closed={b['closed']}"
+            )
 
         if parts and len(parts) > 1:
             origin = parts[1]
@@ -1681,7 +1772,9 @@ class BonnetFirehoseServer:
             filtered = self.nav.list_boards(origin)
             lines.append(f"count: {len(filtered)}")
             for b in filtered:
-                lines.append(f"  origin={b['origin']} board={b['board']} display={b['display_name']} closed={b['closed']}")
+                lines.append(
+                    f"  origin={b['origin']} board={b['board']} display={b['display_name']} closed={b['closed']}"
+                )
 
         lines.append("")
         lines.append("=== Raw SQLite boards table ===")
@@ -1699,7 +1792,9 @@ class BonnetFirehoseServer:
         lines.append("=== Raw SQLite applied_events ===")
         try:
             conn = _sqlite3.connect(str(self.config.nav_db_path))
-            rows = conn.execute("SELECT origin, origin_seq, kind FROM applied_events ORDER BY origin, origin_seq").fetchall()
+            rows = conn.execute(
+                "SELECT origin, origin_seq, kind FROM applied_events ORDER BY origin, origin_seq"
+            ).fetchall()
             lines.append(f"count: {len(rows)}")
             for r in rows:
                 lines.append(f"  origin={r[0]} seq={r[1]} kind={r[2]}")
@@ -1732,7 +1827,7 @@ class BonnetFirehoseServer:
         return "\n".join(lines)
 
     def close(self):
-        if hasattr(self, '_closed') and self._closed:
+        if hasattr(self, "_closed") and self._closed:
             return
         self._closed = True
         first_error = None

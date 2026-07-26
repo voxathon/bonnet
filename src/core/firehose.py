@@ -51,6 +51,7 @@ from core.record import (
 # Exceptions
 # ---------------------------------------------------------------------------
 
+
 class FirehoseError(Exception):
     pass
 
@@ -95,6 +96,7 @@ KIND_ORIGIN_KEY_ROTATE = "bonnet.origin.key.rotate"
 # Accept result
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class AcceptResult:
     accepted: bool
@@ -107,6 +109,7 @@ class AcceptResult:
 # ---------------------------------------------------------------------------
 # FirehoseStore
 # ---------------------------------------------------------------------------
+
 
 class FirehoseStore:
     """SQLite-backed origin-global firehose event store.
@@ -268,6 +271,7 @@ class FirehoseStore:
         body_size = intent.body_size
         if body_size > 0:
             from core.record import compute_body_hash
+
             actual_hash = compute_body_hash(body)
             if actual_hash != body_hash or len(body) != body_size:
                 raise FirehoseError("body hash or size mismatch")
@@ -370,14 +374,30 @@ class FirehoseStore:
                     "target_event_id, body_hash, body_size, encoded_record, "
                     "is_authoritative, source, accepted_at) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (origin, origin_seq, event_hash, prev_hash,
-                     intent.event_id, intent.kind, intent.schema_version,
-                     rec.created_at, intent.actor_pubkey, intent.board,
-                     intent.article_id, article_num,
-                     intent.target_origin, intent.target_board,
-                     intent.target_article_id, intent.target_event_id,
-                     body_hash, body_size, encoded,
-                     1, "", int(time.time())),
+                    (
+                        origin,
+                        origin_seq,
+                        event_hash,
+                        prev_hash,
+                        intent.event_id,
+                        intent.kind,
+                        intent.schema_version,
+                        rec.created_at,
+                        intent.actor_pubkey,
+                        intent.board,
+                        intent.article_id,
+                        article_num,
+                        intent.target_origin,
+                        intent.target_board,
+                        intent.target_article_id,
+                        intent.target_event_id,
+                        body_hash,
+                        body_size,
+                        encoded,
+                        1,
+                        "",
+                        int(time.time()),
+                    ),
                 )
 
                 self._update_head_locked(origin, origin_seq, event_hash, origin_identity)
@@ -398,7 +418,9 @@ class FirehoseStore:
                 self._conn.execute("ROLLBACK")
                 raise
 
-    def _update_head_locked(self, origin: str, seq: int, event_hash: bytes, identity: Identity) -> None:
+    def _update_head_locked(
+        self, origin: str, seq: int, event_hash: bytes, identity: Identity
+    ) -> None:
         head = Head(
             head_format=HEAD_FORMAT,
             origin=origin,
@@ -419,9 +441,17 @@ class FirehoseStore:
             "generated_at, origin_pubkey, origin_signature, head_hash, "
             "is_authoritative, observed_at, source) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, '')",
-            (origin, seq, event_hash, seq, head.generated_at,
-             identity.public_key, head.origin_signature, head_hash,
-             int(time.time())),
+            (
+                origin,
+                seq,
+                event_hash,
+                seq,
+                head.generated_at,
+                identity.public_key,
+                head.origin_signature,
+                head_hash,
+                int(time.time()),
+            ),
         )
 
     # -----------------------------------------------------------------------
@@ -474,7 +504,11 @@ class FirehoseStore:
             return bytes(row[0]) if row else None
 
     def _apply_rotation_locked(
-        self, origin: str, seq: int, intent: Intent, origin_identity: Identity | None,
+        self,
+        origin: str,
+        seq: int,
+        intent: Intent,
+        origin_identity: Identity | None,
     ) -> None:
         """Process a bonnet.origin.key.rotate record at sequence N."""
         new_pubkey = intent.metadata.get_bytes(1)
@@ -538,7 +572,9 @@ class FirehoseStore:
 
                 if last_seq < local_seq:
                     self._conn.execute("ROLLBACK")
-                    return AcceptResult(accepted=False, reason="rollback: range below local sequence")
+                    return AcceptResult(
+                        accepted=False, reason="rollback: range below local sequence"
+                    )
 
                 expected_prev = local_hash if first_seq == local_seq + 1 else None
                 conflicts = []
@@ -575,8 +611,15 @@ class FirehoseStore:
                                 "INSERT OR IGNORE INTO event_conflicts "
                                 "(origin, origin_seq, event_hash, encoded_record, source, observed_at, reason) "
                                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                (origin, rec.origin_seq, event_hash, encoded,
-                                 source, int(time.time()), "equivocation: different hash at same seq"),
+                                (
+                                    origin,
+                                    rec.origin_seq,
+                                    event_hash,
+                                    encoded,
+                                    source,
+                                    int(time.time()),
+                                    "equivocation: different hash at same seq",
+                                ),
                             )
                             conflict_found = True
                             break
@@ -606,8 +649,7 @@ class FirehoseStore:
                         if rec.previous_event_hash != expected_prev:
                             self._conn.execute("ROLLBACK")
                             raise ChainBreak(
-                                f"chain break at seq {rec.origin_seq}: "
-                                f"previous_event_hash mismatch"
+                                f"chain break at seq {rec.origin_seq}: previous_event_hash mismatch"
                             )
                     expected_prev = event_hash
 
@@ -617,11 +659,17 @@ class FirehoseStore:
                         key = origin_pubkey
 
                     if not verify_record_signature(key, unsigned, rec.origin_signature):
-                        log_msg(f"ACCEPT_RANGE: origin='{origin}' seq={rec.origin_seq} sig_verify FAILED")
+                        log_msg(
+                            f"ACCEPT_RANGE: origin='{origin}' seq={rec.origin_seq} sig_verify FAILED"
+                        )
                         log_msg(f"ACCEPT_RANGE:   key_used={key.hex()[:32]}...")
                         log_msg(f"ACCEPT_RANGE:   head_origin_pubkey={origin_pubkey.hex()[:32]}...")
-                        log_msg(f"ACCEPT_RANGE:   record_origin_sig={rec.origin_signature.hex()[:32]}...")
-                        log_msg(f"ACCEPT_RANGE:   record_actor_pubkey={rec.actor_pubkey.hex()[:32]}...")
+                        log_msg(
+                            f"ACCEPT_RANGE:   record_origin_sig={rec.origin_signature.hex()[:32]}..."
+                        )
+                        log_msg(
+                            f"ACCEPT_RANGE:   record_actor_pubkey={rec.actor_pubkey.hex()[:32]}..."
+                        )
                         self._conn.execute("ROLLBACK")
                         raise SignatureInvalid(
                             f"origin signature verification failed at seq {rec.origin_seq}"
@@ -629,7 +677,9 @@ class FirehoseStore:
 
                     reconstructed = reconstruct_intent_from_record(rec)
                     if not verify_intent_signature(
-                        rec.actor_pubkey, encode_intent(reconstructed), rec.actor_signature,
+                        rec.actor_pubkey,
+                        encode_intent(reconstructed),
+                        rec.actor_signature,
                     ):
                         self._conn.execute("ROLLBACK")
                         raise SignatureInvalid(
@@ -643,14 +693,30 @@ class FirehoseStore:
                         "target_event_id, body_hash, body_size, encoded_record, "
                         "is_authoritative, source, accepted_at) "
                         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (origin, rec.origin_seq, event_hash, rec.previous_event_hash,
-                         rec.event_id, rec.kind, rec.schema_version,
-                         rec.created_at, rec.actor_pubkey, rec.board,
-                         rec.article_id, rec.article_num,
-                         rec.target_origin, rec.target_board,
-                         rec.target_article_id, rec.target_event_id,
-                         rec.body_hash, rec.body_size, encoded,
-                         0, source, int(time.time())),
+                        (
+                            origin,
+                            rec.origin_seq,
+                            event_hash,
+                            rec.previous_event_hash,
+                            rec.event_id,
+                            rec.kind,
+                            rec.schema_version,
+                            rec.created_at,
+                            rec.actor_pubkey,
+                            rec.board,
+                            rec.article_id,
+                            rec.article_num,
+                            rec.target_origin,
+                            rec.target_board,
+                            rec.target_article_id,
+                            rec.target_event_id,
+                            rec.body_hash,
+                            rec.body_size,
+                            encoded,
+                            0,
+                            source,
+                            int(time.time()),
+                        ),
                     )
 
                     if rec.kind == KIND_ORIGIN_KEY_ROTATE:
@@ -710,9 +776,18 @@ class FirehoseStore:
                     "generated_at, origin_pubkey, origin_signature, head_hash, "
                     "is_authoritative, observed_at, source) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-                    (origin, head.latest_origin_seq, head.latest_event_hash,
-                     head.event_count, head.generated_at, head.origin_pubkey,
-                     head.origin_signature, head_hash, int(time.time()), source),
+                    (
+                        origin,
+                        head.latest_origin_seq,
+                        head.latest_event_hash,
+                        head.event_count,
+                        head.generated_at,
+                        head.origin_pubkey,
+                        head.origin_signature,
+                        head_hash,
+                        int(time.time()),
+                        source,
+                    ),
                 )
 
                 new_seq = max(local_seq, last_seq)
@@ -787,9 +862,15 @@ class FirehoseStore:
                     "generated_at, origin_pubkey, origin_signature, head_hash, "
                     "is_authoritative, observed_at, source) "
                     "VALUES (?, 0, ?, 0, ?, ?, ?, ?, 1, ?, '')",
-                    (origin, ZERO_HASH, int(time.time()),
-                     identity.public_key, head.origin_signature, head_hash,
-                     int(time.time())),
+                    (
+                        origin,
+                        ZERO_HASH,
+                        int(time.time()),
+                        identity.public_key,
+                        head.origin_signature,
+                        head_hash,
+                        int(time.time()),
+                    ),
                 )
                 self._conn.execute(
                     "INSERT OR IGNORE INTO origin_state (origin, highest_seq, current_event_hash, current_head_hash) "
@@ -853,13 +934,23 @@ class FirehoseStore:
                 "(event_origin, event_id, event_hash, relay_pubkey, relay_hostname, "
                 "received_from_pubkey, received_from_hostname, seen_at, relay_signature) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (w.event_origin, w.event_id, w.event_hash, w.relay_pubkey, w.relay_hostname,
-                 w.received_from_pubkey, w.received_from_hostname,
-                 w.seen_at, w.relay_signature),
+                (
+                    w.event_origin,
+                    w.event_id,
+                    w.event_hash,
+                    w.relay_pubkey,
+                    w.relay_hostname,
+                    w.received_from_pubkey,
+                    w.received_from_hostname,
+                    w.seen_at,
+                    w.relay_signature,
+                ),
             )
             self._conn.commit()
 
-    def get_witness(self, event_origin: str, event_id: bytes, relay_pubkey: bytes) -> Witness | None:
+    def get_witness(
+        self, event_origin: str, event_id: bytes, relay_pubkey: bytes
+    ) -> Witness | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT event_hash, relay_hostname, received_from_pubkey, "
@@ -928,9 +1019,12 @@ class FirehoseStore:
 
     def list_origins(self) -> list[str]:
         with self._lock:
-            return [r[0] for r in self._conn.execute(
-                "SELECT origin FROM origin_state ORDER BY origin"
-            ).fetchall()]
+            return [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT origin FROM origin_state ORDER BY origin"
+                ).fetchall()
+            ]
 
     # -----------------------------------------------------------------------
     # Origin lifecycle (depeer/purge/reset-key)
@@ -981,9 +1075,7 @@ class FirehoseStore:
                     ("board_counters", "origin"),
                     ("projection_checkpoints", "origin"),
                 ]:
-                    c = self._conn.execute(
-                        f"DELETE FROM {table} WHERE {col}=?", (origin,)
-                    ).rowcount
+                    c = self._conn.execute(f"DELETE FROM {table} WHERE {col}=?", (origin,)).rowcount
                     counts[table] = c
                 self._conn.execute("COMMIT")
                 return counts
@@ -1000,12 +1092,8 @@ class FirehoseStore:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                self._conn.execute(
-                    "DELETE FROM origin_key_epochs WHERE origin=?", (origin,)
-                )
-                self._conn.execute(
-                    "DELETE FROM origin_state WHERE origin=?", (origin,)
-                )
+                self._conn.execute("DELETE FROM origin_key_epochs WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM origin_state WHERE origin=?", (origin,))
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")

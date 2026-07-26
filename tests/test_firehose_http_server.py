@@ -78,28 +78,47 @@ async def server_stack(tmp_path):
 
     allowed_origins = {ORIGIN}
     dispatcher = Dispatcher(
-        firehose=firehose, nav=nav, users=users, policy=policy,
-        boards_dir=config.boards_dir, body_store=body_store,
+        firehose=firehose,
+        nav=nav,
+        users=users,
+        policy=policy,
+        boards_dir=config.boards_dir,
+        body_store=body_store,
         allowed_origins=allowed_origins,
     )
 
     acl = ACLEvaluator(default_rules_for_admin(SERVER_PUB.hex()))
-    acl.add_rule(ACLRule(
-        effect="allow",
-        matcher=PrincipalMatcher(anonymous=True),
-        actions=["read"],
-        commands=["EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "BOARD_LIST",
-                   "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY",
-                   "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"],
-        boards=["*"],
-    ))
-    acl.add_rule(ACLRule(
-        effect="allow",
-        matcher=PrincipalMatcher(unknown=True),
-        actions=["write"],
-        commands=["PUBLISH_RECORD"],
-        kinds=["bonnet.user.register"],
-    ))
+    acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(anonymous=True),
+            actions=["read"],
+            commands=[
+                "EVENT_HEAD",
+                "EVENT_RANGE",
+                "EVENT_GET",
+                "BOARD_LIST",
+                "ARTICLE_GET",
+                "ARTICLE_LIST",
+                "ARTICLE_SEARCH",
+                "ARTICLE_BODY",
+                "USER_GET",
+                "USER_LIST",
+                "BAN_STATUS",
+                "EVENT_BODY",
+            ],
+            boards=["*"],
+        )
+    )
+    acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(unknown=True),
+            actions=["write"],
+            commands=["PUBLISH_RECORD"],
+            kinds=["bonnet.user.register"],
+        )
+    )
 
     validator = KindValidator()
     search = SearchService(
@@ -190,6 +209,7 @@ async def server_stack(tmp_path):
 # Discovery
 # ---------------------------------------------------------------------------
 
+
 async def test_discovery_returns_signed_response(server_stack):
     """Discovery endpoint returns signed JSON with server key and origin."""
     c = server_stack["client"]
@@ -225,6 +245,7 @@ async def test_discovery_anonymous_key_matches(server_stack):
 # Authenticated command roundtrip
 # ---------------------------------------------------------------------------
 
+
 async def test_authenticated_command_roundtrip(server_stack):
     """A signed command request gets a signed response."""
     c = server_stack["client"]
@@ -240,6 +261,7 @@ async def test_authenticated_command_roundtrip(server_stack):
 # ---------------------------------------------------------------------------
 # Missing and malformed authentication
 # ---------------------------------------------------------------------------
+
 
 async def test_missing_signature_rejected(server_stack):
     """A command without signature headers is rejected with 401."""
@@ -277,6 +299,7 @@ async def test_missing_content_digest_rejected(server_stack):
 # Unsupported protocol and content type
 # ---------------------------------------------------------------------------
 
+
 async def test_unsupported_protocol_rejected(server_stack):
     """A command with wrong protocol header is rejected with 426."""
     c = server_stack["client"]
@@ -313,6 +336,7 @@ async def test_unsupported_content_type_rejected(server_stack):
 # Anonymous access
 # ---------------------------------------------------------------------------
 
+
 async def test_anonymous_command_roundtrip(server_stack):
     """Anonymous requests can read but the response is still signed."""
     c = server_stack["client"]
@@ -329,6 +353,7 @@ async def test_anonymous_command_roundtrip(server_stack):
 # Replay protection
 # ---------------------------------------------------------------------------
 
+
 async def test_replay_detected(server_stack):
     """A replayed nonce is rejected with 409."""
     c = server_stack["client"]
@@ -336,6 +361,7 @@ async def test_replay_detected(server_stack):
     await c.connect(SERVER_IDENTITY, username="admin")
 
     import base64
+
     nonce = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
     now = int(time.time())
     expires = now + 60
@@ -373,6 +399,7 @@ async def test_replay_detected(server_stack):
 # Rate limiting
 # ---------------------------------------------------------------------------
 
+
 async def test_rate_limit_enforced(server_stack):
     """Exceeding the rate limit returns 429."""
     stack = server_stack
@@ -391,6 +418,7 @@ async def test_rate_limit_enforced(server_stack):
     assert r2[0] == 0x00
 
     import base64
+
     cmd3 = build_board_list(ORIGIN)
     nonce3 = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
     msg3 = __import__("net.http_auth", fromlist=["HTTPMessage"]).HTTPMessage(
@@ -404,7 +432,9 @@ async def test_rate_limit_enforced(server_stack):
         },
         body=cmd3,
     )
-    await c._signer.sign_request(msg3, nonce=nonce3, created=int(time.time()), expires=int(time.time()) + 60)
+    await c._signer.sign_request(
+        msg3, nonce=nonce3, created=int(time.time()), expires=int(time.time()) + 60
+    )
     resp3 = await c._http.post("/command", content=cmd3, headers=dict(msg3.headers))
     assert resp3.status_code == 429
 
@@ -412,6 +442,7 @@ async def test_rate_limit_enforced(server_stack):
 # ---------------------------------------------------------------------------
 # Oversized body rejection
 # ---------------------------------------------------------------------------
+
 
 async def test_oversized_body_rejected(server_stack):
     """An oversized body is rejected with 413."""
@@ -433,6 +464,7 @@ async def test_oversized_body_rejected(server_stack):
 # ---------------------------------------------------------------------------
 # Sanitized error responses
 # ---------------------------------------------------------------------------
+
 
 async def test_internal_error_sanitized(server_stack):
     """Dispatch exceptions should not leak internal details to the client."""
@@ -461,6 +493,7 @@ async def test_internal_error_sanitized(server_stack):
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
+
 
 async def test_lifespan_startup_and_shutdown(server_stack):
     """ASGI lifespan startup and shutdown complete without error."""
@@ -503,6 +536,7 @@ async def test_lifespan_startup_and_shutdown(server_stack):
 # 404 handling
 # ---------------------------------------------------------------------------
 
+
 async def test_unknown_path_returns_404(server_stack):
     """Unknown paths return 404."""
     c = server_stack["client"]
@@ -513,6 +547,7 @@ async def test_unknown_path_returns_404(server_stack):
 # ---------------------------------------------------------------------------
 # Empty body rejection
 # ---------------------------------------------------------------------------
+
 
 async def test_empty_body_rejected(server_stack):
     """An empty command body is rejected with 400."""

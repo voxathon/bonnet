@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 # Errors
 # ---------------------------------------------------------------------------
 
+
 class ACLError(Exception):
     pass
 
@@ -27,6 +28,7 @@ class ACLError(Exception):
 # ---------------------------------------------------------------------------
 # Matcher
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class PrincipalMatcher:
@@ -76,6 +78,7 @@ class PrincipalMatcher:
 # ---------------------------------------------------------------------------
 # ACL Rule
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ACLRule:
@@ -131,8 +134,15 @@ class ACLRule:
         objects = data.get("objects")
         if isinstance(objects, str):
             objects = [objects]
-        return ACLRule(effect=effect, matcher=matcher, actions=actions,
-                       commands=commands, kinds=kinds, boards=boards, objects=objects)
+        return ACLRule(
+            effect=effect,
+            matcher=matcher,
+            actions=actions,
+            commands=commands,
+            kinds=kinds,
+            boards=boards,
+            objects=objects,
+        )
 
 
 def _list_matches(patterns: list, value: str) -> bool:
@@ -145,6 +155,7 @@ def _list_matches(patterns: list, value: str) -> bool:
 # ---------------------------------------------------------------------------
 # Auth Context
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class AuthContext:
@@ -159,6 +170,7 @@ class AuthContext:
 # ---------------------------------------------------------------------------
 # ACL Evaluator
 # ---------------------------------------------------------------------------
+
 
 class ACLEvaluator:
     """Compositional ACL evaluator (§16).
@@ -205,7 +217,11 @@ class ACLEvaluator:
         return True
 
     def _check_dimension(
-        self, ctx: AuthContext, action: str, dim: str, selector: str,
+        self,
+        ctx: AuthContext,
+        action: str,
+        dim: str,
+        selector: str,
     ) -> bool:
         matching_rules = []
         for rule in self._rules:
@@ -249,6 +265,7 @@ class ACLEvaluator:
 # ---------------------------------------------------------------------------
 # Default ACL generator
 # ---------------------------------------------------------------------------
+
 
 def default_rules_for_admin(pubkey_hex: str) -> list[ACLRule]:
     """Generate default explicit grants for the initial local admin key."""

@@ -33,48 +33,88 @@ KIND_PUNISHMENT_ISSUE = "bonnet.punishment.issue"
 KIND_PUNISHMENT_REVOKE = "bonnet.punishment.revoke"
 KIND_ORIGIN_KEY_ROTATE = "bonnet.origin.key.rotate"
 
-ALL_KNOWN_KINDS = frozenset({
-    KIND_ARTICLE, KIND_ARTICLE_CANCEL, KIND_ARTICLE_RESTORE, KIND_ARTICLE_PURGE,
-    KIND_ARTICLE_PIN, KIND_ARTICLE_UNPIN,
-    KIND_THREAD_CLOSE, KIND_THREAD_REOPEN,
-    KIND_BOARD_CREATE, KIND_BOARD_CLOSE, KIND_BOARD_REOPEN,
-    KIND_USER_REGISTER, KIND_USER_REVOKE,
-    KIND_RULE_PUBLISH, KIND_RULE_REVOKE,
-    KIND_REPORT, KIND_PUNISHMENT_ISSUE, KIND_PUNISHMENT_REVOKE,
-    KIND_ORIGIN_KEY_ROTATE,
-})
+ALL_KNOWN_KINDS = frozenset(
+    {
+        KIND_ARTICLE,
+        KIND_ARTICLE_CANCEL,
+        KIND_ARTICLE_RESTORE,
+        KIND_ARTICLE_PURGE,
+        KIND_ARTICLE_PIN,
+        KIND_ARTICLE_UNPIN,
+        KIND_THREAD_CLOSE,
+        KIND_THREAD_REOPEN,
+        KIND_BOARD_CREATE,
+        KIND_BOARD_CLOSE,
+        KIND_BOARD_REOPEN,
+        KIND_USER_REGISTER,
+        KIND_USER_REVOKE,
+        KIND_RULE_PUBLISH,
+        KIND_RULE_REVOKE,
+        KIND_REPORT,
+        KIND_PUNISHMENT_ISSUE,
+        KIND_PUNISHMENT_REVOKE,
+        KIND_ORIGIN_KEY_ROTATE,
+    }
+)
 
-ARTICLE_LIFECYCLE_KINDS = frozenset({
-    KIND_ARTICLE_CANCEL, KIND_ARTICLE_RESTORE, KIND_ARTICLE_PURGE,
-})
+ARTICLE_LIFECYCLE_KINDS = frozenset(
+    {
+        KIND_ARTICLE_CANCEL,
+        KIND_ARTICLE_RESTORE,
+        KIND_ARTICLE_PURGE,
+    }
+)
 
-ARTICLE_TARGET_KINDS = frozenset({
-    KIND_ARTICLE_CANCEL, KIND_ARTICLE_RESTORE, KIND_ARTICLE_PURGE,
-    KIND_ARTICLE_PIN, KIND_ARTICLE_UNPIN,
-    KIND_THREAD_CLOSE, KIND_THREAD_REOPEN,
-})
+ARTICLE_TARGET_KINDS = frozenset(
+    {
+        KIND_ARTICLE_CANCEL,
+        KIND_ARTICLE_RESTORE,
+        KIND_ARTICLE_PURGE,
+        KIND_ARTICLE_PIN,
+        KIND_ARTICLE_UNPIN,
+        KIND_THREAD_CLOSE,
+        KIND_THREAD_REOPEN,
+    }
+)
 
-EVENT_TARGET_KINDS = frozenset({
-    KIND_USER_REVOKE, KIND_RULE_REVOKE, KIND_PUNISHMENT_REVOKE,
-})
+EVENT_TARGET_KINDS = frozenset(
+    {
+        KIND_USER_REVOKE,
+        KIND_RULE_REVOKE,
+        KIND_PUNISHMENT_REVOKE,
+    }
+)
 
-BOARD_LIFECYCLE_KINDS = frozenset({
-    KIND_BOARD_CREATE, KIND_BOARD_CLOSE, KIND_BOARD_REOPEN,
-})
+BOARD_LIFECYCLE_KINDS = frozenset(
+    {
+        KIND_BOARD_CREATE,
+        KIND_BOARD_CLOSE,
+        KIND_BOARD_REOPEN,
+    }
+)
 
-USER_LIFECYCLE_KINDS = frozenset({
-    KIND_USER_REGISTER, KIND_USER_REVOKE,
-})
+USER_LIFECYCLE_KINDS = frozenset(
+    {
+        KIND_USER_REGISTER,
+        KIND_USER_REVOKE,
+    }
+)
 
-MODERATION_KINDS = frozenset({
-    KIND_RULE_PUBLISH, KIND_RULE_REVOKE, KIND_REPORT,
-    KIND_PUNISHMENT_ISSUE, KIND_PUNISHMENT_REVOKE,
-})
+MODERATION_KINDS = frozenset(
+    {
+        KIND_RULE_PUBLISH,
+        KIND_RULE_REVOKE,
+        KIND_REPORT,
+        KIND_PUNISHMENT_ISSUE,
+        KIND_PUNISHMENT_REVOKE,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
+
 
 class ValidationError(Exception):
     pass
@@ -83,6 +123,7 @@ class ValidationError(Exception):
 # ---------------------------------------------------------------------------
 # Validator
 # ---------------------------------------------------------------------------
+
 
 class KindValidator:
     """Validates an Intent against its kind schema (§12)."""
@@ -99,8 +140,7 @@ class KindValidator:
             self._validate_article(intent)
         elif kind in ARTICLE_LIFECYCLE_KINDS:
             self._validate_lifecycle_control(intent)
-        elif kind in (KIND_ARTICLE_PIN, KIND_ARTICLE_UNPIN,
-                      KIND_THREAD_CLOSE, KIND_THREAD_REOPEN):
+        elif kind in (KIND_ARTICLE_PIN, KIND_ARTICLE_UNPIN, KIND_THREAD_CLOSE, KIND_THREAD_REOPEN):
             self._validate_pin_thread_control(intent)
         elif kind in BOARD_LIFECYCLE_KINDS:
             self._validate_board_lifecycle(intent)
@@ -145,7 +185,9 @@ class KindValidator:
     def _validate_lifecycle_control(self, intent: Intent) -> None:
         self._require_article_target(intent)
         if intent.board:
-            raise ValidationError(f"{intent.kind} must have empty board (target tuple carries board)")
+            raise ValidationError(
+                f"{intent.kind} must have empty board (target tuple carries board)"
+            )
 
     # ------------------------------------------------------------------
     # Pin/thread controls
@@ -171,7 +213,9 @@ class KindValidator:
 
         if intent.kind == KIND_BOARD_CREATE:
             if intent.metadata.get_bytes(1) is None:
-                raise ValidationError("bonnet.board.create requires metadata field 1 (owner public key)")
+                raise ValidationError(
+                    "bonnet.board.create requires metadata field 1 (owner public key)"
+                )
 
     # ------------------------------------------------------------------
     # User lifecycle
@@ -185,7 +229,9 @@ class KindValidator:
         if m.get_text(1) is None:
             raise ValidationError("bonnet.user.register requires metadata field 1 (username)")
         if m.get_bytes(2) is None:
-            raise ValidationError("bonnet.user.register requires metadata field 2 (user public key)")
+            raise ValidationError(
+                "bonnet.user.register requires metadata field 2 (user public key)"
+            )
         flags = m.get_u64(3)
         if flags is None:
             raise ValidationError("bonnet.user.register requires metadata field 3 (flags)")
@@ -196,7 +242,9 @@ class KindValidator:
         self._require_event_target(intent)
         self._require_empty_board(intent)
         if intent.metadata.get_bytes(1) is None:
-            raise ValidationError("bonnet.user.revoke requires metadata field 1 (revoked user public key)")
+            raise ValidationError(
+                "bonnet.user.revoke requires metadata field 1 (revoked user public key)"
+            )
 
     # ------------------------------------------------------------------
     # Rules
@@ -255,7 +303,9 @@ class KindValidator:
 
         m = intent.metadata
         if m.get_bytes(1) is None:
-            raise ValidationError("bonnet.punishment.issue requires metadata field 1 (punished public key)")
+            raise ValidationError(
+                "bonnet.punishment.issue requires metadata field 1 (punished public key)"
+            )
         if m.get_i64(2) is None:
             raise ValidationError("bonnet.punishment.issue requires metadata field 2 (expiration)")
 
@@ -270,9 +320,13 @@ class KindValidator:
 
         m = intent.metadata
         if m.get_bytes(1) is None:
-            raise ValidationError("bonnet.origin.key.rotate requires metadata field 1 (new origin public key)")
+            raise ValidationError(
+                "bonnet.origin.key.rotate requires metadata field 1 (new origin public key)"
+            )
         if m.get_bytes(2) is None:
-            raise ValidationError("bonnet.origin.key.rotate requires metadata field 2 (new-key proof signature)")
+            raise ValidationError(
+                "bonnet.origin.key.rotate requires metadata field 2 (new-key proof signature)"
+            )
 
     # ------------------------------------------------------------------
     # Target helpers

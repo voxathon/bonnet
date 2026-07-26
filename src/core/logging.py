@@ -10,7 +10,7 @@ _initialized = False
 
 class TimestampFormatter(logging.Formatter):
     def format(self, record):
-        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         return f"[{ts}] {record.getMessage()}"
 
 
@@ -26,18 +26,18 @@ def init_logging(log_dir: str = None) -> None:
         return
 
     if log_dir is None:
-        log_dir = './logs'
+        log_dir = "./logs"
 
     os.makedirs(log_dir, exist_ok=True)
 
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    _log_file_path = os.path.join(log_dir, f'bonnet-{ts}.log')
-    _log_file = open(_log_file_path, 'w', encoding='utf-8', errors='replace')
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _log_file_path = os.path.join(log_dir, f"bonnet-{ts}.log")
+    _log_file = open(_log_file_path, "w", encoding="utf-8", errors="replace")
 
     handler = logging.StreamHandler(_log_file)
     handler.setFormatter(TimestampFormatter())
 
-    _log = logging.getLogger('bonnet')
+    _log = logging.getLogger("bonnet")
     _log.setLevel(logging.DEBUG)
     _log.addHandler(handler)
 
@@ -58,11 +58,11 @@ def log_hex(label: str, data: bytes) -> None:
     if not _initialized or _log_file is None:
         return
 
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     _log_file.write(f"[{ts}] {label} ({len(data)} bytes):\n")
     hex_str = data.hex()
     for i in range(0, len(hex_str), 64):
-        _log_file.write(f"  {hex_str[i:i+64]}\n")
+        _log_file.write(f"  {hex_str[i : i + 64]}\n")
     _log_file.flush()
 
 
@@ -72,7 +72,7 @@ def log_dict(label: str, d: dict) -> None:
     if not _initialized or _log_file is None:
         return
 
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     _log_file.write(f"[{ts}] {label}:\n")
     for k, v in d.items():
         if isinstance(v, str) and len(v) > 100:
