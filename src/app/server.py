@@ -394,6 +394,15 @@ class BonnetFirehoseServer:
         if cmd == "rebuild":
             return self._cmd_rebuild(parts)
 
+        if cmd == "depeer":
+            return self._cmd_depeer(parts)
+
+        if cmd == "purge-origin":
+            return self._cmd_purge_origin(parts)
+
+        if cmd == "reset-key":
+            return self._cmd_reset_key(parts)
+
         return f"Unknown command: {cmd}. Type 'help' for commands."
 
     def _cmd_help(self) -> str:
@@ -423,6 +432,9 @@ class BonnetFirehoseServer:
   debug-nav [origin]            Dump nav.db state
   debug-acl                     Dump ACL state
   rebuild [origin]              Rebuild projections from firehose (retries failed records)
+  depeer <origin>               Stop syncing an origin and freeze its projections
+  purge-origin <origin>         Remove all firehose and projection data for an origin
+  reset-key <origin>            Clear key epoch pinning for an origin
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:
@@ -1484,6 +1496,89 @@ class BonnetFirehoseServer:
         origin = parts[1] if len(parts) > 1 else self.config.origin
         count = self.dispatcher.rebuild_all(origin)
         return f"Rebuilt projections for '{origin}': {count} records replayed."
+
+    def _cmd_depeer(self, parts) -> str:
+        if len(parts) < 2:
+            return "Usage: depeer <origin>"
+        origin = parts[1]
+        if origin == self.config.origin:
+            return "Cannot depeer the local origin."
+        if origin not in self.sync_manager._clients and origin not in self.sync_manager._tasks:
+            return f"Origin '{origin}' is not a configured peer."
+        self.sync_manager.stop_origin(origin)
+        return f"Depeered '{origin}': sync stopped, data frozen and readable."
+
+    def _cmd_reset_key(self, parts) -> str:
+        if len(parts) < 2:
+            return "Usage: reset-key <origin>"
+        origin = parts[1]
+        if origin == self.config.origin:
+            return "Cannot reset key for the local origin."
+        summary = self.firehose.get_origin_summary(origin)
+        if summary["event_count"] == 0 and summary["witness_count"] == 0:
+            return f"Origin '{origin}' has no data."
+        self.firehose.reset_origin_key(origin)
+        return f"Reset key pinning for '{origin}'. Next sync will perform fresh TOFU."
+
+    def _cmd_purge_origin(self, parts) -> str:
+        if len(parts) < 2:
+            return "Usage: purge-origin <origin>"
+        origin = parts[1]
+        if origin == self.config.origin:
+            return "Cannot purge the local origin."
+        if origin in self.sync_manager._clients or origin in self.sync_manager._tasks:
+            return f"Origin '{origin}' has active sync. Run 'depeer {origin}' first."
+
+        summary = self.firehose.get_origin_summary(origin)
+        if summary["event_count"] == 0 and summary["witness_count"] == 0:
+            return f"Origin '{origin}' has no data to purge."
+
+        manifest_path = os.path.join(self.config.data_dir, f"purge_manifest_{origin}.json")
+        import json
+        manifest = {
+            "origin": origin,
+            "summary": summary,
+            "steps": [],
+        }
+
+        body_count = self.body_store.delete_origin_bodies(origin)
+        manifest["steps"].append({"action": "delete_bodies", "count": body_count})
+
+        self.dispatcher._boards_lock.acquire()
+        try:
+            for key, bp in list(self.dispatcher._board_projections.items()):
+                if key[0] == origin:
+                    bp.close()
+                    del self.dispatcher._board_projections[key]
+                    manifest["steps"].append({"action": "close_board_projection", "board": key[1]})
+        finally:
+            self.dispatcher._boards_lock.release()
+
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+
+        try:
+            self.nav.clear_origin(origin)
+            self.users.clear_origin(origin)
+            self.policy.clear_origin(origin)
+            manifest["steps"].append({"action": "clear_global_projections"})
+
+            counts = self.firehose.delete_origin_data(origin)
+            manifest["steps"].append({"action": "delete_firehose_data", "counts": counts})
+
+            os.remove(manifest_path)
+        except Exception as e:
+            log_msg(f"PURGE: error during purge of '{origin}': {e}")
+            log_msg(f"PURGE: manifest saved at {manifest_path} for manual completion or re-run")
+            return f"Purge of '{origin}' incomplete: {e}. Manifest at {manifest_path}."
+
+        lines = [f"Purged '{origin}':"]
+        lines.append(f"  body files deleted: {body_count}")
+        lines.append(f"  firehose rows deleted: {sum(counts.values())}")
+        for table, count in counts.items():
+            if count > 0:
+                lines.append(f"    {table}: {count}")
+        return "\n".join(lines)
 
     def _cmd_debug_acl(self) -> str:
         lines = []
