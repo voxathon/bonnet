@@ -268,7 +268,8 @@ class TestSignVerifyRoundtrip:
     async def test_request_roundtrip(self, keypair, key_resolver, request_msg, valid_nonce):
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        await signer.sign_request(request_msg, nonce=valid_nonce)
+        now = int(time.time())
+        await signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60)
 
         assert request_msg.has_header("Signature-Input")
         assert request_msg.has_header("Signature")
@@ -304,7 +305,8 @@ class TestSignVerifyRoundtrip:
         priv, pub = keypair
         request_msg.set_header("Bonnet-Username", "alice")
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        await signer.sign_request(request_msg, nonce=valid_nonce, include_username=True)
+        now = int(time.time())
+        await signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60, include_username=True)
 
         verifier = BonnetVerifier(key_resolver=key_resolver)
         result = await verifier.verify_request(request_msg)
@@ -320,7 +322,8 @@ class TestRejections:
     async def test_wrong_tag_rejected(self, keypair, key_resolver, request_msg, valid_nonce):
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex(), tag="wrong-tag")
-        await signer.sign_request(request_msg, nonce=valid_nonce)
+        now = int(time.time())
+        await signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60)
         verifier = BonnetVerifier(key_resolver=key_resolver, tag="bonnet-v2")
         with pytest.raises(InvalidParameter, match="tag"):
             await verifier.verify_request(request_msg)
@@ -329,7 +332,8 @@ class TestRejections:
     async def test_tampered_body_rejected(self, keypair, key_resolver, request_msg, valid_nonce):
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        await signer.sign_request(request_msg, nonce=valid_nonce)
+        now = int(time.time())
+        await signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60)
         # Tamper body but NOT the Content-Digest header — the digest check should catch it
         request_msg.body = b"\x12"
         verifier = BonnetVerifier(key_resolver=key_resolver)
@@ -340,7 +344,8 @@ class TestRejections:
     async def test_tampered_signature_rejected(self, keypair, key_resolver, request_msg, valid_nonce):
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        await signer.sign_request(request_msg, nonce=valid_nonce)
+        now = int(time.time())
+        await signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60)
         # Flip a bit in the Signature header
         sig_header = request_msg.header("Signature")
         tampered = sig_header[:-3] + ("A" if sig_header[-3] != "A" else "B") + sig_header[-2:]
@@ -356,8 +361,10 @@ class TestRejections:
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
         # Manually sign with incomplete components
         components = ["@method", "@authority"]  # missing content-digest, bonnet-protocol, bonnet-nonce
+        now = int(time.time())
         params = {
-            "created": int(time.time()),
+            "created": now,
+            "expires": now + 60,
             "keyid": "ed25519:" + pub.hex(),
             "alg": ED25519_ALG,
             "nonce": valid_nonce,
@@ -410,7 +417,8 @@ class TestRejections:
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
         different_nonce = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
-        await signer.sign_request(request_msg, nonce=different_nonce)
+        now = int(time.time())
+        await signer.sign_request(request_msg, nonce=different_nonce, created=now, expires=now + 60)
         # The Bonnet-Nonce header still has the old nonce
         verifier = BonnetVerifier(key_resolver=key_resolver)
         with pytest.raises(InvalidParameter, match="nonce param"):
@@ -440,7 +448,8 @@ class TestRejections:
                 return other_pub
 
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        await signer.sign_request(request_msg, nonce=valid_nonce)
+        now = int(time.time())
+        await signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60)
         verifier = BonnetVerifier(key_resolver=WrongResolver())
         with pytest.raises(InvalidSignature):
             await verifier.verify_request(request_msg)
@@ -533,7 +542,8 @@ class TestAsyncInterface:
     async def test_sign_returns_awaitable(self, keypair, request_msg, valid_nonce):
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        coro = signer.sign_request(request_msg, nonce=valid_nonce)
+        now = int(time.time())
+        coro = signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60)
         assert asyncio.iscoroutine(coro)
         await coro
 
@@ -541,7 +551,8 @@ class TestAsyncInterface:
     async def test_verify_returns_awaitable(self, keypair, key_resolver, request_msg, valid_nonce):
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        await signer.sign_request(request_msg, nonce=valid_nonce)
+        now = int(time.time())
+        await signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60)
         verifier = BonnetVerifier(key_resolver=key_resolver)
         coro = verifier.verify_request(request_msg)
         assert asyncio.iscoroutine(coro)
@@ -558,7 +569,8 @@ class TestFormatCompatibility:
         """Verify our Signature-Input format is structurally compatible with RFC 9421."""
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        asyncio.run(signer.sign_request(request_msg, nonce=valid_nonce))
+        now = int(time.time())
+        asyncio.run(signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60))
 
         si = request_msg.header("Signature-Input")
         # Must start with label=
@@ -576,7 +588,8 @@ class TestFormatCompatibility:
     def test_signature_format(self, keypair, request_msg, valid_nonce):
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        asyncio.run(signer.sign_request(request_msg, nonce=valid_nonce))
+        now = int(time.time())
+        asyncio.run(signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60))
 
         sig = request_msg.header("Signature")
         assert sig.startswith("bonnet=:")

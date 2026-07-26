@@ -446,16 +446,28 @@ async def test_oversized_body_rejected(server_stack):
 # Sanitized error responses
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="Phase 4: internal exception messages leaked to clients")
 async def test_internal_error_sanitized(server_stack):
     """Dispatch exceptions should not leak internal details to the client."""
-    c = server_stack["client"]
+    stack = server_stack
+    c = stack["client"]
     await c.discover()
     await c.connect(SERVER_IDENTITY, username="admin")
 
-    cmd = build_event_head(ORIGIN)
-    resp = await c._send_command(cmd)
-    assert resp[0] == 0x00
+    original_handle = stack["command_handler"].handle
+
+    def exploding_handle(data, ctx):
+        raise RuntimeError("internal secret: /path/to/secret.db")
+
+    stack["command_handler"].handle = exploding_handle
+    try:
+        cmd = build_board_list(ORIGIN)
+        resp = await c._send_command(cmd)
+    finally:
+        stack["command_handler"].handle = original_handle
+
+    assert resp[0] == 0x01
+    assert b"secret" not in resp
+    assert b"Internal error" in resp
 
 
 # ---------------------------------------------------------------------------

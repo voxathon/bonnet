@@ -11,6 +11,7 @@ with status:u8 (0=success, 1=error).
 from __future__ import annotations
 
 import struct
+import threading
 import time
 from typing import Optional
 
@@ -233,20 +234,25 @@ class FirehoseCommandHandler:
         self._peer_map = peer_map or {}
         self._allowed_origins = allowed_origins or set()
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
+        self._boards_lock = threading.Lock()
         self._max_body_size = max_body_size
 
     def close(self) -> None:
-        for bp in self._board_projections.values():
-            bp.close()
-        self._board_projections.clear()
+        with self._boards_lock:
+            for bp in self._board_projections.values():
+                bp.close()
+            self._board_projections.clear()
 
     def _get_board_projection(self, origin: str, board: str) -> BoardProjection:
         key = (origin, board)
-        if key not in self._board_projections:
-            self._board_projections[key] = BoardProjection(
-                board_db_path(self._boards_dir, origin, board)
-            )
-        return self._board_projections[key]
+        with self._boards_lock:
+            bp = self._board_projections.get(key)
+            if bp is None:
+                bp = BoardProjection(
+                    board_db_path(self._boards_dir, origin, board)
+                )
+                self._board_projections[key] = bp
+            return bp
 
     def _maybe_queue_remote_sync(self, origin: str) -> None:
         """Queue an on-demand sync if the origin is a remote peer."""
