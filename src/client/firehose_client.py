@@ -110,7 +110,15 @@ class FirehoseHTTPClient:
     # ------------------------------------------------------------------
 
     async def discover(self) -> DiscoveryInfo:
-        """Fetch and parse the discovery document."""
+        """Fetch and parse the discovery document.
+
+        The discovery response is signed by the server's own key. We parse
+        the key from the response body, construct a verifier, and verify
+        the response signature before pinning. On first contact this is
+        self-attesting (circular) — TLS provides the independent trust
+        anchor when enabled. TOFU pinning persists the key for subsequent
+        connections.
+        """
         resp = await self._http.get(f"{self._base_url}/.well-known/bonnet")
         resp.raise_for_status()
         data = resp.json()
@@ -131,8 +139,6 @@ class FirehoseHTTPClient:
         self._anonymous_private_key = bytes.fromhex(info.anonymous_private_key)
         self._discovery = info
 
-        self._pin_server_key(info.origin, self._server_pubkey)
-
         self._verifier = BonnetVerifier(
             key_resolver=_ServerKeyResolver(self._server_pubkey),
             tag=FIREHOSE_TAG,
@@ -148,6 +154,28 @@ class FirehoseHTTPClient:
                 "bonnet-protocol", "bonnet-origin", "bonnet-request-nonce",
             }),
         )
+
+        try:
+            resp_msg = HTTPMessage(
+                method="GET",
+                url=str(resp.url),
+                headers=dict(resp.headers),
+                status_code=resp.status_code,
+                body=resp.content,
+            )
+            await self._verifier.verify_response(
+                resp_msg,
+                expected_origin=info.origin,
+                require_components=False,
+            )
+        except SignatureError as e:
+            self._server_pubkey = None
+            self._server_origin = None
+            self._discovery = None
+            self._verifier = None
+            raise FirehoseClientError(f"Discovery response signature verification failed: {e}")
+
+        self._pin_server_key(info.origin, self._server_pubkey)
 
         return info
 
