@@ -159,6 +159,7 @@ class BonnetFirehoseServer:
             sync_manager=self.sync_manager,
             peer_map=peer_map,
             allowed_origins=allowed_origins,
+            max_body_size=config.max_article_body_size,
         )
         log_msg("INIT: FirehoseCommandHandler initialized")
 

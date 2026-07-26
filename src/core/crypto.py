@@ -30,10 +30,14 @@ class Identity:
     @staticmethod
     def verify(pubkey: bytes, message: bytes, signature: bytes) -> bool:
         try:
+            if len(pubkey) != 32:
+                return False
+            if len(signature) != 64:
+                return False
             verify_key = nacl.signing.VerifyKey(pubkey)
             verify_key.verify(message, signature)
             return True
-        except nacl.exceptions.BadSignatureError:
+        except (nacl.exceptions.BadSignatureError, nacl.exceptions.ValueError, TypeError):
             return False
 
     @property

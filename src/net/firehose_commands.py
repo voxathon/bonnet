@@ -214,6 +214,7 @@ class FirehoseCommandHandler:
         sync_manager=None,
         peer_map: dict = None,
         allowed_origins: set = None,
+        max_body_size: int = 1024 * 1024,
     ):
         self._firehose = firehose
         self._identity = server_identity
@@ -232,6 +233,7 @@ class FirehoseCommandHandler:
         self._peer_map = peer_map or {}
         self._allowed_origins = allowed_origins or set()
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
+        self._max_body_size = max_body_size
 
     def close(self) -> None:
         for bp in self._board_projections.values():
@@ -409,6 +411,8 @@ class FirehoseCommandHandler:
                         return _error(0x0004, "Only the original author may supersede an article")
 
         if intent.body_size > 0:
+            if intent.body_size > self._max_body_size:
+                return _error(0x0006, f"Body size {intent.body_size} exceeds maximum {self._max_body_size}")
             if len(body) != intent.body_size:
                 return _error(0x0006, "Body length mismatch")
             actual_hash = compute_body_hash(body)

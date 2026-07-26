@@ -90,6 +90,9 @@ class KindValidator:
 
     def validate(self, intent: Intent) -> None:
         kind = intent.kind
+        if not kind or not all(32 <= ord(c) <= 126 for c in kind):
+            raise ValidationError("kind must be printable ASCII")
+
         if kind not in ALL_KNOWN_KINDS:
             return
 
