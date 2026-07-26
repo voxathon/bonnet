@@ -19,6 +19,7 @@ def _write_config(tmp_path, content):
 # Origin normalization
 # ---------------------------------------------------------------------------
 
+
 def test_normalize_origin_lowercases():
     assert _normalize_origin("BBS.TEST") == "bbs.test"
 
@@ -38,6 +39,7 @@ def test_normalize_origin_empty_returns_empty():
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
+
 
 def test_defaults():
     c = FirehoseConfig()
@@ -73,8 +75,11 @@ def test_http_host_default():
 # TOML loading
 # ---------------------------------------------------------------------------
 
+
 def test_load_complete_config(tmp_path):
-    path = _write_config(tmp_path, """
+    path = _write_config(
+        tmp_path,
+        """
 [server]
 origin = "bbs.example"
 hostname = "bbs.example.com"
@@ -108,7 +113,8 @@ origin = "peer.example"
 hostname = "peer.example.com"
 port = 8443
 verify_tls = true
-""")
+""",
+    )
     c = FirehoseConfig.load(path)
 
     assert c.origin == "bbs.example"
@@ -134,10 +140,13 @@ verify_tls = true
 
 
 def test_load_defaults_for_omitted_values(tmp_path):
-    path = _write_config(tmp_path, """
+    path = _write_config(
+        tmp_path,
+        """
 [server]
 origin = "bbs.test"
-""")
+""",
+    )
     c = FirehoseConfig.load(path)
 
     assert c.origin == "bbs.test"
@@ -150,46 +159,60 @@ origin = "bbs.test"
 
 
 def test_load_normalizes_origin(tmp_path):
-    path = _write_config(tmp_path, """
+    path = _write_config(
+        tmp_path,
+        """
 [server]
 origin = "BBS.TEST."
-""")
+""",
+    )
     c = FirehoseConfig.load(path)
     assert c.origin == "bbs.test"
 
 
 def test_load_hostname_defaults_to_origin(tmp_path):
-    path = _write_config(tmp_path, """
+    path = _write_config(
+        tmp_path,
+        """
 [server]
 origin = "bbs.test"
-""")
+""",
+    )
     c = FirehoseConfig.load(path)
     assert c.hostname == "bbs.test"
 
 
 def test_load_admin_pubkey_creates_default_acl(tmp_path):
     pubkey = "dd" * 32
-    path = _write_config(tmp_path, f"""
+    path = _write_config(
+        tmp_path,
+        f"""
 [server]
 origin = "bbs.test"
 admin_pubkey = "{pubkey}"
-""")
+""",
+    )
     c = FirehoseConfig.load(path)
     assert len(c.acl._rules) >= 1
     assert any(r.matcher.pubkey == bytes.fromhex(pubkey) for r in c.acl._rules)
 
 
 def test_load_no_admin_no_acl(tmp_path):
-    path = _write_config(tmp_path, """
+    path = _write_config(
+        tmp_path,
+        """
 [server]
 origin = "bbs.test"
-""")
+""",
+    )
     c = FirehoseConfig.load(path)
     assert len(c.acl._rules) == 0
 
 
 def test_load_multiple_peers(tmp_path):
-    path = _write_config(tmp_path, """
+    path = _write_config(
+        tmp_path,
+        """
 [server]
 origin = "bbs.test"
 
@@ -203,7 +226,8 @@ origin = "b.test"
 hostname = "b.test"
 port = 9999
 verify_tls = true
-""")
+""",
+    )
     c = FirehoseConfig.load(path)
     assert len(c.peers) == 2
     assert c.peers[0].origin == "a.test"
@@ -215,6 +239,7 @@ verify_tls = true
 # ---------------------------------------------------------------------------
 # Missing config behavior
 # ---------------------------------------------------------------------------
+
 
 def test_load_missing_config_raises(tmp_path):
     """Loading a missing config raises FileNotFoundError."""
@@ -243,9 +268,12 @@ def test_create_default_config_creates_parent_dir(tmp_path):
 # ACL from TOML
 # ---------------------------------------------------------------------------
 
+
 def test_load_acl_from_toml(tmp_path):
     pubkey = "ab" * 32
-    path = _write_config(tmp_path, f"""
+    path = _write_config(
+        tmp_path,
+        f"""
 [server]
 origin = "bbs.test"
 
@@ -263,7 +291,8 @@ match.anonymous = true
 actions = ["read"]
 commands = ["BOARD_LIST"]
 boards = ["*"]
-""")
+""",
+    )
     c = FirehoseConfig.load(path)
     assert len(c.acl._rules) == 2
 
@@ -271,6 +300,7 @@ boards = ["*"]
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
+
 
 def test_validate_rejects_empty_origin():
     c = FirehoseConfig(origin="")
@@ -306,10 +336,12 @@ def test_validate_rejects_excessive_clock_skew():
 
 
 def test_validate_rejects_duplicate_peers():
-    c = FirehoseConfig(peers=[
-        PeerConfig(origin="a.test", hostname="a.test"),
-        PeerConfig(origin="a.test", hostname="b.test"),
-    ])
+    c = FirehoseConfig(
+        peers=[
+            PeerConfig(origin="a.test", hostname="a.test"),
+            PeerConfig(origin="a.test", hostname="b.test"),
+        ]
+    )
     with pytest.raises(ValueError, match="duplicate"):
         c.validate()
 
@@ -327,6 +359,7 @@ def test_validate_accepts_valid_config():
 # Configurable bind host
 # ---------------------------------------------------------------------------
 
+
 def test_configurable_host():
     c = FirehoseConfig(host="127.0.0.1")
     assert c.http_host == "127.0.0.1"
@@ -338,10 +371,13 @@ def test_host_default():
 
 
 def test_host_from_toml(tmp_path):
-    path = _write_config(tmp_path, """
+    path = _write_config(
+        tmp_path,
+        """
 [server]
 origin = "bbs.test"
 host = "127.0.0.1"
-""")
+""",
+    )
     c = FirehoseConfig.load(path)
     assert c.http_host == "127.0.0.1"

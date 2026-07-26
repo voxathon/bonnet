@@ -137,7 +137,9 @@ class TrustStore:
             )
             self._conn.commit()
 
-    def verify_rotation(self, origin: str, old_publickey: bytes, new_publickey: bytes, signature: bytes) -> bool:
+    def verify_rotation(
+        self, origin: str, old_publickey: bytes, new_publickey: bytes, signature: bytes
+    ) -> bool:
         """Verify a key rotation signed by the old pinned key.
 
         The canonical rotation payload is:
@@ -165,8 +167,7 @@ class TrustStore:
         now = int(time.time())
         with self._lock:
             cursor = self._conn.execute(
-                "UPDATE origin_keys SET publickey=?, last_rotated=? "
-                "WHERE origin=? AND publickey=?",
+                "UPDATE origin_keys SET publickey=?, last_rotated=? WHERE origin=? AND publickey=?",
                 (new_publickey, now, origin, old_publickey),
             )
             if cursor.rowcount == 0:

@@ -37,6 +37,7 @@ KIND_PUNISHMENT_REVOKE = "bonnet.punishment.revoke"
 # Base class
 # ---------------------------------------------------------------------------
 
+
 class _BaseProjection:
     """Common applied-events and checkpoint management."""
 
@@ -118,8 +119,7 @@ class _BaseProjection:
 
     def _set_checkpoint(self, origin: str, seq: int) -> None:
         self._conn.execute(
-            "INSERT OR REPLACE INTO projection_checkpoint (origin, last_applied_seq) "
-            "VALUES (?, ?)",
+            "INSERT OR REPLACE INTO projection_checkpoint (origin, last_applied_seq) VALUES (?, ?)",
             (origin, seq),
         )
 
@@ -161,6 +161,7 @@ class _BaseProjection:
 # ---------------------------------------------------------------------------
 # NavProjection — board directory
 # ---------------------------------------------------------------------------
+
 
 class NavProjection(_BaseProjection):
     """Board directory projection from board lifecycle records."""
@@ -249,9 +250,11 @@ class NavProjection(_BaseProjection):
                 ).fetchall()
             return [
                 {
-                    "origin": r[0], "board": r[1],
+                    "origin": r[0],
+                    "board": r[1],
                     "owner_pubkey": bytes(r[2]),
-                    "display_name": r[3], "closed": bool(r[4]),
+                    "display_name": r[3],
+                    "closed": bool(r[4]),
                     "created_seq": r[5],
                 }
                 for r in rows
@@ -267,9 +270,11 @@ class NavProjection(_BaseProjection):
             if not row:
                 return None
             return {
-                "origin": row[0], "board": row[1],
+                "origin": row[0],
+                "board": row[1],
                 "owner_pubkey": bytes(row[2]),
-                "display_name": row[3], "closed": bool(row[4]),
+                "display_name": row[3],
+                "closed": bool(row[4]),
                 "created_seq": row[5],
             }
 
@@ -301,6 +306,7 @@ class NavProjection(_BaseProjection):
 # ---------------------------------------------------------------------------
 # UserProjection — user registrations
 # ---------------------------------------------------------------------------
+
 
 class UserProjection(_BaseProjection):
     """User registration and revocation projection."""
@@ -353,8 +359,7 @@ class UserProjection(_BaseProjection):
             try:
                 revoked_pubkey = rec.metadata.get_bytes(1) or b"\x00" * 32
                 self._conn.execute(
-                    "UPDATE users SET revoked=1, revoked_seq=? "
-                    "WHERE origin=? AND user_pubkey=?",
+                    "UPDATE users SET revoked=1, revoked_seq=? WHERE origin=? AND user_pubkey=?",
                     (rec.origin_seq, rec.target_origin, revoked_pubkey),
                 )
                 self._mark_applied(rec)
@@ -374,10 +379,14 @@ class UserProjection(_BaseProjection):
             if not row:
                 return None
             return {
-                "origin": row[0], "user_pubkey": bytes(row[1]),
-                "username": row[2], "flags": row[3],
-                "reg_seq": row[4], "created_at": row[5],
-                "revoked": bool(row[6]), "revoked_seq": row[7],
+                "origin": row[0],
+                "user_pubkey": bytes(row[1]),
+                "username": row[2],
+                "flags": row[3],
+                "reg_seq": row[4],
+                "created_at": row[5],
+                "revoked": bool(row[6]),
+                "revoked_seq": row[7],
             }
 
     def list_users(self, origin: str = None, include_revoked: bool = False) -> list[dict]:
@@ -408,10 +417,14 @@ class UserProjection(_BaseProjection):
                     ).fetchall()
             return [
                 {
-                    "origin": r[0], "user_pubkey": bytes(r[1]),
-                    "username": r[2], "flags": r[3],
-                    "reg_seq": r[4], "created_at": r[5],
-                    "revoked": bool(r[6]), "revoked_seq": r[7],
+                    "origin": r[0],
+                    "user_pubkey": bytes(r[1]),
+                    "username": r[2],
+                    "flags": r[3],
+                    "reg_seq": r[4],
+                    "created_at": r[5],
+                    "revoked": bool(r[6]),
+                    "revoked_seq": r[7],
                 }
                 for r in rows
             ]
@@ -444,6 +457,7 @@ class UserProjection(_BaseProjection):
 # ---------------------------------------------------------------------------
 # PolicyProjection — rules, reports, punishments
 # ---------------------------------------------------------------------------
+
 
 class PolicyProjection(_BaseProjection):
     """Moderation policy projection: rules, reports, punishments."""
@@ -500,8 +514,15 @@ class PolicyProjection(_BaseProjection):
                     "INSERT OR REPLACE INTO rules "
                     "(event_id, origin, origin_seq, rule_name, body_hash, body_size, created_at, revoked) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-                    (rec.event_id, rec.origin, rec.origin_seq, rule_name,
-                     rec.body_hash, rec.body_size, rec.created_at),
+                    (
+                        rec.event_id,
+                        rec.origin,
+                        rec.origin_seq,
+                        rule_name,
+                        rec.body_hash,
+                        rec.body_size,
+                        rec.created_at,
+                    ),
                 )
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
@@ -540,10 +561,19 @@ class PolicyProjection(_BaseProjection):
                     "target_origin, target_board, target_article_id, target_event_id, "
                     "body_hash, body_size, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (rec.event_id, rec.origin, rec.origin_seq, culprit,
-                     rec.target_origin, rec.target_board,
-                     rec.target_article_id, rec.target_event_id,
-                     rec.body_hash, rec.body_size, rec.created_at),
+                    (
+                        rec.event_id,
+                        rec.origin,
+                        rec.origin_seq,
+                        culprit,
+                        rec.target_origin,
+                        rec.target_board,
+                        rec.target_article_id,
+                        rec.target_event_id,
+                        rec.body_hash,
+                        rec.body_size,
+                        rec.created_at,
+                    ),
                 )
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
@@ -565,8 +595,14 @@ class PolicyProjection(_BaseProjection):
                     "(event_id, origin, origin_seq, punished_pubkey, expires_at, "
                     "created_at, revoked, revoked_by) "
                     "VALUES (?, ?, ?, ?, ?, ?, 0, NULL)",
-                    (rec.event_id, rec.origin, rec.origin_seq, punished,
-                     expires_at, rec.created_at),
+                    (
+                        rec.event_id,
+                        rec.origin,
+                        rec.origin_seq,
+                        punished,
+                        expires_at,
+                        rec.created_at,
+                    ),
                 )
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
@@ -592,7 +628,9 @@ class PolicyProjection(_BaseProjection):
                 self._rollback()
                 raise
 
-    def list_punishments_for_pubkey(self, pubkey: bytes, include_revoked: bool = False) -> list[dict]:
+    def list_punishments_for_pubkey(
+        self, pubkey: bytes, include_revoked: bool = False
+    ) -> list[dict]:
         with self._lock:
             if include_revoked:
                 rows = self._conn.execute(
@@ -612,9 +650,13 @@ class PolicyProjection(_BaseProjection):
                 ).fetchall()
             return [
                 {
-                    "event_id": bytes(r[0]), "origin": r[1], "origin_seq": r[2],
-                    "punished_pubkey": bytes(r[3]), "expires_at": r[4],
-                    "created_at": r[5], "revoked": bool(r[6]),
+                    "event_id": bytes(r[0]),
+                    "origin": r[1],
+                    "origin_seq": r[2],
+                    "punished_pubkey": bytes(r[3]),
+                    "expires_at": r[4],
+                    "created_at": r[5],
+                    "revoked": bool(r[6]),
                     "revoked_by": bytes(r[7]) if r[7] else None,
                 }
                 for r in rows
@@ -648,9 +690,14 @@ class PolicyProjection(_BaseProjection):
                     ).fetchall()
             return [
                 {
-                    "event_id": bytes(r[0]), "origin": r[1], "origin_seq": r[2],
-                    "rule_name": r[3], "body_hash": bytes(r[4]),
-                    "body_size": r[5], "created_at": r[6], "revoked": bool(r[7]),
+                    "event_id": bytes(r[0]),
+                    "origin": r[1],
+                    "origin_seq": r[2],
+                    "rule_name": r[3],
+                    "body_hash": bytes(r[4]),
+                    "body_size": r[5],
+                    "created_at": r[6],
+                    "revoked": bool(r[7]),
                 }
                 for r in rows
             ]

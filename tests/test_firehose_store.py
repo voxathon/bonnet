@@ -66,8 +66,12 @@ def _random_id(seed: int) -> bytes:
 
 
 def _make_article_intent(
-    origin: str, event_id: bytes, article_id: bytes, board: str = "general",
-    actor: Identity = ACTOR, body: bytes = b"test body",
+    origin: str,
+    event_id: bytes,
+    article_id: bytes,
+    board: str = "general",
+    actor: Identity = ACTOR,
+    body: bytes = b"test body",
 ) -> Intent:
     return Intent(
         event_id=event_id,
@@ -77,10 +81,12 @@ def _make_article_intent(
         actor_pubkey=actor.public_key,
         board=board,
         article_id=article_id,
-        metadata=MetadataMap([
-            metadata_text(1, "Test"),
-            metadata_text(4, "text/plain"),
-        ]),
+        metadata=MetadataMap(
+            [
+                metadata_text(1, "Test"),
+                metadata_text(4, "text/plain"),
+            ]
+        ),
         body_hash=compute_body_hash(body),
         body_size=len(body),
     )
@@ -140,6 +146,7 @@ def _make_remote_records(origin: str, identity: Identity, count: int, start_seq:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def store(tmp_path):
     s = FirehoseStore(str(tmp_path / "events.db"))
@@ -150,6 +157,7 @@ def store(tmp_path):
 # ---------------------------------------------------------------------------
 # Sequence allocation
 # ---------------------------------------------------------------------------
+
 
 class TestSequenceAllocation:
     def test_first_record_seq_1(self, store):
@@ -184,6 +192,7 @@ class TestSequenceAllocation:
 # ---------------------------------------------------------------------------
 # Article number allocation
 # ---------------------------------------------------------------------------
+
 
 class TestArticleNumberAllocation:
     def test_first_article_num_1(self, store):
@@ -230,6 +239,7 @@ class TestArticleNumberAllocation:
 # Idempotent resubmit
 # ---------------------------------------------------------------------------
 
+
 class TestIdempotentResubmit:
     def test_same_event_id_returns_existing(self, store):
         store.init_origin_key("bbs.a", ORIGIN_A_PUB)
@@ -245,6 +255,7 @@ class TestIdempotentResubmit:
 # ---------------------------------------------------------------------------
 # Collision rejection
 # ---------------------------------------------------------------------------
+
 
 class TestCollisions:
     def test_event_id_collision_rejected(self, store):
@@ -279,6 +290,7 @@ class TestCollisions:
 # Chain continuity
 # ---------------------------------------------------------------------------
 
+
 class TestChainContinuity:
     def test_previous_event_hash_links_correctly(self, store):
         store.init_origin_key("bbs.a", ORIGIN_A_PUB)
@@ -305,6 +317,7 @@ class TestChainContinuity:
 # ---------------------------------------------------------------------------
 # Head management
 # ---------------------------------------------------------------------------
+
 
 class TestHeadManagement:
     def test_empty_head(self, store):
@@ -339,6 +352,7 @@ class TestHeadManagement:
 # Key epoch management
 # ---------------------------------------------------------------------------
 
+
 class TestKeyEpochs:
     def test_init_and_get_current_key(self, store):
         store.init_origin_key("bbs.a", ORIGIN_A_PUB)
@@ -356,6 +370,7 @@ class TestKeyEpochs:
             store.append_record(ORIGIN_A, intent, _sign_intent(intent), b"test body")
 
         from core.record import sign_key_rotation_proof
+
         proof = sign_key_rotation_proof(NEW_ORIGIN, "bbs.a", ORIGIN_A_PUB, NEW_ORIGIN_PUB)
 
         rot_intent = Intent(
@@ -363,10 +378,12 @@ class TestKeyEpochs:
             kind=KIND_ORIGIN_KEY_ROTATE,
             origin="bbs.a",
             actor_pubkey=ORIGIN_A_PUB,
-            metadata=MetadataMap([
-                metadata_bytes(1, NEW_ORIGIN_PUB),
-                metadata_bytes(2, proof),
-            ]),
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, NEW_ORIGIN_PUB),
+                    metadata_bytes(2, proof),
+                ]
+            ),
         )
         rec = store.append_record(ORIGIN_A, rot_intent, _sign_intent(rot_intent, ORIGIN_A), b"")
         rot_seq = rec.origin_seq
@@ -385,13 +402,15 @@ class TestKeyEpochs:
 # Remote range acceptance
 # ---------------------------------------------------------------------------
 
-class TestRemoteAcceptance:
 
+class TestRemoteAcceptance:
     def test_accept_full_range(self, store):
         store.init_origin_key("bbs.b", ORIGIN_B_PUB)
         records, final_hash = _make_remote_records("bbs.b", ORIGIN_B, 3)
         head = _make_head("bbs.b", 3, final_hash, ORIGIN_B)
-        result = store.accept_remote_range("bbs.b", records, head, ORIGIN_B_PUB, source="relay.test")
+        result = store.accept_remote_range(
+            "bbs.b", records, head, ORIGIN_B_PUB, source="relay.test"
+        )
         assert result.accepted
         assert result.accepted_count == 3
         assert len(result.conflicts) == 0
@@ -511,6 +530,7 @@ class TestRemoteAcceptance:
 # Equivocation / conflict storage
 # ---------------------------------------------------------------------------
 
+
 class TestEquivocation:
     def test_conflict_stored(self, store):
         store.init_origin_key("bbs.b", ORIGIN_B_PUB)
@@ -520,9 +540,13 @@ class TestEquivocation:
 
         fake_identity = Identity.generate()
         records2, _ = _make_remote_records("bbs.b", fake_identity, 1)
-        head2 = _make_head("bbs.b", 1, compute_event_hash(encode_record(records2[0])), fake_identity)
+        head2 = _make_head(
+            "bbs.b", 1, compute_event_hash(encode_record(records2[0])), fake_identity
+        )
 
-        result = store.accept_remote_range("bbs.b", records2, head2, fake_identity.public_key, source="evil.test")
+        result = store.accept_remote_range(
+            "bbs.b", records2, head2, fake_identity.public_key, source="evil.test"
+        )
         conflicts = store.get_conflicts("bbs.b")
         assert len(conflicts) >= 1
         assert conflicts[0]["origin_seq"] == 1
@@ -532,6 +556,7 @@ class TestEquivocation:
 # ---------------------------------------------------------------------------
 # Witness storage
 # ---------------------------------------------------------------------------
+
 
 class TestWitnessStorage:
     def test_store_and_retrieve_witness(self, store):
@@ -564,6 +589,7 @@ class TestWitnessStorage:
 # Projection checkpoint
 # ---------------------------------------------------------------------------
 
+
 class TestProjectionCheckpoint:
     def test_default_checkpoint_zero(self, store):
         assert store.get_checkpoint("bbs.a") == 0
@@ -576,6 +602,7 @@ class TestProjectionCheckpoint:
 # ---------------------------------------------------------------------------
 # Multi-origin independence
 # ---------------------------------------------------------------------------
+
 
 class TestMultiOrigin:
     def test_two_origins_independent_chains(self, store):
@@ -600,6 +627,7 @@ class TestMultiOrigin:
 # ---------------------------------------------------------------------------
 # Concurrency
 # ---------------------------------------------------------------------------
+
 
 class TestConcurrency:
     def test_concurrent_appends_no_sequence_gaps(self, store, tmp_path):

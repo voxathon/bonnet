@@ -15,6 +15,7 @@ ORIGIN_PUB = Identity.from_private_key(bytes(range(1, 33))).public_key
 # SSRF validation
 # ---------------------------------------------------------------------------
 
+
 def test_safe_dial_target_rejects_loopback():
     assert not is_safe_dial_target("127.0.0.1", 2272)
 
@@ -55,6 +56,7 @@ def test_safe_dial_target_allows_public_hostname():
 # Mock sync client for SyncManager tests
 # ---------------------------------------------------------------------------
 
+
 class MockClient(SyncClient):
     """Mock sync client for testing."""
 
@@ -76,6 +78,7 @@ class MockClient(SyncClient):
 # ---------------------------------------------------------------------------
 # Backoff
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.xdist_group("sync_backoff")
 def test_backoff_increases_on_failure(tmp_path):
@@ -99,6 +102,7 @@ def test_backoff_increases_on_failure(tmp_path):
 # ---------------------------------------------------------------------------
 # Resource cleanup
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.xdist_group("sync_cleanup")
 async def test_stop_all_closes_clients(tmp_path):
