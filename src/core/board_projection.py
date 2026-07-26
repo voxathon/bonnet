@@ -176,12 +176,15 @@ class BoardProjection:
 
     def set_checkpoint(self, origin: str, seq: int) -> None:
         with self._lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO projection_checkpoint (origin, last_applied_seq) "
-                "VALUES (?, ?)",
-                (origin, seq),
-            )
+            self._set_checkpoint(origin, seq)
             self._conn.commit()
+
+    def _set_checkpoint(self, origin: str, seq: int) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO projection_checkpoint (origin, last_applied_seq) "
+            "VALUES (?, ?)",
+            (origin, seq),
+        )
 
     # ------------------------------------------------------------------
     # Applied event tracking (idempotency)
@@ -258,6 +261,7 @@ class BoardProjection:
                 self._replay_pending_for_article(rec.origin, rec.board, rec.article_id)
 
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -271,6 +275,7 @@ class BoardProjection:
             try:
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
                     self._conn.execute("COMMIT")
                     return
 
@@ -283,18 +288,10 @@ class BoardProjection:
                 ).rowcount
 
                 if updated == 0:
-                    updated = self._conn.execute(
-                        "UPDATE articles SET visibility='cancelled', latest_control_seq=? "
-                        "WHERE origin=? AND board=? AND article_id=? "
-                        "AND visibility='restored'",
-                        (rec.origin_seq, rec.target_origin, rec.target_board,
-                         rec.target_article_id),
-                    ).rowcount
-
-                if updated == 0:
                     self._add_pending(rec)
 
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -308,6 +305,7 @@ class BoardProjection:
             try:
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
                     self._conn.execute("COMMIT")
                     return
 
@@ -323,6 +321,7 @@ class BoardProjection:
                     self._add_pending(rec)
 
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -336,6 +335,7 @@ class BoardProjection:
             try:
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
                     self._conn.execute("COMMIT")
                     return
 
@@ -350,6 +350,7 @@ class BoardProjection:
                     self._add_pending(rec)
 
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -363,6 +364,7 @@ class BoardProjection:
             try:
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
                     self._conn.execute("COMMIT")
                     return
 
@@ -378,6 +380,7 @@ class BoardProjection:
                     self._add_pending(rec)
 
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -391,6 +394,7 @@ class BoardProjection:
             try:
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
                     self._conn.execute("COMMIT")
                     return
 
@@ -404,6 +408,7 @@ class BoardProjection:
                     self._add_pending(rec)
 
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -417,6 +422,7 @@ class BoardProjection:
             try:
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
                     self._conn.execute("COMMIT")
                     return
 
@@ -430,6 +436,7 @@ class BoardProjection:
                     self._add_pending(rec)
 
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -443,6 +450,7 @@ class BoardProjection:
             try:
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
                     self._conn.execute("COMMIT")
                     return
 
@@ -456,6 +464,7 @@ class BoardProjection:
                     self._add_pending(rec)
 
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -469,6 +478,7 @@ class BoardProjection:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -896,7 +906,6 @@ class BoardProjection:
             where_parts.append("body_state != 'purged'")
 
         where_clause = " AND ".join(where_parts)
-        placeholders = ",".join("?" * 0)
 
         with self._lock:
             rows = self._conn.execute(

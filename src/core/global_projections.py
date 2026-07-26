@@ -90,6 +90,20 @@ class _BaseProjection:
             (rec.event_id, rec.origin, rec.origin_seq, rec.kind, int(time.time())),
         )
 
+    def apply_unknown(self, rec: Record) -> None:
+        """Record an unknown kind as applied (no projection effect)."""
+        with self._lock:
+            if self.is_applied(rec.event_id):
+                return
+            self._begin()
+            try:
+                self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
+
     def get_checkpoint(self, origin: str) -> int:
         with self._lock:
             row = self._conn.execute(
@@ -100,12 +114,15 @@ class _BaseProjection:
 
     def set_checkpoint(self, origin: str, seq: int) -> None:
         with self._lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO projection_checkpoint (origin, last_applied_seq) "
-                "VALUES (?, ?)",
-                (origin, seq),
-            )
+            self._set_checkpoint(origin, seq)
             self._conn.commit()
+
+    def _set_checkpoint(self, origin: str, seq: int) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO projection_checkpoint (origin, last_applied_seq) "
+            "VALUES (?, ?)",
+            (origin, seq),
+        )
 
     def _begin(self) -> None:
         self._conn.execute("BEGIN IMMEDIATE")
@@ -125,6 +142,17 @@ class _BaseProjection:
             try:
                 self._conn.execute("DELETE FROM applied_events")
                 self._conn.execute("DELETE FROM projection_checkpoint")
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._rollback()
+                raise
+
+    def clear_origin(self, origin: str) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM applied_events WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM projection_checkpoint WHERE origin=?", (origin,))
                 self._conn.execute("COMMIT")
             except Exception:
                 self._rollback()
@@ -167,6 +195,7 @@ class NavProjection(_BaseProjection):
                     (rec.origin, rec.board, owner, display, rec.origin_seq, rec.created_at),
                 )
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._commit()
             except Exception:
                 self._rollback()
@@ -183,6 +212,7 @@ class NavProjection(_BaseProjection):
                     (rec.origin, rec.board),
                 )
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._commit()
             except Exception:
                 self._rollback()
@@ -199,6 +229,7 @@ class NavProjection(_BaseProjection):
                     (rec.origin, rec.board),
                 )
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._commit()
             except Exception:
                 self._rollback()
@@ -255,6 +286,18 @@ class NavProjection(_BaseProjection):
                 self._rollback()
                 raise
 
+    def clear_origin(self, origin: str) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM boards WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM applied_events WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM projection_checkpoint WHERE origin=?", (origin,))
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._rollback()
+                raise
+
 
 # ---------------------------------------------------------------------------
 # UserProjection — user registrations
@@ -297,6 +340,7 @@ class UserProjection(_BaseProjection):
                     (rec.origin, user_pubkey, username, flags, reg_seq, rec.created_at),
                 )
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._commit()
             except Exception:
                 self._rollback()
@@ -315,6 +359,7 @@ class UserProjection(_BaseProjection):
                     (rec.origin_seq, rec.target_origin, revoked_pubkey),
                 )
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._commit()
             except Exception:
                 self._rollback()
@@ -384,6 +429,18 @@ class UserProjection(_BaseProjection):
                 self._rollback()
                 raise
 
+    def clear_origin(self, origin: str) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM users WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM applied_events WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM projection_checkpoint WHERE origin=?", (origin,))
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._rollback()
+                raise
+
 
 # ---------------------------------------------------------------------------
 # PolicyProjection — rules, reports, punishments
@@ -448,6 +505,7 @@ class PolicyProjection(_BaseProjection):
                      rec.body_hash, rec.body_size, rec.created_at),
                 )
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._commit()
             except Exception:
                 self._rollback()
@@ -464,6 +522,7 @@ class PolicyProjection(_BaseProjection):
                     (rec.target_event_id,),
                 )
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._commit()
             except Exception:
                 self._rollback()
@@ -488,6 +547,7 @@ class PolicyProjection(_BaseProjection):
                      rec.body_hash, rec.body_size, rec.created_at),
                 )
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._commit()
             except Exception:
                 self._rollback()
@@ -510,6 +570,7 @@ class PolicyProjection(_BaseProjection):
                      expires_at, rec.created_at),
                 )
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._commit()
             except Exception:
                 self._rollback()
@@ -526,6 +587,7 @@ class PolicyProjection(_BaseProjection):
                     (rec.event_id, rec.target_event_id),
                 )
                 self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
                 self._commit()
             except Exception:
                 self._rollback()
@@ -603,6 +665,20 @@ class PolicyProjection(_BaseProjection):
                 self._conn.execute("DELETE FROM punishments")
                 self._conn.execute("DELETE FROM applied_events")
                 self._conn.execute("DELETE FROM projection_checkpoint")
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._rollback()
+                raise
+
+    def clear_origin(self, origin: str) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM rules WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM reports WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM punishments WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM applied_events WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM projection_checkpoint WHERE origin=?", (origin,))
                 self._conn.execute("COMMIT")
             except Exception:
                 self._rollback()
