@@ -6,13 +6,10 @@ Exit gate (§13 Phase 3):
 """
 
 import os
-import sys
 import struct
 import time
 import threading
 import pytest
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from core.trust import TrustStore, TRUST_MODE_TOFU, TRUST_MODE_CONFIGURED
 from core.crypto import Identity

@@ -512,9 +512,9 @@ class TestEquivocation:
 
         result = store.accept_remote_range("bbs.b", records2, head2, fake_identity.public_key, source="evil.test")
         conflicts = store.get_conflicts("bbs.b")
-        if conflicts:
-            assert conflicts[0]["origin_seq"] == 1
-            assert "equivocation" in conflicts[0]["reason"].lower() or result.accepted
+        assert len(conflicts) >= 1
+        assert conflicts[0]["origin_seq"] == 1
+        assert "equivocation" in conflicts[0]["reason"].lower()
 
 
 # ---------------------------------------------------------------------------
