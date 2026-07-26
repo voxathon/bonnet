@@ -18,7 +18,7 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_http_request
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import PlainTextResponse, JSONResponse
 
 from client.tools import mcp, current_username, current_password
 from client import resources  # noqa: F401 — registers @mcp.resource decorators
@@ -27,6 +27,19 @@ from client import resources  # noqa: F401 — registers @mcp.resource decorator
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> PlainTextResponse:
     return PlainTextResponse("OK")
+
+
+@mcp.custom_route("/.well-known/bonnet", methods=["GET"])
+async def well_known_bonnet(request: Request):
+    import httpx
+    bonnet_url = os.environ.get("BONNET_URL", "https://localhost:2272")
+    verify = os.environ.get("BONNET_VERIFY_TLS", "true").lower() not in ("false", "0", "no")
+    try:
+        async with httpx.AsyncClient(verify=verify, timeout=10.0) as http:
+            resp = await http.get(f"{bonnet_url}/.well-known/bonnet")
+            return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    except Exception as e:
+        return PlainTextResponse(f"Failed to reach Bonnet server: {e}", status_code=502)
 
 
 def parse_auth_header(auth: str) -> tuple[str, str]:
