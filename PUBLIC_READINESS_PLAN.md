@@ -327,6 +327,31 @@ lifecycle reliability are in place.
 Create a trustworthy safety net around the server's highest-risk behavior
 before changing production logic.
 
+### Decisions
+
+- **Import strategy:** Add `pythonpath = ["src"]` to
+  `[tool.pytest.ini_options]` in `pyproject.toml`. Remove all `sys.path.insert`
+  calls from individual test files. Tests work in IDEs, CI, and CLI without
+  `PYTHONPATH` environment variables.
+- **asyncio mode:** Set `asyncio_mode = "auto"` in `pyproject.toml`. Async test
+  functions are automatically detected without `@pytest.mark.asyncio`
+  decorators. Existing sync tests that call `asyncio.run()` internally continue
+  to work.
+- **ASGI harness:** Use `httpx.ASGITransport` to wrap `FirehoseHTTPServer` in
+  process. Tests use the real `FirehoseHTTPClient` to sign requests and verify
+  responses, giving true end-to-end coverage of the HTTP path. `httpx` is
+  already a dependency.
+- **Parallelism:** Keep `-n auto` as the default. Mark tests that share state
+  or use threads with `@pytest.mark.xdist_group` for serial execution within
+  the parallel run. `@pytest.mark.slow` tests run only when explicitly
+  requested.
+- **Test naming:** New test files use descriptive names:
+  `test_dispatcher.py`, `test_firehose_http_server.py`, `test_config.py`,
+  `test_rate_limiter.py`, `test_server_lifecycle.py`. Existing phase-named
+  files keep their names until they are rewritten.
+- **Commit order:** Follow the plan's suggested order — fixtures first, then
+  dispatcher tests, then ASGI, then config, rate-limiter, and lifecycle.
+
 ### Work
 
 #### Dispatcher and Projection Tests
@@ -461,6 +486,17 @@ Likely new file:
 Guarantee that projection failures are visible, retryable, and isolated to the
 affected origin.
 
+### Decisions
+
+- **Dispatch failure behavior:** Hard stop. When a projection method raises,
+  stop dispatching the origin immediately. The checkpoint remains at the record
+  before the failure. Later records are not dispatched until the fault is
+  cleared and dispatch is retried. No dead-letter or skip mechanism is
+  introduced.
+- **Cross-origin user revocation:** Deferred to the Gate D punishment schema
+  work, which will revisit cross-origin moderation semantics holistically.
+  Current behavior remains unchanged in this phase.
+
 ### Work
 
 #### Stop Checkpoint Advancement on Failure
@@ -540,6 +576,22 @@ In `src/core/dispatcher.py`:
 
 Ensure local publication validates all configured limits and semantic gates
 before creating durable records or body files.
+
+### Decisions
+
+- **Event body limits:** Apply `max_article_body_size` to all body-bearing
+  records, not just articles. One limit, one check. Non-article event bodies
+  are typically smaller than articles and do not warrant a separate config
+  knob.
+- **NFC encoding strategy:** Auto-normalize text to NFC at encode time in
+  `enc_text16`. Any valid Unicode input becomes canonical. Clients do not need
+  to pre-normalize. The protocol's "MUST be NFC" requirement is guaranteed on
+  the wire by the encoder rather than pushed to every caller.
+- **Effective-ban enforcement:** Blocked on Gate D. The punishment schema
+  redesign (three typed kinds, per-type per-origin import filtering,
+  server-tracked acknowledgment) must be implemented before the publish gate
+  can be wired. This is the largest single work item in the phase and may be
+  split into its own sub-phase.
 
 ### Work
 
@@ -640,6 +692,17 @@ After approval:
 Make every HTTP request path bounded, authenticated according to policy, and
 safe under malformed or adversarial input.
 
+### Decisions
+
+- **Anonymous replay protection:** Skip the replay ledger for anonymous
+  requests. The shared anonymous key is public by design (Gate A), so replay
+  tracking is meaningless — anyone can generate fresh signed requests with the
+  public key. Address-based rate limiting is the real DoS defense for anonymous
+  traffic.
+- **Signature tightening:** Gate E is approved — require request `expires` and
+  response `bonnet-request-nonce` immediately. Current clients already send
+  both.
+
 ### Work
 
 #### Bound Streaming Request Bodies
@@ -737,6 +800,16 @@ After approval:
 
 Bound all remote synchronization work, make trust decisions explicit, and close
 every federation resource reliably.
+
+### Decisions
+
+- **Batch conflict behavior:** Keep committed batches, stop at the conflict,
+  and let the next sync cycle resume from where it stopped. Records already
+  accepted are permanent — matches the append-only firehose model. Conflicts
+  are stored and stop advancement, same as today.
+- **Dial-target validation:** Gate C is approved — reject non-global addresses
+  by default, explicit `allow_private_dial` required for private/loopback.
+- **Discovery trust:** Gate B is approved — layered PKI + TOFU + operator pins.
 
 ### Work
 
@@ -843,6 +916,15 @@ After approval:
 
 Make startup, operation, shutdown, and installed execution predictable across
 supported environments.
+
+### Decisions
+
+- **SIGHUP reload:** Not supported. Configuration changes require a restart.
+  Simpler, fewer edge cases, works identically on Windows. Document that
+  SIGHUP is ignored and restart is the reload mechanism.
+- **Package namespace:** Gate F is deferred — keep current layout, fix
+  `sys.path` hacks, verify wheel installation. Namespace migration is a
+  separate focused change after this cleanup cycle.
 
 ### Work
 
