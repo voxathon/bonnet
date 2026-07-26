@@ -5,7 +5,7 @@
 This document is the authoritative roadmap for preparing the current Bonnet
 server implementation for public review. Existing Markdown files in this
 repository are historical material unless they are explicitly reconciled and
-adopted during Phase 8.
+adopted during Phase 9.
 
 The current implementation and its executable tests are the baseline for this
 plan. Existing documentation must not be used to infer intended behavior when
@@ -101,7 +101,7 @@ requests. The key is public by design — it provides no authentication, only a
 classification mechanism for ACL and rate-limiting.
 
 No protocol change is required. The limited security semantics of the shared
-anonymous key must be documented during Phase 8 so that public reviewers
+anonymous key must be documented during Phase 9 so that public reviewers
 understand it is a classifier, not a secret.
 
 ### Gate B: Discovery Trust
@@ -910,7 +910,159 @@ After approval:
 6. Add dial-target validation after approval.
 7. Implement the approved discovery and trust model.
 
-## Phase 6: Fix Configuration and Lifecycle
+## Phase 6: Depeering and Origin Lifecycle
+
+### Objective
+
+Make origin removal, key reset, and rebuild operations safe and easy for a
+sysadmin to perform through explicit REPL commands.
+
+### Decisions
+
+- **Depeer scope:** Two distinct operations — `depeer` freezes an origin
+  (stop sync, keep data, read-only), `purge-origin` removes all data for an
+  origin irreversibly. The operator decides whether to freeze or purge.
+- **Purge atomicity:** Manifest + best-effort. Purge writes a manifest of
+  everything it will delete, deletes filesystem files first, then deletes
+  database rows. If it crashes, the manifest allows re-running or manual
+  completion. The manifest is deleted on successful completion.
+- **Key epoch reset:** Separate `reset-key` command that clears key epochs and
+  origin\_state without touching events, projections, or bodies. Implements the
+  "operator must reset\_origin\_key" operation referenced by the sync code.
+- **Rebuild after failure:** No new command. After Phase 2's hard-stop fix,
+  `rebuild <origin>` already does the right thing — resets checkpoint to 0,
+  clears origin-scoped projections, replays all records from the firehose.
+
+### Work
+
+#### Three REPL Commands
+
+##### `depeer <origin>`
+
+Freeze an origin — stop synchronization and freeze projections as a read-only
+snapshot:
+
+- stop the sync loop and on-demand queue for that origin via
+  `sync_manager.stop_origin()`;
+- close the HTTP client for that origin;
+- leave all firehose events, projections, bodies, witnesses, and key epochs
+  in place;
+- projections remain readable — `list-articles`, `get-article`, `search`, and
+  other read commands still work for that origin;
+- re-peering is possible by re-adding the peer to config and restarting, or
+  via a future `repeer` command.
+
+##### `purge-origin <origin>`
+
+Remove all data for an origin irreversibly:
+
+- refuse to purge the local origin;
+- refuse to purge if sync is still active for that origin — must `depeer`
+  first;
+- write a manifest file listing every database table, row count, and
+  filesystem path that will be deleted;
+- delete filesystem body files first — article bodies under
+  `boards/<origin>/` and event bodies under `event_bodies/<origin>/`;
+- then delete database rows across all stores:
+  - `events` WHERE origin=?
+  - `origin_heads` WHERE origin=?
+  - `origin_state` WHERE origin=?
+  - `relay_witnesses` WHERE event_origin=?
+  - `event_conflicts` WHERE origin=?
+  - `origin_key_epochs` WHERE origin=?
+  - `board_counters` WHERE origin=?
+  - `projection_checkpoints` WHERE origin=?
+  - nav, users, and policy projection rows WHERE origin=?
+  - board projection databases — close and delete the SQLite files;
+- if the purge crashes mid-operation, the manifest file allows re-running or
+  manual completion;
+- delete the manifest on successful completion;
+- return a summary of what was deleted.
+
+##### `reset-key <origin>`
+
+Clear key epoch pinning for an origin:
+
+- delete `origin_key_epochs` rows for that origin;
+- delete the `origin_state` entry (forces re-TOFU on next sync);
+- do not touch events, projections, or bodies;
+- used when a remote origin has rotated its key and the local pin is stale;
+- implements the operation referenced at `firehose_sync.py:298` ("operator
+  must reset\_origin\_key").
+
+#### New FirehoseStore Methods
+
+The `FirehoseStore` class needs three new public methods:
+
+- `delete_origin_data(origin) -> dict` — deletes all rows for an origin across
+  all firehose tables, returns per-table deletion counts;
+- `reset_origin_key(origin)` — deletes key epochs and origin\_state for an
+  origin;
+- `get_origin_summary(origin) -> dict` — returns event count, board count,
+  body count, witness count, conflict count, and projection checkpoint, used
+  by the manifest writer and the purge summary.
+
+#### New Projection and Body Store Methods
+
+Global projections need origin-scoped deletion (shared with Phase 2's
+origin-safe rebuild work):
+
+- `NavProjection.clear_origin(origin)`;
+- `UserProjection.clear_origin(origin)`;
+- `PolicyProjection.clear_origin(origin)`.
+
+Board projections and body store need:
+
+- `BodyStore.delete_origin_bodies(origin) -> int` — deletes all article and
+  event body files for an origin, returns count;
+- board projection databases for the origin are closed and deleted from disk.
+
+#### REPL Help Text
+
+Add the three commands to the `help` output:
+
+```
+  depeer <origin>               Stop syncing an origin and freeze its projections
+  purge-origin <origin>         Remove all firehose and projection data for an origin
+  reset-key <origin>            Clear key epoch pinning for an origin
+```
+
+### Acceptance Criteria
+
+- `depeer` stops sync, closes the HTTP client, and leaves all data readable.
+- `purge-origin` removes all traces of an origin from every store, leaves no
+  orphaned files or database rows, and produces a manifest for crash recovery.
+- `purge-origin` refuses to operate on the local origin or on an origin with
+  active sync.
+- `reset-key` clears key epochs and origin\_state without affecting events,
+  projections, or bodies.
+- After `purge-origin`, `list_origins` no longer returns the origin and all
+  read commands for that origin return "not found."
+- After `reset-key`, the next sync cycle for that origin performs fresh TOFU
+  pinning.
+- `rebuild <origin>` after a dispatch failure resets the checkpoint and
+  replays all records without affecting other origins.
+
+### Suggested Commit Boundaries
+
+1. Add `FirehoseStore.delete_origin_data`, `reset_origin_key`, and
+   `get_origin_summary` methods.
+2. Add origin-scoped `clear_origin` to nav, users, and policy projections
+   (shared with Phase 2).
+3. Add `BodyStore.delete_origin_bodies`.
+4. Add `depeer` REPL command (stop sync + close client).
+5. Add `reset-key` REPL command.
+6. Add `purge-origin` REPL command with manifest.
+7. Add tests for freeze, purge, key reset, and rebuild-after-purge.
+
+### Dependencies
+
+- **Phase 2:** origin-scoped projection clearing must exist before purge can
+  work.
+- **Phase 5:** proper sync stop/close must exist before depeer can work.
+- **Phase 7:** REPL command infrastructure is the delivery vehicle.
+
+## Phase 7: Fix Configuration and Lifecycle
 
 ### Objective
 
@@ -1012,7 +1164,7 @@ exposing secrets.
 6. Remove source path hacks and verify wheel entry points.
 7. Repair or remove standalone build configuration.
 
-## Phase 7: Clean the Current Repository Tree
+## Phase 8: Clean the Current Repository Tree
 
 ### Objective
 
@@ -1081,7 +1233,7 @@ Do not print private key contents during cleanup or review.
 4. Add sanitized example configuration.
 5. Remove or rewrite stale benchmark and local run artifacts.
 
-## Phase 8: Make Documentation and Tooling Reviewable
+## Phase 9: Make Documentation and Tooling Reviewable
 
 ### Objective
 
@@ -1204,7 +1356,7 @@ mixes formatting with behavior changes.
 7. Add type checking with a documented baseline.
 8. Add test, build, audit, and clean-tree CI jobs.
 
-## Phase 9: Final Nitpick Pass
+## Phase 10: Final Nitpick Pass
 
 ### Objective
 
@@ -1328,6 +1480,10 @@ public-ready:
 - unknown kinds survive storage, sync, relay, and rebuild;
 - multi-hop witnesses and tracing behave as documented;
 - effective punishments gate publication exactly as approved;
+- depeering freezes an origin without data loss;
+- purging an origin removes all traces from every store;
+- key reset clears pinning without affecting events or projections;
+- rebuild after purge or dispatch failure restores correct state;
 - startup failure and normal shutdown close all opened resources;
 - installed wheel entry points import and start correctly;
 - tests and builds leave the repository clean.
@@ -1352,7 +1508,7 @@ approved extension to this document.
 
 Bonnet is public-ready when all of the following are true:
 
-- Phases 1 through 8 are complete and Phase 9 has no release-blocking finding.
+- Phases 1 through 9 are complete and Phase 10 has no release-blocking finding.
 - Every decision gate is either resolved and implemented or documented as an
   intentional retained behavior.
 - The full verification matrix passes from a clean checkout.
