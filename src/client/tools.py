@@ -1,61 +1,68 @@
+"""MCP tools for the Bonnet Firehose Protocol.
+
+Exposes firehose client operations as FastMCP tools for AI agents.
+Uses IdentityStore for local key management (username:password → Ed25519).
+"""
+
 import contextvars
 import os
 import time
-from typing import Optional
 
 from fastmcp import FastMCP
 
-from .connection import BonnetClient
-from .identity import IdentityStore
-from .models import (
-    User,
-    Board,
-    Post,
-    PostSummary,
-    PostCreateResult,
-    Rule,
-    Report,
-    Punishment,
-    BannedStatus,
-    Peer,
+from client.firehose_client import FirehoseHTTPClient
+from client.firehose_models import (
+    ArticleView,
+    BanStatus,
+    BoardInfo,
+    HeadInfo,
+    QueryResponse,
+    SearchResponse,
+    UserInfo,
 )
+from client.identity import IdentityStore
+from core.crypto import Identity
+from core.record import ZERO_ID
 
 mcp = FastMCP("Bonnet BBS")
 
-current_username: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+current_username: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "username", default=None
 )
-current_password: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+current_password: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "password", default=""
 )
+
 identity_store: IdentityStore | None = None
-bonnet_url: str = "ws://localhost:2272"
+bonnet_url: str = os.environ.get("BONNET_URL", "https://localhost:2272")
+bonnet_verify: bool | str = os.environ.get("BONNET_VERIFY_TLS", "true").lower() not in (
+    "false",
+    "0",
+    "no",
+)
 
 auth_tokens: dict[str, dict] = {}
 TOKEN_EXPIRY_SECONDS = 24 * 60 * 60
 
 
-def get_client() -> BonnetClient:
+def _get_identity_store() -> IdentityStore:
     global identity_store
     if identity_store is None:
         identity_store = IdentityStore()
-    return BonnetClient(identity_store, bonnet_url)
+    return identity_store
 
 
-def get_username() -> str:
-    username = current_username.get()
-    if not username:
-        raise ValueError("No username in context - check Authorization header")
-    return username
+def _make_client() -> FirehoseHTTPClient:
+    return FirehoseHTTPClient(bonnet_url, verify=bonnet_verify)
 
 
-def get_password() -> str:
-    return current_password.get() or ""
-
-
-def resolve_auth(auth: str | None) -> tuple[str, str]:
+def _resolve_auth(auth: str | None) -> tuple[str, str]:
     if auth is None:
-        return get_username(), get_password()
+        username = current_username.get()
+        password = current_password.get() or ""
+        if not username:
+            raise ValueError("No username in context - check Authorization header")
+        return username, password
 
     if ":" in auth:
         parts = auth.split(":", 1)
@@ -73,46 +80,66 @@ def resolve_auth(auth: str | None) -> tuple[str, str]:
     return token_data["username"], token_data["password"]
 
 
-def resolve_username(auth: str | None) -> str:
-    if auth is None:
-        return get_username()
-
-    if ":" in auth:
-        return auth.split(":", 1)[0]
-
-    token_data = auth_tokens.get(auth)
-    if token_data is None:
-        raise ValueError("Invalid or expired auth token")
-
-    if time.time() > token_data["expires_at"]:
-        del auth_tokens[auth]
-        raise ValueError("Auth token has expired")
-
-    return token_data["username"]
+async def _connect_authenticated(client: FirehoseHTTPClient, auth: str | None) -> None:
+    """Connect with authenticated identity from IdentityStore."""
+    username, password = _resolve_auth(auth)
+    store = _get_identity_store()
+    private_key = store.get_private_key(username, password)
+    identity = Identity.from_private_key(private_key)
+    await client.connect(identity, username=username)
 
 
-def validate_pubkey(pubkey: str) -> bytes:
+async def _connect_anonymous(client: FirehoseHTTPClient) -> None:
+    """Connect using the server's anonymous key."""
+    await client.connect_anonymous()
+
+
+def _validate_pubkey(pubkey_hex: str) -> bytes:
     try:
-        pubkey_bytes = bytes.fromhex(pubkey)
-        if len(pubkey_bytes) != 32:
-            raise ValueError(
-                f"Public key must be 32 bytes (64 hex characters), got {len(pubkey_bytes)} bytes."
-            )
-        return pubkey_bytes
+        pk = bytes.fromhex(pubkey_hex)
+        if len(pk) != 32:
+            raise ValueError(f"Public key must be 32 bytes (64 hex chars), got {len(pk)} bytes")
+        return pk
     except ValueError as e:
-        raise ValueError(f"Invalid public key format: {pubkey}") from e
+        raise ValueError(f"Invalid public key: {pubkey_hex}") from e
+
+
+def _validate_article_id(aid_hex: str) -> bytes:
+    try:
+        aid = bytes.fromhex(aid_hex)
+        if len(aid) != 32:
+            raise ValueError(f"Article ID must be 32 bytes (64 hex chars), got {len(aid)} bytes")
+        return aid
+    except ValueError as e:
+        raise ValueError(f"Invalid article ID: {aid_hex}") from e
+
+
+def _validate_event_id(eid_hex: str) -> bytes:
+    try:
+        eid = bytes.fromhex(eid_hex)
+        if len(eid) != 32:
+            raise ValueError(f"Event ID must be 32 bytes (64 hex chars), got {len(eid)} bytes")
+        return eid
+    except ValueError as e:
+        raise ValueError(f"Invalid event ID: {eid_hex}") from e
+
+
+# ---------------------------------------------------------------------------
+# Auth / identity tools
+# ---------------------------------------------------------------------------
 
 
 @mcp.tool
 async def login(username: str, password: str) -> str:
-    """Authenticate and receive a temporary auth token valid for 24 hours."""
-    client = get_client()
+    """Authenticate and receive a temporary auth token valid for 24 hours.
 
-    try:
-        async with client:
-            await client.connect(username, password, require_auth=True)
-    except Exception as e:
-        raise ValueError(f"Authentication failed: {e}") from e
+    Returns a hex token string to pass as the 'auth' parameter to other tools.
+    You can also pass 'username:password' directly as the auth parameter
+    without calling login first.
+    """
+    store = _get_identity_store()
+    if not store.verify_password(username, password):
+        raise ValueError(f"Authentication failed: invalid credentials for '{username}'")
 
     token = os.urandom(32).hex()
     auth_tokens[token] = {
@@ -120,454 +147,746 @@ async def login(username: str, password: str) -> str:
         "password": password,
         "expires_at": time.time() + TOKEN_EXPIRY_SECONDS,
     }
-
     return token
 
 
 @mcp.tool
 async def register_user(username: str, password: str) -> str:
-    """Register a new user locally and on the Bonnet server. Returns the registered username."""
-    client = get_client()
-    is_existing = False
+    """Register a new user identity locally and on the Bonnet server.
+
+    Creates a local Ed25519 identity and publishes a bonnet.user.register
+    record to the server. Returns the registered username.
+    """
+    store = _get_identity_store()
     try:
-        client.identity_store.register(username, password)
+        store.register(username, password)
     except ValueError as e:
-        if str(e) == "User already exists locally":
-            if not client.identity_store.verify_password(username, password):
-                raise ValueError(
-                    "User already exists locally and password does not match."
-                ) from e
-            is_existing = True
+        if "already exists" in str(e).lower():
+            if not store.verify_password(username, password):
+                raise ValueError("User already exists and password does not match") from e
         else:
             raise
 
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        try:
-            await client._register(username)
-        except Exception as backend_err:
-            if is_existing and "already exists" in str(backend_err).lower():
-                user = await client.get_user(client._public_key)
-                if user and user.username == username:
-                    return username
-            raise backend_err
-        return username
+    identity = Identity.from_private_key(store.get_private_key(username, password))
+
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, f"{username}:{password}")
+        result = await client.publish_user_register(username, identity.public_key, flags=0)
+        return f"Registered '{username}' — event seq {result.origin_seq}"
+    finally:
+        await client.close()
 
 
 @mcp.tool
-async def get_user_by_pubkey(pubkey: str, auth: str | None = None) -> User | None:
-    """Look up a user by their Ed25519 public key (hex string)."""
-    pubkey_bytes = validate_pubkey(pubkey)
+async def get_user(pubkey_hex: str, origin: str = "", auth: str | None = None) -> UserInfo | None:
+    """Look up a registered user by their Ed25519 public key.
 
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.get_user(pubkey_bytes)
-
-
-@mcp.tool
-async def list_users(
-    offset: int = 0, limit: int = 100, auth: str | None = None
-) -> list[User]:
-    """List registered users with pagination."""
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.list_users(offset, limit)
+    pubkey_hex: hex-encoded 32-byte Ed25519 public key.
+    origin: origin to query (defaults to server's origin).
+    """
+    pubkey = _validate_pubkey(pubkey_hex)
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        origin = origin or client._server_origin or ""
+        return await client.get_user(origin, pubkey)
+    finally:
+        await client.close()
 
 
 @mcp.tool
-async def list_peers(auth: str | None = None) -> list[Peer]:
-    """List known peer server hostnames for federation."""
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.list_peers()
+async def list_users(origin: str = "", auth: str | None = None) -> list[UserInfo]:
+    """List registered users on an origin.
+
+    origin: origin to query (defaults to server's origin).
+    """
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        origin = origin or client._server_origin or ""
+        return await client.list_users(origin)
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Board tools
+# ---------------------------------------------------------------------------
 
 
 @mcp.tool
-async def create_board(name: str, auth: str | None = None) -> Board:
-    """Create a new board. Requires admin privileges."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        return await client.board_create(name)
+async def create_board(
+    name: str,
+    display_name: str = "",
+    auth: str | None = None,
+) -> str:
+    """Create a new board. Requires admin privileges.
+
+    name: board name (alphanumeric, hyphens, underscores).
+    display_name: optional human-readable board title.
+    """
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_board_create(
+            name,
+            client._identity.public_key,
+            display_name,
+        )
+        return f"Board '{name}' created — event seq {result.origin_seq}"
+    finally:
+        await client.close()
 
 
 @mcp.tool
-async def list_boards(auth: str | None = None) -> list[Board]:
-    """List all available boards with metadata."""
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.board_list()
+async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardInfo]:
+    """List all boards with metadata (name, closed state, owner, display name).
+
+    origin: origin to query (empty = aggregate across all known origins).
+    """
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        if origin:
+            return await client.list_boards(origin)
+        return await client.list_boards("")
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Article tools (read)
+# ---------------------------------------------------------------------------
 
 
 @mcp.tool
-async def close_board(name: str, auth: str | None = None) -> None:
-    """Mark a board as read-only. Requires admin privileges."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        await client.board_close(name)
+async def get_article(
+    board: str,
+    article_num: int,
+    include_body: bool = True,
+    origin: str = "",
+    auth: str | None = None,
+) -> ArticleView | None:
+    """Get a single article by board and article number.
+
+    Returns the full article including subject, tags, body (if available),
+    author info, projected state (active/cancelled/superseded), and lifecycle
+    metadata. Returns None if not found.
+
+    board: board name.
+    article_num: article number (starts at 1).
+    include_body: whether to fetch the article body content.
+    origin: origin to query (defaults to server's origin).
+    """
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        origin = origin or client._server_origin or ""
+        view = await client.get_article(origin, board, article_num, include_body)
+        if view and include_body and view.body is None and view.body_size > 0:
+            try:
+                body = await client.get_article_body(origin, board, article_num)
+                view.body = body
+                if view.body_hash and view.body_size:
+                    from core.record import compute_body_hash
+
+                    actual_hash = compute_body_hash(body).hex()
+                    view.body_verified = (
+                        len(body) == view.body_size and actual_hash == view.body_hash
+                    )
+            except Exception:
+                pass
+        return view
+    finally:
+        await client.close()
 
 
 @mcp.tool
-async def delete_board(name: str, auth: str | None = None) -> None:
-    """Delete a board from disk. Requires admin privileges. Must be closed first."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        await client.board_delete(name)
+async def list_articles(
+    board: str,
+    offset: int = 0,
+    limit: int = 50,
+    include_cancelled: bool = False,
+    include_superseded: bool = False,
+    origin: str = "",
+    auth: str | None = None,
+) -> QueryResponse:
+    """List articles on a board, sorted by created_at descending.
+
+    By default only active articles are returned. Set include_cancelled or
+    include_superseded to also include those states.
+
+    board: board name.
+    offset: pagination offset.
+    limit: max articles to return.
+    origin: origin to query (empty = aggregate across all known origins).
+    """
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        if origin:
+            return await client.list_articles(
+                origin,
+                board,
+                offset,
+                limit,
+                include_cancelled,
+                include_superseded,
+            )
+        return await client.list_articles(
+            "",
+            board,
+            offset,
+            limit,
+            include_cancelled,
+            include_superseded,
+        )
+    finally:
+        await client.close()
 
 
 @mcp.tool
-async def create_post(
+async def search_articles(
+    board: str,
+    query: str,
+    offset: int = 0,
+    limit: int = 50,
+    origin: str = "",
+    auth: str | None = None,
+) -> SearchResponse:
+    """Search article metadata (subject, tags) on a board. Results sorted by created_at descending.
+
+    query: substring to search for in subject and tags.
+    board: board name.
+    origin: origin to query (empty = aggregate across all known origins).
+    """
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        if origin:
+            return await client.search_articles(origin, board, query, "", offset, limit)
+        return await client.search_articles("", board, query, "", offset, limit)
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def query_articles(
+    board: str,
+    author_pubkey: str = "",
+    username: str = "",
+    tag: str = "",
+    state: str = "",
+    root_only: bool = False,
+    pinned_only: bool = False,
+    offset: int = 0,
+    limit: int = 50,
+    origin: str = "",
+    auth: str | None = None,
+) -> QueryResponse:
+    """Query articles with structured field filters. All filters are AND'd.
+
+    author_pubkey: hex Ed25519 public key to filter by author.
+    username: filter by author username.
+    tag: filter by tag (substring match).
+    state: filter by visibility (active, cancelled, superseded).
+    root_only: only show root articles (not replies).
+    pinned_only: only show pinned articles.
+    origin: origin to query (defaults to server's origin).
+    """
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    filters = []
+    if author_pubkey:
+        pk = _validate_pubkey(author_pubkey)
+        filters.append((0x01, 0x01, 0x01, pk))
+    if username:
+        filters.append((0x02, 0x01, 0x02, username.encode("utf-8")))
+    if tag:
+        filters.append((0x04, 0x05, 0x02, tag.encode("utf-8")))
+    if state:
+        filters.append((0x06, 0x01, 0x02, state.encode("utf-8")))
+    if root_only:
+        filters.append((0x07, 0x01, 0x04, b"\x01"))
+    if pinned_only:
+        filters.append((0x09, 0x01, 0x04, b"\x01"))
+
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        origin = origin or client._server_origin or ""
+        return await client.query_articles(origin, board, filters, offset, limit)
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Article tools (write)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def publish_article(
     board: str,
     subject: str,
     content: str,
     tags: str = "",
-    options: str = "",
-    root: int = 0,
+    reply_to_article_id: str = "",
     auth: str | None = None,
-) -> PostCreateResult:
-    """Create a new post. root=0 starts a new thread, root>0 replies to that post."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        return await client.post_create(board, subject, content, tags, options, root)
+) -> str:
+    """Publish a new article to a board. Requires a registered user.
 
+    Articles are immutable once published; to remove use cancel_article,
+    to hard-delete use purge_article, to replace use supersede_article.
+    The article is signed with your Ed25519 key.
 
-@mcp.tool
-async def get_post(board: str, post_num: int, auth: str | None = None) -> Post:
-    """Get full post content by board and post number."""
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.post_get(board, post_num)
-
-
-@mcp.tool
-async def list_posts(
-    board: str, offset: int = 0, limit: int = 50, auth: str | None = None
-) -> list[PostSummary]:
-    """List posts on a board with pagination."""
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.post_list(board, offset, limit)
-
-
-@mcp.tool
-async def update_post(
-    board: str,
-    post_num: int,
-    content: str | None = None,
-    subject: str | None = None,
-    tags: str | None = None,
-    options: str | None = None,
-    sticky: int | None = None,
-    closed: bool | None = None,
-    auth: str | None = None,
-) -> None:
-    """Update post fields. Author can edit content/subject/tags/options. Mods can also edit sticky/closed."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        await client.post_update(
-            board, post_num, content, subject, tags, options, sticky, closed
-        )
-
-
-@mcp.tool
-async def delete_post(board: str, post_num: int, auth: str | None = None) -> None:
-    """Delete a post."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        await client.post_delete(board, post_num)
-
-
-@mcp.tool
-async def query_posts(
-    board: str,
-    where: str = "",
-    values: list[tuple[int, str | int]] | None = None,
-    orderby: str = "last_bumped DESC",
-    limit: int = 100,
-    auth: str | None = None,
-) -> list[PostSummary]:
-    """Query posts with a SQL WHERE clause over post metadata.
-
-    where is a clause of "column = ?" and/or "column LIKE ?" terms joined by
-    AND/OR. LIKE is permitted only on the subject and author columns; use
-    values to supply the bound parameters (type: 1=int, 2=str). For LIKE
-    substring matches pass a value like "%needle%".
+    board: board name.
+    subject: article subject line.
+    content: article body text.
+    tags: comma-separated tags (optional).
+    reply_to_article_id: hex article ID of the article being replied to (optional).
     """
-    client = get_client()
-    username = resolve_username(auth)
+    import os as _os
 
-    parsed_values = []
-    if values:
-        from .protocol import encode_string
-        import struct
+    article_id = _os.urandom(32)
+    tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    body = content.encode("utf-8")
 
-        for vtype, vval in values:
-            if vtype == 1:
-                parsed_values.append((1, struct.pack(">q", vval)))
+    root_id = None
+    reply_id = None
+    if reply_to_article_id:
+        reply_id = _validate_article_id(reply_to_article_id)
+        client = _make_client()
+        try:
+            if auth:
+                await _connect_authenticated(client, auth)
             else:
-                parsed_values.append((2, encode_string(str(vval))))
+                await _connect_anonymous(client)
+            srv_origin = client._server_origin or ""
+            target = await client.get_article_by_id(srv_origin, board, reply_id, include_body=False)
+            if target is None:
+                return f"Error: Article {reply_to_article_id} not found in /{board}"
+            if target.root_article_id:
+                root_id = bytes.fromhex(target.root_article_id)
+            else:
+                root_id = reply_id
+        finally:
+            await client.close()
 
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.query_posts(board, where, parsed_values, orderby, limit)
-
-
-@mcp.tool
-async def search_posts(
-    board: str,
-    pattern: str,
-    limit: int = 100,
-    auth: str | None = None,
-) -> list[PostSummary]:
-    """Search post *content* (bodies) on a local board for a regex pattern.
-
-    Uses server-side ripgrep over the board's flat-file post bodies and returns
-    hydrated PostSummary objects. Only local-origin boards are searchable;
-    remote/relay boards return an error. Rate-limited per identity.
-    """
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.post_content_search(board, pattern, limit)
-
-
-@mcp.tool
-async def sign_post(board: str, post_num: int, auth: str | None = None) -> str:
-    """Sign a post with your identity. Only the post author can sign. Returns the signature hex."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-
-    async with client:
-        await client.connect(username, password, require_auth=False)
-        post = await client.post_get(board, post_num)
-
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        return await client.post_sign(
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_article(
             board,
-            post_num,
-            post.creation_date,
-            post.last_modified,
-            post.author,
-            post.author_registrar,
-            ",".join(post.tags),
-            post.subject,
-            post.options,
-            post.content,
+            article_id,
+            body,
+            subject,
+            tags=tags_list or None,
+            root_article_id=root_id,
+            reply_to_article_id=reply_id,
         )
+        return f"Article #{result.article_num} published — event seq {result.origin_seq}"
+    finally:
+        await client.close()
 
 
 @mcp.tool
-async def promote_user(target_username: str, auth: str | None = None) -> None:
-    """Promote a user to moderator. Requires admin privileges."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        await client.user_promote(target_username)
-
-
-@mcp.tool
-async def demote_user(target_username: str, auth: str | None = None) -> None:
-    """Remove moderator status from a user. Requires admin privileges."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        await client.user_demote(target_username)
-
-
-@mcp.tool
-async def get_server_pubkey(auth: str | None = None) -> str:
-    """Get the server's Ed25519 public key (hex string)."""
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.get_server_pubkey()
-
-
-@mcp.tool
-async def create_rule(name: str, description: str, auth: str | None = None) -> Rule:
-    """Create a new community rule. Requires moderator privileges."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        return await client.rule_create(name, description)
-
-
-@mcp.tool
-async def get_rule(rule_num: int, auth: str | None = None) -> Rule:
-    """Get a rule by its number."""
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.rule_get(rule_num)
-
-
-@mcp.tool
-async def get_rule_by_name(name: str, auth: str | None = None) -> Rule:
-    """Get a rule by its name."""
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.rule_get_by_name(name)
-
-
-@mcp.tool
-async def list_rules(auth: str | None = None) -> list[Rule]:
-    """List all community rules."""
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.rule_list()
-
-
-@mcp.tool
-async def update_rule(
-    rule_num: int,
-    name: str | None = None,
-    description: str | None = None,
+async def supersede_article(
+    board: str,
+    target_article_id: str,
+    subject: str,
+    content: str,
+    tags: str = "",
     auth: str | None = None,
-) -> Rule:
-    """Update a rule's name or description."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        return await client.rule_update(rule_num, name, description)
+) -> str:
+    """Publish a replacement article that supersedes an existing one.
 
+    Only the original author may supersede. The superseded article's
+    visibility becomes 'superseded' and this article carries the link.
 
-@mcp.tool
-async def create_report(
-    rule_num: int,
-    culprit_pubkey: str,
-    description: str,
-    board: str | None = None,
-    post_num: int | None = None,
-    origin: str | None = None,
-    relay: str | None = None,
-    auth: str | None = None,
-) -> Report:
-    """Report a user for violating a rule."""
-    validate_pubkey(culprit_pubkey)
+    board: board where the target article lives.
+    target_article_id: hex article ID of the article being superseded.
+    subject: subject line for the replacement article.
+    content: body text for the replacement article.
+    tags: comma-separated tags (optional).
+    """
+    import os as _os
 
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        return await client.report_create(
-            rule_num, culprit_pubkey, description, board, post_num, origin, relay
+    supersedes_id = _validate_article_id(target_article_id)
+    article_id = _os.urandom(32)
+    tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    body = content.encode("utf-8")
+
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_supersede(
+            board,
+            article_id,
+            body,
+            subject,
+            supersedes_article_id=supersedes_id,
+            tags=tags_list or None,
         )
+        return f"Article #{result.article_num} supersedes {target_article_id[:16]}... — event seq {result.origin_seq}"
+    finally:
+        await client.close()
 
 
 @mcp.tool
-async def get_report(origin: str, report_num: int, auth: str | None = None) -> Report:
-    """Get a report by origin server and report number."""
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.report_get(origin, report_num)
-
-
-@mcp.tool
-async def list_reports_by_culprit(pubkey: str, auth: str | None = None) -> list[Report]:
-    """List all reports against a user by their public key."""
-    validate_pubkey(pubkey)
-
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.report_list_by_culprit(pubkey)
-
-
-@mcp.tool
-async def sign_report(origin: str, report_num: int, auth: str | None = None) -> Report:
-    """Sign a report as the reporter."""
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        return await client.report_sign(origin, report_num)
-
-
-@mcp.tool
-async def create_punishment(
-    pubkey: str,
-    report_ids: list[int],
-    expires_at: int,
-    notes: str = "",
+async def cancel_article(
+    board: str,
+    target_article_id: str,
+    reason: str = "",
+    origin: str = "",
     auth: str | None = None,
-) -> Punishment:
-    """Create a punishment (ban/warning). expires_at: 0=warning, -1=permanent, >0=unix timestamp. Requires mod privileges."""
-    validate_pubkey(pubkey)
+) -> str:
+    """Cancel an article (soft delete). Author or moderator may cancel.
 
-    client = get_client()
-    username, password = resolve_auth(auth)
-    async with client:
-        await client.connect(username, password, require_auth=True)
-        return await client.punishment_create(pubkey, report_ids, expires_at, notes)
-
-
-@mcp.tool
-async def get_punishment(pubkey: str, auth: str | None = None) -> Punishment | None:
-    """Get active punishment for a user."""
-    validate_pubkey(pubkey)
-
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.punishment_get(pubkey)
+    board: board where the target article lives.
+    target_article_id: hex article ID of the article to cancel.
+    origin: origin to query (defaults to server's origin).
+    reason: optional human-readable cancellation reason.
+    """
+    aid = _validate_article_id(target_article_id)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        srv_origin = origin or client._server_origin or ""
+        result = await client.publish_cancel(board, srv_origin, board, aid, reason)
+        return f"Cancel event published — seq {result.origin_seq}"
+    finally:
+        await client.close()
 
 
 @mcp.tool
-async def list_active_punishments(auth: str | None = None) -> list[Punishment]:
-    """List all active punishments."""
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.punishment_list_active()
+async def restore_article(
+    board: str,
+    target_article_id: str,
+    reason: str = "",
+    origin: str = "",
+    auth: str | None = None,
+) -> str:
+    """Restore a previously cancelled article. Author or moderator.
+
+    board: board where the target article lives.
+    target_article_id: hex article ID of the cancelled article to restore.
+    """
+    aid = _validate_article_id(target_article_id)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        srv_origin = origin or client._server_origin or ""
+        result = await client.publish_restore(board, srv_origin, board, aid, reason)
+        return f"Restore event published — seq {result.origin_seq}"
+    finally:
+        await client.close()
 
 
 @mcp.tool
-async def is_banned(pubkey: str, auth: str | None = None) -> BannedStatus:
-    """Check if a user is banned. Returns (banned, reason)."""
-    validate_pubkey(pubkey)
+async def purge_article(
+    board: str,
+    target_article_id: str,
+    reason: str,
+    origin: str = "",
+    auth: str | None = None,
+) -> str:
+    """Purge an article's body (hard delete). The author or a moderator/admin may purge.
+    Irreversible — the body is deleted but the event metadata is retained in the firehose.
 
-    client = get_client()
-    username = resolve_username(auth)
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.is_banned(pubkey)
+    board: board where the target article lives.
+    target_article_id: hex article ID of the article to purge.
+    reason: human-readable purge reason (required).
+    """
+    aid = _validate_article_id(target_article_id)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        srv_origin = origin or client._server_origin or ""
+        result = await client.publish_purge(board, srv_origin, board, aid, reason)
+        return f"Purge event published — seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def pin_article(
+    board: str,
+    target_article_id: str,
+    priority: int = 0,
+    origin: str = "",
+    auth: str | None = None,
+) -> str:
+    """Pin an article to the top of the board. Moderator/admin only.
+
+    board: board where the target article lives.
+    target_article_id: hex article ID of the article to pin.
+    priority: higher values appear more prominent.
+    """
+    aid = _validate_article_id(target_article_id)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        srv_origin = origin or client._server_origin or ""
+        result = await client.publish_pin(board, srv_origin, board, aid, priority)
+        return f"Pin event published — seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def unpin_article(
+    board: str,
+    target_article_id: str,
+    origin: str = "",
+    auth: str | None = None,
+) -> str:
+    """Remove a pin from an article. Moderator/admin only.
+
+    board: board where the target article lives.
+    target_article_id: hex article ID of the article to unpin.
+    """
+    aid = _validate_article_id(target_article_id)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        srv_origin = origin or client._server_origin or ""
+        result = await client.publish_unpin(board, srv_origin, board, aid)
+        return f"Unpin event published — seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Ban status
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
+    """Check if a user is currently banned.
+
+    pubkey_hex: hex Ed25519 public key of the user to check.
+    Returns ban status, source origin, and expiry.
+    """
+    pubkey = _validate_pubkey(pubkey_hex)
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        return await client.get_ban_status(pubkey)
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Firehose / federation tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def event_head(origin: str = "", auth: str | None = None) -> HeadInfo | None:
+    """Get the signed firehose head for an origin (latest sequence, event hash, counts).
+
+    origin: origin to query (defaults to server's origin).
+    """
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        origin = origin or client._server_origin or ""
+        return await client.get_head(origin)
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def event_range(
+    origin: str = "",
+    start_seq: int = 1,
+    max_count: int = 100,
+    auth: str | None = None,
+) -> list[dict]:
+    """Fetch firehose events from an origin starting at a sequence number.
+
+    Returns a list of event summaries with origin_seq, kind, event_id,
+    actor info, board, article_num, and target fields (for control events).
+
+    origin: origin to query (defaults to server's origin).
+    start_seq: first sequence number to fetch.
+    max_count: maximum events to return.
+    """
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        origin = origin or client._server_origin or ""
+        results = await client.get_event_range(origin, start_seq, max_count)
+        return [
+            {
+                "origin_seq": rec.origin_seq,
+                "kind": rec.kind,
+                "event_id": rec.event_id.hex(),
+                "actor_pubkey": rec.actor_pubkey.hex(),
+                "actor_username": rec.actor_username,
+                "actor_registrar": rec.actor_registrar,
+                "board": rec.board,
+                "article_num": rec.article_num,
+                "target_origin": rec.target_origin,
+                "target_board": rec.target_board,
+                "target_article_id": rec.target_article_id.hex()
+                if rec.target_article_id != ZERO_ID
+                else "",
+                "target_event_id": rec.target_event_id.hex()
+                if rec.target_event_id != ZERO_ID
+                else "",
+                "created_at": rec.created_at,
+            }
+            for rec, witness in results
+        ]
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def get_event(
+    origin: str,
+    event_id_hex: str,
+    auth: str | None = None,
+) -> dict:
+    """Get a single event by ID with full details including witness.
+
+    origin: origin that published the event.
+    event_id_hex: hex event ID (64 chars).
+    """
+    eid = _validate_event_id(event_id_hex)
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        rec, witness = await client.get_event(origin, eid)
+        return {
+            "origin": rec.origin,
+            "origin_seq": rec.origin_seq,
+            "event_id": rec.event_id.hex(),
+            "kind": rec.kind,
+            "schema_version": rec.schema_version,
+            "created_at": rec.created_at,
+            "actor_pubkey": rec.actor_pubkey.hex(),
+            "actor_username": rec.actor_username,
+            "actor_registrar": rec.actor_registrar,
+            "board": rec.board,
+            "article_id": rec.article_id.hex() if rec.article_id != ZERO_ID else "",
+            "article_num": rec.article_num,
+            "target_origin": rec.target_origin,
+            "target_board": rec.target_board,
+            "target_article_id": rec.target_article_id.hex()
+            if rec.target_article_id != ZERO_ID
+            else "",
+            "target_event_id": rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else "",
+            "body_hash": rec.body_hash.hex(),
+            "body_size": rec.body_size,
+            "witness": {
+                "relay_pubkey": witness.relay_pubkey.hex(),
+                "relay_hostname": witness.relay_hostname,
+                "received_from_pubkey": witness.received_from_pubkey.hex(),
+                "received_from_hostname": witness.received_from_hostname,
+                "seen_at": witness.seen_at,
+            },
+        }
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def trace_event(
+    origin: str,
+    event_id_hex: str,
+    max_hops: int = 10,
+    auth: str | None = None,
+) -> list[dict]:
+    """Trace an event back to its origin through relay witnesses.
+
+    Follows the witness chain hop-by-hop. Returns a list of hops with
+    relay pubkey, relay hostname, upstream pubkey, upstream hostname,
+    and seen_at timestamp.
+
+    origin: origin that published the event.
+    event_id_hex: hex event ID (64 chars).
+    max_hops: maximum hops to follow (default 10).
+    """
+    eid = _validate_event_id(event_id_hex)
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        return await client.trace_event(origin, eid, max_hops)
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def get_event_body(
+    origin: str,
+    event_id_hex: str,
+    auth: str | None = None,
+) -> str:
+    """Get the body content of an event (non-article events like cancel reasons, rule text).
+
+    origin: origin that published the event.
+    event_id_hex: hex event ID (64 chars).
+    Returns the body as a UTF-8 string.
+    """
+    eid = _validate_event_id(event_id_hex)
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            await _connect_anonymous(client)
+        body = await client.get_event_body(origin, eid)
+        return body.decode("utf-8", errors="replace") if body else ""
+    finally:
+        await client.close()

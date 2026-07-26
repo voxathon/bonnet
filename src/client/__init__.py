@@ -1,39 +1,37 @@
-from .models import (
-    User,
-    Board,
-    Post,
-    PostSummary,
-    PostCreateResult,
-    Rule,
-    Report,
-    Punishment,
-    BannedStatus,
-    Peer,
+from .firehose_client import FirehoseHTTPClient
+from .firehose_models import (
+    ArticleListItem,
+    ArticleView,
+    BanStatus,
+    BoardInfo,
+    DiscoveryInfo,
+    EventInfo,
+    HeadInfo,
+    PublishResult,
+    QueryResponse,
+    SearchResponse,
+    SearchResult,
+    UserInfo,
 )
+from .firehose_protocol import ProtocolError
 from .identity import IdentityStore
-from .connection import BonnetClient, BonnetError, EncryptedSession
-from .protocol import ProtocolError, ResponseStatus, ErrorCode
 from .server import run
-from .simple import run as run_simple
 
 __all__ = [
-    "User",
-    "Board",
-    "Post",
-    "PostSummary",
-    "PostCreateResult",
-    "Rule",
-    "Report",
-    "Punishment",
-    "BannedStatus",
-    "Peer",
-    "IdentityStore",
-    "BonnetClient",
-    "BonnetError",
-    "EncryptedSession",
+    "PublishResult",
+    "EventInfo",
+    "HeadInfo",
+    "ArticleView",
+    "ArticleListItem",
+    "SearchResult",
+    "SearchResponse",
+    "QueryResponse",
+    "BoardInfo",
+    "UserInfo",
+    "BanStatus",
+    "DiscoveryInfo",
+    "FirehoseHTTPClient",
     "ProtocolError",
-    "ResponseStatus",
-    "ErrorCode",
+    "IdentityStore",
     "run",
-    "run_simple",
 ]

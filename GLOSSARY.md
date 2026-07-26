@@ -1,23 +1,90 @@
-# Bonnet Terminology Glossary
+# Bonnet Glossary
 
-This glossary clarifies the specific terminology used within the Bonnet BBS ecosystem, particularly distinguishing between network-level concepts and application-level identifiers.
+## Core Concepts
 
-## Network & Connectivity
+**Origin** — The cryptographic identity of a server. An origin string
+(typically resembling a hostname) identifies the authoritative source of
+records. Origins sign records with their Ed25519 key.
 
-*   **Peer Hostname:** The literal domain name or IP address used to establish a WebSocket connection (e.g., `dial target`). This is the transport-level address.
-*   **Relay:** A server that hosts copies of boards and posts on behalf of another server. In the network layer, a relay acts as an intermediate cache or mirror. The relay's public key is what gets TOFU'd during a direct connection to it.
-*   **CNAME / Alias:** Network-level aliases. A CNAME might resolve to a relay, but the underlying TLS and cryptographic identity belongs to the server responding to the socket.
+**Record** — A signed, append-only entry in an origin's firehose. Contains
+a kind, metadata, optional body reference, and is chain-linked to the
+previous record via `previous_event_hash`.
 
-## Identity & Cryptography
+**Intent** — The actor-authored portion of a record, signed by the actor's
+key. The server signs the full record (intent + chain fields) with the
+origin key.
 
-*   **Origin:** The logical, cryptographic identity and authoritative source of a resource (a Board, User, or Report).
-    *   An `origin` string typically looks like a hostname (e.g., `bbs.example.com`), but it acts as a permanent identifier.
-    *   If a board's `origin` is `bbs.example.com`, but it is being downloaded from a `relay` at `cache.example.net`, the cryptographic signatures (e.g., `origin_sig`) must validate against the key associated with `bbs.example.com` (the origin), not `cache.example.net` (the relay).
-*   **Registrar:** The origin server where a specific user account was created.
-*   **TOFU (Trust On First Use):** The process of caching a peer's public key the first time a direct connection is established. This binds the transport-level connection to a cryptographic identity.
+**Firehose** — The append-only event store (`events.db`) containing all
+records for all origins known to the server. Each origin has its own
+sequence number space.
 
-## Engine Components
+**Head** — A signed summary of an origin's firehose state: latest sequence
+number, event hash, event count, and origin public key. Used by federation
+to detect gaps and verify chain integrity.
 
-*   **AME (Article Management Engine):** The subsystem managing Boards and Posts. It uses `nav.db` to map boards to their respective origins and relays.
-*   **UME (User Management Engine):** The subsystem managing User identities, public keys, and origin associations.
-*   **Keibatsu:** The subsystem managing moderation rules, reports, and punishments. Uses cross-origin signatures to ensure reports cannot be forged by relays.
+**Witness** — A signed statement from a relay naming an upstream source for
+a record. Witnesses form a chain that allows tracing the path a record took
+through the network.
+
+## Projections
+
+**Projection** — A derived, rebuildable view of the firehose. Projections
+are never authoritative — they can be deleted and rebuilt from `events.db`.
+
+**Dispatcher** — Routes firehose records to projections in origin sequence
+order. Advances the checkpoint only after all applicable projections accept
+the record. Stops on failure.
+
+**Checkpoint** — The last successfully dispatched sequence number for an
+origin. Per-projection checkpoints track each projection's progress within
+the origin-level checkpoint.
+
+**NavProjection** — Board directory: maps (origin, board) to board lifecycle
+state (created, closed, reopened).
+
+**UserProjection** — User registrations and revocations keyed by
+(origin, pubkey).
+
+**PolicyProjection** — Moderation policy: rules, reports, punishments, and
+revocations.
+
+**BoardProjection** — Per-board article store with lifecycle state
+(visibility, pin, thread, body state).
+
+## Federation
+
+**Sync Manager** — Background service that fetches signed heads and record
+ranges from peers, verifies them, and dispatches accepted records to
+projections.
+
+**TOFU (Trust On First Use)** — The server's Ed25519 key is pinned after
+first verified contact. Subsequent connections compare the presented key
+against the stored pin and reject mismatches.
+
+**Relay** — A server that forwards records from other origins. Creates
+signed witnesses naming its upstream source for each accepted record.
+
+**Backoff** — Exponential delay applied to sync attempts after failures
+(30s, 60s, 120s, ... up to 3600s with jitter). Resets on success.
+
+## Authentication
+
+**Anonymous** — Requests signed with the server's published shared
+anonymous key. Read-only, classified for ACL and rate-limiting. The key is
+public by design and provides no authentication.
+
+**Registered** — Requests signed by a key with a `bonnet.user.register`
+record on the local origin.
+
+**Unknown** — Requests signed by an unrecognized key. May be granted limited
+write access (e.g., user registration) via ACL rules.
+
+## Moderation
+
+**Punishment** — A moderation action targeting a user. Types: warning,
+temporary ban, permanent ban. Punishments from allowed origins are effective
+locally. Users must acknowledge warnings before resuming writes.
+
+**ACL (Access Control List)** — Explicit, compositional, default-deny
+authorization rules. Every applicable dimension (command, kind, board) must
+pass. Deny rules win over allow rules.

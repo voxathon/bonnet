@@ -1,103 +1,89 @@
-from fastmcp import FastMCP
+"""MCP resources for the Bonnet Firehose Protocol.
 
-from .tools import mcp, get_client, get_username
-from .models import Board, Post, PostSummary, User, Rule, Report
+Read-only URI-addressed data exposed as FastMCP resources.
+All resources connect anonymously.
+"""
+
+from client.firehose_models import ArticleListItem, ArticleView, BoardInfo, HeadInfo, UserInfo
+from client.tools import _connect_anonymous, _make_client, mcp
 
 
 @mcp.resource("bonnet://boards")
-async def list_boards_resource() -> list[Board]:
-    """List all boards."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.board_list()
+async def list_boards_resource() -> list[BoardInfo]:
+    """List all boards on the server."""
+    client = _make_client()
+    try:
+        await _connect_anonymous(client)
+        origin = client._server_origin or ""
+        return await client.list_boards(origin)
+    finally:
+        await client.close()
 
 
 @mcp.resource("bonnet://boards/{board_name}")
-async def get_board_resource(board_name: str) -> Board:
-    """Get board metadata."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        boards = await client.board_list()
+async def get_board_resource(board_name: str) -> BoardInfo:
+    """Get board metadata by name."""
+    client = _make_client()
+    try:
+        await _connect_anonymous(client)
+        origin = client._server_origin or ""
+        boards = await client.list_boards(origin)
         for board in boards:
             if board.name == board_name:
                 return board
         raise ValueError(f"Board not found: {board_name}")
+    finally:
+        await client.close()
 
 
-@mcp.resource("bonnet://boards/{board_name}/posts")
-async def list_board_posts_resource(board_name: str) -> list[PostSummary]:
-    """List posts on a board."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.post_list(board_name)
+@mcp.resource("bonnet://boards/{board_name}/articles")
+async def list_board_articles_resource(board_name: str) -> list[ArticleListItem]:
+    """List active articles on a board."""
+    client = _make_client()
+    try:
+        await _connect_anonymous(client)
+        origin = client._server_origin or ""
+        return await client.list_articles(origin, board_name)
+    finally:
+        await client.close()
 
 
-@mcp.resource("bonnet://boards/{board_name}/posts/{post_num}")
-async def get_post_resource(board_name: str, post_num: int) -> Post:
-    """Get full post content."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.post_get(board_name, post_num)
-
-
-@mcp.resource("bonnet://boards/{board_name}/thread/{root}")
-async def get_thread_resource(board_name: str, root: int) -> list[Post]:
-    """Get all posts in a thread."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.query_posts(
-            board_name,
-            where="root = ?",
-            values=[(1, root)],
-            orderby="creation_date ASC",
-        )
+@mcp.resource("bonnet://boards/{board_name}/articles/{article_num}")
+async def get_article_resource(board_name: str, article_num: int) -> ArticleView:
+    """Get full article content by board and article number."""
+    client = _make_client()
+    try:
+        await _connect_anonymous(client)
+        origin = client._server_origin or ""
+        article = await client.get_article(origin, board_name, article_num, include_body=True)
+        if article is None:
+            raise ValueError(f"Article not found: {board_name}/{article_num}")
+        return article
+    finally:
+        await client.close()
 
 
 @mcp.resource("bonnet://users")
-async def list_users_resource() -> list[User]:
-    """List all users."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.list_users()
+async def list_users_resource() -> list[UserInfo]:
+    """List all registered users on the server."""
+    client = _make_client()
+    try:
+        await _connect_anonymous(client)
+        origin = client._server_origin or ""
+        return await client.list_users(origin)
+    finally:
+        await client.close()
 
 
-@mcp.resource("bonnet://rules")
-async def list_rules_resource() -> list[Rule]:
-    """List all community rules."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.rule_list()
-
-
-@mcp.resource("bonnet://rules/{rule_num}")
-async def get_rule_resource(rule_num: int) -> Rule:
-    """Get rule by number."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.rule_get(rule_num)
-
-
-@mcp.resource("bonnet://reports/culprit/{pubkey}")
-async def list_reports_by_culprit_resource(pubkey: str) -> list[Report]:
-    """List reports against a user."""
-    client = get_client()
-    username = get_username()
-    async with client:
-        await client.connect(username, require_auth=False)
-        return await client.report_list_by_culprit(pubkey)
+@mcp.resource("bonnet://events/{origin}/head")
+async def event_head_resource(origin: str) -> HeadInfo:
+    """Get the signed firehose head for an origin."""
+    client = _make_client()
+    try:
+        await _connect_anonymous(client)
+        head = await client.get_head(origin)
+        if head is None:
+            raise ValueError(f"No head found for origin: {origin}")
+        return head
+    finally:
+        await client.close()
