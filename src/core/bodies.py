@@ -64,6 +64,33 @@ class BodyStore:
         board_hex = _safe_path_component(board)
         return os.path.join(self._boards_dir, origin_hex, board_hex, "bodies")
 
+    def _atomic_write_verified(
+        self, final_path: str, body: bytes,
+        expected_hash: bytes, expected_size: int,
+    ) -> None:
+        """Write body to a temp file, verify, and atomically rename.
+
+        Caller must hold self._lock.
+        """
+        final_dir = os.path.dirname(final_path)
+        os.makedirs(final_dir, exist_ok=True)
+        tmp_path = final_path + ".tmp"
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(body)
+            with open(tmp_path, "rb") as f:
+                verify = f.read()
+            if len(verify) != expected_size or compute_body_hash(verify) != expected_hash:
+                raise BodyError("body verification failed after write")
+            os.replace(tmp_path, final_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise
+
     def stage_article_body(
         self, origin: str, board: str, event_id: bytes, body: bytes,
         expected_hash: bytes, expected_size: int,
@@ -75,8 +102,7 @@ class BodyStore:
         """
         if len(body) != expected_size:
             raise BodyError(f"body size {len(body)} != expected {expected_size}")
-        actual_hash = compute_body_hash(body)
-        if actual_hash != expected_hash:
+        if compute_body_hash(body) != expected_hash:
             raise BodyError("body hash mismatch")
 
         origin_hex = _safe_path_component(origin)
@@ -88,15 +114,7 @@ class BodyStore:
         staging_path = os.path.join(staging_dir, event_id.hex())
 
         with self._lock:
-            tmp_path = staging_path + ".tmp"
-            with open(tmp_path, "wb") as f:
-                f.write(body)
-            with open(tmp_path, "rb") as f:
-                verify = f.read()
-            if len(verify) != len(body) or compute_body_hash(verify) != expected_hash:
-                os.remove(tmp_path)
-                raise BodyError("staged body verification failed")
-            os.replace(tmp_path, staging_path)
+            self._atomic_write_verified(staging_path, body, expected_hash, expected_size)
 
         return staging_path
 
@@ -125,16 +143,19 @@ class BodyStore:
 
     def write_article_body(
         self, origin: str, board: str, article_num: int, body: bytes,
+        expected_hash: bytes, expected_size: int,
     ) -> None:
-        """Write an article body directly to its final path (for remote fetch cache)."""
+        """Write an article body directly to its final path (for remote fetch cache).
+
+        Verifies size and hash before the atomic rename.
+        """
         final_path = self._article_body_path(origin, board, article_num)
         with self._lock:
-            final_dir = os.path.dirname(final_path)
-            os.makedirs(final_dir, exist_ok=True)
-            tmp_path = final_path + ".tmp"
-            with open(tmp_path, "wb") as f:
-                f.write(body)
-            os.replace(tmp_path, final_path)
+            if len(body) != expected_size:
+                raise BodyError(f"body size {len(body)} != expected {expected_size}")
+            if compute_body_hash(body) != expected_hash:
+                raise BodyError("body hash mismatch")
+            self._atomic_write_verified(final_path, body, expected_hash, expected_size)
 
     def get_article_body(
         self, origin: str, board: str, article_num: int,
@@ -251,17 +272,7 @@ class BodyStore:
 
         path = self._event_body_path(origin, event_id)
         with self._lock:
-            d = os.path.dirname(path)
-            os.makedirs(d, exist_ok=True)
-            tmp_path = path + ".tmp"
-            with open(tmp_path, "wb") as f:
-                f.write(body)
-            with open(tmp_path, "rb") as f:
-                verify = f.read()
-            if len(verify) != len(body) or compute_body_hash(verify) != expected_hash:
-                os.remove(tmp_path)
-                raise BodyError("event body verification failed")
-            os.replace(tmp_path, path)
+            self._atomic_write_verified(path, body, expected_hash, expected_size)
 
     def get_event_body(
         self, origin: str, event_id: bytes,
@@ -306,6 +317,11 @@ class BodyStore:
             if not os.path.isdir(staging_dir):
                 return 0
             for name in os.listdir(staging_dir):
-                os.remove(os.path.join(staging_dir, name))
-                count += 1
+                path = os.path.join(staging_dir, name)
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                        count += 1
+                except OSError:
+                    pass
         return count

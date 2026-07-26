@@ -121,6 +121,7 @@ class FirehoseStore:
         self._conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._init_schema()
 
     def close(self) -> None:
@@ -538,6 +539,7 @@ class FirehoseStore:
                 expected_prev = local_hash if first_seq == local_seq + 1 else None
                 conflicts = []
                 idempotent_count = 0
+                newly_accepted = 0
                 last_accepted_seq = local_seq
                 last_accepted_hash = local_hash
                 conflict_found = False
@@ -652,6 +654,7 @@ class FirehoseStore:
 
                     last_accepted_seq = rec.origin_seq
                     last_accepted_hash = event_hash
+                    newly_accepted += 1
 
                 if conflict_found:
                     self._conn.execute(
@@ -664,7 +667,7 @@ class FirehoseStore:
                     self._conn.execute("COMMIT")
                     return AcceptResult(
                         accepted=True,
-                        accepted_count=len(records) - idempotent_count - len(conflicts),
+                        accepted_count=newly_accepted,
                         idempotent=idempotent_count > 0,
                         conflicts=conflicts,
                         reason="equivocation detected; range partially accepted",

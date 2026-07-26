@@ -269,6 +269,32 @@ class TestPublishRecord:
         assert resp[0] == 1
         assert b"not permitted" in resp.lower()
 
+    def test_publish_rejects_oversized_body(self, stack):
+        h = stack["handler"]
+        h._max_body_size = 100
+
+        body = b"\x00" * 200
+        intent = Intent(
+            event_id=_rid(1), kind="bonnet.article", origin="bbs.test",
+            actor_pubkey=ACTOR_PUB, board="general", article_id=_rid(2),
+            metadata=MetadataMap([
+                metadata_text(1, "Test"),
+                metadata_text(4, "text/plain"),
+            ]),
+            body_hash=compute_body_hash(body), body_size=len(body),
+        )
+        encoded_intent = encode_intent(intent)
+        actor_sig = sign_intent(ACTOR, encoded_intent)
+
+        req = struct.pack(">B", OP_PUBLISH_RECORD)
+        req += struct.pack(">I", len(encoded_intent)) + encoded_intent
+        req += actor_sig
+        req += struct.pack(">I", len(body)) + body
+
+        resp = h.handle(req, _actor_ctx())
+        assert resp[0] == 1
+        assert b"exceeds maximum" in resp.lower()
+
 
 # ---------------------------------------------------------------------------
 # EVENT_HEAD tests

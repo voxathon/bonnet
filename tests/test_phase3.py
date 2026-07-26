@@ -607,8 +607,8 @@ class TestSearchService:
         bp.apply_article(rec1)
         bp.apply_article(rec2)
 
-        body_store.write_article_body("bbs.test", "general", 1, body1)
-        body_store.write_article_body("bbs.test", "general", 2, body2)
+        body_store.write_article_body("bbs.test", "general", 1, body1, compute_body_hash(body1), len(body1))
+        body_store.write_article_body("bbs.test", "general", 2, body2, compute_body_hash(body2), len(body2))
 
         results = search.search_bodies(bp, "bbs.test", "general", "fox")
         assert len(results.results) == 1
@@ -625,8 +625,8 @@ class TestSearchService:
         bp.apply_article(rec1)
         bp.apply_article(rec2)
 
-        body_store.write_article_body("bbs.test", "general", 1, body1)
-        body_store.write_article_body("bbs.test", "general", 2, body2)
+        body_store.write_article_body("bbs.test", "general", 1, body1, compute_body_hash(body1), len(body1))
+        body_store.write_article_body("bbs.test", "general", 2, body2, compute_body_hash(body2), len(body2))
 
         from core.record import Record
         purge_rec = Record(
@@ -652,8 +652,8 @@ class TestSearchService:
         bp.apply_article(rec1)
         bp.apply_article(rec2)
 
-        body_store.write_article_body("bbs.test", "general", 1, body1)
-        body_store.write_article_body("bbs.test", "general", 2, body2)
+        body_store.write_article_body("bbs.test", "general", 1, body1, compute_body_hash(body1), len(body1))
+        body_store.write_article_body("bbs.test", "general", 2, body2, compute_body_hash(body2), len(body2))
 
         from core.record import Record
         cancel_rec = Record(

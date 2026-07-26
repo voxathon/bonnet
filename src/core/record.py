@@ -145,7 +145,8 @@ def enc_sig64(v: bytes) -> bytes:
 
 
 def enc_text16(v: str, max_len: int = 0xFFFF) -> bytes:
-    encoded = v.encode("utf-8")
+    normalized = unicodedata.normalize("NFC", v)
+    encoded = normalized.encode("utf-8")
     if len(encoded) > max_len:
         raise LengthExceeded(f"text16 encoded length {len(encoded)} exceeds {max_len}")
     return struct.pack(">H", len(encoded)) + encoded

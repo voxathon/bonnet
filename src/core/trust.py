@@ -166,10 +166,13 @@ class TrustStore:
 
         now = int(time.time())
         with self._lock:
-            self._conn.execute(
-                "UPDATE origin_keys SET publickey=?, last_rotated=? WHERE origin=?",
-                (new_publickey, now, origin),
+            cursor = self._conn.execute(
+                "UPDATE origin_keys SET publickey=?, last_rotated=? "
+                "WHERE origin=? AND publickey=?",
+                (new_publickey, now, origin, old_publickey),
             )
+            if cursor.rowcount == 0:
+                return False
             self._conn.commit()
         return True
 
