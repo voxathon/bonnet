@@ -1,0 +1,71 @@
+[server]
+origin = "bbs.example"
+hostname = "bbs.example"
+data_dir = "./data"
+boards_dir = "./boards"
+events_bodies_dir = "./event_bodies"
+port = 2272
+host = "0.0.0.0"
+# admin_pubkey = "<hex-encoded Ed25519 public key for full access>"
+
+[limits]
+max_request_size = 10485760
+max_article_body_size = 1048576
+rate_limit_requests = 100
+rate_limit_window = 1
+
+[search]
+max_count = 1000
+timeout_seconds = 10
+result_limit = 100
+
+[tls]
+enabled = false
+# cert_path = "./certs/bonnet.crt"
+# key_path = "./certs/bonnet.key"
+# ca_bundle = true
+
+[sync]
+interval_seconds = 300
+
+# Firehose federation peers. Each entry starts a background sync loop.
+# The origin is the peer's Bonnet origin string; hostname/port is the dial address.
+# verify_tls should be false for self-signed certs (common on LAN).
+# import_warnings, import_temp_bans, and import_permabans control which
+# punishment types are accepted from each peer (default: all true).
+#
+# [[sync.peers]]
+# origin = "peer.example"
+# hostname = "peer.example"
+# port = 2272
+# verify_tls = true
+# import_warnings = true
+# import_temp_bans = true
+# import_permabans = false
+
+# ACL rules: explicit deny-wins, conjunctive dimensions.
+# Supported matchers: pubkey, role, origin, anonymous, unknown, wildcard.
+# Selector lists: commands, kinds, boards, objects. Omit = not granted. "*" = all.
+#
+# [[acl]]
+# effect = "allow"
+# match.pubkey = "hex:<64 hex chars>"
+# actions = ["read", "write"]
+# commands = ["*"]
+# kinds = ["*"]
+# boards = ["*"]
+# objects = ["*"]
+#
+# [[acl]]
+# effect = "allow"
+# match.anonymous = true
+# actions = ["read"]
+# commands = ["EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
+# boards = ["*"]
+#
+# [[acl]]
+# effect = "allow"
+# match.unknown = true
+# actions = ["write"]
+# commands = ["PUBLISH_RECORD"]
+# kinds = ["bonnet.user.register"]
