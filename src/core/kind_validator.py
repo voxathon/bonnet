@@ -371,9 +371,3 @@ class KindValidator:
     def _require_empty_board(self, intent: Intent) -> None:
         if intent.board:
             raise ValidationError(f"{intent.kind} requires empty board")
-
-    def _require_empty_article_targets_only(self, intent: Intent) -> None:
-        if intent.target_article_id != ZERO_ID:
-            raise ValidationError(f"{intent.kind} requires zero target_article_id")
-        if intent.target_event_id != ZERO_ID:
-            raise ValidationError(f"{intent.kind} requires zero target_event_id")

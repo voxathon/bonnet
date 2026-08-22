@@ -24,29 +24,6 @@ class PublishResult:
 
 
 @dataclass
-class EventInfo:
-    """A firehose event returned by EVENT_GET or EVENT_RANGE."""
-
-    origin_seq: int
-    event_id: str
-    kind: str
-    schema_version: int
-    created_at: int
-    actor_pubkey: str
-    origin: str
-    board: str
-    article_id: str
-    article_num: int
-    body_hash: str
-    body_size: int
-    witness_pubkey: str
-    witness_hostname: str
-    received_from_pubkey: str
-    received_from_hostname: str
-    seen_at: int
-
-
-@dataclass
 class HeadInfo:
     """Signed firehose head."""
 

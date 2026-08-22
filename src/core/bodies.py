@@ -19,14 +19,6 @@ class BodyError(Exception):
     pass
 
 
-class BodyCorrupt(BodyError):
-    pass
-
-
-class BodyUnavailable(BodyError):
-    pass
-
-
 def _safe_path_component(s: str) -> str:
     """Encode a string as lowercase hex of its UTF-8 bytes (§14)."""
     return s.encode("utf-8").hex()
