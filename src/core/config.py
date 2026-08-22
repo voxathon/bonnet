@@ -16,18 +16,44 @@ from core.acl import ACLEvaluator
 
 @dataclass
 class PeerConfig:
-    """Configuration for a firehose federation peer."""
+    """Configuration for a firehose federation peer.
+
+    The import_* flags control which punishment types are applied locally
+    when they arrive from this peer (Gate D). Records are always stored and
+    relayed regardless; the flags only govern enforcement.
+    """
 
     origin: str
     hostname: str
     port: int = 2272
     verify_tls: bool = False
+    import_warnings: bool = True
+    import_temp_bans: bool = True
+    import_permabans: bool = True
+
+    def imported_punishment_types(self) -> set[str]:
+        """Return the locally enforced punishment type names for this peer."""
+        types = set()
+        if self.import_warnings:
+            types.add("warning")
+        if self.import_temp_bans:
+            types.add("ban")
+        if self.import_permabans:
+            types.add("permaban")
+        return types
 
 
 def _normalize_origin(origin: str) -> str:
     if not origin:
         return ""
     return origin.strip().lower().rstrip(".")
+
+
+def _as_bool(table: dict, key: str, section: str, default: bool) -> bool:
+    value = table.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"config: {section}.{key} must be a boolean, got {value!r}")
+    return value
 
 
 class FirehoseConfig:
@@ -141,6 +167,10 @@ class FirehoseConfig:
             seen_origins.add(peer.origin)
             if not (1 <= peer.port <= 65535):
                 raise ValueError(f"config: peer '{peer.origin}' port {peer.port} out of range")
+            for flag in ("import_warnings", "import_temp_bans", "import_permabans"):
+                value = getattr(peer, flag)
+                if not isinstance(value, bool):
+                    raise ValueError(f"config: peer '{peer.origin}' {flag} must be a boolean")
 
     @property
     def identity_path(self) -> str:
@@ -227,6 +257,9 @@ class FirehoseConfig:
                     hostname=p.get("hostname", ""),
                     port=p.get("port", 2272),
                     verify_tls=p.get("verify_tls", False),
+                    import_warnings=_as_bool(p, "import_warnings", "sync.peers", True),
+                    import_temp_bans=_as_bool(p, "import_temp_bans", "sync.peers", True),
+                    import_permabans=_as_bool(p, "import_permabans", "sync.peers", True),
                 )
                 for p in sync.get("peers", [])
             ],
