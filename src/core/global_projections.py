@@ -758,7 +758,7 @@ class PolicyProjection(_BaseProjection):
                 "       AND a.punishment_event_id=punishments.event_id))"
                 "  OR (type='ban' AND expires_at > ?)"
                 "  OR (type='permaban')"
-                ") ORDER BY created_at ASC",
+                ") ORDER BY created_at ASC, origin_seq ASC",
                 (pubkey, now),
             ).fetchall()
             result = []
