@@ -1322,7 +1322,7 @@ class BonnetFirehoseServer:
         except ValueError:
             return "Invalid hex pubkey"
 
-        from net.firehose_commands import OP_BAN_STATUS
+        from net.firehose_commands import OP_BAN_STATUS, PUNISHMENT_TYPE_CODES
 
         req = struct.pack(">B", OP_BAN_STATUS) + struct.pack(">B", len(pubkey)) + pubkey
 
@@ -1330,28 +1330,40 @@ class BonnetFirehoseServer:
         if resp[0] != 0x00:
             return self._parse_response_error(resp)
 
-        banned = resp[1]
-        if not banned:
-            return "Not banned."
+        count = resp[1]
+        if count == 0:
+            return "No pending punishments."
 
+        type_names = {code: name for name, code in PUNISHMENT_TYPE_CODES.items()}
         offset = 2
-        eid_len = resp[offset]
-        offset += 1
-        event_id = resp[offset : offset + eid_len].hex()
-        offset += eid_len
-        origin, offset = self._read_text16(resp, offset)
-        expires_at = struct.unpack(">q", resp[offset : offset + 8])[0]
+        lines = []
+        from datetime import datetime
 
-        if expires_at < 0:
-            exp = "permanent"
-        elif expires_at == 0:
-            exp = "warning"
-        else:
-            from datetime import datetime
+        for _ in range(count):
+            type_code = resp[offset]
+            offset += 1
+            (expires_at,) = struct.unpack(">q", resp[offset : offset + 8])
+            offset += 8
+            (body_size,) = struct.unpack(">I", resp[offset : offset + 4])
+            offset += 4
+            body_hash = resp[offset : offset + 32].hex()
+            offset += 32
+            event_id = resp[offset : offset + 32].hex()
+            offset += 32
+            origin, offset = self._read_text16(resp, offset)
 
-            exp = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d %H:%M")
+            ptype = type_names.get(type_code, f"unknown({type_code})")
+            if expires_at > 0:
+                exp = "expires " + datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d %H:%M")
+            else:
+                exp = "no expiry"
+            lines.append(
+                f"  {ptype}\n    Origin: {origin}\n    {exp}\n"
+                f"    Event: {event_id}\n"
+                f"    Body: {body_size} bytes (hash {body_hash[:16]}...)"
+            )
 
-        return f"BANNED\nOrigin: {origin}\nExpires: {exp}\nEvent: {event_id}"
+        return "Pending punishments:\n" + "\n".join(lines)
 
     # ------------------------------------------------------------------
     # event-head
