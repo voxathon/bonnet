@@ -119,6 +119,7 @@ def stack(tmp_path, firehose):
         policy=policy,
         boards_dir=boards_dir,
         body_store=body_store,
+        local_origin="bbs.test",
     )
 
     handler = FirehoseCommandHandler(

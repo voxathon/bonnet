@@ -17,6 +17,7 @@ from core.bodies import BodyStore
 from core.crypto import Identity
 from core.kind_validator import KindValidator, ValidationError
 from core.record import (
+    ZERO_HASH,
     ZERO_ID,
     Intent,
     MetadataMap,
@@ -470,26 +471,141 @@ class TestKindValidator:
         )
         self.validator.validate(intent)
 
-    def test_punishment_issue_valid(self):
-        intent = self._intent(
-            kind="bonnet.punishment.issue",
+    def _punish_intent(self, kind, metadata, **kwargs):
+        defaults = dict(
+            kind=kind,
             board="moderation.actions",
-            metadata=MetadataMap(
-                [
-                    metadata_bytes(1, _rid(30)),
-                    metadata_i64(2, -1),
-                ]
-            ),
+            body_hash=b"\x11" * 32,
+            body_size=10,
+        )
+        defaults.update(kwargs)
+        return self._intent(metadata=MetadataMap(metadata), **defaults)
+
+    def test_punishment_warn_valid(self):
+        intent = self._punish_intent(
+            "bonnet.punishment.warn",
+            [metadata_bytes(1, _rid(30))],
         )
         self.validator.validate(intent)
 
-    def test_punishment_issue_missing_expiration(self):
-        intent = self._intent(
-            kind="bonnet.punishment.issue",
-            board="moderation.actions",
-            metadata=MetadataMap([metadata_bytes(1, _rid(30))]),
+    def test_punishment_ban_valid(self):
+        intent = self._punish_intent(
+            "bonnet.punishment.ban",
+            [metadata_bytes(1, _rid(30)), metadata_i64(2, 1700000000)],
         )
-        with pytest.raises(ValidationError, match="expiration"):
+        self.validator.validate(intent)
+
+    def test_punishment_permaban_valid(self):
+        intent = self._punish_intent(
+            "bonnet.punishment.permaban",
+            [metadata_bytes(1, _rid(30))],
+        )
+        self.validator.validate(intent)
+
+    def test_punishment_missing_pubkey(self):
+        for kind in (
+            "bonnet.punishment.warn",
+            "bonnet.punishment.ban",
+            "bonnet.punishment.permaban",
+        ):
+            intent = self._punish_intent(kind, [])
+            with pytest.raises(ValidationError, match="punished public key"):
+                self.validator.validate(intent)
+
+    def test_punishment_short_pubkey(self):
+        intent = self._punish_intent(
+            "bonnet.punishment.ban",
+            [metadata_bytes(1, b"\x01" * 16), metadata_i64(2, 1700000000)],
+        )
+        with pytest.raises(ValidationError, match="32 bytes"):
+            self.validator.validate(intent)
+
+    def test_punishment_ban_missing_expiry(self):
+        intent = self._punish_intent("bonnet.punishment.ban", [metadata_bytes(1, _rid(30))])
+        with pytest.raises(ValidationError, match="expiry"):
+            self.validator.validate(intent)
+
+    def test_punishment_ban_non_positive_expiry(self):
+        for bad in (0, -1):
+            intent = self._punish_intent(
+                "bonnet.punishment.ban",
+                [metadata_bytes(1, _rid(30)), metadata_i64(2, bad)],
+            )
+            with pytest.raises(ValidationError, match="positive"):
+                self.validator.validate(intent)
+
+    def test_punishment_warn_with_expiry_rejected(self):
+        intent = self._punish_intent(
+            "bonnet.punishment.warn",
+            [metadata_bytes(1, _rid(30)), metadata_i64(2, 1700000000)],
+        )
+        with pytest.raises(ValidationError, match="field 2"):
+            self.validator.validate(intent)
+
+    def test_punishment_permaban_with_expiry_rejected(self):
+        intent = self._punish_intent(
+            "bonnet.punishment.permaban",
+            [metadata_bytes(1, _rid(30)), metadata_i64(2, 1700000000)],
+        )
+        with pytest.raises(ValidationError, match="field 2"):
+            self.validator.validate(intent)
+
+    def test_punishment_empty_body_rejected(self):
+        intent = self._punish_intent(
+            "bonnet.punishment.warn",
+            [metadata_bytes(1, _rid(30))],
+            body_size=0,
+            body_hash=ZERO_HASH,
+        )
+        with pytest.raises(ValidationError, match="non-empty body"):
+            self.validator.validate(intent)
+
+    def test_punishment_empty_board_rejected(self):
+        intent = self._punish_intent(
+            "bonnet.punishment.warn",
+            [metadata_bytes(1, _rid(30))],
+            board="",
+        )
+        with pytest.raises(ValidationError, match="board"):
+            self.validator.validate(intent)
+
+    def test_punishment_with_targets_rejected(self):
+        intent = self._punish_intent(
+            "bonnet.punishment.warn",
+            [metadata_bytes(1, _rid(30))],
+            target_origin="bbs.test",
+            target_event_id=_rid(9),
+        )
+        with pytest.raises(ValidationError, match="target"):
+            self.validator.validate(intent)
+
+    def test_punishment_ack_valid(self):
+        intent = self._intent(
+            kind="bonnet.punishment.ack",
+            metadata=MetadataMap([metadata_bytes(1, _rid(7))]),
+        )
+        self.validator.validate(intent)
+
+    def test_punishment_ack_missing_target(self):
+        intent = self._intent(kind="bonnet.punishment.ack")
+        with pytest.raises(ValidationError, match="punishment event ID"):
+            self.validator.validate(intent)
+
+    def test_punishment_ack_short_target(self):
+        intent = self._intent(
+            kind="bonnet.punishment.ack",
+            metadata=MetadataMap([metadata_bytes(1, b"\x02" * 8)]),
+        )
+        with pytest.raises(ValidationError, match="32 bytes"):
+            self.validator.validate(intent)
+
+    def test_punishment_ack_with_board_rejected(self):
+        intent = self._intent(
+            kind="bonnet.punishment.ack",
+            board="moderation.actions",
+            metadata=MetadataMap([metadata_bytes(1, _rid(7))]),
+        )
+        with pytest.raises(ValidationError, match="empty board"):
             self.validator.validate(intent)
 
     def test_report_with_article_target(self):
