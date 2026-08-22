@@ -1,12 +1,12 @@
 """Dispatcher regression tests: checkpoint failure, multi-origin rebuild,
 unknown-kind handling, and projection checkpoint invariants.
-
-Tests marked xfail document bugs scheduled for Phase 2 fixes.
 """
+
+import sqlite3
 
 import pytest
 
-from core.board_projection import BoardProjection
+from core.board_projection import BoardProjection, board_db_path
 from core.bodies import BodyStore
 from core.crypto import Identity
 from core.dispatcher import Dispatcher
@@ -372,3 +372,72 @@ def test_rebuild_is_idempotent(stack):
 
     bp = d._get_board_projection("bbs.a", "general")
     assert bp.article_count("bbs.a", "general") == 1
+
+
+# ---------------------------------------------------------------------------
+# Rebuild with uncached board projections
+# ---------------------------------------------------------------------------
+
+
+def test_rebuild_clears_uncached_board_projections(stack, tmp_path):
+    """Rebuild must delete board DBs that are not open when it starts.
+
+    Stale applied-event rows in an uncached board database must not
+    suppress replay; otherwise diverged state survives the rebuild while
+    the firehose checkpoint advances.
+    """
+    d, firehose, nav, users, policy, bs = stack
+
+    body = b"hello"
+    aid = _rid(50)
+    intent = _make_article_intent("bbs.a", _rid(1), body=body, aid_seed=50)
+    assert intent.article_id == aid
+    cancel = Intent(
+        event_id=_rid(2),
+        kind="bonnet.article.cancel",
+        origin="bbs.a",
+        actor_pubkey=ACTOR_PUB,
+        target_origin="bbs.a",
+        target_board="general",
+        target_article_id=aid,
+    )
+
+    bs.stage_article_body(
+        "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
+    )
+    _append(firehose, ORIGIN_A, intent, body)
+    _append(firehose, ORIGIN_A, cancel)
+
+    d.dispatch_origin("bbs.a")
+    bp = d._get_board_projection("bbs.a", "general")
+    art = bp.get_article_by_num("bbs.a", "general", 1)
+    assert art is not None and art.visibility == "cancelled"
+
+    d.close()
+
+    db_path = board_db_path(str(tmp_path / "boards"), "bbs.a", "general")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM articles")
+        conn.commit()
+    finally:
+        conn.close()
+
+    d2 = Dispatcher(
+        firehose=firehose,
+        nav=nav,
+        users=users,
+        policy=policy,
+        boards_dir=str(tmp_path / "boards"),
+        body_store=bs,
+    )
+    try:
+        count = d2.rebuild_all("bbs.a")
+        assert count == 2, f"rebuild should replay both records, got {count}"
+
+        bp2 = d2._get_board_projection("bbs.a", "general")
+        art2 = bp2.get_article_by_num("bbs.a", "general", 1)
+        assert art2 is not None, "rebuild must restore articles from uncached board DBs"
+        assert art2.visibility == "cancelled"
+    finally:
+        d2.close()

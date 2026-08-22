@@ -25,6 +25,7 @@ from core.firehose import (
 )
 from core.global_projections import NavProjection, PolicyProjection, UserProjection
 from core.kind_validator import KindValidator, ValidationError
+from core.logging import log_msg
 from core.record import (
     SIG_SIZE,
     ZERO_ID,
@@ -323,7 +324,8 @@ class FirehoseCommandHandler:
         except (FirehoseError, ValidationError) as e:
             return _error(0x0006, str(e))
         except Exception as e:
-            return _error(0x0000, str(e))
+            log_msg(f"COMMAND: {cmd_name} failed unexpectedly: {e}")
+            return _error(0x0000, "Internal error")
 
     # ------------------------------------------------------------------
     # PUBLISH_RECORD (§19.1)

@@ -165,7 +165,6 @@ async def server_stack(tmp_path):
         replay_ledger=replay_ledger,
         rate_limiter=rate_limiter,
         users_projection=users,
-        firehose_store=firehose,
     )
 
     transport = httpx.ASGITransport(app=http_server)

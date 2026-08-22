@@ -191,7 +191,6 @@ class BonnetFirehoseServer:
             replay_ledger=self.replay_ledger,
             rate_limiter=self.rate_limiter,
             users_projection=self.users,
-            firehose_store=self.firehose,
         )
         log_msg("INIT: FirehoseHTTPServer initialized")
 

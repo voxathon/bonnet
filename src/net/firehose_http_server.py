@@ -71,9 +71,6 @@ RESPONSE_REQUIRED_COMPONENTS = frozenset(
 class FirehoseKeyResolver(KeyResolver):
     """Resolves keyid → raw Ed25519 public key for verification."""
 
-    def __init__(self, anonymous_public_key: bytes):
-        self._anonymous_pubkey = anonymous_public_key
-
     def resolve_public_key(self, key_id: str) -> bytes:
         if key_id.startswith("ed25519:"):
             return bytes.fromhex(key_id[8:])
@@ -92,13 +89,11 @@ class FirehoseHTTPServer:
         replay_ledger: ReplayLedger | None = None,
         rate_limiter: RateLimiter | None = None,
         users_projection=None,
-        firehose_store=None,
     ):
         self._handler = command_handler
         self._server_identity = server_identity
         self._config = config
         self._users = users_projection
-        self._firehose = firehose_store
 
         if anonymous_identity is None:
             anonymous_identity = Identity.generate()
@@ -140,7 +135,7 @@ class FirehoseHTTPServer:
         )
 
         self._verifier = BonnetVerifier(
-            key_resolver=FirehoseKeyResolver(self._anonymous_public_key),
+            key_resolver=FirehoseKeyResolver(),
             tag=FIREHOSE_TAG,
             max_lifetime=getattr(config, "signature_lifetime_seconds", 60),
             clock_skew=getattr(config, "clock_skew_seconds", 30),

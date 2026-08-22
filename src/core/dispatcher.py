@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 
-from core.board_projection import BoardProjection, board_db_path
+from core.board_projection import BoardProjection, board_db_path, delete_board_dbs
 from core.bodies import BodyStore
 from core.firehose import FirehoseStore
 from core.global_projections import (
@@ -239,19 +239,25 @@ class Dispatcher:
     def rebuild_all(self, origin: str) -> int:
         """Clear all projections for an origin and replay from the firehose.
 
+        Board projection databases are deleted from disk rather than cleared
+        in place, so replay is deterministic even for boards whose projections
+        were never opened by this process and cannot be suppressed by stale
+        applied-event tracking.
+
         Returns the number of records replayed.
         """
         with self._dispatch_lock:
-            self._nav.clear_origin(origin)
-            self._users.clear_origin(origin)
-            self._policy.clear_origin(origin)
-
             with self._boards_lock:
                 for key, bp in list(self._board_projections.items()):
                     if key[0] == origin:
-                        bp.clear()
                         bp.close()
                         del self._board_projections[key]
+
+            delete_board_dbs(self._boards_dir, origin)
+
+            self._nav.clear_origin(origin)
+            self._users.clear_origin(origin)
+            self._policy.clear_origin(origin)
 
             self._firehose.set_checkpoint(origin, 0)
 

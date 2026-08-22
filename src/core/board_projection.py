@@ -59,6 +59,34 @@ def board_db_path(boards_dir: str, origin: str, board: str) -> str:
     )
 
 
+def origin_boards_dir(boards_dir: str, origin: str) -> str:
+    return os.path.join(boards_dir, _safe_path_component(origin))
+
+
+def delete_board_dbs(boards_dir: str, origin: str) -> int:
+    """Delete every board projection database file for an origin.
+
+    Removes metadata.db and its SQLite sidecar files from each board
+    directory under the origin's boards directory, including boards whose
+    projections are not currently open. Article body files are untouched.
+    Returns the number of files removed.
+    """
+    root = origin_boards_dir(boards_dir, origin)
+    if not os.path.isdir(root):
+        return 0
+    removed = 0
+    for entry in os.listdir(root):
+        board_dir = os.path.join(root, entry)
+        if not os.path.isdir(board_dir):
+            continue
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            path = os.path.join(board_dir, "metadata.db" + suffix)
+            if os.path.exists(path):
+                os.remove(path)
+                removed += 1
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # Article projection row
 # ---------------------------------------------------------------------------
