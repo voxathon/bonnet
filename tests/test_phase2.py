@@ -149,6 +149,8 @@ def dispatcher(tmp_path, firehose):
         policy=policy,
         boards_dir=str(tmp_path / "boards"),
         body_store=bs,
+        allowed_origins={"bbs.a"},
+        local_origin="bbs.a",
     )
     yield d, firehose, nav, users, policy, bs
     d.close()

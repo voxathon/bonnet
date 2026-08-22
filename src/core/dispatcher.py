@@ -13,6 +13,7 @@ from core.board_projection import BoardProjection, board_db_path, delete_board_d
 from core.bodies import BodyStore
 from core.firehose import FirehoseStore
 from core.global_projections import (
+    PUNISHMENT_TYPE_BY_KIND,
     NavProjection,
     PolicyProjection,
     UserProjection,
@@ -73,6 +74,8 @@ class Dispatcher:
         boards_dir: str,
         body_store: BodyStore,
         allowed_origins: set = None,
+        local_origin: str = "",
+        punishment_import_policy: dict = None,
     ):
         self._firehose = firehose
         self._nav = nav
@@ -81,6 +84,10 @@ class Dispatcher:
         self._boards_dir = boards_dir
         self._body_store = body_store
         self._allowed_origins = allowed_origins or set()
+        self._local_origin = local_origin
+        # origin -> set of imported punishment type names (Gate D). Types from
+        # origins not present in the map are never applied locally.
+        self._punishment_import_policy = punishment_import_policy or {}
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
         self._boards_lock = threading.RLock()
         self._dispatch_lock = threading.RLock()
@@ -169,7 +176,8 @@ class Dispatcher:
         elif kind == KIND_REPORT:
             self._policy.apply_report(rec)
         elif kind in PUNISHMENT_ISSUE_KINDS:
-            self._policy.apply_punishment(rec)
+            if self._punishment_import_allowed(rec):
+                self._policy.apply_punishment(rec)
         elif kind == KIND_PUNISHMENT_REVOKE:
             self._policy.apply_punishment_revoke(rec)
         elif kind == KIND_PUNISHMENT_ACK:
@@ -178,6 +186,25 @@ class Dispatcher:
             pass  # handled by firehose store
         else:
             self._dispatch_unknown(rec)
+
+    def _punishment_import_allowed(self, rec: Record) -> bool:
+        """Gate D: per-type, per-origin punishment import filtering.
+
+        Local punishments always apply. Federated ones apply only when the
+        origin is configured with that type imported. Rejected records stay
+        in the firehose for relay; they are simply not enforced locally.
+        """
+        if rec.origin == self._local_origin:
+            return True
+        imported = self._punishment_import_policy.get(rec.origin, frozenset())
+        punishment_type = PUNISHMENT_TYPE_BY_KIND.get(rec.kind)
+        if punishment_type not in imported:
+            log_msg(
+                f"DISPATCH: origin='{rec.origin}' seq={rec.origin_seq} kind='{rec.kind}' "
+                "not imported — stored for relay only"
+            )
+            return False
+        return True
 
     def _dispatch_article(self, rec: Record) -> None:
         bp = self._get_board_projection(rec.origin, rec.board)
