@@ -63,8 +63,39 @@ u16. Binary fields are length-prefixed with u32.
 | `bonnet.user.register` / `.revoke` | User lifecycle |
 | `bonnet.rule.publish` / `.revoke` | Moderation rules |
 | `bonnet.report` | Report content |
-| `bonnet.punishment.issue` / `.revoke` | Punishments |
+| `bonnet.punishment.warn` / `.ban` / `.permaban` | Typed punishments (Gate D) |
+| `bonnet.punishment.revoke` | Revoke any punishment by event ID |
+| `bonnet.punishment.ack` | User acknowledgment of a punishment |
 | `bonnet.origin.key.rotate` | Origin key rotation |
+
+Punishment semantics (Gate D):
+
+- **warn** — metadata field 1 = punished pubkey (32 bytes); body = warning
+  message. Stays pending until acknowledged or revoked.
+- **ban** — metadata field 1 = punished pubkey, field 2 = expiry unix
+  timestamp (positive i64); body = ban reason. Expires automatically.
+- **permaban** — metadata field 1 = punished pubkey; body = reason. Never
+  expires; only revocation lifts it.
+- **revoke** — targets any punishment by `target_event_id`.
+- **ack** — metadata field 1 = punishment event ID (32 bytes), signed by the
+  punished user's own key. Acks are local to the user's homeserver and do
+  not federate. Acknowledging a warning clears its pending state; bans stay
+  in force until expiry or revocation.
+
+### Punishment write gate
+
+Publication of any record kind (except `bonnet.punishment.ack`) is blocked
+while the actor has pending punishments from allowed origins: unacknowledged
+warnings, active temporary bans, or permabans. Administrators bypass the
+gate. Blocked writes return error code `0x000A` with the punishment details.
+If the policy projection is unavailable or behind the firehose, the gate
+fails open so an outage cannot block all publication.
+
+Per-type per-origin import filtering: each `[sync.peers]` entry configures
+`import_warnings`, `import_temp_bans`, and `import_permabans`. Rejected
+punishment records remain in the firehose for relay but are not applied to
+the local policy projection. Punishments from origins without an import
+policy entry are never enforced locally.
 
 ## Projection Model
 
@@ -73,7 +104,7 @@ Projections are derived, rebuildable views:
 
 - **NavProjection** (`nav.db`) — board directory
 - **UserProjection** (`users.db`) — user registrations and revocations
-- **PolicyProjection** (`policy.db`) — rules, reports, punishments
+- **PolicyProjection** (`policy.db`) — rules, reports, punishments, punishment acks
 - **BoardProjection** (per-board `metadata.db`) — articles and lifecycle state
 
 The dispatcher processes records in origin sequence order, advancing the
@@ -146,3 +177,7 @@ Command responses begin with a status byte: `0x00` for success, `0x01` for
 error. Error responses include a 16-bit error code and a UTF-8 message.
 Internal exceptions return a generic `"Internal error"` message to avoid
 leaking server internals.
+
+Known codes: `0x0004` not permitted (ACL), `0x0006` validation error,
+`0x0009` conflicting state, `0x000A` write blocked by a pending punishment
+(message carries the punishment type, event ID, origin, and expiry).
