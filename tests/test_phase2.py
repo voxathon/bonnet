@@ -4,6 +4,8 @@ Tests PROTOCOL.md §13 (state reduction), §14.2 (board projection),
 §14.3 (bodies), §14.4 (global projections).
 """
 
+import time
+
 import pytest
 
 from core.board_projection import BoardProjection
@@ -695,36 +697,38 @@ class TestPolicyProjection:
         assert len(rules) == 1
         assert rules[0]["rule_name"] == "no-spam"
 
-    def test_punishment_and_revoke(self, policy_proj):
-        punished = _rid(30)
-        issue_rec = Record(
+    def _punish_rec(self, seq, kind, punished, event_id=None, **kwargs):
+        return Record(
             origin="bbs.a",
-            origin_seq=1,
-            event_id=_rid(1),
-            kind="bonnet.punishment.issue",
+            origin_seq=seq,
+            event_id=event_id or _rid(seq),
+            kind=kind,
             actor_pubkey=ACTOR_PUB,
             board="moderation.actions",
-            metadata=MetadataMap(
-                [
-                    metadata_bytes(1, punished),
-                    metadata_i64(2, -1),
-                ]
-            ),
+            metadata=kwargs.pop("metadata", MetadataMap([metadata_bytes(1, punished)])),
             created_at=1700000000,
+            **kwargs,
+        )
+
+    def test_punishment_and_revoke(self, policy_proj):
+        punished = _rid(30)
+        issue_rec = self._punish_rec(
+            1,
+            "bonnet.punishment.permaban",
+            punished,
+            metadata=MetadataMap([metadata_bytes(1, punished)]),
         )
         policy_proj.apply_punishment(issue_rec)
 
         puns = policy_proj.list_punishments_for_pubkey(punished)
         assert len(puns) == 1
-        assert puns[0]["expires_at"] == -1
+        assert puns[0]["type"] == "permaban"
+        assert puns[0]["expires_at"] == 0
 
-        revoke_rec = Record(
-            origin="bbs.a",
-            origin_seq=2,
-            event_id=_rid(2),
-            kind="bonnet.punishment.revoke",
-            actor_pubkey=ACTOR_PUB,
-            board="moderation.actions",
+        revoke_rec = self._punish_rec(
+            2,
+            "bonnet.punishment.revoke",
+            punished,
             target_origin="bbs.a",
             target_event_id=_rid(1),
         )
@@ -735,6 +739,131 @@ class TestPolicyProjection:
 
         all_puns = policy_proj.list_punishments_for_pubkey(punished, include_revoked=True)
         assert len(all_puns) == 1
+        assert all_puns[0]["revoked"] is True
+
+    def test_apply_punishment_rejects_unknown_kind(self, policy_proj):
+        rec = self._punish_rec(1, "bonnet.punishment.issue", _rid(30))
+        with pytest.raises(ValueError, match="not a punishment kind"):
+            policy_proj.apply_punishment(rec)
+
+    def test_pending_warning_blocks_until_acked(self, policy_proj):
+        punished = _rid(31)
+        warn_rec = self._punish_rec(1, "bonnet.punishment.warn", punished)
+        policy_proj.apply_punishment(warn_rec)
+
+        pending = policy_proj.list_pending_for_pubkey(punished)
+        assert len(pending) == 1
+        assert pending[0]["type"] == "warning"
+        assert pending[0]["event_id"] == _rid(1)
+
+        ack_rec = Record(
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.punishment.ack",
+            actor_pubkey=punished,
+            metadata=MetadataMap([metadata_bytes(1, _rid(1))]),
+            created_at=1700000100,
+        )
+        policy_proj.apply_punishment_ack(ack_rec)
+
+        assert policy_proj.list_pending_for_pubkey(punished) == []
+        # Ack is idempotent at the pending level even if re-acknowledged.
+        dup_ack = Record(
+            origin="bbs.a",
+            origin_seq=3,
+            event_id=_rid(3),
+            kind="bonnet.punishment.ack",
+            actor_pubkey=punished,
+            metadata=MetadataMap([metadata_bytes(1, _rid(1))]),
+            created_at=1700000200,
+        )
+        policy_proj.apply_punishment_ack(dup_ack)
+        assert policy_proj.list_pending_for_pubkey(punished) == []
+
+    def test_pending_ban_respects_expiry(self, policy_proj):
+        punished = _rid(32)
+        future = int(time.time()) + 3600
+        past = int(time.time()) - 3600
+
+        active_rec = self._punish_rec(
+            1,
+            "bonnet.punishment.ban",
+            punished,
+            event_id=_rid(1),
+            metadata=MetadataMap([metadata_bytes(1, punished), metadata_i64(2, future)]),
+        )
+        policy_proj.apply_punishment(active_rec)
+
+        expired_rec = self._punish_rec(
+            2,
+            "bonnet.punishment.ban",
+            punished,
+            event_id=_rid(2),
+            metadata=MetadataMap([metadata_bytes(1, punished), metadata_i64(2, past)]),
+        )
+        policy_proj.apply_punishment(expired_rec)
+
+        pending = policy_proj.list_pending_for_pubkey(punished)
+        assert len(pending) == 1
+        assert pending[0]["event_id"] == _rid(1)
+        assert pending[0]["expires_at"] == future
+
+    def test_pending_permaban_and_revocation(self, policy_proj):
+        punished = _rid(33)
+        rec = self._punish_rec(1, "bonnet.punishment.permaban", punished)
+        policy_proj.apply_punishment(rec)
+        assert len(policy_proj.list_pending_for_pubkey(punished)) == 1
+
+        revoke_rec = self._punish_rec(
+            2,
+            "bonnet.punishment.revoke",
+            punished,
+            target_origin="bbs.a",
+            target_event_id=_rid(1),
+        )
+        policy_proj.apply_punishment_revoke(revoke_rec)
+        assert policy_proj.list_pending_for_pubkey(punished) == []
+
+    def test_pending_filters_by_allowed_origins(self, policy_proj):
+        punished = _rid(34)
+        local_rec = self._punish_rec(1, "bonnet.punishment.warn", punished, event_id=_rid(1))
+        policy_proj.apply_punishment(local_rec)
+
+        remote_rec = Record(
+            origin="bbs.remote",
+            origin_seq=1,
+            event_id=_rid(2),
+            kind="bonnet.punishment.warn",
+            actor_pubkey=ACTOR_PUB,
+            board="moderation.actions",
+            metadata=MetadataMap([metadata_bytes(1, punished)]),
+            created_at=1700000000,
+        )
+        policy_proj.apply_punishment(remote_rec)
+
+        both = policy_proj.list_pending_for_pubkey(
+            punished, allowed_origins={"bbs.a", "bbs.remote"}
+        )
+        assert len(both) == 2
+        only_local = policy_proj.list_pending_for_pubkey(punished, allowed_origins={"bbs.a"})
+        assert len(only_local) == 1
+        assert only_local[0]["origin"] == "bbs.a"
+
+    def test_pending_stores_body_reference(self, policy_proj):
+        punished = _rid(35)
+        rec = self._punish_rec(
+            1,
+            "bonnet.punishment.warn",
+            punished,
+            body_hash=b"\x22" * 32,
+            body_size=42,
+        )
+        policy_proj.apply_punishment(rec)
+
+        pending = policy_proj.list_pending_for_pubkey(punished)
+        assert pending[0]["body_hash"] == b"\x22" * 32
+        assert pending[0]["body_size"] == 42
 
 
 # ---------------------------------------------------------------------------
@@ -881,28 +1010,45 @@ class TestDispatcher:
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
 
-        punished = _rid(30)
+        punished_user = Identity.from_private_key(bytes(range(50, 82)))
         pun_intent = Intent(
             event_id=_rid(1),
-            kind="bonnet.punishment.issue",
+            kind="bonnet.punishment.ban",
             origin="bbs.a",
             actor_pubkey=ACTOR_PUB,
             board="moderation.actions",
             metadata=MetadataMap(
                 [
-                    metadata_bytes(1, punished),
-                    metadata_i64(2, -1),
+                    metadata_bytes(1, punished_user.public_key),
+                    metadata_i64(2, 1800000000),
                 ]
             ),
+            body_hash=compute_body_hash(b"banned for spam"),
+            body_size=len(b"banned for spam"),
         )
         sig = sign_intent(ACTOR, encode_intent(pun_intent))
         firehose.append_record(ORIGIN_A, pun_intent, sig, b"banned for spam")
 
+        ack_intent = Intent(
+            event_id=_rid(2),
+            kind="bonnet.punishment.ack",
+            origin="bbs.a",
+            actor_pubkey=punished_user.public_key,
+            metadata=MetadataMap([metadata_bytes(1, _rid(1))]),
+        )
+        ack_sig = sign_intent(punished_user, encode_intent(ack_intent))
+        firehose.append_record(ORIGIN_A, ack_intent, ack_sig, b"")
+
         d.dispatch_origin("bbs.a")
 
-        puns = policy.list_punishments_for_pubkey(punished)
+        puns = policy.list_punishments_for_pubkey(punished_user.public_key)
         assert len(puns) == 1
-        assert puns[0]["expires_at"] == -1
+        assert puns[0]["type"] == "ban"
+        assert puns[0]["expires_at"] == 1800000000
+
+        # Ban with an ack still gates — only expiry or revoke lifts it.
+        pending_after_ack = policy.list_pending_for_pubkey(punished_user.public_key)
+        assert len(pending_after_ack) == 1
 
     def test_dispatch_idempotent(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher

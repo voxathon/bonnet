@@ -29,8 +29,18 @@ KIND_USER_REVOKE = "bonnet.user.revoke"
 KIND_RULE_PUBLISH = "bonnet.rule.publish"
 KIND_RULE_REVOKE = "bonnet.rule.revoke"
 KIND_REPORT = "bonnet.report"
-KIND_PUNISHMENT_ISSUE = "bonnet.punishment.issue"
+KIND_PUNISHMENT_WARN = "bonnet.punishment.warn"
+KIND_PUNISHMENT_BAN = "bonnet.punishment.ban"
+KIND_PUNISHMENT_PERMABAN = "bonnet.punishment.permaban"
 KIND_PUNISHMENT_REVOKE = "bonnet.punishment.revoke"
+KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
+
+# Gate D: issuing kind -> stored punishment type name.
+PUNISHMENT_TYPE_BY_KIND = {
+    KIND_PUNISHMENT_WARN: "warning",
+    KIND_PUNISHMENT_BAN: "ban",
+    KIND_PUNISHMENT_PERMABAN: "permaban",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +60,8 @@ class _BaseProjection:
         self._conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
-        self._init_schema()
         self._init_common()
+        self._init_schema()
 
     def close(self) -> None:
         with self._lock:
@@ -463,6 +473,18 @@ class PolicyProjection(_BaseProjection):
     """Moderation policy projection: rules, reports, punishments."""
 
     def _init_schema(self) -> None:
+        # Gate D schema v2: punishments carry a type and a body reference.
+        # If an older untyped punishments table exists, reset this projection
+        # entirely so the dispatcher replays it from the authoritative
+        # firehose (projections are derived state and never authoritative).
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(punishments)")}
+        if cols and "type" not in cols:
+            self._conn.executescript("""
+                DROP TABLE IF EXISTS punishment_acks;
+                DROP TABLE IF EXISTS punishments;
+                DELETE FROM applied_events;
+                DELETE FROM projection_checkpoint;
+            """)
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS rules (
                 event_id        BLOB PRIMARY KEY,
@@ -493,14 +515,26 @@ class PolicyProjection(_BaseProjection):
                 event_id        BLOB PRIMARY KEY,
                 origin          TEXT NOT NULL,
                 origin_seq      INTEGER NOT NULL,
+                type            TEXT NOT NULL CHECK(type IN ('warning', 'ban', 'permaban')),
                 punished_pubkey BLOB NOT NULL,
                 expires_at      INTEGER NOT NULL,
+                body_hash       BLOB NOT NULL,
+                body_size       INTEGER NOT NULL,
                 created_at      INTEGER NOT NULL,
                 revoked         INTEGER NOT NULL DEFAULT 0,
                 revoked_by      BLOB
             );
             CREATE INDEX IF NOT EXISTS idx_punishments_pubkey
                 ON punishments(punished_pubkey, revoked, expires_at);
+
+            CREATE TABLE IF NOT EXISTS punishment_acks (
+                ack_event_id        BLOB PRIMARY KEY,
+                user_pubkey         BLOB NOT NULL,
+                punishment_event_id BLOB NOT NULL,
+                acked_at            INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_punishment_acks_target
+                ON punishment_acks(user_pubkey, punishment_event_id);
         """)
 
     def apply_rule(self, rec: Record) -> None:
@@ -583,6 +617,9 @@ class PolicyProjection(_BaseProjection):
                 raise
 
     def apply_punishment(self, rec: Record) -> None:
+        punishment_type = PUNISHMENT_TYPE_BY_KIND.get(rec.kind)
+        if punishment_type is None:
+            raise ValueError(f"apply_punishment: not a punishment kind: {rec.kind}")
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
@@ -592,15 +629,18 @@ class PolicyProjection(_BaseProjection):
                 expires_at = rec.metadata.get_i64(2) or 0
                 self._conn.execute(
                     "INSERT OR REPLACE INTO punishments "
-                    "(event_id, origin, origin_seq, punished_pubkey, expires_at, "
-                    "created_at, revoked, revoked_by) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 0, NULL)",
+                    "(event_id, origin, origin_seq, type, punished_pubkey, expires_at, "
+                    "body_hash, body_size, created_at, revoked, revoked_by) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)",
                     (
                         rec.event_id,
                         rec.origin,
                         rec.origin_seq,
+                        punishment_type,
                         punished,
                         expires_at,
+                        rec.body_hash,
+                        rec.body_size,
                         rec.created_at,
                     ),
                 )
@@ -628,22 +668,48 @@ class PolicyProjection(_BaseProjection):
                 self._rollback()
                 raise
 
+    def apply_punishment_ack(self, rec: Record) -> None:
+        """Record a user's acknowledgment of a punishment (Gate D).
+
+        Acks are local to the user's homeserver and reference the punishment
+        event ID regardless of which origin issued it. Re-acking the same
+        punishment with a new event is idempotent at the pending-state level.
+        """
+        with self._lock:
+            if self.is_applied(rec.event_id):
+                return
+            self._begin()
+            try:
+                punishment_event_id = rec.metadata.get_bytes(1) or b"\x00" * 32
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO punishment_acks "
+                    "(ack_event_id, user_pubkey, punishment_event_id, acked_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (rec.event_id, rec.actor_pubkey, punishment_event_id, rec.created_at),
+                )
+                self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
+
     def list_punishments_for_pubkey(
         self, pubkey: bytes, include_revoked: bool = False
     ) -> list[dict]:
         with self._lock:
             if include_revoked:
                 rows = self._conn.execute(
-                    "SELECT event_id, origin, origin_seq, punished_pubkey, expires_at, "
-                    "created_at, revoked, revoked_by "
+                    "SELECT event_id, origin, origin_seq, type, punished_pubkey, expires_at, "
+                    "body_hash, body_size, created_at, revoked, revoked_by "
                     "FROM punishments WHERE punished_pubkey=? "
                     "ORDER BY created_at DESC",
                     (pubkey,),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    "SELECT event_id, origin, origin_seq, punished_pubkey, expires_at, "
-                    "created_at, revoked, revoked_by "
+                    "SELECT event_id, origin, origin_seq, type, punished_pubkey, expires_at, "
+                    "body_hash, body_size, created_at, revoked, revoked_by "
                     "FROM punishments WHERE punished_pubkey=? AND revoked=0 "
                     "ORDER BY created_at DESC",
                     (pubkey,),
@@ -653,14 +719,66 @@ class PolicyProjection(_BaseProjection):
                     "event_id": bytes(r[0]),
                     "origin": r[1],
                     "origin_seq": r[2],
-                    "punished_pubkey": bytes(r[3]),
-                    "expires_at": r[4],
-                    "created_at": r[5],
-                    "revoked": bool(r[6]),
-                    "revoked_by": bytes(r[7]) if r[7] else None,
+                    "type": r[3],
+                    "punished_pubkey": bytes(r[4]),
+                    "expires_at": r[5],
+                    "body_hash": bytes(r[6]),
+                    "body_size": r[7],
+                    "created_at": r[8],
+                    "revoked": bool(r[9]),
+                    "revoked_by": bytes(r[10]) if r[10] else None,
                 }
                 for r in rows
             ]
+
+    def list_pending_for_pubkey(
+        self,
+        pubkey: bytes,
+        allowed_origins: set | None = None,
+        now: int | None = None,
+    ) -> list[dict]:
+        """Return the punishments currently gating writes by this user (Gate D).
+
+        Pending means: unacknowledged warnings, unexpired temporary bans,
+        and permabans — all non-revoked. When allowed_origins is provided,
+        only punishments issued by those origins are considered.
+        """
+        if now is None:
+            now = int(time.time())
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT event_id, origin, origin_seq, type, punished_pubkey, expires_at, "
+                "body_hash, body_size, created_at "
+                "FROM punishments "
+                "WHERE punished_pubkey=? AND revoked=0 "
+                "AND ("
+                "  (type='warning' AND NOT EXISTS ("
+                "     SELECT 1 FROM punishment_acks a"
+                "     WHERE a.user_pubkey=punishments.punished_pubkey"
+                "       AND a.punishment_event_id=punishments.event_id))"
+                "  OR (type='ban' AND expires_at > ?)"
+                "  OR (type='permaban')"
+                ") ORDER BY created_at ASC",
+                (pubkey, now),
+            ).fetchall()
+            result = []
+            for r in rows:
+                origin = r[1]
+                if allowed_origins is not None and origin not in allowed_origins:
+                    continue
+                result.append(
+                    {
+                        "type": r[3],
+                        "event_id": bytes(r[0]),
+                        "origin": origin,
+                        "origin_seq": r[2],
+                        "expires_at": r[5],
+                        "body_hash": bytes(r[6]),
+                        "body_size": r[7],
+                        "created_at": r[8],
+                    }
+                )
+            return result
 
     def list_rules(self, origin: str = None, include_revoked: bool = False) -> list[dict]:
         with self._lock:
@@ -709,6 +827,7 @@ class PolicyProjection(_BaseProjection):
                 self._conn.execute("DELETE FROM rules")
                 self._conn.execute("DELETE FROM reports")
                 self._conn.execute("DELETE FROM punishments")
+                self._conn.execute("DELETE FROM punishment_acks")
                 self._conn.execute("DELETE FROM applied_events")
                 self._conn.execute("DELETE FROM projection_checkpoint")
                 self._conn.execute("COMMIT")
@@ -722,6 +841,11 @@ class PolicyProjection(_BaseProjection):
             try:
                 self._conn.execute("DELETE FROM rules WHERE origin=?", (origin,))
                 self._conn.execute("DELETE FROM reports WHERE origin=?", (origin,))
+                self._conn.execute(
+                    "DELETE FROM punishment_acks WHERE punishment_event_id IN "
+                    "(SELECT event_id FROM punishments WHERE origin=?)",
+                    (origin,),
+                )
                 self._conn.execute("DELETE FROM punishments WHERE origin=?", (origin,))
                 self._conn.execute("DELETE FROM applied_events WHERE origin=?", (origin,))
                 self._conn.execute("DELETE FROM projection_checkpoint WHERE origin=?", (origin,))
