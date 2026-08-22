@@ -14,6 +14,7 @@ from client.firehose_models import (
     BanStatus,
     BoardInfo,
     HeadInfo,
+    PendingPunishment,
     PublishResult,
     QueryResponse,
     SearchResponse,
@@ -753,20 +754,29 @@ def build_ban_status(pubkey: bytes) -> bytes:
 
 def parse_ban_status_response(resp: bytes) -> BanStatus:
     status, payload = parse_response(resp)
-    banned, offset = _read_u8(payload, 0)
-    if not banned:
-        return BanStatus(banned=False)
-    eid_len, offset = _read_u8(payload, offset)
-    event_id = payload[offset : offset + eid_len]
-    offset += eid_len
-    origin, offset = _read_text16(payload, offset)
-    expires_at, offset = _read_i64(payload, offset)
-    return BanStatus(
-        banned=True,
-        punishment_event_id=event_id.hex(),
-        source_origin=origin,
-        expires_at=expires_at,
-    )
+    type_names = {1: "warning", 2: "ban", 3: "permaban"}
+    count, offset = _read_u8(payload, 0)
+    punishments = []
+    for _ in range(count):
+        type_code, offset = _read_u8(payload, offset)
+        expires_at, offset = _read_i64(payload, offset)
+        body_size, offset = _read_u32(payload, offset)
+        body_hash = payload[offset : offset + 32]
+        offset += 32
+        event_id = payload[offset : offset + 32]
+        offset += 32
+        origin, offset = _read_text16(payload, offset)
+        punishments.append(
+            PendingPunishment(
+                type=type_names.get(type_code, f"unknown({type_code})"),
+                event_id=event_id.hex(),
+                origin=origin,
+                expires_at=expires_at,
+                body_hash=body_hash.hex(),
+                body_size=body_size,
+            )
+        )
+    return BanStatus(punishments=punishments)
 
 
 # ---------------------------------------------------------------------------

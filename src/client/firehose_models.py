@@ -164,13 +164,30 @@ class UserInfo:
 
 
 @dataclass
-class BanStatus:
-    """Ban status query result."""
+class PendingPunishment:
+    """A punishment currently gating a user's writes (Gate D)."""
 
-    banned: bool
-    punishment_event_id: str = ""
-    source_origin: str = ""
-    expires_at: int = 0
+    type: str  # "warning" | "ban" | "permaban"
+    event_id: str = ""  # hex
+    origin: str = ""
+    expires_at: int = 0  # 0 = no expiry
+    body_hash: str = ""  # hex
+    body_size: int = 0
+
+
+@dataclass
+class BanStatus:
+    """Ban status query result: all pending punishments for a pubkey."""
+
+    punishments: list[PendingPunishment] = field(default_factory=list)
+
+    @property
+    def banned(self) -> bool:
+        return any(p.type in ("ban", "permaban") for p in self.punishments)
+
+    @property
+    def blocked(self) -> bool:
+        return bool(self.punishments)
 
 
 @dataclass

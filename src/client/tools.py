@@ -690,16 +690,18 @@ async def unpin_article(
 
 
 # ---------------------------------------------------------------------------
-# Ban status
+# Punishments (Gate D)
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool
 async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
-    """Check if a user is currently banned.
+    """List all punishments currently pending against a user.
 
     pubkey_hex: hex Ed25519 public key of the user to check.
-    Returns ban status, source origin, and expiry.
+    Returns each pending punishment with its type, event ID, issuing
+    origin, expiry, and body reference. Pending warnings and bans gate
+    the user's writes until acknowledged/expired/revoked.
     """
     pubkey = _validate_pubkey(pubkey_hex)
     client = _make_client()
@@ -709,6 +711,122 @@ async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
         else:
             await _connect_anonymous(client)
         return await client.get_ban_status(pubkey)
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def punish_warn(
+    punished_pubkey_hex: str,
+    reason: str,
+    board: str = "moderation.actions",
+    auth: str | None = None,
+) -> str:
+    """Issue a formal warning to a user. Requires moderator or administrator.
+
+    The warning stays pending until the user acknowledges it with
+    acknowledge_punishment; while pending it blocks their writes.
+    """
+    pubkey = _validate_pubkey(punished_pubkey_hex)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_punishment_warn(pubkey, reason, board=board)
+        return f"Warning issued — event seq {result.origin_seq}, event {result.event_id}"
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def punish_ban(
+    punished_pubkey_hex: str,
+    reason: str,
+    expires_at: int,
+    board: str = "moderation.actions",
+    auth: str | None = None,
+) -> str:
+    """Temporarily ban a user until a unix timestamp. Requires moderator or administrator.
+
+    expires_at: positive unix timestamp when the ban lapses.
+    """
+    pubkey = _validate_pubkey(punished_pubkey_hex)
+    if expires_at <= int(time.time()):
+        raise ValueError("expires_at must be a future unix timestamp")
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_punishment_ban(pubkey, reason, expires_at, board=board)
+        return f"Ban issued until {expires_at} — event seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def punish_permaban(
+    punished_pubkey_hex: str,
+    reason: str,
+    board: str = "moderation.actions",
+    auth: str | None = None,
+) -> str:
+    """Permanently ban a user. Requires administrator authority via ACL.
+
+    Permabans never expire; only punish_revoke can lift them.
+    """
+    pubkey = _validate_pubkey(punished_pubkey_hex)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_punishment_permaban(pubkey, reason, board=board)
+        return f"Permaban issued — event seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def punish_revoke(
+    punishment_event_id_hex: str,
+    reason: str = "",
+    auth: str | None = None,
+) -> str:
+    """Revoke any punishment by its event ID. Requires moderator or administrator."""
+    eid = _validate_event_id(punishment_event_id_hex)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_punishment_revoke(eid, reason)
+        return f"Punishment revoked — event seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def acknowledge_punishment(
+    punishment_event_id_hex: str,
+    auth: str | None = None,
+) -> str:
+    """Acknowledge a punishment as the punished user.
+
+    Acknowledging a warning clears it from your pending state so writes
+    proceed again. Bans remain in force until they expire or are revoked.
+    Must be called with your own identity.
+    """
+    eid = _validate_event_id(punishment_event_id_hex)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_punishment_ack(eid)
+        return f"Punishment acknowledged — ack event {result.event_id}"
+    finally:
+        await client.close()
+
+
+@mcp.tool
+async def my_punishments(auth: str | None = None) -> BanStatus:
+    """List punishments pending against your own identity."""
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        return await client.get_ban_status(client._identity.public_key)
     finally:
         await client.close()
 

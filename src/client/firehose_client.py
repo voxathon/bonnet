@@ -648,6 +648,114 @@ class FirehoseHTTPClient:
         return parse_publish_response(resp)
 
     # ------------------------------------------------------------------
+    # Punishments (Gate D)
+    # ------------------------------------------------------------------
+
+    async def _publish_punishment_issue(
+        self,
+        kind: str,
+        board: str,
+        punished_pubkey: bytes,
+        reason: str,
+        expires_at: int | None = None,
+    ) -> PublishResult:
+        if self._identity is None or self._server_origin is None:
+            raise FirehoseClientError("not connected")
+        eid = os.urandom(32)
+        body = reason.encode("utf-8")
+        m = MetadataMap([metadata_bytes(1, punished_pubkey)])
+        if expires_at is not None:
+            m.fields.append(metadata_i64(2, expires_at))
+        intent = Intent(
+            event_id=eid,
+            kind=kind,
+            origin=self._server_origin,
+            actor_pubkey=self._identity.public_key,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            board=board,
+            metadata=m,
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
+        )
+        actor_sig = sign_intent(self._identity, encode_intent(intent))
+        cmd = build_publish_record(intent, actor_sig, body)
+        resp = await self._send_command(cmd)
+        return parse_publish_response(resp)
+
+    async def publish_punishment_warn(
+        self, punished_pubkey: bytes, reason: str, board: str = "moderation.actions"
+    ) -> PublishResult:
+        """Issue a warning. Stays pending until the user acknowledges it."""
+        return await self._publish_punishment_issue(
+            "bonnet.punishment.warn", board, punished_pubkey, reason
+        )
+
+    async def publish_punishment_ban(
+        self,
+        punished_pubkey: bytes,
+        reason: str,
+        expires_at: int,
+        board: str = "moderation.actions",
+    ) -> PublishResult:
+        """Issue a temporary ban expiring at a unix timestamp."""
+        return await self._publish_punishment_issue(
+            "bonnet.punishment.ban", board, punished_pubkey, reason, expires_at=expires_at
+        )
+
+    async def publish_punishment_permaban(
+        self, punished_pubkey: bytes, reason: str, board: str = "moderation.actions"
+    ) -> PublishResult:
+        """Issue a permanent ban."""
+        return await self._publish_punishment_issue(
+            "bonnet.punishment.permaban", board, punished_pubkey, reason
+        )
+
+    async def publish_punishment_revoke(
+        self, punishment_event_id: bytes, reason: str = ""
+    ) -> PublishResult:
+        """Revoke any punishment by its event ID."""
+        if self._identity is None or self._server_origin is None:
+            raise FirehoseClientError("not connected")
+        eid = os.urandom(32)
+        body = reason.encode("utf-8") if reason else b""
+        intent = Intent(
+            event_id=eid,
+            kind="bonnet.punishment.revoke",
+            origin=self._server_origin,
+            actor_pubkey=self._identity.public_key,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            target_origin=self._server_origin,
+            target_event_id=punishment_event_id,
+            body_hash=compute_body_hash(body) if body else ZERO_ID,
+            body_size=len(body),
+        )
+        actor_sig = sign_intent(self._identity, encode_intent(intent))
+        cmd = build_publish_record(intent, actor_sig, body)
+        resp = await self._send_command(cmd)
+        return parse_publish_response(resp)
+
+    async def publish_punishment_ack(self, punishment_event_id: bytes) -> PublishResult:
+        """Acknowledge a punishment as the punished user (Gate D ack flow)."""
+        if self._identity is None or self._server_origin is None:
+            raise FirehoseClientError("not connected")
+        eid = os.urandom(32)
+        intent = Intent(
+            event_id=eid,
+            kind="bonnet.punishment.ack",
+            origin=self._server_origin,
+            actor_pubkey=self._identity.public_key,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            metadata=MetadataMap([metadata_bytes(1, punishment_event_id)]),
+        )
+        actor_sig = sign_intent(self._identity, encode_intent(intent))
+        cmd = build_publish_record(intent, actor_sig, b"")
+        resp = await self._send_command(cmd)
+        return parse_publish_response(resp)
+
+    # ------------------------------------------------------------------
     # Firehose reads
     # ------------------------------------------------------------------
 
