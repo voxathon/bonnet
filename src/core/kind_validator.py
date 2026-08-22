@@ -29,9 +29,27 @@ KIND_USER_REVOKE = "bonnet.user.revoke"
 KIND_RULE_PUBLISH = "bonnet.rule.publish"
 KIND_RULE_REVOKE = "bonnet.rule.revoke"
 KIND_REPORT = "bonnet.report"
-KIND_PUNISHMENT_ISSUE = "bonnet.punishment.issue"
+KIND_PUNISHMENT_WARN = "bonnet.punishment.warn"
+KIND_PUNISHMENT_BAN = "bonnet.punishment.ban"
+KIND_PUNISHMENT_PERMABAN = "bonnet.punishment.permaban"
 KIND_PUNISHMENT_REVOKE = "bonnet.punishment.revoke"
+KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
 KIND_ORIGIN_KEY_ROTATE = "bonnet.origin.key.rotate"
+
+PUNISHMENT_ISSUE_KINDS = frozenset(
+    {
+        KIND_PUNISHMENT_WARN,
+        KIND_PUNISHMENT_BAN,
+        KIND_PUNISHMENT_PERMABAN,
+    }
+)
+
+# Maps each issuing kind to its PolicyProjection type name (Gate D).
+PUNISHMENT_TYPE_BY_KIND = {
+    KIND_PUNISHMENT_WARN: "warning",
+    KIND_PUNISHMENT_BAN: "ban",
+    KIND_PUNISHMENT_PERMABAN: "permaban",
+}
 
 ALL_KNOWN_KINDS = frozenset(
     {
@@ -51,8 +69,11 @@ ALL_KNOWN_KINDS = frozenset(
         KIND_RULE_PUBLISH,
         KIND_RULE_REVOKE,
         KIND_REPORT,
-        KIND_PUNISHMENT_ISSUE,
+        KIND_PUNISHMENT_WARN,
+        KIND_PUNISHMENT_BAN,
+        KIND_PUNISHMENT_PERMABAN,
         KIND_PUNISHMENT_REVOKE,
+        KIND_PUNISHMENT_ACK,
         KIND_ORIGIN_KEY_ROTATE,
     }
 )
@@ -105,8 +126,11 @@ MODERATION_KINDS = frozenset(
         KIND_RULE_PUBLISH,
         KIND_RULE_REVOKE,
         KIND_REPORT,
-        KIND_PUNISHMENT_ISSUE,
+        KIND_PUNISHMENT_WARN,
+        KIND_PUNISHMENT_BAN,
+        KIND_PUNISHMENT_PERMABAN,
         KIND_PUNISHMENT_REVOKE,
+        KIND_PUNISHMENT_ACK,
     }
 )
 
@@ -154,10 +178,12 @@ class KindValidator:
             self._validate_event_target(intent)
         elif kind == KIND_REPORT:
             self._validate_report(intent)
-        elif kind == KIND_PUNISHMENT_ISSUE:
+        elif kind in PUNISHMENT_ISSUE_KINDS:
             self._validate_punishment_issue(intent)
         elif kind == KIND_PUNISHMENT_REVOKE:
             self._validate_event_target(intent)
+        elif kind == KIND_PUNISHMENT_ACK:
+            self._validate_punishment_ack(intent)
         elif kind == KIND_ORIGIN_KEY_ROTATE:
             self._validate_key_rotation(intent)
 
@@ -297,17 +323,49 @@ class KindValidator:
     # ------------------------------------------------------------------
 
     def _validate_punishment_issue(self, intent: Intent) -> None:
+        kind = intent.kind
         if not intent.board:
-            raise ValidationError("bonnet.punishment.issue requires non-empty board")
+            raise ValidationError(f"{kind} requires non-empty board")
         self._require_empty_article_targets(intent)
+        self._require_empty_targets(intent)
 
         m = intent.metadata
-        if m.get_bytes(1) is None:
+        punished = m.get_bytes(1)
+        if punished is None:
+            raise ValidationError(f"{kind} requires metadata field 1 (punished public key)")
+        if len(punished) != 32:
+            raise ValidationError(f"{kind} metadata field 1 (punished public key) must be 32 bytes")
+
+        expires_at = m.get_i64(2)
+        if kind == KIND_PUNISHMENT_BAN:
+            if expires_at is None:
+                raise ValidationError(
+                    "bonnet.punishment.ban requires metadata field 2 (expiry timestamp)"
+                )
+            if expires_at <= 0:
+                raise ValidationError("bonnet.punishment.ban expiry must be a positive timestamp")
+        elif expires_at is not None:
             raise ValidationError(
-                "bonnet.punishment.issue requires metadata field 1 (punished public key)"
+                f"{kind} must not carry metadata field 2 (only bonnet.punishment.ban has an expiry)"
             )
-        if m.get_i64(2) is None:
-            raise ValidationError("bonnet.punishment.issue requires metadata field 2 (expiration)")
+
+        if intent.body_size <= 0:
+            raise ValidationError(f"{kind} requires a non-empty body (the reason)")
+
+    def _validate_punishment_ack(self, intent: Intent) -> None:
+        self._require_empty_board(intent)
+        self._require_empty_article_targets(intent)
+        self._require_empty_targets(intent)
+
+        target = intent.metadata.get_bytes(1)
+        if target is None:
+            raise ValidationError(
+                "bonnet.punishment.ack requires metadata field 1 (punishment event ID)"
+            )
+        if len(target) != 32:
+            raise ValidationError(
+                "bonnet.punishment.ack metadata field 1 (punishment event ID) must be 32 bytes"
+            )
 
     # ------------------------------------------------------------------
     # Key rotation
