@@ -46,6 +46,10 @@ KIND_ARTICLE_PIN = "bonnet.article.pin"
 KIND_ARTICLE_UNPIN = "bonnet.article.unpin"
 KIND_THREAD_CLOSE = "bonnet.thread.close"
 KIND_THREAD_REOPEN = "bonnet.thread.reopen"
+KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
+
+# Gate D punishment type codes used by the BAN_STATUS response.
+PUNISHMENT_TYPE_CODES = {"warning": 1, "ban": 2, "permaban": 3}
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +275,46 @@ class FirehoseCommandHandler:
         if self._sync_manager is not None:
             self._sync_manager.queue_sync_threadsafe(origin)
 
+    # ------------------------------------------------------------------
+    # Punishment write gate (Gate D)
+    # ------------------------------------------------------------------
+
+    def _policy_current(self) -> bool:
+        """True when the policy projection has caught up with the firehose."""
+        for origin in self._allowed_origins or {self._origin}:
+            try:
+                if self._firehose.get_highest_seq(origin) > self._policy.get_checkpoint(origin):
+                    return False
+            except Exception:
+                return False
+        return True
+
+    def _punishment_gate_response(self, actor_pubkey: bytes) -> bytes | None:
+        """Return an error response if this user's writes are gated (Gate D).
+
+        Fails open when the policy projection is unavailable or behind the
+        firehose — an outage must not block all publication.
+        """
+        if not self._policy_current():
+            return None
+        try:
+            pending = self._policy.list_pending_for_pubkey(
+                actor_pubkey,
+                allowed_origins=self._allowed_origins or None,
+            )
+        except Exception as e:
+            log_msg(f"PUNISHMENT_GATE: fail-open: {type(e).__name__}: {e}")
+            return None
+        if not pending:
+            return None
+        p = pending[0]
+        expires = p["expires_at"] if p["type"] == "ban" else 0
+        msg = (
+            f"Write blocked by {p['type']}: "
+            f"event={p['event_id'].hex()} origin={p['origin']} expires={expires}"
+        )
+        return _error(0x000A, msg)
+
     def handle(self, body: bytes, ctx: FirehoseContext) -> bytes:
         if not body:
             return _error(0x0005, "Empty request")
@@ -370,6 +414,13 @@ class FirehoseCommandHandler:
             ctx.to_auth_context(), "write", command="PUBLISH_RECORD", kind=kind, board=board or None
         ):
             return _error(0x0004, "Not permitted")
+
+        # Gate D write gate: administrators bypass; ack must pass so a
+        # punished user can acknowledge their warning.
+        if kind != KIND_PUNISHMENT_ACK and ctx.role != "administrator":
+            gate_error = self._punishment_gate_response(intent.actor_pubkey)
+            if gate_error is not None:
+                return gate_error
 
         if kind in (
             KIND_ARTICLE_CANCEL,
@@ -1106,31 +1157,28 @@ class FirehoseCommandHandler:
     def _cmd_ban_status(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         pubkey_len, offset = _read_u8(data, offset)
+        if offset + pubkey_len > len(data):
+            return _error(0x0006, "Truncated pubkey")
         pubkey = data[offset : offset + pubkey_len]
-        offset += pubkey_len
 
-        punishments = self._policy.list_punishments_for_pubkey(pubkey, include_revoked=False)
-        if self._allowed_origins:
-            punishments = [p for p in punishments if p["origin"] in self._allowed_origins]
+        try:
+            punishments = self._policy.list_pending_for_pubkey(
+                pubkey,
+                allowed_origins=self._allowed_origins or None,
+            )
+        except Exception as e:
+            log_msg(f"BAN_STATUS: policy read failed: {type(e).__name__}: {e}")
+            return _error(0x0000, "Internal error")
 
-        now = int(time.time())
-        active_ban = None
+        out = struct.pack(">B", len(punishments))
         for p in punishments:
-            expires = p["expires_at"]
-            if expires == 0:
-                continue
-            if expires < 0 or expires > now:
-                active_ban = p
-                break
-
-        if active_ban:
-            out = struct.pack(">B", 1)
-            out += struct.pack(">B", len(active_ban["event_id"])) + active_ban["event_id"]
-            origin = active_ban["origin"].encode("utf-8")
-            out += struct.pack(">H", len(origin)) + origin
-            out += struct.pack(">q", active_ban["expires_at"])
-        else:
-            out = struct.pack(">B", 0)
+            out += struct.pack(">B", PUNISHMENT_TYPE_CODES.get(p["type"], 0))
+            out += struct.pack(">q", p["expires_at"])
+            out += struct.pack(">I", p["body_size"])
+            out += p["body_hash"]
+            out += p["event_id"]
+            origin_bytes = p["origin"].encode("utf-8")
+            out += struct.pack(">H", len(origin_bytes)) + origin_bytes
 
         return _success(out)
 

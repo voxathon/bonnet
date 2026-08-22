@@ -4,6 +4,7 @@ Tests PROTOCOL.md §18 (discovery), §19 (command transport), §17 (sync).
 """
 
 import struct
+import time
 
 import pytest
 
@@ -18,6 +19,7 @@ from core.record import (
     Head,
     Intent,
     MetadataMap,
+    Record,
     compute_body_hash,
     compute_event_hash,
     decode_head,
@@ -29,6 +31,7 @@ from core.record import (
     is_origin_witness,
     make_origin_witness,
     metadata_bytes,
+    metadata_i64,
     metadata_text,
     sign_intent,
 )
@@ -43,6 +46,7 @@ from net.firehose_commands import (
     OP_EVENT_HEAD,
     OP_EVENT_RANGE,
     OP_PUBLISH_RECORD,
+    PUNISHMENT_TYPE_CODES,
     FirehoseCommandHandler,
     FirehoseContext,
 )
@@ -135,6 +139,7 @@ def stack(tmp_path, firehose):
         validator=validator,
         search=search,
         hostname="bbs.test",
+        dispatcher=dispatcher,
     )
 
     yield {
@@ -362,6 +367,294 @@ class TestPublishRecord:
         resp = h.handle(req, _actor_ctx())
         assert resp[0] == 1
         assert b"exceeds maximum" in resp.lower()
+
+
+# ---------------------------------------------------------------------------
+# Punishment write gate + BAN_STATUS (Gate D)
+# ---------------------------------------------------------------------------
+
+
+def _publish_request(intent, actor_identity, body=b""):
+    encoded_intent = encode_intent(intent)
+    actor_sig = sign_intent(actor_identity, encoded_intent)
+    req = struct.pack(">B", OP_PUBLISH_RECORD)
+    req += struct.pack(">I", len(encoded_intent)) + encoded_intent
+    req += actor_sig
+    req += struct.pack(">I", len(body)) + body
+    return req
+
+
+def _user_ctx(user_identity):
+    return FirehoseContext(
+        peer_pubkey=user_identity.public_key,
+        is_registered=True,
+        origin="bbs.test",
+    )
+
+
+class TestPunishmentGate:
+    @pytest.fixture
+    def punished(self):
+        return Identity.from_private_key(bytes(range(60, 92)))
+
+    def _grant_write_all(self, stack):
+        stack["acl"].add_rule(
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(wildcard=True),
+                actions=["read", "write"],
+                commands=["*"],
+                kinds=["*"],
+                boards=["*"],
+                objects=["*"],
+            )
+        )
+
+    def _apply_punishment(self, policy, kind, pubkey, seq, expires=None):
+        fields = [metadata_bytes(1, pubkey)]
+        if expires is not None:
+            fields.append(metadata_i64(2, expires))
+        rec = Record(
+            origin="bbs.test",
+            origin_seq=seq,
+            event_id=_rid(seq),
+            kind=kind,
+            actor_pubkey=ACTOR_PUB,
+            board="moderation.actions",
+            metadata=MetadataMap(fields),
+            body_hash=compute_body_hash(b"reason"),
+            body_size=len(b"reason"),
+            created_at=int(time.time()),
+        )
+        if kind == "bonnet.punishment.revoke":
+            rec.target_origin = "bbs.test"
+            rec.target_event_id = _rid(expires)
+            policy.apply_punishment_revoke(rec)
+        else:
+            policy.apply_punishment(rec)
+
+    def _article_req(self, user, seed=1):
+        body = b"hello world"
+        intent = Intent(
+            event_id=_rid(seed),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=user.public_key,
+            board="general",
+            article_id=_rid(seed + 100),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
+        )
+        return _publish_request(intent, user, body), intent
+
+    def test_warn_blocks_publish(self, stack, punished):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        self._apply_punishment(stack["policy"], "bonnet.punishment.warn", punished.public_key, 1)
+
+        req, _ = self._article_req(punished)
+        resp = h.handle(req, _user_ctx(punished))
+        assert resp[0] == 1
+        assert struct.unpack(">H", resp[1:3])[0] == 0x000A
+        assert b"warning" in resp
+        assert b"event=" + _rid(1).hex().encode() in resp
+
+    def test_ack_clears_warning_then_publish_succeeds(self, stack, punished):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        self._apply_punishment(stack["policy"], "bonnet.punishment.warn", punished.public_key, 1)
+
+        req, _ = self._article_req(punished)
+        assert h.handle(req, _user_ctx(punished))[0] == 1
+
+        ack = Intent(
+            event_id=_rid(50),
+            kind="bonnet.punishment.ack",
+            origin="bbs.test",
+            actor_pubkey=punished.public_key,
+            metadata=MetadataMap([metadata_bytes(1, _rid(1))]),
+        )
+        ack_resp = h.handle(_publish_request(ack, punished), _user_ctx(punished))
+        assert ack_resp[0] == 0
+        assert stack["policy"].list_pending_for_pubkey(punished.public_key) == []
+
+        req2, _ = self._article_req(punished, seed=2)
+        assert h.handle(req2, _user_ctx(punished))[0] == 0
+
+    def test_active_ban_and_permaban_block(self, stack, punished):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        future = int(time.time()) + 3600
+        self._apply_punishment(
+            stack["policy"], "bonnet.punishment.ban", punished.public_key, 1, expires=future
+        )
+        req, _ = self._article_req(punished)
+        resp = h.handle(req, _user_ctx(punished))
+        assert struct.unpack(">H", resp[1:3])[0] == 0x000A
+        assert b"ban" in resp
+
+        permaban_user = Identity.from_private_key(bytes(range(70, 102)))
+        self._apply_punishment(
+            stack["policy"], "bonnet.punishment.permaban", permaban_user.public_key, 2
+        )
+        req2, _ = self._article_req(permaban_user)
+        resp2 = h.handle(req2, _user_ctx(permaban_user))
+        assert struct.unpack(">H", resp2[1:3])[0] == 0x000A
+        assert b"permaban" in resp2
+
+    def test_expired_ban_does_not_block(self, stack, punished):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        past = int(time.time()) - 3600
+        self._apply_punishment(
+            stack["policy"], "bonnet.punishment.ban", punished.public_key, 1, expires=past
+        )
+        req, _ = self._article_req(punished)
+        assert h.handle(req, _user_ctx(punished))[0] == 0
+
+    def test_revoked_permaban_does_not_block(self, stack, punished):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        self._apply_punishment(
+            stack["policy"], "bonnet.punishment.permaban", punished.public_key, 1
+        )
+        revoke_rec = Record(
+            origin="bbs.test",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.punishment.revoke",
+            actor_pubkey=ACTOR_PUB,
+            target_origin="bbs.test",
+            target_event_id=_rid(1),
+            created_at=int(time.time()),
+        )
+        stack["policy"].apply_punishment_revoke(revoke_rec)
+
+        req, _ = self._article_req(punished)
+        assert h.handle(req, _user_ctx(punished))[0] == 0
+
+    def test_administrator_bypasses_gate(self, stack, punished):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        self._apply_punishment(
+            stack["policy"], "bonnet.punishment.permaban", punished.public_key, 1
+        )
+
+        admin = Identity.from_private_key(bytes(range(80, 112)))
+        self._apply_punishment(stack["policy"], "bonnet.punishment.permaban", admin.public_key, 2)
+        ctx = FirehoseContext(
+            peer_pubkey=admin.public_key,
+            is_registered=True,
+            role="administrator",
+            origin="bbs.test",
+        )
+        req, _ = self._article_req(admin)
+        assert h.handle(req, ctx)[0] == 0
+
+
+class TestBanStatusV2:
+    def test_empty_status(self, stack):
+        h = stack["handler"]
+        req = struct.pack(">B", OP_BAN_STATUS) + struct.pack(">B", 32) + b"\x01" * 32
+        resp = h.handle(req, _actor_ctx())
+        assert resp[0] == 0
+        assert resp[1] == 0
+
+    def test_multi_pending_with_types(self, stack):
+        h = stack["handler"]
+        policy = stack["policy"]
+        target = Identity.from_private_key(bytes(range(90, 122))).public_key
+        future = int(time.time()) + 7200
+
+        for seq, kind in (
+            (1, "bonnet.punishment.warn"),
+            (2, "bonnet.punishment.ban"),
+            (3, "bonnet.punishment.permaban"),
+        ):
+            fields = [metadata_bytes(1, target)]
+            if kind == "bonnet.punishment.ban":
+                fields.append(metadata_i64(2, future))
+            rec = Record(
+                origin="bbs.test",
+                origin_seq=seq,
+                event_id=_rid(seq),
+                kind=kind,
+                actor_pubkey=ACTOR_PUB,
+                board="moderation.actions",
+                metadata=MetadataMap(fields),
+                body_hash=b"\x33" * 32,
+                body_size=7,
+                created_at=int(time.time()) + seq,
+            )
+            policy.apply_punishment(rec)
+
+        req = struct.pack(">B", OP_BAN_STATUS) + struct.pack(">B", len(target)) + target
+        resp = h.handle(req, _actor_ctx())
+        assert resp[0] == 0
+
+        payload = resp[1:]
+        count = payload[0]
+        assert count == 3
+
+        offset = 1
+        seen_types = []
+        for _ in range(count):
+            type_code = payload[offset]
+            offset += 1
+            (expires_at,) = struct.unpack(">q", payload[offset : offset + 8])
+            offset += 8
+            (body_size,) = struct.unpack(">I", payload[offset : offset + 4])
+            offset += 4
+            body_hash = payload[offset : offset + 32]
+            offset += 32
+            event_id = payload[offset : offset + 32]
+            offset += 32
+            origin_len = struct.unpack(">H", payload[offset : offset + 2])[0]
+            offset += 2
+            origin = payload[offset : offset + origin_len].decode()
+            offset += origin_len
+
+            seen_types.append(type_code)
+            assert body_hash == b"\x33" * 32
+            assert body_size == 7
+            assert origin == "bbs.test"
+
+        assert seen_types == [
+            PUNISHMENT_TYPE_CODES["warning"],
+            PUNISHMENT_TYPE_CODES["ban"],
+            PUNISHMENT_TYPE_CODES["permaban"],
+        ]
+
+    def test_expired_and_revoked_excluded(self, stack):
+        h = stack["handler"]
+        policy = stack["policy"]
+        target = Identity.from_private_key(bytes(range(95, 127))).public_key
+        past = int(time.time()) - 7200
+
+        expired = Record(
+            origin="bbs.test",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.punishment.ban",
+            actor_pubkey=ACTOR_PUB,
+            board="moderation.actions",
+            metadata=MetadataMap([metadata_bytes(1, target), metadata_i64(2, past)]),
+            body_hash=b"\x33" * 32,
+            body_size=7,
+            created_at=int(time.time()),
+        )
+        policy.apply_punishment(expired)
+
+        req = struct.pack(">B", OP_BAN_STATUS) + struct.pack(">B", len(target)) + target
+        resp = h.handle(req, _actor_ctx())
+        assert resp[0] == 0
+        assert resp[1] == 0
 
 
 # ---------------------------------------------------------------------------
