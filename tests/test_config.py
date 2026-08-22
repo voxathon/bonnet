@@ -284,9 +284,7 @@ import_permabans = false
 
 def test_validate_rejects_non_bool_peer_import_flag():
     c = FirehoseConfig(
-        peers=[
-            PeerConfig(origin="a.test", hostname="a.test", import_warnings="yes")
-        ]
+        peers=[PeerConfig(origin="a.test", hostname="a.test", import_warnings="yes")]
     )
     with pytest.raises(ValueError, match="import_warnings"):
         c.validate()
