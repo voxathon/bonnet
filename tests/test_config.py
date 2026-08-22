@@ -236,6 +236,79 @@ verify_tls = true
     assert c.peers[1].verify_tls is True
 
 
+def test_peer_import_flags_default_to_true(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "a.test"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    peer = c.peers[0]
+    assert peer.import_warnings is True
+    assert peer.import_temp_bans is True
+    assert peer.import_permabans is True
+
+
+def test_peer_import_flags_from_toml(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "a.test"
+import_warnings = true
+import_temp_bans = true
+import_permabans = false
+
+[[sync.peers]]
+origin = "b.test"
+hostname = "b.test"
+import_warnings = false
+import_temp_bans = false
+import_permabans = false
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.peers[0].imported_punishment_types() == {"warning", "ban"}
+    assert c.peers[1].imported_punishment_types() == set()
+
+
+def test_validate_rejects_non_bool_peer_import_flag():
+    c = FirehoseConfig(
+        peers=[
+            PeerConfig(origin="a.test", hostname="a.test", import_warnings="yes")
+        ]
+    )
+    with pytest.raises(ValueError, match="import_warnings"):
+        c.validate()
+
+
+def test_as_bool_rejects_non_bool_toml_value(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "a.test"
+import_permabans = 1
+""",
+    )
+    with pytest.raises(ValueError, match="import_permabans"):
+        FirehoseConfig.load(path)
+
+
 # ---------------------------------------------------------------------------
 # Missing config behavior
 # ---------------------------------------------------------------------------
