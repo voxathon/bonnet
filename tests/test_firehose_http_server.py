@@ -85,6 +85,7 @@ async def server_stack(tmp_path):
         boards_dir=config.boards_dir,
         body_store=body_store,
         allowed_origins=allowed_origins,
+        local_origin=ORIGIN,
     )
 
     acl = ACLEvaluator(default_rules_for_admin(SERVER_PUB.hex()))

@@ -91,6 +91,10 @@ class BonnetFirehoseServer:
         for peer in config.peers:
             allowed_origins.add(peer.origin)
 
+        punishment_import_policy = {
+            peer.origin: peer.imported_punishment_types() for peer in config.peers
+        }
+
         self.dispatcher = Dispatcher(
             firehose=self.firehose,
             nav=self.nav,
@@ -99,6 +103,8 @@ class BonnetFirehoseServer:
             boards_dir=config.boards_dir,
             body_store=self.body_store,
             allowed_origins=allowed_origins,
+            local_origin=config.origin,
+            punishment_import_policy=punishment_import_policy,
         )
         log_msg("INIT: Dispatcher initialized")
 
