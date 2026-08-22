@@ -40,9 +40,20 @@ KIND_USER_REVOKE = "bonnet.user.revoke"
 KIND_RULE_PUBLISH = "bonnet.rule.publish"
 KIND_RULE_REVOKE = "bonnet.rule.revoke"
 KIND_REPORT = "bonnet.report"
-KIND_PUNISHMENT_ISSUE = "bonnet.punishment.issue"
+KIND_PUNISHMENT_WARN = "bonnet.punishment.warn"
+KIND_PUNISHMENT_BAN = "bonnet.punishment.ban"
+KIND_PUNISHMENT_PERMABAN = "bonnet.punishment.permaban"
 KIND_PUNISHMENT_REVOKE = "bonnet.punishment.revoke"
+KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
 KIND_ORIGIN_KEY_ROTATE = "bonnet.origin.key.rotate"
+
+PUNISHMENT_ISSUE_KINDS = frozenset(
+    {
+        KIND_PUNISHMENT_WARN,
+        KIND_PUNISHMENT_BAN,
+        KIND_PUNISHMENT_PERMABAN,
+    }
+)
 
 
 class Dispatcher:
@@ -157,10 +168,12 @@ class Dispatcher:
             self._policy.apply_rule_revoke(rec)
         elif kind == KIND_REPORT:
             self._policy.apply_report(rec)
-        elif kind == KIND_PUNISHMENT_ISSUE:
+        elif kind in PUNISHMENT_ISSUE_KINDS:
             self._policy.apply_punishment(rec)
         elif kind == KIND_PUNISHMENT_REVOKE:
             self._policy.apply_punishment_revoke(rec)
+        elif kind == KIND_PUNISHMENT_ACK:
+            self._policy.apply_punishment_ack(rec)
         elif kind == KIND_ORIGIN_KEY_ROTATE:
             pass  # handled by firehose store
         else:
