@@ -69,3 +69,20 @@ interval_seconds = 300
 # actions = ["write"]
 # commands = ["PUBLISH_RECORD"]
 # kinds = ["bonnet.user.register"]
+#
+# Punishment authority is ACL-enforced (Gate D). Grant administrators all
+# punishment kinds; moderators everything except permaban:
+#
+# [[acl]]
+# effect = "allow"
+# match.role = "administrator"
+# actions = ["write"]
+# commands = ["PUBLISH_RECORD"]
+# kinds = ["bonnet.punishment.warn", "bonnet.punishment.ban", "bonnet.punishment.permaban", "bonnet.punishment.revoke"]
+#
+# [[acl]]
+# effect = "allow"
+# match.role = "moderator"
+# actions = ["write"]
+# commands = ["PUBLISH_RECORD"]
+# kinds = ["bonnet.punishment.warn", "bonnet.punishment.ban", "bonnet.punishment.revoke"]
