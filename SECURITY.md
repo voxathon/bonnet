@@ -4,7 +4,7 @@
 
 Report security vulnerabilities privately. Do not open a public issue.
 
-Email: security@voxathon.com
+Email: moxxie@knolastna.me
 
 Include:
 - A description of the vulnerability

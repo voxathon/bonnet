@@ -56,10 +56,6 @@ class FirehoseError(Exception):
     pass
 
 
-class SequenceConflict(FirehoseError):
-    pass
-
-
 class EventIdCollision(FirehoseError):
     pass
 
@@ -73,10 +69,6 @@ class ChainBreak(FirehoseError):
 
 
 class SignatureInvalid(FirehoseError):
-    pass
-
-
-class RollbackDetected(FirehoseError):
     pass
 
 

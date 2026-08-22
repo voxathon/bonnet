@@ -107,10 +107,6 @@ def _read_blob32(data: bytes, offset: int) -> tuple[bytes, int]:
     return data[offset : offset + n], offset + n
 
 
-def _read_sig64(data: bytes, offset: int) -> tuple[bytes, int]:
-    return data[offset : offset + 64], offset + 64
-
-
 class ProtocolError(Exception):
     pass
 

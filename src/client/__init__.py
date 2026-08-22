@@ -5,7 +5,6 @@ from .firehose_models import (
     BanStatus,
     BoardInfo,
     DiscoveryInfo,
-    EventInfo,
     HeadInfo,
     PublishResult,
     QueryResponse,
@@ -19,7 +18,6 @@ from .server import run
 
 __all__ = [
     "PublishResult",
-    "EventInfo",
     "HeadInfo",
     "ArticleView",
     "ArticleListItem",
