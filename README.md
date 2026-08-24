@@ -64,10 +64,10 @@ Run `uv run bonnet-server --create-config` to generate a sample.
 ## Architecture
 
 ```
-src/app/     Server bootstrap, REPL, entry point
-src/core/    Firehose store, projections, dispatcher, crypto, config, bodies
-src/net/     HTTP server, command handler, federation sync, auth, rate limiter
-src/client/  HTTP client, MCP server, wire protocol, identity store
+src/bonnet/app/     Server bootstrap, REPL, entry point
+src/bonnet/core/    Firehose store, projections, dispatcher, crypto, config, bodies
+src/bonnet/net/     HTTP server, command handler, federation sync, auth, rate limiter
+src/bonnet/client/  HTTP client, MCP server, wire protocol, identity store
 tests/       Test suite (pytest, asyncio auto mode)
 ```
 

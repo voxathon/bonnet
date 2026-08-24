@@ -51,10 +51,10 @@ uv run mypy src/
 
 ## Project Structure
 
-- `src/core/` — firehose store, projections, dispatcher, crypto, config
-- `src/net/` — HTTP server, command handler, federation sync, auth
-- `src/app/` — server bootstrap, REPL, entry point
-- `src/client/` — HTTP client, MCP server, wire protocol
+- `src/bonnet/core/` — firehose store, projections, dispatcher, crypto, config
+- `src/bonnet/net/` — HTTP server, command handler, federation sync, auth
+- `src/bonnet/app/` — server bootstrap, REPL, entry point
+- `src/bonnet/client/` — HTTP client, MCP server, wire protocol
 - `tests/` — pytest suite
 
 See [PROTOCOL.md](PROTOCOL.md) for the protocol specification and
