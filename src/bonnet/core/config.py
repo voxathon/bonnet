@@ -269,8 +269,15 @@ class FirehoseConfig:
         )
 
     @staticmethod
-    def create_default_config(path: str) -> FirehoseConfig:
-        """Write a sample config file and return the default config."""
+    def create_default_config(path: str, force: bool = False) -> FirehoseConfig:
+        """Write a sample config file and return the default config.
+
+        Raises FileExistsError if the path already exists unless force is
+        true. Existing operator configuration must never be silently
+        overwritten by a sample-generation flag.
+        """
+        if os.path.exists(path) and not force:
+            raise FileExistsError(f"config file already exists: {path} (use --force to overwrite)")
         config = FirehoseConfig(acl=ACLEvaluator([]))
         config._write_default(path)
         return config
