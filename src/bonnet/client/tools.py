@@ -48,7 +48,7 @@ TOKEN_EXPIRY_SECONDS = 24 * 60 * 60
 def _get_identity_store() -> IdentityStore:
     global identity_store
     if identity_store is None:
-        identity_store = IdentityStore()
+        identity_store = IdentityStore(os.environ.get("BONNET_IDENTITIES_DB") or None)
     return identity_store
 
 
