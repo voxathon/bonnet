@@ -284,7 +284,11 @@ class FirehoseConfig:
 
     @staticmethod
     def _write_default(path: str) -> None:
-        default_content = """[server]
+        default_content = """# Bonnet server configuration sample.
+# Operator documentation: OPERATOR_GUIDE.md
+# Protocol specification: PROTOCOL.md
+
+[server]
 origin = "localhost"
 hostname = ""
 data_dir = "./data"
@@ -300,6 +304,8 @@ rate_limit_requests = 100
 rate_limit_window = 1
 
 [search]
+# Full-text search shells out to ripgrep. Install rg and put it on PATH,
+# or point rg_path at the binary; without it ARTICLE_SEARCH returns 503.
 max_count = 1000
 timeout_seconds = 10
 result_limit = 100
