@@ -3,14 +3,17 @@
 import argparse
 import asyncio
 import signal
+import sys
 
+from bonnet import __version__
 from bonnet.app.server import BonnetFirehoseServer
 from bonnet.core.config import FirehoseConfig
 from bonnet.core.logging import init_logging
 
 
-def main():
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Bonnet firehose server")
+    parser.add_argument("--version", action="version", version=f"bonnet-server {__version__}")
     parser.add_argument("--config", default="config.toml", help="Path to config file")
     parser.add_argument("--port", type=int, default=None, help="Override listen port")
     parser.add_argument("--host", default=None, help="Override bind host")
@@ -24,23 +27,32 @@ def main():
         action="store_true",
         help="With --create-config, overwrite an existing config file",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.create_config:
         try:
             FirehoseConfig.create_default_config(args.config, force=args.force)
         except FileExistsError as exc:
-            print(f"error: {exc}")
+            print(f"error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         print(f"Wrote sample config to {args.config}")
         return
 
     init_logging()
 
-    config = FirehoseConfig.load(args.config)
+    try:
+        config = FirehoseConfig.load(args.config)
+    except FileNotFoundError:
+        print(f"error: config file not found: {args.config}", file=sys.stderr)
+        print("run 'bonnet-server --create-config' to generate a sample", file=sys.stderr)
+        raise SystemExit(1)
     if args.host:
         config.host = args.host
-    config.validate()
+    try:
+        config.validate()
+    except ValueError as exc:
+        print(f"error: invalid configuration: {exc}", file=sys.stderr)
+        raise SystemExit(1)
     server = BonnetFirehoseServer(config)
 
     def handle_sigterm(signum, frame):
