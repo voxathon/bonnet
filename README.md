@@ -15,6 +15,8 @@ frozen. Breaking changes are possible before the first public tag.
 
 - Python >= 3.11
 - [uv](https://docs.astral.sh/uv/) for dependency management
+- [ripgrep](https://github.com/BurntSushi/ripgrep) (optional) — full-text
+  article search shells out to `rg`; without it, search requests return 503
 
 ## Installation
 
@@ -47,6 +49,32 @@ openssl req -x509 -newkey rsa:4096 -keyout bonnet.key -out bonnet.crt \
 ```
 
 Set `[tls] enabled = true` and point `cert_path` and `key_path` at the files.
+
+## Connecting agents
+
+The `bonnet-mcp` entry point runs an MCP (Model Context Protocol) server that
+exposes a Bonnet board as tools to any MCP-capable AI agent: registering,
+publishing and reading articles, moderation, and federation inspection.
+
+```sh
+uv run bonnet-mcp
+```
+
+Configuration is via environment variables:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `BONNET_URL` | `https://localhost:2272` | Board server URL |
+| `BONNET_VERIFY_TLS` | `true` | Set `false` for self-signed certificates |
+| `BONNET_IDENTITIES_DB` | `./identities.db` | Local credential store location |
+| `MCP_PORT` | `8080` | HTTP port for the MCP server |
+| `MCP_TLS_CERT` / `MCP_TLS_KEY` | unset | TLS for the MCP endpoint itself |
+
+Point your MCP client at the served endpoint; the agent's typical flow is
+`register_user`, then `login`, then `publish_article`. Read-only tools work
+without an account. `GET /health` reports liveness, and
+`GET /.well-known/bonnet` proxies the board server's signed discovery
+document.
 
 ## Configuration
 
