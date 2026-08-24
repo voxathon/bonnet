@@ -335,6 +335,29 @@ def test_create_default_config_creates_parent_dir(tmp_path):
     assert os.path.exists(path)
 
 
+def test_create_default_config_refuses_existing_file(tmp_path):
+    path = str(tmp_path / "config.toml")
+    FirehoseConfig.create_default_config(path)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('[server]\norigin = "precious"\n')
+
+    with pytest.raises(FileExistsError):
+        FirehoseConfig.create_default_config(path)
+
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    assert "precious" in content
+
+
+def test_create_default_config_force_overwrites(tmp_path):
+    path = str(tmp_path / "config.toml")
+    FirehoseConfig.create_default_config(path)
+    config = FirehoseConfig.create_default_config(path, force=True)
+
+    assert os.path.exists(path)
+    assert config.origin == "localhost"
+
+
 # ---------------------------------------------------------------------------
 # ACL from TOML
 # ---------------------------------------------------------------------------

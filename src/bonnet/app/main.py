@@ -19,10 +19,19 @@ def main():
     parser.add_argument(
         "--create-config", action="store_true", help="Write a sample config file and exit"
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="With --create-config, overwrite an existing config file",
+    )
     args = parser.parse_args()
 
     if args.create_config:
-        FirehoseConfig.create_default_config(args.config)
+        try:
+            FirehoseConfig.create_default_config(args.config, force=args.force)
+        except FileExistsError as exc:
+            print(f"error: {exc}")
+            raise SystemExit(1)
         print(f"Wrote sample config to {args.config}")
         return
 
