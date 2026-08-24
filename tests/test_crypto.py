@@ -1,6 +1,6 @@
 import pytest
 
-from core.crypto import Identity
+from bonnet.core.crypto import Identity
 
 
 class TestIdentity:

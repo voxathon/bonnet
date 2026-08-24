@@ -19,8 +19,8 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 
-from client import resources  # noqa: F401 — registers @mcp.resource decorators
-from client.tools import current_password, current_username, mcp
+from bonnet.client import resources  # noqa: F401 — registers @mcp.resource decorators
+from bonnet.client.tools import current_password, current_username, mcp
 
 
 @mcp.custom_route("/health", methods=["GET"])

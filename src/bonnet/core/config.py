@@ -11,7 +11,7 @@ import os
 import tomllib
 from dataclasses import dataclass
 
-from core.acl import ACLEvaluator
+from bonnet.core.acl import ACLEvaluator
 
 
 @dataclass
@@ -225,7 +225,7 @@ class FirehoseConfig:
         acl = ACLEvaluator.from_toml(data)
 
         if not acl._rules and admin_pubkey_hex:
-            from core.acl import default_rules_for_admin
+            from bonnet.core.acl import default_rules_for_admin
 
             acl = ACLEvaluator(default_rules_for_admin(admin_pubkey_hex))
 

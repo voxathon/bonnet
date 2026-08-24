@@ -1,6 +1,6 @@
 import pytest
 
-from client.identity import IdentityStore
+from bonnet.client.identity import IdentityStore
 
 pytestmark = pytest.mark.slow
 

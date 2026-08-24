@@ -5,18 +5,18 @@ Tests PROTOCOL.md §12 (kind schemas), §15 (search), §16 (ACL model).
 
 import pytest
 
-from core.acl import (
+from bonnet.core.acl import (
     ACLEvaluator,
     ACLRule,
     AuthContext,
     PrincipalMatcher,
     default_rules_for_admin,
 )
-from core.board_projection import BoardProjection
-from core.bodies import BodyStore
-from core.crypto import Identity
-from core.kind_validator import KindValidator, ValidationError
-from core.record import (
+from bonnet.core.board_projection import BoardProjection
+from bonnet.core.bodies import BodyStore
+from bonnet.core.crypto import Identity
+from bonnet.core.kind_validator import KindValidator, ValidationError
+from bonnet.core.record import (
     ZERO_HASH,
     ZERO_ID,
     Intent,
@@ -28,7 +28,7 @@ from core.record import (
     metadata_text_list,
     metadata_u64,
 )
-from core.search import SearchService
+from bonnet.core.search import SearchService
 
 # ---------------------------------------------------------------------------
 # Test identities
@@ -692,7 +692,7 @@ class TestSearchService:
         bp.close()
 
     def _make_article_rec(self, seq, article_num, subject="Test", tags="", body=b"hello world"):
-        from core.record import Record
+        from bonnet.core.record import Record
 
         origin = Identity.from_private_key(bytes(range(1, 33)))
         aid = _rid(seq + 10)
@@ -751,7 +751,7 @@ class TestSearchService:
         bp.apply_article(rec1)
         bp.apply_article(rec2)
 
-        from core.record import Record
+        from bonnet.core.record import Record
 
         purge_rec = Record(
             origin="bbs.test",
@@ -772,7 +772,7 @@ class TestSearchService:
 
     def test_metadata_search_filter_by_actor(self, search_env):
         bp, body_store, search = search_env
-        from core.record import Record
+        from bonnet.core.record import Record
 
         origin = Identity.from_private_key(bytes(range(1, 33)))
         other_pub = bytes(range(50, 82))
@@ -842,7 +842,7 @@ class TestSearchService:
             "bbs.test", "general", 2, body2, compute_body_hash(body2), len(body2)
         )
 
-        from core.record import Record
+        from bonnet.core.record import Record
 
         purge_rec = Record(
             origin="bbs.test",
@@ -879,7 +879,7 @@ class TestSearchService:
             "bbs.test", "general", 2, body2, compute_body_hash(body2), len(body2)
         )
 
-        from core.record import Record
+        from bonnet.core.record import Record
 
         cancel_rec = Record(
             origin="bbs.test",

@@ -11,30 +11,30 @@ import time
 import httpx
 import pytest
 
-from client.firehose_client import FirehoseHTTPClient
-from client.firehose_protocol import (
+from bonnet.client.firehose_client import FirehoseHTTPClient
+from bonnet.client.firehose_protocol import (
     build_board_list,
     build_event_head,
     parse_board_list_response,
 )
-from core.acl import ACLEvaluator, ACLRule, PrincipalMatcher, default_rules_for_admin
-from core.bodies import BodyStore
-from core.config import FirehoseConfig
-from core.crypto import Identity
-from core.dispatcher import Dispatcher
-from core.firehose import FirehoseStore
-from core.global_projections import NavProjection, PolicyProjection, UserProjection
-from core.kind_validator import KindValidator
-from core.search import SearchService
-from net.firehose_commands import (
+from bonnet.core.acl import ACLEvaluator, ACLRule, PrincipalMatcher, default_rules_for_admin
+from bonnet.core.bodies import BodyStore
+from bonnet.core.config import FirehoseConfig
+from bonnet.core.crypto import Identity
+from bonnet.core.dispatcher import Dispatcher
+from bonnet.core.firehose import FirehoseStore
+from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
+from bonnet.core.kind_validator import KindValidator
+from bonnet.core.search import SearchService
+from bonnet.net.firehose_commands import (
     FirehoseCommandHandler,
 )
-from net.firehose_http_server import FirehoseHTTPServer
-from net.http_auth import (
+from bonnet.net.firehose_http_server import FirehoseHTTPServer
+from bonnet.net.http_auth import (
     compute_content_digest,
 )
-from net.rate_limiter import RateLimiter
-from net.replay import ReplayLedger
+from bonnet.net.rate_limiter import RateLimiter
+from bonnet.net.replay import ReplayLedger
 
 ORIGIN = "bbs.test"
 SERVER_IDENTITY = Identity.from_private_key(bytes(range(1, 33)))
@@ -367,7 +367,7 @@ async def test_replay_detected(server_stack):
     expires = now + 60
 
     cmd = build_event_head(ORIGIN)
-    msg = __import__("net.http_auth", fromlist=["HTTPMessage"]).HTTPMessage(
+    msg = __import__("bonnet.net.http_auth", fromlist=["HTTPMessage"]).HTTPMessage(
         method="POST",
         url="https://bbs.test/command",
         headers={
@@ -421,7 +421,7 @@ async def test_rate_limit_enforced(server_stack):
 
     cmd3 = build_board_list(ORIGIN)
     nonce3 = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
-    msg3 = __import__("net.http_auth", fromlist=["HTTPMessage"]).HTTPMessage(
+    msg3 = __import__("bonnet.net.http_auth", fromlist=["HTTPMessage"]).HTTPMessage(
         method="POST",
         url="https://bbs.test/command",
         headers={

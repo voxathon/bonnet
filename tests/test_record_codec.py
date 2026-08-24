@@ -11,8 +11,8 @@ import unicodedata
 
 import pytest
 
-from core.crypto import Identity
-from core.record import (
+from bonnet.core.crypto import Identity
+from bonnet.core.record import (
     DOMAIN_BODY,
     DOMAIN_EVENT_HASH,
     MAX_U63,

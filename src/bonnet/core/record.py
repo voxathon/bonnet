@@ -13,7 +13,7 @@ import struct
 import unicodedata
 from dataclasses import dataclass, field
 
-from core.crypto import Identity
+from bonnet.core.crypto import Identity
 
 # ---------------------------------------------------------------------------
 # Constants (§4, §5)

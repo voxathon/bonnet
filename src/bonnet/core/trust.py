@@ -152,7 +152,7 @@ class TrustStore:
 
         On success, updates the pin to new_publickey and sets last_rotated.
         """
-        from core.crypto import Identity
+        from bonnet.core.crypto import Identity
 
         existing = self.get_pin(origin)
         if existing is None or existing != old_publickey:

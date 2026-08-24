@@ -11,8 +11,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from core.board_projection import BoardProjection
-from core.bodies import BodyStore
+from bonnet.core.board_projection import BoardProjection
+from bonnet.core.bodies import BodyStore
 
 # ---------------------------------------------------------------------------
 # Search result
