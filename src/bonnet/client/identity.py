@@ -14,6 +14,9 @@ class IdentityStore:
 
     def __init__(self, db_path: str | None = None):
         self.db_path = Path(db_path or self.DB_PATH)
+        parent = self.db_path.parent
+        if str(parent) not in ("", "."):
+            parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._init_db()
 
