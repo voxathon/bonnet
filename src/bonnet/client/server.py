@@ -7,6 +7,7 @@ for tool resolution.
 Environment variables:
     BONNET_URL         — server URL (default: https://localhost:2272)
     BONNET_VERIFY_TLS  — TLS verification (default: true)
+    BONNET_IDENTITIES_DB — local identity store path (default: ./identities.db)
     MCP_PORT           — MCP server port (default: 8080)
     MCP_TLS_CERT       — TLS certificate path (optional)
     MCP_TLS_KEY        — TLS key path (optional)
