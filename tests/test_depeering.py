@@ -4,11 +4,11 @@ import os
 
 import pytest
 
-from core.bodies import BodyStore
-from core.config import FirehoseConfig
-from core.crypto import Identity
-from core.firehose import KIND_ARTICLE, FirehoseStore
-from core.record import (
+from bonnet.core.bodies import BodyStore
+from bonnet.core.config import FirehoseConfig
+from bonnet.core.crypto import Identity
+from bonnet.core.firehose import KIND_ARTICLE, FirehoseStore
+from bonnet.core.record import (
     Intent,
     MetadataMap,
     compute_body_hash,
@@ -17,7 +17,7 @@ from core.record import (
     metadata_text,
     sign_intent,
 )
-from net.firehose_sync import SyncClient
+from bonnet.net.firehose_sync import SyncClient
 
 ORIGIN = Identity.from_private_key(bytes(range(1, 33)))
 ACTOR = Identity.from_private_key(bytes(range(10, 42)))
@@ -71,7 +71,7 @@ def _append(firehose, origin_identity, intent, body=b""):
 
 class MockSyncClient(SyncClient):
     async def fetch_head(self, origin):
-        from core.record import ZERO_HASH, Head
+        from bonnet.core.record import ZERO_HASH, Head
 
         return Head(
             origin=origin,
@@ -97,7 +97,7 @@ def server(tmp_path):
     os.makedirs(tmp_path / "boards", exist_ok=True)
     os.makedirs(tmp_path / "event_bodies", exist_ok=True)
 
-    from app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetFirehoseServer
 
     config = FirehoseConfig(
         origin="bbs.test",

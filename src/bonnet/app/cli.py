@@ -6,7 +6,7 @@ signature verification. The local admin identity is the server's own key.
 
 from __future__ import annotations
 
-from net.firehose_commands import FirehoseContext
+from bonnet.net.firehose_commands import FirehoseContext
 
 
 class FirehoseLocalConnection:

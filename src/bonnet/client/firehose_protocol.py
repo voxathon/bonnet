@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import struct
 
-from client.firehose_models import (
+from bonnet.client.firehose_models import (
     ArticleListItem,
     ArticleView,
     BanStatus,
@@ -21,7 +21,7 @@ from client.firehose_models import (
     SearchResult,
     UserInfo,
 )
-from core.record import (
+from bonnet.core.record import (
     ZERO_ID,
     Head,
     Intent,

@@ -5,7 +5,7 @@ UV := uv
 all: run
 
 run:
-	$(UV) run python src/app/main.py
+	$(UV) run python -m bonnet.app.main
 
 test:
 	$(UV) run pytest tests/ -n auto -m "not slow" -v

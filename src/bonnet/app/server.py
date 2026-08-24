@@ -11,18 +11,18 @@ import asyncio
 import os
 import struct
 
-from app.cli import FirehoseLocalConnection
-from core.acl import ACLEvaluator, default_rules_for_admin
-from core.binutil import set_rg_path
-from core.bodies import BodyStore
-from core.config import FirehoseConfig
-from core.crypto import Identity
-from core.dispatcher import Dispatcher
-from core.firehose import FirehoseStore
-from core.global_projections import NavProjection, PolicyProjection, UserProjection
-from core.kind_validator import KindValidator
-from core.logging import log_msg
-from core.record import (
+from bonnet.app.cli import FirehoseLocalConnection
+from bonnet.core.acl import ACLEvaluator, default_rules_for_admin
+from bonnet.core.binutil import set_rg_path
+from bonnet.core.bodies import BodyStore
+from bonnet.core.config import FirehoseConfig
+from bonnet.core.crypto import Identity
+from bonnet.core.dispatcher import Dispatcher
+from bonnet.core.firehose import FirehoseStore
+from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
+from bonnet.core.kind_validator import KindValidator
+from bonnet.core.logging import log_msg
+from bonnet.core.record import (
     ZERO_ID,
     Intent,
     MetadataMap,
@@ -34,13 +34,13 @@ from core.record import (
     metadata_u64,
     sign_intent,
 )
-from core.search import SearchService
-from net.firehose_commands import FirehoseCommandHandler
-from net.firehose_http_server import FirehoseHTTPServer
-from net.firehose_sync import HttpSyncClient
-from net.firehose_sync import SyncManager as FirehoseSyncManager
-from net.rate_limiter import RateLimiter
-from net.replay import ReplayLedger
+from bonnet.core.search import SearchService
+from bonnet.net.firehose_commands import FirehoseCommandHandler
+from bonnet.net.firehose_http_server import FirehoseHTTPServer
+from bonnet.net.firehose_sync import HttpSyncClient
+from bonnet.net.firehose_sync import SyncManager as FirehoseSyncManager
+from bonnet.net.rate_limiter import RateLimiter
+from bonnet.net.replay import ReplayLedger
 
 
 class BonnetFirehoseServer:
@@ -121,7 +121,7 @@ class BonnetFirehoseServer:
                 if r.matcher.pubkey is not None
             )
             if not has_server_admin:
-                from core.acl import ACLRule, PrincipalMatcher
+                from bonnet.core.acl import ACLRule, PrincipalMatcher
 
                 acl.add_rule(
                     ACLRule(
@@ -231,7 +231,7 @@ class BonnetFirehoseServer:
 
             import os as _os
 
-            from core.record import (
+            from bonnet.core.record import (
                 ZERO_ID,
                 Intent,
                 MetadataMap,
@@ -540,7 +540,7 @@ class BonnetFirehoseServer:
 
         actor_sig = sign_intent(self.server_identity, encode_intent(intent))
 
-        from net.firehose_commands import OP_PUBLISH_RECORD
+        from bonnet.net.firehose_commands import OP_PUBLISH_RECORD
 
         req = struct.pack(">B", OP_PUBLISH_RECORD)
         encoded_intent = encode_intent(intent)
@@ -616,7 +616,7 @@ class BonnetFirehoseServer:
 
         tags_list = [t.strip() for t in tags_input.split(",") if t.strip()] if tags_input else []
 
-        from core.record import ZERO_ID, metadata_bytes
+        from bonnet.core.record import ZERO_ID, metadata_bytes
 
         m = MetadataMap(
             [
@@ -675,7 +675,7 @@ class BonnetFirehoseServer:
 
         actor_sig = sign_intent(self.server_identity, encode_intent(intent))
 
-        from net.firehose_commands import OP_PUBLISH_RECORD
+        from bonnet.net.firehose_commands import OP_PUBLISH_RECORD
 
         req = struct.pack(">B", OP_PUBLISH_RECORD)
         encoded_intent = encode_intent(intent)
@@ -686,7 +686,7 @@ class BonnetFirehoseServer:
         resp = self._local_handle(req)
         if resp[0] == 0x00:
             rec_len = struct.unpack(">I", resp[1:5])[0]
-            from core.record import decode_record
+            from bonnet.core.record import decode_record
 
             rec = decode_record(resp[5 : 5 + rec_len])
             return f"Article #{rec.article_num} published.\nSubject: {subject}\nEvent ID: {rec.event_id.hex()}"
@@ -728,7 +728,7 @@ class BonnetFirehoseServer:
 
         actor_sig = sign_intent(self.server_identity, encode_intent(intent))
 
-        from net.firehose_commands import OP_PUBLISH_RECORD
+        from bonnet.net.firehose_commands import OP_PUBLISH_RECORD
 
         req = struct.pack(">B", OP_PUBLISH_RECORD)
         encoded_intent = encode_intent(intent)
@@ -750,7 +750,7 @@ class BonnetFirehoseServer:
         aggregate = not parts or len(parts) <= 1
         origin = parts[1] if parts and len(parts) > 1 else ""
 
-        from net.firehose_commands import OP_BOARD_LIST
+        from bonnet.net.firehose_commands import OP_BOARD_LIST
 
         req = struct.pack(">B", OP_BOARD_LIST) + self._enc_text16(origin)
         resp = self._local_handle(req)
@@ -811,7 +811,7 @@ class BonnetFirehoseServer:
         except ValueError:
             return "Invalid article number"
 
-        from net.firehose_commands import OP_ARTICLE_GET
+        from bonnet.net.firehose_commands import OP_ARTICLE_GET
 
         req = struct.pack(">B", OP_ARTICLE_GET)
         req += self._enc_text16(origin)
@@ -961,7 +961,7 @@ class BonnetFirehoseServer:
 
         aggregate = origin == ""
 
-        from net.firehose_commands import OP_ARTICLE_LIST
+        from bonnet.net.firehose_commands import OP_ARTICLE_LIST
 
         req = struct.pack(">B", OP_ARTICLE_LIST)
         req += self._enc_text16(origin)
@@ -1057,7 +1057,7 @@ class BonnetFirehoseServer:
 
         aggregate = origin == ""
 
-        from net.firehose_commands import OP_ARTICLE_SEARCH
+        from bonnet.net.firehose_commands import OP_ARTICLE_SEARCH
 
         req = struct.pack(">B", OP_ARTICLE_SEARCH)
         req += self._enc_text16(origin)
@@ -1127,7 +1127,7 @@ class BonnetFirehoseServer:
 
         board = parts[1]
 
-        from net.firehose_commands import OP_ARTICLE_QUERY
+        from bonnet.net.firehose_commands import OP_ARTICLE_QUERY
 
         filters = []
         list_offset = 0
@@ -1275,7 +1275,7 @@ class BonnetFirehoseServer:
     def _cmd_list_users(self, parts=None) -> str:
         origin = parts[1] if parts and len(parts) > 1 else self.config.origin
 
-        from net.firehose_commands import OP_USER_LIST
+        from bonnet.net.firehose_commands import OP_USER_LIST
 
         req = struct.pack(">B", OP_USER_LIST) + self._enc_text16(origin) + struct.pack(">B", 0)
 
@@ -1322,7 +1322,7 @@ class BonnetFirehoseServer:
         except ValueError:
             return "Invalid hex pubkey"
 
-        from net.firehose_commands import OP_BAN_STATUS, PUNISHMENT_TYPE_CODES
+        from bonnet.net.firehose_commands import OP_BAN_STATUS, PUNISHMENT_TYPE_CODES
 
         req = struct.pack(">B", OP_BAN_STATUS) + struct.pack(">B", len(pubkey)) + pubkey
 
@@ -1375,7 +1375,7 @@ class BonnetFirehoseServer:
 
         origin = parts[1]
 
-        from net.firehose_commands import OP_EVENT_HEAD
+        from bonnet.net.firehose_commands import OP_EVENT_HEAD
 
         req = struct.pack(">B", OP_EVENT_HEAD) + self._enc_text16(origin)
 
@@ -1384,7 +1384,7 @@ class BonnetFirehoseServer:
             return self._parse_response_error(resp)
 
         head_len = struct.unpack(">H", resp[1:3])[0]
-        from core.record import decode_head
+        from bonnet.core.record import decode_head
 
         head = decode_head(resp[3 : 3 + head_len])
 
@@ -1411,7 +1411,7 @@ class BonnetFirehoseServer:
         except ValueError:
             return "Invalid start or count"
 
-        from net.firehose_commands import OP_EVENT_RANGE
+        from bonnet.net.firehose_commands import OP_EVENT_RANGE
 
         req = struct.pack(">B", OP_EVENT_RANGE)
         req += self._enc_text16(origin)
@@ -1429,7 +1429,7 @@ class BonnetFirehoseServer:
         for _ in range(resp_count):
             rec_len = struct.unpack(">I", resp[offset : offset + 4])[0]
             offset += 4
-            from core.record import decode_record
+            from bonnet.core.record import decode_record
 
             rec = decode_record(resp[offset : offset + rec_len])
             offset += rec_len
@@ -1459,7 +1459,7 @@ class BonnetFirehoseServer:
         if len(event_id) != 32:
             return "Event ID must be 32 bytes (64 hex chars)"
 
-        from net.firehose_commands import OP_EVENT_GET
+        from bonnet.net.firehose_commands import OP_EVENT_GET
 
         req = struct.pack(">B", OP_EVENT_GET) + self._enc_text16(origin) + event_id
 
@@ -1470,13 +1470,13 @@ class BonnetFirehoseServer:
         offset = 1
         rec_len = struct.unpack(">I", resp[offset : offset + 4])[0]
         offset += 4
-        from core.record import decode_record
+        from bonnet.core.record import decode_record
 
         rec = decode_record(resp[offset : offset + rec_len])
         offset += rec_len
         w_len = struct.unpack(">H", resp[offset : offset + 2])[0]
         offset += 2
-        from core.record import decode_witness, is_origin_witness
+        from bonnet.core.record import decode_witness, is_origin_witness
 
         witness = decode_witness(resp[offset : offset + w_len])
 
@@ -1730,7 +1730,7 @@ class BonnetFirehoseServer:
 
         lines.append("")
         lines.append("=== ACL Checks ===")
-        from net.firehose_commands import CMD_NAMES
+        from bonnet.net.firehose_commands import CMD_NAMES
 
         for opcode, cmd_name in sorted(CMD_NAMES.items(), key=lambda x: x[1]):
             action = "write" if opcode == 0x01 else "read"

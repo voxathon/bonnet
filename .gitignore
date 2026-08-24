@@ -54,6 +54,7 @@ test_client_id
 
 # Build configuration
 *.spec
+!bonnet.spec
 
 # Local configuration
 config.toml

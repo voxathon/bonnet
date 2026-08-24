@@ -4,9 +4,9 @@ import asyncio
 
 import pytest
 
-from core.crypto import Identity
-from core.firehose import FirehoseStore
-from net.firehose_sync import SyncClient, SyncManager, is_safe_dial_target
+from bonnet.core.crypto import Identity
+from bonnet.core.firehose import FirehoseStore
+from bonnet.net.firehose_sync import SyncClient, SyncManager, is_safe_dial_target
 
 ORIGIN_PUB = Identity.from_private_key(bytes(range(1, 33))).public_key
 

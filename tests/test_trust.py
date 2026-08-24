@@ -1,4 +1,4 @@
-"""Tests for src/core/trust.py — atomic origin-key pinning and rotation.
+"""Tests for src/bonnet/core/trust.py — atomic origin-key pinning and rotation.
 
 Exit gate (§13 Phase 3):
   - Origin pin first use, repeat use, mismatch, configured pin, and rotation
@@ -12,8 +12,8 @@ import time
 
 import pytest
 
-from core.crypto import Identity
-from core.trust import TRUST_MODE_CONFIGURED, TRUST_MODE_TOFU, TrustStore
+from bonnet.core.crypto import Identity
+from bonnet.core.trust import TRUST_MODE_CONFIGURED, TRUST_MODE_TOFU, TrustStore
 
 
 @pytest.fixture

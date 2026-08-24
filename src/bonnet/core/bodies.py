@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import threading
 
-from core.record import compute_body_hash
+from bonnet.core.record import compute_body_hash
 
 
 class BodyError(Exception):
@@ -219,7 +219,7 @@ class BodyStore:
         import json
         import subprocess
 
-        from core.binutil import resolve_rg
+        from bonnet.core.binutil import resolve_rg
 
         rg = rg_path or resolve_rg()
         if rg is None:
