@@ -15,7 +15,7 @@ import sqlite3
 import threading
 import time
 
-from core.record import Record
+from bonnet.core.record import Record
 
 # ---------------------------------------------------------------------------
 # Kind constants

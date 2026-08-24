@@ -14,7 +14,7 @@ import time
 
 import httpx
 
-from client.firehose_models import (
+from bonnet.client.firehose_models import (
     ArticleView,
     BanStatus,
     BoardInfo,
@@ -25,7 +25,7 @@ from client.firehose_models import (
     SearchResponse,
     UserInfo,
 )
-from client.firehose_protocol import (
+from bonnet.client.firehose_protocol import (
     SELECTOR_BY_ID,
     SELECTOR_BY_NUM,
     BodyRedirectError,
@@ -59,8 +59,8 @@ from client.firehose_protocol import (
     parse_user_get_response,
     parse_user_list_response,
 )
-from core.crypto import Identity
-from core.record import (
+from bonnet.core.crypto import Identity
+from bonnet.core.record import (
     ZERO_ID,
     Intent,
     MetadataMap,
@@ -75,8 +75,8 @@ from core.record import (
     metadata_u64,
     sign_intent,
 )
-from core.trust import TrustStore
-from net.http_auth import (
+from bonnet.core.trust import TrustStore
+from bonnet.net.http_auth import (
     BonnetSigner,
     BonnetVerifier,
     HTTPMessage,

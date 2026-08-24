@@ -8,14 +8,14 @@ import time
 
 import pytest
 
-from core.acl import ACLEvaluator, ACLRule, PrincipalMatcher, default_rules_for_admin
-from core.bodies import BodyStore
-from core.crypto import Identity
-from core.dispatcher import Dispatcher
-from core.firehose import FirehoseStore
-from core.global_projections import NavProjection, PolicyProjection, UserProjection
-from core.kind_validator import KindValidator
-from core.record import (
+from bonnet.core.acl import ACLEvaluator, ACLRule, PrincipalMatcher, default_rules_for_admin
+from bonnet.core.bodies import BodyStore
+from bonnet.core.crypto import Identity
+from bonnet.core.dispatcher import Dispatcher
+from bonnet.core.firehose import FirehoseStore
+from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
+from bonnet.core.kind_validator import KindValidator
+from bonnet.core.record import (
     Head,
     Intent,
     MetadataMap,
@@ -35,8 +35,8 @@ from core.record import (
     metadata_text,
     sign_intent,
 )
-from core.search import SearchService
-from net.firehose_commands import (
+from bonnet.core.search import SearchService
+from bonnet.net.firehose_commands import (
     OP_ARTICLE_BODY,
     OP_ARTICLE_GET,
     OP_ARTICLE_LIST,
@@ -50,7 +50,7 @@ from net.firehose_commands import (
     FirehoseCommandHandler,
     FirehoseContext,
 )
-from net.firehose_sync import SyncClient, SyncManager
+from bonnet.net.firehose_sync import SyncClient, SyncManager
 
 # ---------------------------------------------------------------------------
 # Test identities

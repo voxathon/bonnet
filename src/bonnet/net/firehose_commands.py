@@ -14,19 +14,19 @@ import struct
 import threading
 import time
 
-from core.acl import ACLEvaluator, AuthContext
-from core.board_projection import BoardProjection, board_db_path
-from core.bodies import BodyStore
-from core.crypto import Identity
-from core.firehose import (
+from bonnet.core.acl import ACLEvaluator, AuthContext
+from bonnet.core.board_projection import BoardProjection, board_db_path
+from bonnet.core.bodies import BodyStore
+from bonnet.core.crypto import Identity
+from bonnet.core.firehose import (
     KIND_ARTICLE,
     FirehoseError,
     FirehoseStore,
 )
-from core.global_projections import NavProjection, PolicyProjection, UserProjection
-from core.kind_validator import KindValidator, ValidationError
-from core.logging import log_msg
-from core.record import (
+from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
+from bonnet.core.kind_validator import KindValidator, ValidationError
+from bonnet.core.logging import log_msg
+from bonnet.core.record import (
     SIG_SIZE,
     ZERO_ID,
     compute_body_hash,
@@ -37,7 +37,7 @@ from core.record import (
     encode_witness,
     make_origin_witness,
 )
-from core.search import SearchService
+from bonnet.core.search import SearchService
 
 KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
 KIND_ARTICLE_RESTORE = "bonnet.article.restore"
@@ -731,7 +731,7 @@ class FirehoseCommandHandler:
         return _success(self._encode_article_view(art, include_body=bool(include_body)))
 
     def _encode_article_view(self, art, include_body: bool = False) -> bytes:
-        from core.record import ZERO_ID
+        from bonnet.core.record import ZERO_ID
 
         out = struct.pack(">Q", art.article_num)
         out += struct.pack(">B", len(art.article_id)) + art.article_id

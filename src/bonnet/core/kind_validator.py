@@ -7,7 +7,7 @@ target rules. Called before origin acceptance of a publication request.
 
 from __future__ import annotations
 
-from core.record import ZERO_ID, Intent
+from bonnet.core.record import ZERO_ID, Intent
 
 # ---------------------------------------------------------------------------
 # Kind constants

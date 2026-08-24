@@ -8,7 +8,7 @@ import struct
 
 import pytest
 
-from client.firehose_protocol import (
+from bonnet.client.firehose_protocol import (
     OP_ARTICLE_BODY,
     OP_ARTICLE_GET,
     OP_ARTICLE_LIST,
@@ -54,8 +54,8 @@ from client.firehose_protocol import (
     parse_user_get_response,
     parse_user_list_response,
 )
-from core.crypto import Identity
-from core.record import (
+from bonnet.core.crypto import Identity
+from bonnet.core.record import (
     ZERO_HASH,
     ZERO_ID,
     Head,
@@ -161,7 +161,7 @@ def _make_record(
 def _make_witness(rec: Record, hostname="bbs.test") -> Witness:
     encoded = encode_record(rec)
     event_hash = compute_event_hash(encoded)
-    from core.record import make_origin_witness
+    from bonnet.core.record import make_origin_witness
 
     return make_origin_witness(
         origin=rec.origin,

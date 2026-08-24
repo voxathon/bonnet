@@ -6,17 +6,17 @@ import sqlite3
 
 import pytest
 
-from core.board_projection import BoardProjection, board_db_path
-from core.bodies import BodyStore
-from core.crypto import Identity
-from core.dispatcher import Dispatcher
-from core.firehose import KIND_ARTICLE, FirehoseStore
-from core.global_projections import (
+from bonnet.core.board_projection import BoardProjection, board_db_path
+from bonnet.core.bodies import BodyStore
+from bonnet.core.crypto import Identity
+from bonnet.core.dispatcher import Dispatcher
+from bonnet.core.firehose import KIND_ARTICLE, FirehoseStore
+from bonnet.core.global_projections import (
     NavProjection,
     PolicyProjection,
     UserProjection,
 )
-from core.record import (
+from bonnet.core.record import (
     Intent,
     MetadataMap,
     compute_body_hash,

@@ -18,13 +18,13 @@ import threading
 import time
 from urllib.parse import urlparse
 
-from core.crypto import Identity
-from core.firehose import (
+from bonnet.core.crypto import Identity
+from bonnet.core.firehose import (
     AcceptResult,
     FirehoseStore,
 )
-from core.logging import log_msg
-from core.record import (
+from bonnet.core.logging import log_msg
+from bonnet.core.record import (
     Head,
     Record,
     Witness,
@@ -107,7 +107,7 @@ class HttpSyncClient(SyncClient):
     """
 
     def __init__(self, base_url: str, verify_tls: bool = False, allow_private_dial: bool = False):
-        from client.firehose_client import FirehoseHTTPClient
+        from bonnet.client.firehose_client import FirehoseHTTPClient
 
         parsed = urlparse(base_url)
         if not is_safe_dial_target(
@@ -126,7 +126,7 @@ class HttpSyncClient(SyncClient):
             )
 
     async def fetch_head(self, origin: str) -> tuple[Head, bytes]:
-        from client.firehose_protocol import build_event_head, parse_event_head_response_raw
+        from bonnet.client.firehose_protocol import build_event_head, parse_event_head_response_raw
 
         await self._ensure_connected()
         cmd = build_event_head(origin)
@@ -137,7 +137,7 @@ class HttpSyncClient(SyncClient):
     async def fetch_range(
         self, origin: str, start_seq: int, max_count: int
     ) -> list[tuple[Record, Witness]]:
-        from client.firehose_protocol import build_event_range, parse_event_range_response
+        from bonnet.client.firehose_protocol import build_event_range, parse_event_range_response
 
         await self._ensure_connected()
         cmd = build_event_range(origin, start_seq, max_count)
@@ -471,7 +471,7 @@ class SyncManager:
             received_from_hostname=upstream.relay_hostname,
             seen_at=int(time.time()),
         )
-        from core.record import sign_witness
+        from bonnet.core.record import sign_witness
 
         w.relay_signature = sign_witness(self._identity, encode_unsigned_witness(w))
         return w

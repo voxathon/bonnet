@@ -4,9 +4,9 @@ import argparse
 import asyncio
 import signal
 
-from app.server import BonnetFirehoseServer
-from core.config import FirehoseConfig
-from core.logging import init_logging
+from bonnet.app.server import BonnetFirehoseServer
+from bonnet.core.config import FirehoseConfig
+from bonnet.core.logging import init_logging
 
 
 def main():

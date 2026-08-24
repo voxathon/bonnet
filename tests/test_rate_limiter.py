@@ -1,9 +1,9 @@
-"""Tests for src/net/rate_limiter.py — sliding-window rate limiter."""
+"""Tests for src/bonnet/net/rate_limiter.py — sliding-window rate limiter."""
 
 import threading
 import time
 
-from net.rate_limiter import RateLimiter
+from bonnet.net.rate_limiter import RateLimiter
 
 # ---------------------------------------------------------------------------
 # Basic check

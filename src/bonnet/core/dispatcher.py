@@ -9,17 +9,17 @@ from __future__ import annotations
 
 import threading
 
-from core.board_projection import BoardProjection, board_db_path, delete_board_dbs
-from core.bodies import BodyStore
-from core.firehose import FirehoseStore
-from core.global_projections import (
+from bonnet.core.board_projection import BoardProjection, board_db_path, delete_board_dbs
+from bonnet.core.bodies import BodyStore
+from bonnet.core.firehose import FirehoseStore
+from bonnet.core.global_projections import (
     PUNISHMENT_TYPE_BY_KIND,
     NavProjection,
     PolicyProjection,
     UserProjection,
 )
-from core.logging import log_msg
-from core.record import ZERO_ID, Record
+from bonnet.core.logging import log_msg
+from bonnet.core.record import ZERO_ID, Record
 
 # ---------------------------------------------------------------------------
 # Kind constants (mirror of record/firehose kinds)

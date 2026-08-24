@@ -15,7 +15,7 @@ import os
 import sqlite3
 import threading
 
-from core.record import ZERO_ID, Record
+from bonnet.core.record import ZERO_ID, Record
 
 # ---------------------------------------------------------------------------
 # Kind constants
@@ -550,7 +550,7 @@ class BoardProjection:
     # ------------------------------------------------------------------
 
     def _add_pending(self, rec: Record) -> None:
-        from core.record import encode_metadata, encode_record
+        from bonnet.core.record import encode_metadata, encode_record
 
         self._conn.execute(
             "INSERT OR IGNORE INTO pending_controls "
@@ -573,7 +573,7 @@ class BoardProjection:
 
     def _replay_pending_for_article(self, origin: str, board: str, article_id: bytes) -> None:
         """Replay pending controls for a newly appeared article."""
-        from core.record import decode_record
+        from bonnet.core.record import decode_record
 
         rows = self._conn.execute(
             "SELECT event_id, encoded_record FROM pending_controls "

@@ -15,9 +15,9 @@ import json
 import struct
 import time
 
-from core.crypto import Identity
-from core.logging import log_msg
-from net.http_auth import (
+from bonnet.core.crypto import Identity
+from bonnet.core.logging import log_msg
+from bonnet.net.http_auth import (
     BonnetSigner,
     BonnetVerifier,
     DigestMismatch,
@@ -33,8 +33,8 @@ from net.http_auth import (
     compute_content_digest,
     validate_content_digest,
 )
-from net.rate_limiter import RateLimiter
-from net.replay import ReplayLedger
+from bonnet.net.rate_limiter import RateLimiter
+from bonnet.net.replay import ReplayLedger
 
 FIREHOSE_TAG = "bonnet-firehose-1"
 FIREHOSE_LABEL = "bonnet"
@@ -332,7 +332,7 @@ class FirehoseHTTPServer:
             self._rate_limiter.cleanup()
         self._cleanup_counter += 1
 
-        from net.firehose_commands import FirehoseContext
+        from bonnet.net.firehose_commands import FirehoseContext
 
         role = ""
         is_registered = False

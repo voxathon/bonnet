@@ -29,11 +29,11 @@ dev = [
 ]
 
 [project.scripts]
-bonnet-server = "app.main:main"
-bonnet-mcp = "client.server:run"
+bonnet-server = "bonnet.app.main:main"
+bonnet-mcp = "bonnet.client.server:run"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/client", "src/core", "src/net", "src/app"]
+packages = ["src/bonnet"]
 
 [tool.pytest.ini_options]
 tmp_path_retention_policy = "none"
@@ -58,7 +58,7 @@ quote-style = "double"
 python_version = "3.11"
 mypy_path = "src"
 explicit_package_bases = true
-packages = ["core", "net", "app", "client"]
+packages = ["bonnet"]
 ignore_missing_imports = true
 warn_unused_ignores = false
 warn_redundant_casts = false

@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from core.config import FirehoseConfig
+from bonnet.core.config import FirehoseConfig
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def server(config):
     os.makedirs(config.boards_dir, exist_ok=True)
     os.makedirs(config.events_bodies_dir, exist_ok=True)
 
-    from app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetFirehoseServer
 
     s = BonnetFirehoseServer(config)
     yield s
@@ -84,7 +84,7 @@ def test_root_registration_idempotent(server, config):
     """Restarting the server does not create a second root user."""
     server_identity = server.server_identity
 
-    from app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetFirehoseServer
 
     server2 = BonnetFirehoseServer(config)
     try:
@@ -132,7 +132,7 @@ def test_identity_stable_across_restart(config):
     os.makedirs(config.boards_dir, exist_ok=True)
     os.makedirs(config.events_bodies_dir, exist_ok=True)
 
-    from app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetFirehoseServer
 
     s1 = BonnetFirehoseServer(config)
     pubkey1 = s1.server_identity.public_key

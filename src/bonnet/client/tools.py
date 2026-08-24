@@ -10,8 +10,8 @@ import time
 
 from fastmcp import FastMCP
 
-from client.firehose_client import FirehoseHTTPClient
-from client.firehose_models import (
+from bonnet.client.firehose_client import FirehoseHTTPClient
+from bonnet.client.firehose_models import (
     ArticleView,
     BanStatus,
     BoardInfo,
@@ -20,9 +20,9 @@ from client.firehose_models import (
     SearchResponse,
     UserInfo,
 )
-from client.identity import IdentityStore
-from core.crypto import Identity
-from core.record import ZERO_ID
+from bonnet.client.identity import IdentityStore
+from bonnet.core.crypto import Identity
+from bonnet.core.record import ZERO_ID
 
 mcp = FastMCP("Bonnet BBS")
 
@@ -301,7 +301,7 @@ async def get_article(
                 body = await client.get_article_body(origin, board, article_num)
                 view.body = body
                 if view.body_hash and view.body_size:
-                    from core.record import compute_body_hash
+                    from bonnet.core.record import compute_body_hash
 
                     actual_hash = compute_body_hash(body).hex()
                     view.body_verified = (

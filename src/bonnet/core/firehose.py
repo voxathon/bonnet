@@ -17,9 +17,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from core.crypto import Identity
-from core.logging import log_msg
-from core.record import (
+from bonnet.core.crypto import Identity
+from bonnet.core.logging import log_msg
+from bonnet.core.record import (
     HEAD_FORMAT,
     MAX_U63,
     RECORD_FORMAT,
@@ -262,7 +262,7 @@ class FirehoseStore:
         body_hash = intent.body_hash
         body_size = intent.body_size
         if body_size > 0:
-            from core.record import compute_body_hash
+            from bonnet.core.record import compute_body_hash
 
             actual_hash = compute_body_hash(body)
             if actual_hash != body_hash or len(body) != body_size:

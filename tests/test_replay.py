@@ -1,4 +1,4 @@
-"""Tests for src/net/replay.py — persistent replay-prevention ledger.
+"""Tests for src/bonnet/net/replay.py — persistent replay-prevention ledger.
 
 Exit gate (§13 Phase 3):
   - Replays and stale/future requests fail before dispatch
@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from net.replay import ReplayLedger
+from bonnet.net.replay import ReplayLedger
 
 
 def _make_nonce() -> str:
