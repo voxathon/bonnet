@@ -16,24 +16,22 @@ from bonnet.client.tools import _connect_anonymous, _make_client, mcp
 
 @mcp.resource("bonnet://boards")
 async def list_boards_resource() -> list[BoardInfo]:
-    """List all boards on the server."""
+    """List all boards across every known origin."""
     client = _make_client()
     try:
         await _connect_anonymous(client)
-        origin = client._server_origin or ""
-        return await client.list_boards(origin)
+        return await client.list_boards("")
     finally:
         await client.close()
 
 
 @mcp.resource("bonnet://boards/{board_name}")
 async def get_board_resource(board_name: str) -> BoardInfo:
-    """Get board metadata by name."""
+    """Get board metadata by name, searching all known origins."""
     client = _make_client()
     try:
         await _connect_anonymous(client)
-        origin = client._server_origin or ""
-        boards = await client.list_boards(origin)
+        boards = await client.list_boards("")
         for board in boards:
             if board.name == board_name:
                 return board
