@@ -76,36 +76,6 @@ def close_logging() -> None:
     _initialized = False
 
 
-def log_hex(label: str, data: bytes) -> None:
-    """Log binary data as full hex dump. No-op if init_logging() not called."""
-    global _log_file, _initialized
-    if not _initialized or _log_file is None:
-        return
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    _log_file.write(f"[{ts}] {label} ({len(data)} bytes):\n")
-    hex_str = data.hex()
-    for i in range(0, len(hex_str), 64):
-        _log_file.write(f"  {hex_str[i : i + 64]}\n")
-    _log_file.flush()
-
-
-def log_dict(label: str, d: dict) -> None:
-    """Log dictionary with truncation for long strings. No-op if init_logging() not called."""
-    global _log_file, _initialized
-    if not _initialized or _log_file is None:
-        return
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    _log_file.write(f"[{ts}] {label}:\n")
-    for k, v in d.items():
-        if isinstance(v, str) and len(v) > 100:
-            _log_file.write(f"  {k}: {v[:100]}... ({len(v)} chars)\n")
-        else:
-            _log_file.write(f"  {k}: {v}\n")
-    _log_file.flush()
-
-
 def get_log_path() -> str:
     """Return current log file path. None if not initialized."""
     global _log_file_path
