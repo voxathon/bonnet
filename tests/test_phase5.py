@@ -8,7 +8,29 @@ import struct
 
 import pytest
 
-from bonnet.client.firehose_protocol import (
+from bonnet.core.crypto import Identity
+from bonnet.core.record import (
+    ZERO_HASH,
+    ZERO_ID,
+    Head,
+    Intent,
+    MetadataMap,
+    Record,
+    Witness,
+    compute_body_hash,
+    compute_event_hash,
+    encode_head,
+    encode_intent,
+    encode_record,
+    encode_unsigned_head,
+    encode_unsigned_record,
+    encode_witness,
+    metadata_text,
+    sign_head,
+    sign_intent,
+    sign_record,
+)
+from bonnet.net.firehose_wire import (
     OP_ARTICLE_BODY,
     OP_ARTICLE_GET,
     OP_ARTICLE_LIST,
@@ -53,28 +75,6 @@ from bonnet.client.firehose_protocol import (
     parse_response,
     parse_user_get_response,
     parse_user_list_response,
-)
-from bonnet.core.crypto import Identity
-from bonnet.core.record import (
-    ZERO_HASH,
-    ZERO_ID,
-    Head,
-    Intent,
-    MetadataMap,
-    Record,
-    Witness,
-    compute_body_hash,
-    compute_event_hash,
-    encode_head,
-    encode_intent,
-    encode_record,
-    encode_unsigned_head,
-    encode_unsigned_record,
-    encode_witness,
-    metadata_text,
-    sign_head,
-    sign_intent,
-    sign_record,
 )
 
 # ---------------------------------------------------------------------------

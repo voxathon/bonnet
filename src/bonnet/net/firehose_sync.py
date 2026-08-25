@@ -33,6 +33,12 @@ from bonnet.core.record import (
     encode_record,
     encode_unsigned_witness,
 )
+from bonnet.net.firehose_wire import (
+    build_event_head,
+    build_event_range,
+    parse_event_head_response_raw,
+    parse_event_range_response,
+)
 
 
 def is_safe_dial_target(hostname: str, port: int, allow_private: bool = False) -> bool:
@@ -126,8 +132,6 @@ class HttpSyncClient(SyncClient):
             )
 
     async def fetch_head(self, origin: str) -> tuple[Head, bytes]:
-        from bonnet.client.firehose_protocol import build_event_head, parse_event_head_response_raw
-
         await self._ensure_connected()
         cmd = build_event_head(origin)
         resp = await self._client._send_command(cmd)
@@ -137,8 +141,6 @@ class HttpSyncClient(SyncClient):
     async def fetch_range(
         self, origin: str, start_seq: int, max_count: int
     ) -> list[tuple[Record, Witness]]:
-        from bonnet.client.firehose_protocol import build_event_range, parse_event_range_response
-
         await self._ensure_connected()
         cmd = build_event_range(origin, start_seq, max_count)
         resp = await self._client._send_command(cmd)

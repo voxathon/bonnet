@@ -1,5 +1,4 @@
-from .firehose_client import FirehoseHTTPClient
-from .firehose_models import (
+from bonnet.net.firehose_models import (
     ArticleListItem,
     ArticleView,
     BanStatus,
@@ -13,7 +12,8 @@ from .firehose_models import (
     SearchResult,
     UserInfo,
 )
-from .firehose_protocol import ProtocolError
+
+from .firehose_client import FirehoseHTTPClient
 from .identity import IdentityStore
 from .server import run
 
@@ -31,7 +31,6 @@ __all__ = [
     "PendingPunishment",
     "DiscoveryInfo",
     "FirehoseHTTPClient",
-    "ProtocolError",
     "IdentityStore",
     "run",
 ]

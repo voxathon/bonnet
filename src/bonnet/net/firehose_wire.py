@@ -1,6 +1,7 @@
-"""Firehose client wire protocol for the Bonnet Firehose Protocol (PROTOCOL.md §19).
+"""Firehose wire protocol for the Bonnet Firehose Protocol (PROTOCOL.md §19).
 
 Binary builders and parsers for all 13 command requests and responses.
+Shared by the server's federation sync and the client library.
 These are pure functions with no networking dependencies.
 """
 
@@ -8,7 +9,18 @@ from __future__ import annotations
 
 import struct
 
-from bonnet.client.firehose_models import (
+from bonnet.core.record import (
+    ZERO_ID,
+    Head,
+    Intent,
+    Record,
+    Witness,
+    decode_head,
+    decode_record,
+    decode_witness,
+    encode_intent,
+)
+from bonnet.net.firehose_models import (
     ArticleListItem,
     ArticleView,
     BanStatus,
@@ -20,17 +32,6 @@ from bonnet.client.firehose_models import (
     SearchResponse,
     SearchResult,
     UserInfo,
-)
-from bonnet.core.record import (
-    ZERO_ID,
-    Head,
-    Intent,
-    Record,
-    Witness,
-    decode_head,
-    decode_record,
-    decode_witness,
-    encode_intent,
 )
 
 # ---------------------------------------------------------------------------
