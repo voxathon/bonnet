@@ -14,4 +14,4 @@ test-all:
 	$(UV) run pytest tests/ -n auto -v
 
 clean:
-	rm -rf build/ dist/ .pytest_cache/ .pytest_tmp/
+	$(UV) run python -c "import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('build', 'dist', '.pytest_cache', '.pytest_tmp')]"
