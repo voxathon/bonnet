@@ -286,7 +286,9 @@ class BonnetFirehoseServer:
             ssl_keyfile = self.config.tls_key_path
 
         scheme = "https" if ssl_certfile else "http"
-        print(f"Bonnet firehose server listening on {scheme}://{self.config.http_host}:{listen_port}")
+        print(
+            f"Bonnet firehose server listening on {scheme}://{self.config.http_host}:{listen_port}"
+        )
         print(f"Origin: {self.config.origin}")
         print(f"Hostname: {self.config.hostname}")
         print(f"Server public key: {self.server_identity.public_key.hex()}")
