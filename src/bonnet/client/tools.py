@@ -8,6 +8,7 @@ import contextvars
 import os
 import time
 
+import httpx
 from fastmcp import FastMCP
 
 from bonnet.client.firehose_client import FirehoseHTTPClient
@@ -20,6 +21,7 @@ from bonnet.client.firehose_models import (
     SearchResponse,
     UserInfo,
 )
+from bonnet.client.firehose_protocol import ProtocolError
 from bonnet.client.identity import IdentityStore
 from bonnet.core.crypto import Identity
 from bonnet.core.record import ZERO_ID
@@ -307,7 +309,9 @@ async def get_article(
                     view.body_verified = (
                         len(body) == view.body_size and actual_hash == view.body_hash
                     )
-            except Exception:
+            except (ProtocolError, httpx.HTTPError):
+                # body unavailable/purged or unreachable — leave it unset;
+                # signature verification failures still propagate
                 pass
         return view
     finally:
