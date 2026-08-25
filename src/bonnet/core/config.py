@@ -372,6 +372,8 @@ data_dir = "./data"
 boards_dir = "./boards"
 events_bodies_dir = "./event_bodies"
 port = 2272
+# Bind address: 0.0.0.0 for all interfaces, 127.0.0.1 for local-only.
+host = "0.0.0.0"
 # admin_pubkey = "<hex-encoded Ed25519 public key for full access>"
 
 [limits]
@@ -399,12 +401,17 @@ interval_seconds = 300
 # Firehose federation peers. Each entry starts a background sync loop.
 # The origin is the peer's Bonnet origin string; hostname/port is the dial address.
 # verify_tls should be false for self-signed certs (common on LAN).
+# import_warnings, import_temp_bans, and import_permabans control which
+# punishment types are accepted from each peer (default: all true).
 #
 # [[sync.peers]]
 # origin = "10.0.0.15"
 # hostname = "10.0.0.15"
 # port = 2272
 # verify_tls = false
+# import_warnings = true
+# import_temp_bans = true
+# import_permabans = false
 
 # ACL rules (§16): explicit deny-wins, conjunctive dimensions.
 # Supported matchers: pubkey, role, origin, anonymous, unknown, wildcard.
@@ -436,5 +443,5 @@ interval_seconds = 300
         config_dir = os.path.dirname(path)
         if config_dir:
             os.makedirs(config_dir, exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(default_content)
