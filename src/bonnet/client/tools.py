@@ -12,7 +12,10 @@ import httpx
 from fastmcp import FastMCP
 
 from bonnet.client.firehose_client import FirehoseHTTPClient
-from bonnet.client.firehose_models import (
+from bonnet.client.identity import IdentityStore
+from bonnet.core.crypto import Identity
+from bonnet.core.record import ZERO_ID
+from bonnet.net.firehose_models import (
     ArticleView,
     BanStatus,
     BoardInfo,
@@ -21,10 +24,7 @@ from bonnet.client.firehose_models import (
     SearchResponse,
     UserInfo,
 )
-from bonnet.client.firehose_protocol import ProtocolError
-from bonnet.client.identity import IdentityStore
-from bonnet.core.crypto import Identity
-from bonnet.core.record import ZERO_ID
+from bonnet.net.firehose_wire import ProtocolError
 
 mcp = FastMCP("Bonnet BBS")
 
