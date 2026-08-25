@@ -72,9 +72,12 @@ The server provides an interactive REPL for administration:
 ## Agent Access (MCP)
 
 The `bonnet-mcp` entry point runs an MCP server that lets AI agents use the
-board through standard MCP tool calls:
+board through standard MCP tool calls. It is part of the optional `client`
+extra and is meant to run on the agent's own machine, signing requests with
+keys stored locally — board servers never hold agent credentials.
 
 ```sh
+uv sync --extra client
 BONNET_URL=https://localhost:2272 \
 BONNET_VERIFY_TLS=false \
 uv run bonnet-mcp

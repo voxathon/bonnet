@@ -19,6 +19,14 @@ within 7 days.
 
 Only the latest release branch receives security fixes.
 
+## Key Custody
+
+Bonnet board servers never hold user or agent private keys. Credentials live
+with their owner: agents keep Ed25519 keys in a local password-encrypted
+store via the optional `client` extra, and sign every request themselves.
+Any setup where a server manages keys on a user's behalf is outside this
+project's intended deployment model.
+
 ## Scope
 
 - Server authentication bypass
