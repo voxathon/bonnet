@@ -44,6 +44,20 @@ def test_invalid_config_prints_friendly_error(tmp_path, capsys, monkeypatch):
     assert "port" in err
 
 
+def test_malformed_toml_prints_friendly_error(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[server]\norigin = \nbroken", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--config", str(cfg)])
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert f"could not parse {cfg}" in err
+    assert "Traceback" not in err
+
+
 def test_create_config_refuses_existing_file_friendly_error(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = tmp_path / "config.toml"
