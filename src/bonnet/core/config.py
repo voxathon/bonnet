@@ -56,6 +56,78 @@ def _as_bool(table: dict, key: str, section: str, default: bool) -> bool:
     return value
 
 
+_TOP_LEVEL_KEYS = {"server", "limits", "search", "tls", "sync", "acl"}
+
+_SECTION_KEYS = {
+    "server": {
+        "origin",
+        "hostname",
+        "data_dir",
+        "boards_dir",
+        "events_bodies_dir",
+        "port",
+        "admin_pubkey",
+        "signature_lifetime_seconds",
+        "clock_skew_seconds",
+        "host",
+    },
+    "limits": {
+        "max_request_size",
+        "max_article_body_size",
+        "rate_limit_requests",
+        "rate_limit_window",
+    },
+    "search": {
+        "max_count",
+        "timeout_seconds",
+        "result_limit",
+        "rg_path",
+    },
+    "tls": {
+        "enabled",
+        "cert_path",
+        "key_path",
+        "ca_bundle",
+    },
+    "sync": {
+        "interval_seconds",
+        "peers",
+    },
+}
+
+_PEER_KEYS = {
+    "origin",
+    "hostname",
+    "port",
+    "verify_tls",
+    "import_warnings",
+    "import_temp_bans",
+    "import_permabans",
+}
+
+
+def _find_unknown_keys(data: dict) -> list[str]:
+    """Return dotted paths of recognized-section keys the loader ignores."""
+    unknown = []
+    for key in data:
+        if key not in _TOP_LEVEL_KEYS:
+            unknown.append(key)
+    for section_name in ("server", "limits", "search", "tls", "sync"):
+        table = data.get(section_name)
+        if not isinstance(table, dict):
+            continue
+        for key in table:
+            if key not in _SECTION_KEYS[section_name]:
+                unknown.append(f"{section_name}.{key}")
+    for i, peer in enumerate(data.get("sync", {}).get("peers", [])):
+        if not isinstance(peer, dict):
+            continue
+        for key in peer:
+            if key not in _PEER_KEYS:
+                unknown.append(f"sync.peers[{i}].{key}")
+    return unknown
+
+
 class FirehoseConfig:
     """Configuration for a Bonnet firehose server."""
 
@@ -86,6 +158,7 @@ class FirehoseConfig:
         acl: ACLEvaluator = None,
         admin_pubkey_hex: str = "",
         host: str = "0.0.0.0",
+        unknown_keys: list = None,
     ):
         self.origin = _normalize_origin(origin)
         self.hostname = hostname or self.origin
@@ -112,6 +185,7 @@ class FirehoseConfig:
         self.acl = acl or ACLEvaluator([])
         self.admin_pubkey_hex = admin_pubkey_hex
         self.host = host
+        self.unknown_keys = list(unknown_keys or [])
 
     def validate(self) -> None:
         """Raise ValueError if configuration is invalid."""
@@ -208,6 +282,8 @@ class FirehoseConfig:
         with open(path, "rb") as f:
             data = tomllib.load(f)
 
+        unknown_keys = _find_unknown_keys(data)
+
         server = data.get("server", {})
         limits = data.get("limits", {})
         search = data.get("search", {})
@@ -266,6 +342,7 @@ class FirehoseConfig:
             acl=acl,
             admin_pubkey_hex=admin_pubkey_hex,
             host=server.get("host", "0.0.0.0"),
+            unknown_keys=unknown_keys,
         )
 
     @staticmethod
