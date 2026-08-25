@@ -52,6 +52,30 @@ def log_msg(msg: str) -> None:
     _log.debug(msg)
 
 
+def close_logging() -> None:
+    """Flush and close the log file. Safe to call repeatedly and when uninitialized."""
+    global _log_file_path, _log_file, _log, _initialized
+
+    if not _initialized:
+        return
+
+    if _log is not None:
+        for handler in list(_log.handlers):
+            _log.removeHandler(handler)
+            handler.close()
+        _log = None
+
+    if _log_file is not None and not _log_file.closed:
+        try:
+            _log_file.flush()
+        finally:
+            _log_file.close()
+
+    _log_file = None
+    _log_file_path = None
+    _initialized = False
+
+
 def log_hex(label: str, data: bytes) -> None:
     """Log binary data as full hex dump. No-op if init_logging() not called."""
     global _log_file, _initialized
