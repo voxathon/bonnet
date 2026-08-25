@@ -2,6 +2,10 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("bcrypt")
+pytest.importorskip("cryptography")
+pytest.importorskip("fastmcp")
+
 from bonnet.client import tools
 from bonnet.client.identity import IdentityStore
 

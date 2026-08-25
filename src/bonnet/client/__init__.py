@@ -14,8 +14,6 @@ from bonnet.net.firehose_models import (
 )
 
 from .firehose_client import FirehoseHTTPClient
-from .identity import IdentityStore
-from .server import run
 
 __all__ = [
     "PublishResult",
@@ -31,6 +29,4 @@ __all__ = [
     "PendingPunishment",
     "DiscoveryInfo",
     "FirehoseHTTPClient",
-    "IdentityStore",
-    "run",
 ]

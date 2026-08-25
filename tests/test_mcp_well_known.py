@@ -5,6 +5,8 @@ import json
 import httpx
 import pytest
 
+pytest.importorskip("fastmcp")
+
 from bonnet.client.server import well_known_bonnet
 
 
