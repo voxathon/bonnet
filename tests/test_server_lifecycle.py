@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+from bonnet.app.console import OperatorConsole
 from bonnet.core.config import FirehoseConfig
 
 
@@ -108,7 +109,7 @@ async def test_register_user_rebinds_server_identity(server):
     administrator authority via the default ACL pubkey rule. Any change to
     this behavior must update this test deliberately.
     """
-    result = await server._repl_register_user(["bob"])
+    result = await OperatorConsole(server)._repl_register_user(["bob"])
     assert "bob" in result.lower()
     assert "replaces" in result.lower()
 
