@@ -50,6 +50,8 @@ def main(argv: list[str] | None = None):
     except tomllib.TOMLDecodeError as exc:
         print(f"error: could not parse {args.config}: {exc}", file=sys.stderr)
         raise SystemExit(1)
+    for key in config.unknown_keys:
+        print(f"warning: unrecognized config key '{key}' (ignored)", file=sys.stderr)
     if args.host:
         config.host = args.host
     try:
