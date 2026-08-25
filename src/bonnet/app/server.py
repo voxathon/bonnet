@@ -1744,14 +1744,13 @@ class BonnetFirehoseServer:
                 lines.append(f"  DENIED: {cmd_name} ({action})")
             # only show denied ones to keep output concise
 
-        if not any(False for _ in []):
-            all_allowed = True
-            for opcode, cmd_name in sorted(CMD_NAMES.items(), key=lambda x: x[1]):
-                action = "write" if opcode == 0x01 else "read"
-                if not acl.check(auth_ctx, action, command=cmd_name):
-                    all_allowed = False
-            if all_allowed:
-                lines.append("  (all commands allowed)")
+        all_allowed = True
+        for opcode, cmd_name in sorted(CMD_NAMES.items(), key=lambda x: x[1]):
+            action = "write" if opcode == 0x01 else "read"
+            if not acl.check(auth_ctx, action, command=cmd_name):
+                all_allowed = False
+        if all_allowed:
+            lines.append("  (all commands allowed)")
 
         lines.append("")
         lines.append("=== Server identity ===")
