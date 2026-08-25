@@ -5,6 +5,7 @@ data_dir = "./data"
 boards_dir = "./boards"
 events_bodies_dir = "./event_bodies"
 port = 2272
+# Bind address: 0.0.0.0 for all interfaces, 127.0.0.1 for local-only.
 host = "0.0.0.0"
 # admin_pubkey = "<hex-encoded Ed25519 public key for full access>"
 
