@@ -475,3 +475,63 @@ host = "127.0.0.1"
     )
     c = FirehoseConfig.load(path)
     assert c.http_host == "127.0.0.1"
+
+
+# ---------------------------------------------------------------------------
+# Unknown key detection
+# ---------------------------------------------------------------------------
+
+
+def test_load_reports_unknown_keys(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+typo_section = true
+
+[server]
+origin = "bbs.test"
+admin_key = "abc123"
+
+[limits]
+max_requests = 5
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert sorted(c.unknown_keys) == ["limits.max_requests", "server.admin_key", "typo_section"]
+
+
+def test_load_clean_config_has_no_unknown_keys(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[tls]
+enabled = false
+
+[sync]
+interval_seconds = 300
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.unknown_keys == []
+
+
+def test_load_reports_unknown_peer_keys(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[[sync.peers]]
+origin = "peer.test"
+hostname = "peer.test"
+import_warns = true
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.unknown_keys == ["sync.peers[0].import_warns"]
+
+
+def test_constructed_config_defaults_to_no_unknown_keys():
+    c = FirehoseConfig()
+    assert c.unknown_keys == []
