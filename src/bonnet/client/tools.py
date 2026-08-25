@@ -497,7 +497,7 @@ async def publish_article(
             srv_origin = client._server_origin or ""
             target = await client.get_article_by_id(srv_origin, board, reply_id, include_body=False)
             if target is None:
-                return f"Error: Article {reply_to_article_id} not found in /{board}"
+                raise ValueError(f"Article {reply_to_article_id} not found in /{board}")
             if target.root_article_id:
                 root_id = bytes.fromhex(target.root_article_id)
             else:
