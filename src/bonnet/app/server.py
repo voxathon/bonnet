@@ -448,7 +448,7 @@ class BonnetFirehoseServer:
   create-board <name>           Create a board (interactive)
   publish-article <board> [reply-to-num] [supersede-num]
                                 Publish an article (interactive)
-  register-user <name>          Register a user identity
+  register-user <name>          Rebind the server key's registration to <name>
   list-boards [origin]          List boards
   get-article [origin] <board> <num>
                                 Get article by number
@@ -743,7 +743,10 @@ class BonnetFirehoseServer:
 
         resp = self._local_handle(req)
         if resp[0] == 0x00:
-            return f"User '{username}' registered."
+            return (
+                f"Registered '{username}' under the server identity's public key. "
+                "This replaces any previous registration for that key (including 'root')."
+            )
 
         return self._parse_response_error(resp)
 
