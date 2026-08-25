@@ -535,3 +535,52 @@ import_warns = true
 def test_constructed_config_defaults_to_no_unknown_keys():
     c = FirehoseConfig()
     assert c.unknown_keys == []
+
+
+# ---------------------------------------------------------------------------
+# Sample config template
+# ---------------------------------------------------------------------------
+
+
+def test_generated_sample_is_utf8_loadable_and_valid(tmp_path):
+    """--create-config output must round-trip through the real loader.
+
+    Regression guard for locale-dependent writes (cp1252 on Windows made the
+    generated file unparseable by tomllib).
+    """
+    import tomllib
+
+    path = str(tmp_path / "config.toml")
+    FirehoseConfig._write_default(path)
+
+    with open(path, "rb") as f:
+        raw = f.read()
+    data = tomllib.loads(raw.decode("utf-8"))
+    assert data["server"]["origin"] == "localhost"
+
+    c = FirehoseConfig.load(path)
+    c.validate()
+    assert c.unknown_keys == []
+
+
+def test_example_config_matches_generated_template(tmp_path):
+    """config.example.toml and the --create-config template stay in sync.
+
+    server.origin/hostname are excluded: the tracked example ships a
+    placeholder origin, the generated sample starts local.
+    """
+    import tomllib
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    example_path = os.path.join(repo_root, "config.example.toml")
+    generated_path = str(tmp_path / "generated.toml")
+    FirehoseConfig._write_default(generated_path)
+
+    def load_normalized(path):
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        data.get("server", {}).pop("origin", None)
+        data.get("server", {}).pop("hostname", None)
+        return data
+
+    assert load_normalized(example_path) == load_normalized(generated_path)
