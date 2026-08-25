@@ -78,7 +78,6 @@ from bonnet.net.firehose_wire import (
 class FirehoseHTTPClient(FirehoseTransport):
     """Typed client API over the shared signed-HTTP transport."""
 
-
     # ------------------------------------------------------------------
     # Publication
     # ------------------------------------------------------------------

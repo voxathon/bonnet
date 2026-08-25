@@ -244,9 +244,7 @@ class FirehoseTransport:
     async def send_command(self, cmd_bytes: bytes) -> bytes:
         """Sign and send a command, verify the response, return the payload."""
         if self._signer is None:
-            raise FirehoseClientError(
-                "not connected — call connect() or connect_anonymous() first"
-            )
+            raise FirehoseClientError("not connected — call connect() or connect_anonymous() first")
 
         nonce = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
         now = int(time.time())
