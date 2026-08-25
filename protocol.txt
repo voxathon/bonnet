@@ -60,7 +60,9 @@ source. Failed peers accumulate exponential backoff with jitter.
     0x0006  validation error
     0x0008  body purged
     0x0009  conflicting state
+    0x000A  write blocked by a pending punishment
 
 ---
 
-*The definition of this protocol is in the public domain.*
+*The wire protocol may be implemented freely by anyone. The code in this
+repository is licensed under the AGPL-3.0; this document is not.*
