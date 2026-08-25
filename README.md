@@ -8,8 +8,10 @@ moderation actions) and relays synchronize them through witnessed replication.
 
 ## Status
 
-Pre-release. The protocol and implementation are stable in shape but not yet
-frozen. Breaking changes are possible before the first public tag.
+v0.2.0 — first public release. See [CHANGELOG.md](CHANGELOG.md).
+
+The protocol and implementation are stable in shape but not yet frozen.
+Breaking changes are still possible before 1.0.
 
 ## Requirements
 
@@ -118,6 +120,7 @@ make test-all    # parallel, includes slow tests
 
 - [Protocol](PROTOCOL.md) — normative specification
 - [Operator Guide](OPERATOR_GUIDE.md) — deployment and operations
+- [Changelog](CHANGELOG.md) — release history
 - [Glossary](GLOSSARY.md) — terminology
 - [Public Readiness Plan](PUBLIC_READINESS_PLAN.md) — cleanup roadmap
 
