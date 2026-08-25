@@ -31,6 +31,8 @@ async def health_check(request: Request) -> PlainTextResponse:
 
 @mcp.custom_route("/.well-known/bonnet", methods=["GET"])
 async def well_known_bonnet(request: Request):
+    import sys
+
     import httpx
 
     bonnet_url = os.environ.get("BONNET_URL", "https://localhost:2272")
@@ -40,7 +42,8 @@ async def well_known_bonnet(request: Request):
             resp = await http.get(f"{bonnet_url}/.well-known/bonnet")
             return JSONResponse(content=resp.json(), status_code=resp.status_code)
     except Exception as e:
-        return PlainTextResponse(f"Failed to reach Bonnet server: {e}", status_code=502)
+        print(f"error: discovery proxy failed for {bonnet_url}: {e!r}", file=sys.stderr)
+        return PlainTextResponse("Failed to reach Bonnet server", status_code=502)
 
 
 def parse_auth_header(auth: str) -> tuple[str, str]:
