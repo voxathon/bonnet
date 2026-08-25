@@ -33,6 +33,7 @@ from bonnet.core.record import (
     encode_record,
     encode_unsigned_witness,
 )
+from bonnet.net.firehose_transport import FirehoseTransport
 from bonnet.net.firehose_wire import (
     build_event_head,
     build_event_range,
@@ -106,21 +107,19 @@ class SyncClient:
 
 
 class HttpSyncClient(SyncClient):
-    """Concrete SyncClient using FirehoseHTTPClient over HTTP.
+    """Concrete SyncClient using FirehoseTransport over HTTP.
 
     Connects anonymously, performs TOFU key pinning via discovery,
     and wraps the firehose protocol commands EVENT_HEAD and EVENT_RANGE.
     """
 
     def __init__(self, base_url: str, verify_tls: bool = False, allow_private_dial: bool = False):
-        from bonnet.client.firehose_client import FirehoseHTTPClient
-
         parsed = urlparse(base_url)
         if not is_safe_dial_target(
             parsed.hostname, parsed.port or 443, allow_private=allow_private_dial
         ):
             raise ValueError(f"unsafe dial target: {parsed.hostname}:{parsed.port or 443}")
-        self._client = FirehoseHTTPClient(base_url, verify=verify_tls)
+        self._client = FirehoseTransport(base_url, verify=verify_tls)
         self._connected = False
 
     async def _ensure_connected(self) -> None:
@@ -134,7 +133,7 @@ class HttpSyncClient(SyncClient):
     async def fetch_head(self, origin: str) -> tuple[Head, bytes]:
         await self._ensure_connected()
         cmd = build_event_head(origin)
-        resp = await self._client._send_command(cmd)
+        resp = await self._client.send_command(cmd)
         head = parse_event_head_response_raw(resp)
         return head, encode_head(head)
 
@@ -143,7 +142,7 @@ class HttpSyncClient(SyncClient):
     ) -> list[tuple[Record, Witness]]:
         await self._ensure_connected()
         cmd = build_event_range(origin, start_seq, max_count)
-        resp = await self._client._send_command(cmd)
+        resp = await self._client.send_command(cmd)
         return parse_event_range_response(resp)
 
     async def close(self) -> None:
