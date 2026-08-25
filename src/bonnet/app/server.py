@@ -21,7 +21,7 @@ from bonnet.core.dispatcher import Dispatcher
 from bonnet.core.firehose import FirehoseStore
 from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
 from bonnet.core.kind_validator import KindValidator
-from bonnet.core.logging import log_msg
+from bonnet.core.logging import close_logging, get_log_path, log_msg
 from bonnet.core.record import (
     ZERO_ID,
     Intent,
@@ -285,11 +285,14 @@ class BonnetFirehoseServer:
         if ssl_keyfile is None and self.config.tls_enabled and self.config.tls_key_path:
             ssl_keyfile = self.config.tls_key_path
 
-        print(f"Bonnet firehose server listening on port {listen_port}")
+        scheme = "https" if ssl_certfile else "http"
+        print(f"Bonnet firehose server listening on {scheme}://{self.config.http_host}:{listen_port}")
         print(f"Origin: {self.config.origin}")
         print(f"Hostname: {self.config.hostname}")
         print(f"Server public key: {self.server_identity.public_key.hex()}")
         print(f"Anonymous key: {self.anonymous_identity.public_key.hex()}")
+        log_path = get_log_path()
+        print(f"Logs: {log_path}" if log_path else "Logs: disabled")
 
         uv_config = uvicorn.Config(
             self.http_server,
@@ -1864,5 +1867,6 @@ class BonnetFirehoseServer:
                     first_error = e
                 log_msg(f"INIT: error during close: {e}")
         log_msg("INIT: shutdown complete")
+        close_logging()
         if first_error is not None:
             raise first_error
