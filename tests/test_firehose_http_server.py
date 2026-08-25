@@ -12,11 +12,6 @@ import httpx
 import pytest
 
 from bonnet.client.firehose_client import FirehoseHTTPClient
-from bonnet.client.firehose_protocol import (
-    build_board_list,
-    build_event_head,
-    parse_board_list_response,
-)
 from bonnet.core.acl import ACLEvaluator, ACLRule, PrincipalMatcher, default_rules_for_admin
 from bonnet.core.bodies import BodyStore
 from bonnet.core.config import FirehoseConfig
@@ -30,6 +25,11 @@ from bonnet.net.firehose_commands import (
     FirehoseCommandHandler,
 )
 from bonnet.net.firehose_http_server import FirehoseHTTPServer
+from bonnet.net.firehose_wire import (
+    build_board_list,
+    build_event_head,
+    parse_board_list_response,
+)
 from bonnet.net.http_auth import (
     compute_content_digest,
 )
