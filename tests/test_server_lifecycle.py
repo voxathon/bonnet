@@ -99,6 +99,29 @@ def test_root_registration_idempotent(server, config):
         server2.close()
 
 
+async def test_register_user_rebinds_server_identity(server):
+    """REPL register-user reuses the server identity key and REPLACES its
+    existing registration row.
+
+    This test pins current semantics: the new username replaces 'root' and
+    the row carries flags=0 (no admin badge), even though the pubkey keeps
+    administrator authority via the default ACL pubkey rule. Any change to
+    this behavior must update this test deliberately.
+    """
+    result = await server._repl_register_user(["bob"])
+    assert "bob" in result.lower()
+    assert "replaces" in result.lower()
+
+    user = server.users.get_user_by_pubkey("bbs.test", server.server_identity.public_key)
+    assert user is not None
+    assert user["username"] == "bob"
+    assert not user.get("flags", 0) & 0x01
+
+    all_users = server.users.list_users("bbs.test")
+    usernames = [u["username"] for u in all_users]
+    assert usernames == ["bob"]
+
+
 # ---------------------------------------------------------------------------
 # Close
 # ---------------------------------------------------------------------------
