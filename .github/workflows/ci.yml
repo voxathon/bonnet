@@ -8,12 +8,19 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv sync
       - run: sudo apt-get update && sudo apt-get install -y ripgrep
+        if: runner.os == 'Linux'
+      - run: choco install -y ripgrep
+        if: runner.os == 'Windows'
       - run: uv run pytest tests/ -n auto -m "not slow" --tb=short
 
   lint:
