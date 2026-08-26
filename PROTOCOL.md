@@ -16,6 +16,24 @@ replication, creating signed witnesses that name their upstream source.
   followed by opcode-specific fields. Requests and responses are signed using
   RFC 9421 HTTP Message Signatures with Ed25519.
 
+### Key Epochs Command
+
+`KEY_EPOCHS` (opcode `0x05`, read) returns a server's origin key epoch table
+for federation peers bootstrapping rotated histories.
+
+- **Request:** opcode, then the origin as text16.
+- **Response:** count as u16, then per epoch: `start_seq` u64, `end_seq` u64
+  (0 = open), `pubkey` (32 bytes). Epochs are ascending and non-overlapping.
+
+The response is advisory. Peers must verify each internal boundary by
+snatching the rotate record at the prior epoch's `end_seq` and checking
+that its actor pubkey matches the previous epoch's key, its origin
+signature verifies under that key, and its rotation proof — signed by the
+new key over `(origin, old, new)` — chains to the advertised successor.
+The final open epoch must match the signed head's public key. Unverified
+or incoherent hints are discarded; verification then proceeds from the
+record stream alone.
+
 ## Authentication
 
 Every request is signed with an Ed25519 key. The key ID format is

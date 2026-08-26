@@ -26,7 +26,8 @@ rebuildable projection of that immutable log.
   record's proof over the previously pinned key and resume under the new key
   automatically. Rotated histories are self-verifying — a brand-new peer
   bootstraps pre-rotation keys by chaining rotate proofs backward from the
-  head. `reset-key` is reserved for incident response.
+  head, with an advisory `KEY_EPOCHS` (0x05) read command pointing it at
+  the exact swap points. `reset-key` is reserved for incident response.
 - **Typed moderation** — warnings, temp bans, permabans, revocations, and
   user acknowledgments are first-class record kinds. Punishment authority is
   ACL-enforced, imports from peers are filterable per punishment type, and
