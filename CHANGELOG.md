@@ -22,6 +22,9 @@ rebuildable projection of that immutable log.
 - **Federation** — peers sync through bounded batched fetches with exponential
   backoff; first contact uses Web PKI plus TOFU pinning with operator pin
   overrides; dial targets are validated against private networks by default.
+  Key rotation propagates through sync itself: peers verify each rotate
+  record's proof over the previously pinned key and resume under the new key
+  automatically. `reset-key` is reserved for incident response.
 - **Typed moderation** — warnings, temp bans, permabans, revocations, and
   user acknowledgments are first-class record kinds. Punishment authority is
   ACL-enforced, imports from peers are filterable per punishment type, and
