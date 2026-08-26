@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 from bonnet.core.crypto import Identity
 from bonnet.core.firehose import (
+    KIND_ORIGIN_KEY_ROTATE,
     AcceptResult,
     FirehoseStore,
 )
@@ -31,14 +32,20 @@ from bonnet.core.record import (
     compute_event_hash,
     encode_head,
     encode_record,
+    encode_unsigned_record,
     encode_unsigned_witness,
+    verify_key_rotation_proof,
+    verify_record_signature,
 )
-from bonnet.net.firehose_transport import FirehoseTransport
+from bonnet.net.firehose_transport import FirehoseClientError, FirehoseTransport
 from bonnet.net.firehose_wire import (
+    ProtocolError,
     build_event_head,
     build_event_range,
+    build_key_epochs,
     parse_event_head_response_raw,
     parse_event_range_response,
+    parse_key_epochs_response,
 )
 
 
@@ -102,6 +109,14 @@ class SyncClient:
         """Fetch a range of records with witnesses. Returns list of (record, witness)."""
         raise NotImplementedError
 
+    async def fetch_key_epochs(self, origin: str) -> list[tuple[int, int | None, bytes]] | None:
+        """Fetch the server's key epoch table.
+
+        Returns [(start_seq, end_seq_or_None, pubkey)] ascending, or None
+        when the server does not implement KEY_EPOCHS (pre-0x05 peer).
+        """
+        return None
+
     async def close(self) -> None:
         pass
 
@@ -144,6 +159,22 @@ class HttpSyncClient(SyncClient):
         cmd = build_event_range(origin, start_seq, max_count)
         resp = await self._client.send_command(cmd)
         return parse_event_range_response(resp)
+
+    async def fetch_key_epochs(self, origin: str) -> list[tuple[int, int | None, bytes]] | None:
+        await self._ensure_connected()
+        cmd = build_key_epochs(origin)
+        try:
+            resp = await self._client.send_command(cmd)
+        except FirehoseClientError as e:
+            # unknown opcode on a pre-0x05 server arrives as an error frame,
+            # not a transport failure
+            log_msg(f"SYNC_CLIENT: KEY_EPOCHS unsupported by peer '{origin}': {e}")
+            return None
+        try:
+            return parse_key_epochs_response(resp)
+        except ProtocolError as e:
+            log_msg(f"SYNC_CLIENT: malformed KEY_EPOCHS response from '{origin}': {e}")
+            return None
 
     async def close(self) -> None:
         await self._client.close()
@@ -373,6 +404,8 @@ class SyncManager:
         # the rotate record travels through sync itself.
         self._firehose.init_origin_key(origin, head.origin_pubkey)
 
+        key_intervals = await self._verify_epoch_hints(origin, client, head)
+
         total_accepted = 0
         current_start = local_seq + 1
         remaining = count
@@ -401,6 +434,7 @@ class SyncManager:
                 head=head if is_final else None,
                 origin_pubkey=head.origin_pubkey,
                 source=self._hostname,
+                key_intervals=key_intervals,
             )
 
             log_msg(
@@ -451,6 +485,69 @@ class SyncManager:
                 reason=last_result.reason,
             )
         return last_result
+
+    async def _verify_epoch_hints(
+        self, origin: str, client: SyncClient, head: Head
+    ) -> list[tuple[int, int | None, bytes]] | None:
+        """Fetch and verify the peer's advertised key epoch table.
+
+        Hints are never trusted directly: every internal boundary is
+        snatched as a record and must be a genuine rotate — actor equal to
+        the previous epoch's key, origin signature under that key, proof
+        chaining it to the advertised successor. The chain must terminate
+        at the head's pubkey, and hints are only consumed when local state
+        is a fresh blanket bootstrap (veteran peers already hold
+        authoritative epochs; their in-batch derivation covers rotation).
+        Returns verified intervals, or None to fall back.
+        """
+        try:
+            epochs = await client.fetch_key_epochs(origin)
+        except Exception as e:
+            log_msg(f"SYNC_ONCE: epoch hint fetch failed for '{origin}': {e}")
+            return None
+        if not epochs:
+            return None
+
+        if not self._firehose.is_blanket_bootstrap(origin, head.origin_pubkey):
+            return None
+
+        epochs = sorted(epochs, key=lambda e: e[0])
+        if epochs[0][0] != 1:
+            return None
+        if epochs[-1][1] is not None:
+            return None
+        if epochs[-1][2] != head.origin_pubkey:
+            return None
+
+        for prev, nxt in zip(epochs, epochs[1:]):
+            boundary = prev[1]
+            start_i, _, pk_i = nxt
+            _, _, pk_prev = prev
+            if boundary is None or boundary != start_i - 1:
+                log_msg(f"SYNC_ONCE: incoherent epoch boundary from '{origin}'")
+                return None
+
+            snatched = await client.fetch_range(origin, boundary, 1)
+            if len(snatched) != 1:
+                return None
+            rec = snatched[0][0]
+            if rec.kind != KIND_ORIGIN_KEY_ROTATE:
+                log_msg(f"SYNC_ONCE: advertised boundary seq={boundary} is not a rotate")
+                return None
+            if rec.actor_pubkey != pk_prev:
+                return None
+            new_key = rec.metadata.get_bytes(1)
+            proof = rec.metadata.get_bytes(2)
+            if new_key != pk_i:
+                return None
+            if not verify_record_signature(
+                pk_prev, encode_unsigned_record(rec), rec.origin_signature
+            ):
+                return None
+            if not verify_key_rotation_proof(pk_i, origin, pk_prev, proof):
+                return None
+
+        return [(start, end, pk) for start, end, pk in epochs]
 
     def _create_local_witness(self, rec: Record, upstream: Witness) -> Witness | None:
         """Create a local relay witness naming the upstream as immediate source."""

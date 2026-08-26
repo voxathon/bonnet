@@ -84,6 +84,13 @@ KIND_ARTICLE = "bonnet.article"
 KIND_ORIGIN_KEY_ROTATE = "bonnet.origin.key.rotate"
 
 
+def _key_from_intervals(intervals: list[tuple[int, int | None, bytes]], seq: int) -> bytes | None:
+    for start, end, pubkey in intervals:
+        if seq >= start and (end is None or seq <= end):
+            return pubkey
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Accept result
 # ---------------------------------------------------------------------------
@@ -495,6 +502,32 @@ class FirehoseStore:
             ).fetchone()
             return bytes(row[0]) if row else None
 
+    def get_key_epochs(self, origin: str) -> list[tuple[int, int | None, bytes]]:
+        """Return [(start_seq, end_seq_or_None, pubkey)] for an origin, ascending."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT start_seq, end_seq, publickey FROM origin_key_epochs "
+                "WHERE origin=? ORDER BY start_seq",
+                (origin,),
+            ).fetchall()
+            return [(int(r[0]), int(r[1]) if r[1] is not None else None, bytes(r[2])) for r in rows]
+
+    def is_blanket_bootstrap(self, origin: str, anchor_pubkey: bytes) -> bool:
+        """True when the origin's only epoch knowledge is a single open
+        epoch covering seq 1 pinned to anchor_pubkey — i.e., the state a
+        fresh peer gets from bootstrap before any records arrive."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT start_seq, end_seq, publickey FROM origin_key_epochs WHERE origin=?",
+                (origin,),
+            ).fetchall()
+        return (
+            len(rows) == 1
+            and rows[0][0] == 1
+            and rows[0][1] is None
+            and bytes(rows[0][2]) == anchor_pubkey
+        )
+
     def _apply_rotation_locked(
         self,
         origin: str,
@@ -609,6 +642,7 @@ class FirehoseStore:
         head: Head | None,
         origin_pubkey: bytes,
         source: str = "",
+        key_intervals: list[tuple[int, int | None, bytes]] | None = None,
     ) -> AcceptResult:
         """Accept a contiguous range of remote records verified against a head.
 
@@ -619,6 +653,12 @@ class FirehoseStore:
         head=None; they are anchored by chain continuity and per-record
         signatures alone. Verifies chain continuity, signatures,
         collisions, and commits atomically.
+
+        `key_intervals` carries caller-verified [(start, end, pubkey)]
+        epoch boundaries (from a KEY_EPOCHS-advertising peer); it takes
+        precedence over the blanket bootstrap epoch so a fresh peer can
+        verify pre-rotation records. When absent, in-batch rotate records
+        drive backward derivation.
         """
         if not records:
             return AcceptResult(accepted=False, reason="empty record range")
@@ -724,6 +764,8 @@ class FirehoseStore:
 
                     unsigned = encode_unsigned_record(rec)
                     key = derived_keys.get(rec.origin_seq)
+                    if key is None and key_intervals:
+                        key = _key_from_intervals(key_intervals, rec.origin_seq)
                     if key is None:
                         key = self.get_key_for_seq(origin, rec.origin_seq)
                     if key is None:
