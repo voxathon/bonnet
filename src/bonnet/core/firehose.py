@@ -536,15 +536,19 @@ class FirehoseStore:
         self,
         origin: str,
         records: list[Record],
-        head: Head,
+        head: Head | None,
         origin_pubkey: bytes,
         source: str = "",
     ) -> AcceptResult:
         """Accept a contiguous range of remote records verified against a head.
 
         Implements §17.1 acceptance rules. The caller provides pre-decoded
-        records and the signed head. This method verifies chain continuity,
-        signatures, collisions, and commits atomically.
+        records. When the batch completes the synced range, `head` must be
+        provided and is verified against the final record before being
+        recorded. Intermediate batches of a multi-batch transfer pass
+        head=None; they are anchored by chain continuity and per-record
+        signatures alone. Verifies chain continuity, signatures,
+        collisions, and commits atomically.
         """
         if not records:
             return AcceptResult(accepted=False, reason="empty record range")
@@ -553,11 +557,13 @@ class FirehoseStore:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 row = self._conn.execute(
-                    "SELECT highest_seq, current_event_hash FROM origin_state WHERE origin=?",
+                    "SELECT highest_seq, current_event_hash, current_head_hash "
+                    "FROM origin_state WHERE origin=?",
                     (origin,),
                 ).fetchone()
                 local_seq = row[0] if row else 0
                 local_hash = bytes(row[1]) if row else ZERO_HASH
+                local_head_hash = bytes(row[2]) if row else ZERO_HASH
 
                 first_seq = records[0].origin_seq
                 last_seq = records[-1].origin_seq
@@ -735,59 +741,64 @@ class FirehoseStore:
                         reason="equivocation detected; range partially accepted",
                     )
 
-                if head.latest_origin_seq != last_seq:
-                    self._conn.execute("ROLLBACK")
-                    raise HeadMismatch("head latest_origin_seq does not match last record")
+                anchored = head is not None and head.latest_origin_seq == last_seq
 
-                final_hash = expected_prev if records[-1].origin_seq == last_seq else None
-                if final_hash is None:
-                    final_hash = compute_event_hash(encode_record(records[-1]))
+                if anchored:
+                    final_hash = expected_prev if records[-1].origin_seq == last_seq else None
+                    if final_hash is None:
+                        final_hash = compute_event_hash(encode_record(records[-1]))
 
-                if head.latest_event_hash != final_hash:
-                    self._conn.execute("ROLLBACK")
-                    raise HeadMismatch("head latest_event_hash does not match final event hash")
+                    if head.latest_event_hash != final_hash:
+                        self._conn.execute("ROLLBACK")
+                        raise HeadMismatch("head latest_event_hash does not match final event hash")
 
-                if head.event_count != head.latest_origin_seq:
-                    self._conn.execute("ROLLBACK")
-                    raise HeadMismatch("head event_count does not equal latest_origin_seq")
+                    if head.event_count != head.latest_origin_seq:
+                        self._conn.execute("ROLLBACK")
+                        raise HeadMismatch("head event_count does not equal latest_origin_seq")
 
-                unsigned_head = encode_unsigned_head(head)
-                head_key = self.get_key_for_seq(origin, head.latest_origin_seq)
-                if head_key is None:
-                    head_key = origin_pubkey
-                if not verify_head_signature(head_key, unsigned_head, head.origin_signature):
-                    self._conn.execute("ROLLBACK")
-                    raise SignatureInvalid("head signature verification failed")
+                    unsigned_head = encode_unsigned_head(head)
+                    head_key = self.get_key_for_seq(origin, head.latest_origin_seq)
+                    if head_key is None:
+                        head_key = origin_pubkey
+                    if not verify_head_signature(head_key, unsigned_head, head.origin_signature):
+                        self._conn.execute("ROLLBACK")
+                        raise SignatureInvalid("head signature verification failed")
 
-                encoded_head = encode_head(head)
-                head_hash = compute_head_hash(encoded_head)
+                    encoded_head = encode_head(head)
+                    state_head_hash = compute_head_hash(encoded_head)
 
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO origin_heads "
-                    "(origin, latest_origin_seq, latest_event_hash, event_count, "
-                    "generated_at, origin_pubkey, origin_signature, head_hash, "
-                    "is_authoritative, observed_at, source) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-                    (
-                        origin,
-                        head.latest_origin_seq,
-                        head.latest_event_hash,
-                        head.event_count,
-                        head.generated_at,
-                        head.origin_pubkey,
-                        head.origin_signature,
-                        head_hash,
-                        int(time.time()),
-                        source,
-                    ),
-                )
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO origin_heads "
+                        "(origin, latest_origin_seq, latest_event_hash, event_count, "
+                        "generated_at, origin_pubkey, origin_signature, head_hash, "
+                        "is_authoritative, observed_at, source) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                        (
+                            origin,
+                            head.latest_origin_seq,
+                            head.latest_event_hash,
+                            head.event_count,
+                            head.generated_at,
+                            head.origin_pubkey,
+                            head.origin_signature,
+                            state_head_hash,
+                            int(time.time()),
+                            source,
+                        ),
+                    )
+                else:
+                    # Intermediate batch: no head to anchor it. The tip hash
+                    # still advances (chain-verified); the recorded head hash
+                    # is preserved from prior state.
+                    final_hash = last_accepted_hash
+                    state_head_hash = local_head_hash
 
                 new_seq = max(local_seq, last_seq)
                 self._conn.execute(
                     "INSERT OR REPLACE INTO origin_state "
                     "(origin, highest_seq, current_event_hash, current_head_hash) "
                     "VALUES (?, ?, ?, ?)",
-                    (origin, new_seq, final_hash, head_hash),
+                    (origin, new_seq, final_hash, state_head_hash),
                 )
 
                 self._conn.execute("COMMIT")
