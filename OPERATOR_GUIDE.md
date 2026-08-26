@@ -163,14 +163,21 @@ the origin. A manifest file is written for crash recovery.
 
 ### Key Reset
 
-When a peer rotates their key and your pin is stale:
+Peers recover from origin key rotation automatically: the rotate record
+travels through sync like any other, and its proof (signed by the new key
+over the previously pinned one) re-anchors trust. No operator action is
+required for routine rotations.
+
+`reset-key` remains for incident response — when an epoch pin is stale in
+a way no record can repair (e.g., recovering from a compromised or lost
+key without a valid rotate record):
 
 ```
 bonnet> reset-key peer.example
 ```
 
-This clears key epochs and origin state. The next sync cycle performs fresh
-TOFU pinning.
+This clears key epochs and origin state. The next sync cycle performs
+fresh TOFU pinning.
 
 ## Backups
 
