@@ -42,6 +42,7 @@ OP_PUBLISH_RECORD = 0x01
 OP_EVENT_HEAD = 0x02
 OP_EVENT_RANGE = 0x03
 OP_EVENT_GET = 0x04
+OP_KEY_EPOCHS = 0x05
 OP_BOARD_LIST = 0x10
 OP_ARTICLE_GET = 0x11
 OP_ARTICLE_LIST = 0x12
@@ -232,6 +233,29 @@ def build_event_range(
     out += struct.pack(">H", max_count)
     out += struct.pack(">I", max_bytes)
     return out
+
+
+def build_key_epochs(origin: str) -> bytes:
+    """Build a KEY_EPOCHS request (§19.20): origin only."""
+    out = struct.pack(">B", OP_KEY_EPOCHS)
+    out += _enc_text16(origin)
+    return out
+
+
+def parse_key_epochs_response(resp: bytes) -> list[tuple[int, int | None, bytes]]:
+    """Parse a KEY_EPOCHS response into [(start_seq, end_seq_or_None, pubkey)]."""
+    status, payload = parse_response(resp)
+    if status != 0x00:
+        raise ProtocolError("key epochs response not a success frame")
+    count, offset = _read_u16(payload, 0)
+    epochs = []
+    for _ in range(count):
+        start, offset = _read_u64(payload, offset)
+        end_raw, offset = _read_u64(payload, offset)
+        pubkey = payload[offset : offset + 32]
+        offset += 32
+        epochs.append((start, None if end_raw == 0 else end_raw, pubkey))
+    return epochs
 
 
 def parse_event_range_response(resp: bytes) -> list[tuple[Record, Witness]]:

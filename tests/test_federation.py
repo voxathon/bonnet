@@ -243,7 +243,7 @@ class _OriginServer:
 
 
 class _ServingClient(SyncClient):
-    """Serves heads and record ranges from an authoritative store."""
+    """Serves heads, record ranges, and epoch hints from an authoritative store."""
 
     def __init__(self, server: _OriginServer):
         self._server = server
@@ -268,6 +268,9 @@ class _ServingClient(SyncClient):
             )
             out.append((rec, w))
         return out
+
+    async def fetch_key_epochs(self, origin):
+        return self._server.store.get_key_epochs(origin)
 
     async def close(self):
         pass
@@ -330,6 +333,49 @@ async def test_missed_rotation_caught_up_across_batches(tmp_path):
     assert result.accepted_count == 5
 
     assert peer_store.get_highest_seq(origin.origin) == 8
+    assert peer_store.get_current_key(origin.origin) == origin.identity.public_key
+
+
+@pytest.mark.xdist_group("rotation_sync")
+async def test_fresh_peer_multibatch_rotated_history(tmp_path):
+    """Epoch hints let a fresh peer verify pre-rotation records even when
+    the first batches contain no rotate record at all."""
+    origin = _OriginServer(tmp_path)
+    origin.publish_articles(3)
+    origin.rotate()
+    origin.publish_articles(5)
+
+    peer_store, mgr = _make_peer(tmp_path)
+    client = origin.serving_client()
+    client.page_size = 2  # first batch is entirely pre-rotation
+
+    result = await mgr._sync_once(origin.origin, client, skip_allowlist=True)
+    assert result.accepted, result.reason
+    assert result.accepted_count == 9
+
+    assert peer_store.get_highest_seq(origin.origin) == 9
+    assert peer_store.get_current_key(origin.origin) == origin.identity.public_key
+
+
+@pytest.mark.xdist_group("rotation_sync")
+async def test_lying_epoch_hints_degrade_safely(tmp_path):
+    """Hints advertising a boundary where no rotate exists are discarded;
+    the sync falls back to in-batch derivation and still succeeds."""
+    origin = _OriginServer(tmp_path)
+    origin.publish_articles(4)
+
+    peer_store, mgr = _make_peer(tmp_path)
+
+    class LyingClient(_ServingClient):
+        async def fetch_key_epochs(self, origin):
+            k_fake = Identity.generate().public_key
+            return [(1, 2, k_fake), (3, None, self._server.identity.public_key)]
+
+    client = LyingClient(origin)
+    result = await mgr._sync_once(origin.origin, client, skip_allowlist=True)
+    assert result.accepted and result.accepted_count == 4
+
+    assert peer_store.get_highest_seq(origin.origin) == 4
     assert peer_store.get_current_key(origin.origin) == origin.identity.public_key
 
 

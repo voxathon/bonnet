@@ -60,6 +60,7 @@ OP_PUBLISH_RECORD = 0x01
 OP_EVENT_HEAD = 0x02
 OP_EVENT_RANGE = 0x03
 OP_EVENT_GET = 0x04
+OP_KEY_EPOCHS = 0x05
 OP_BOARD_LIST = 0x10
 OP_ARTICLE_GET = 0x11
 OP_ARTICLE_LIST = 0x12
@@ -76,6 +77,7 @@ CMD_NAMES = {
     OP_EVENT_HEAD: "EVENT_HEAD",
     OP_EVENT_RANGE: "EVENT_RANGE",
     OP_EVENT_GET: "EVENT_GET",
+    OP_KEY_EPOCHS: "KEY_EPOCHS",
     OP_BOARD_LIST: "BOARD_LIST",
     OP_ARTICLE_GET: "ARTICLE_GET",
     OP_ARTICLE_LIST: "ARTICLE_LIST",
@@ -94,6 +96,7 @@ READ_OPS = frozenset(
         OP_EVENT_HEAD,
         OP_EVENT_RANGE,
         OP_EVENT_GET,
+        OP_KEY_EPOCHS,
         OP_BOARD_LIST,
         OP_ARTICLE_GET,
         OP_ARTICLE_LIST,
@@ -341,6 +344,8 @@ class FirehoseCommandHandler:
                 return self._cmd_event_range(data, ctx)
             elif opcode == OP_EVENT_GET:
                 return self._cmd_event_get(data, ctx)
+            elif opcode == OP_KEY_EPOCHS:
+                return self._cmd_key_epochs(data, ctx)
             elif opcode == OP_BOARD_LIST:
                 return self._cmd_board_list(data, ctx)
             elif opcode == OP_ARTICLE_GET:
@@ -575,6 +580,26 @@ class FirehoseCommandHandler:
 
         encoded = encode_head(head)
         return _success(struct.pack(">H", len(encoded)) + encoded)
+
+    # ------------------------------------------------------------------
+    # KEY_EPOCHS (§19.21)
+    # ------------------------------------------------------------------
+
+    def _cmd_key_epochs(self, data: bytes, ctx: FirehoseContext) -> bytes:
+        offset = 0
+        origin, offset = _read_text16(data, offset)
+        self._maybe_queue_remote_sync(origin)
+
+        epochs = self._firehose.get_key_epochs(origin)
+        if not epochs:
+            return _error(0x0002, "No key epochs for origin")
+
+        payload = struct.pack(">H", len(epochs))
+        for start_seq, end_seq, pubkey in epochs:
+            payload += struct.pack(">Q", start_seq)
+            payload += struct.pack(">Q", end_seq if end_seq is not None else 0)
+            payload += pubkey
+        return _success(payload)
 
     # ------------------------------------------------------------------
     # EVENT_RANGE (§19.3)
