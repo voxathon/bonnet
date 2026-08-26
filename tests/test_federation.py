@@ -1,11 +1,43 @@
-"""Tests for federation sync: SSRF validation, backoff, resource cleanup."""
+"""Tests for federation sync: SSRF validation, backoff, resource cleanup,
+and key-rotation behavior across the sync boundary."""
 
 import asyncio
+import os
+import time
 
 import pytest
 
 from bonnet.core.crypto import Identity
-from bonnet.core.firehose import FirehoseStore
+from bonnet.core.firehose import (
+    KIND_ARTICLE,
+    KIND_ORIGIN_KEY_ROTATE,
+    FirehoseError,
+    FirehoseStore,
+)
+from bonnet.core.record import (
+    DOMAIN_ORIGIN_SIG,
+    HEAD_FORMAT,
+    RECORD_FORMAT,
+    SIG_SIZE,
+    ZERO_HASH,
+    Head,
+    Intent,
+    MetadataMap,
+    Record,
+    compute_body_hash,
+    compute_event_hash,
+    encode_intent,
+    encode_record,
+    encode_unsigned_head,
+    encode_unsigned_record,
+    make_origin_witness,
+    metadata_bytes,
+    metadata_text,
+    reconstruct_intent_from_record,
+    sign_head,
+    sign_intent,
+    sign_key_rotation_proof,
+)
 from bonnet.net.firehose_sync import SyncClient, SyncManager, is_safe_dial_target
 
 ORIGIN_PUB = Identity.from_private_key(bytes(range(1, 33))).public_key
@@ -140,3 +172,230 @@ async def test_stop_origin_closes_client(tmp_path):
     assert mock._closed
     assert "peer.test" not in mgr._clients
     firehose.close()
+
+
+# ---------------------------------------------------------------------------
+# Key rotation across the sync boundary
+# ---------------------------------------------------------------------------
+
+
+class _OriginServer:
+    """Authoritative origin backed by a real FirehoseStore."""
+
+    def __init__(self, tmp_path, name="rot.test"):
+        self.origin = name
+        self.identity = Identity.generate()
+        self.store = FirehoseStore(str(tmp_path / f"{name}.db"))
+        self.store.init_origin_key(self.origin, self.identity.public_key)
+
+    def publish_articles(self, n):
+        for _ in range(n):
+            body = os.urandom(16).hex().encode("utf-8")
+            intent = Intent(
+                event_id=os.urandom(32),
+                kind=KIND_ARTICLE,
+                origin=self.origin,
+                actor_pubkey=self.identity.public_key,
+                actor_username="root",
+                actor_registrar=self.origin,
+                board="general",
+                article_id=os.urandom(32),
+                metadata=MetadataMap(fields=[metadata_text(1, "hello")]),
+                body_hash=compute_body_hash(body),
+                body_size=len(body),
+            )
+            self.store.append_record(
+                self.identity,
+                intent,
+                sign_intent(self.identity, encode_intent(intent)),
+                body,
+            )
+
+    def rotate(self):
+        """Append a rotate record under the old key; epoch flips to a new key."""
+        new = Identity.generate()
+        proof = sign_key_rotation_proof(new, self.origin, self.identity.public_key, new.public_key)
+        intent = Intent(
+            event_id=os.urandom(32),
+            kind=KIND_ORIGIN_KEY_ROTATE,
+            origin=self.origin,
+            actor_pubkey=self.identity.public_key,
+            actor_username="root",
+            actor_registrar=self.origin,
+            metadata=MetadataMap(
+                fields=[
+                    metadata_bytes(1, new.public_key),
+                    metadata_bytes(2, proof),
+                ]
+            ),
+        )
+        self.store.append_record(
+            self.identity,
+            intent,
+            sign_intent(self.identity, encode_intent(intent)),
+            b"",
+        )
+        self.identity = new
+
+    def serving_client(self):
+        return _ServingClient(self)
+
+
+class _ServingClient(SyncClient):
+    """Serves heads and record ranges from an authoritative store."""
+
+    def __init__(self, server: _OriginServer):
+        self._server = server
+        self.page_size = 100
+
+    async def fetch_head(self, origin):
+        return self._server.store.get_head(origin), b""
+
+    async def fetch_range(self, origin, start_seq, max_count):
+        recs = self._server.store.get_events_range(
+            origin, start_seq, min(max_count, self.page_size)
+        )
+        out = []
+        for rec in recs:
+            w = make_origin_witness(
+                origin,
+                rec.event_id,
+                compute_event_hash(encode_record(rec)),
+                self._server.identity,
+                self._server.origin,
+                int(time.time()),
+            )
+            out.append((rec, w))
+        return out
+
+    async def close(self):
+        pass
+
+
+def _make_peer(tmp_path):
+    peer_store = FirehoseStore(str(tmp_path / "peer.db"))
+    mgr = SyncManager(peer_store, Identity.generate(), "peer.test")
+    return peer_store, mgr
+
+
+@pytest.mark.xdist_group("rotation_sync")
+async def test_rotation_then_sync_continues(tmp_path):
+    """A peer that witnessed a rotation keeps syncing under the new key."""
+    origin = _OriginServer(tmp_path)
+    k1 = origin.identity.public_key
+    origin.publish_articles(3)
+
+    peer_store, mgr = _make_peer(tmp_path)
+    client = origin.serving_client()
+
+    first = await mgr._sync_once(origin.origin, client, skip_allowlist=True)
+    assert first.accepted and first.accepted_count == 3
+    assert peer_store.get_current_key(origin.origin) == k1
+
+    origin.rotate()
+    origin.publish_articles(2)
+
+    second = await mgr._sync_once(origin.origin, client, skip_allowlist=True)
+    assert second.accepted, second.reason
+    assert second.accepted_count == 3
+
+    assert peer_store.get_highest_seq(origin.origin) == 6
+    assert peer_store.get_current_key(origin.origin) != k1
+
+    third = await mgr._sync_once(origin.origin, client, skip_allowlist=True)
+    assert third.reason == "already up to date"
+
+
+@pytest.mark.xdist_group("rotation_sync")
+async def test_missed_rotation_caught_up_across_batches(tmp_path):
+    """A stale peer catches up through a rotate record delivered mid-cycle."""
+    origin = _OriginServer(tmp_path)
+    origin.publish_articles(3)
+
+    peer_store, mgr = _make_peer(tmp_path)
+    client = origin.serving_client()
+
+    first = await mgr._sync_once(origin.origin, client, skip_allowlist=True)
+    assert first.accepted and first.accepted_count == 3
+
+    origin.rotate()
+    origin.publish_articles(4)
+
+    # force small pages so batches straddle the rotate record's sequence
+    client.page_size = 2
+
+    result = await mgr._sync_once(origin.origin, client, skip_allowlist=True)
+    assert result.accepted, result.reason
+    assert result.accepted_count == 5
+
+    assert peer_store.get_highest_seq(origin.origin) == 8
+    assert peer_store.get_current_key(origin.origin) == origin.identity.public_key
+
+
+@pytest.mark.xdist_group("rotation_sync")
+async def test_hostile_substitution_refused_at_acceptance(tmp_path):
+    """A foreign key forging records past our tip is rejected; state unchanged."""
+    real = _OriginServer(tmp_path)
+    real.publish_articles(3)
+
+    peer_store, mgr = _make_peer(tmp_path)
+    client = real.serving_client()
+
+    first = await mgr._sync_once(real.origin, client, skip_allowlist=True)
+    assert first.accepted and first.accepted_count == 3
+    k1 = real.identity.public_key
+
+    tip_rec = real.store.get_events_range(real.origin, 3, 1)[0]
+    tip_hash = compute_event_hash(encode_record(tip_rec))
+
+    attacker = Identity.generate()
+
+    def forge(seq, prev_hash):
+        rec = Record(
+            record_format=RECORD_FORMAT,
+            origin=real.origin,
+            origin_seq=seq,
+            previous_event_hash=prev_hash,
+            event_id=os.urandom(32),
+            kind=KIND_ARTICLE,
+            schema_version=1,
+            created_at=int(time.time()),
+            actor_pubkey=attacker.public_key,
+            actor_username="evil",
+            actor_registrar=real.origin,
+            board="general",
+            article_id=os.urandom(32),
+            article_num=0,
+            metadata=MetadataMap(fields=[metadata_text(1, "forged")]),
+            body_hash=ZERO_HASH,
+            body_size=0,
+            actor_signature=b"\x00" * SIG_SIZE,
+            origin_signature=b"\x00" * SIG_SIZE,
+        )
+        rec.actor_signature = sign_intent(
+            attacker, encode_intent(reconstruct_intent_from_record(rec))
+        )
+        rec.origin_signature = attacker.sign(DOMAIN_ORIGIN_SIG + encode_unsigned_record(rec))
+        return rec
+
+    f4 = forge(4, tip_hash)
+    f5 = forge(5, compute_event_hash(encode_record(f4)))
+
+    head = Head(
+        head_format=HEAD_FORMAT,
+        origin=real.origin,
+        latest_origin_seq=5,
+        latest_event_hash=compute_event_hash(encode_record(f5)),
+        event_count=5,
+        generated_at=int(time.time()),
+        origin_pubkey=attacker.public_key,
+    )
+    head.origin_signature = sign_head(attacker, encode_unsigned_head(head))
+
+    evil = MockClient(head=head, ranges={4: [(f4, None)], 5: [(f5, None)]})
+
+    with pytest.raises(FirehoseError):
+        await mgr._sync_once(real.origin, evil, skip_allowlist=True)
+
+    assert peer_store.get_highest_seq(real.origin) == 3
+    assert peer_store.get_current_key(real.origin) == k1

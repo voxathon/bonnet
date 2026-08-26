@@ -365,23 +365,13 @@ class SyncManager:
         else:
             count = head.latest_origin_seq - local_seq
 
+        # TOFU bootstrap only: establish an epoch table for fresh peers.
+        # Continuity and key legitimacy are enforced per-record by
+        # accept_remote_range (chain links, per-seq epoch keys, rotation
+        # proofs signed over the pinned old key, head match at the tip).
+        # A pre-fetch pin comparison here would deadlock on rotation:
+        # the rotate record travels through sync itself.
         self._firehose.init_origin_key(origin, head.origin_pubkey)
-        existing_key = self._firehose.get_key_for_seq(origin, 1)
-        if existing_key is not None:
-            log_msg(
-                f"SYNC_ONCE: origin='{origin}' key_epoch for seq 1: {existing_key.hex()[:16]}..."
-            )
-            if existing_key != head.origin_pubkey:
-                log_msg(
-                    f"SYNC_ONCE: origin='{origin}' KEY MISMATCH — pinned={existing_key.hex()[:16]}... head={head.origin_pubkey.hex()[:16]}... — refusing to sync (stale key epoch, operator must reset)"
-                )
-                return AcceptResult(
-                    accepted=False, reason="key epoch mismatch — operator must reset_origin_key"
-                )
-        else:
-            log_msg(
-                f"SYNC_ONCE: origin='{origin}' no key epoch found, using head.origin_pubkey as fallback"
-            )
 
         total_accepted = 0
         current_start = local_seq + 1
@@ -400,10 +390,15 @@ class SyncManager:
             batch_records = [r for r, w in items]
             batch_witnesses = [w for r, w in items]
 
+            # Only the batch that reaches the advertised head carries it;
+            # intermediate batches are anchored by chain continuity.
+            last_seq_in_batch = current_start + len(batch_records) - 1
+            is_final = last_seq_in_batch >= head.latest_origin_seq
+
             result = self._firehose.accept_remote_range(
                 origin=origin,
                 records=batch_records,
-                head=head,
+                head=head if is_final else None,
                 origin_pubkey=head.origin_pubkey,
                 source=self._hostname,
             )
