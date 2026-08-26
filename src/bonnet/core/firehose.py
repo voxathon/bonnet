@@ -501,14 +501,20 @@ class FirehoseStore:
         seq: int,
         intent: Intent,
         origin_identity: Identity | None,
+        expected_old: bytes | None = None,
     ) -> None:
-        """Process a bonnet.origin.key.rotate record at sequence N."""
+        """Process a bonnet.origin.key.rotate record at sequence N.
+
+        When the caller has already derived and verified the pre-rotation
+        key (acceptance of a batch containing rotations), pass it as
+        expected_old; otherwise it is taken from current epoch state.
+        """
         new_pubkey = intent.metadata.get_bytes(1)
         proof = intent.metadata.get_bytes(2)
         if new_pubkey is None or proof is None:
             raise FirehoseError("rotation record missing required metadata fields")
 
-        old_pubkey = self.get_current_key(origin)
+        old_pubkey = expected_old or self.get_current_key(origin)
         if old_pubkey is None:
             if origin_identity is not None:
                 old_pubkey = origin_identity.public_key
@@ -527,6 +533,70 @@ class FirehoseStore:
             "VALUES (?, ?, NULL, ?, ?)",
             (origin, seq + 1, new_pubkey, int(time.time())),
         )
+
+    def _derive_batch_keys(
+        self, origin: str, records: list[Record], anchor_pubkey: bytes
+    ) -> dict[int, bytes]:
+        """Backward-derive per-sequence verification keys for a batch.
+
+        A rotate record claims (old -> new); the old key rides in the proof
+        payload and is mirrored by the record's actor_pubkey. The claim is
+        trusted only when the proof is signed by an already-trusted
+        successor over (origin, old, new) AND the rotate record carries a
+        valid origin signature under that old key. Trust flows backward
+        from keys already vouched for by persistent epochs; the presented
+        head key anchors derivation only for a peer whose sole knowledge is
+        the blanket epoch that bootstrap created from it.
+        """
+        rotates = [r for r in records if r.kind == KIND_ORIGIN_KEY_ROTATE]
+        if not rotates:
+            return {}
+
+        epochs = self._conn.execute(
+            "SELECT start_seq, end_seq, publickey FROM origin_key_epochs "
+            "WHERE origin=? ORDER BY start_seq",
+            (origin,),
+        ).fetchall()
+        trusted = {bytes(pk) for _, _, pk in epochs}
+
+        pure_fresh = (
+            len(epochs) == 1
+            and epochs[0][0] == 1
+            and epochs[0][1] is None
+            and bytes(epochs[0][2]) == anchor_pubkey
+        )
+        if pure_fresh:
+            trusted.add(anchor_pubkey)
+
+        accepted = []  # (seq, old_key, new_key), descending during walk
+        for r in reversed(rotates):
+            new_key = r.metadata.get_bytes(1)
+            proof = r.metadata.get_bytes(2)
+            old_key = r.actor_pubkey
+            if new_key is None or proof is None or new_key not in trusted:
+                continue
+            if not verify_record_signature(old_key, encode_unsigned_record(r), r.origin_signature):
+                continue
+            if not verify_key_rotation_proof(new_key, origin, old_key, proof):
+                continue
+            trusted.add(old_key)
+            accepted.append((r.origin_seq, old_key, new_key))
+        if not accepted:
+            return {}
+        accepted.reverse()
+
+        derived: dict[int, bytes] = {}
+        first_seq = records[0].origin_seq
+        last_seq = records[-1].origin_seq
+        for i, (rseq, old_key, new_key) in enumerate(accepted):
+            derived[rseq] = old_key
+            region_start = rseq + 1
+            region_end = accepted[i + 1][0] - 1 if i + 1 < len(accepted) else last_seq
+            for s in range(region_start, region_end + 1):
+                derived[s] = new_key
+        for s in range(first_seq, accepted[0][0]):
+            derived[s] = accepted[0][1]
+        return derived
 
     # -----------------------------------------------------------------------
     # Remote range acceptance
@@ -581,6 +651,7 @@ class FirehoseStore:
                 last_accepted_seq = local_seq
                 last_accepted_hash = local_hash
                 conflict_found = False
+                derived_keys = self._derive_batch_keys(origin, records, origin_pubkey)
 
                 for rec in records:
                     if rec.origin != origin:
@@ -652,7 +723,9 @@ class FirehoseStore:
                     expected_prev = event_hash
 
                     unsigned = encode_unsigned_record(rec)
-                    key = self.get_key_for_seq(origin, rec.origin_seq)
+                    key = derived_keys.get(rec.origin_seq)
+                    if key is None:
+                        key = self.get_key_for_seq(origin, rec.origin_seq)
                     if key is None:
                         key = origin_pubkey
 
@@ -718,7 +791,13 @@ class FirehoseStore:
                     )
 
                     if rec.kind == KIND_ORIGIN_KEY_ROTATE:
-                        self._apply_rotation_locked(origin, rec.origin_seq, reconstructed, None)
+                        self._apply_rotation_locked(
+                            origin,
+                            rec.origin_seq,
+                            reconstructed,
+                            None,
+                            expected_old=derived_keys.get(rec.origin_seq),
+                        )
 
                     last_accepted_seq = rec.origin_seq
                     last_accepted_hash = event_hash

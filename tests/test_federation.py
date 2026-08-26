@@ -20,6 +20,7 @@ from bonnet.core.record import (
     RECORD_FORMAT,
     SIG_SIZE,
     ZERO_HASH,
+    ZERO_ID,
     Head,
     Intent,
     MetadataMap,
@@ -399,3 +400,121 @@ async def test_hostile_substitution_refused_at_acceptance(tmp_path):
 
     assert peer_store.get_highest_seq(real.origin) == 3
     assert peer_store.get_current_key(real.origin) == k1
+
+
+@pytest.mark.xdist_group("rotation_sync")
+async def test_fresh_peer_syncs_history_containing_rotation(tmp_path):
+    """A peer with no prior history bootstraps pre-rotation trust from the
+    rotate record's proof alone."""
+    origin = _OriginServer(tmp_path)
+    origin.publish_articles(3)
+    origin.rotate()
+    origin.publish_articles(2)
+
+    peer_store, mgr = _make_peer(tmp_path)
+
+    result = await mgr._sync_once(origin.origin, origin.serving_client(), skip_allowlist=True)
+    assert result.accepted, result.reason
+    assert result.accepted_count == 6
+
+    assert peer_store.get_highest_seq(origin.origin) == 6
+    assert peer_store.get_current_key(origin.origin) == origin.identity.public_key
+
+
+@pytest.mark.xdist_group("rotation_sync")
+async def test_fresh_peer_two_chained_rotations(tmp_path):
+    """Backward derivation walks through multiple chained rotate proofs."""
+    origin = _OriginServer(tmp_path)
+    origin.publish_articles(2)
+    origin.rotate()
+    origin.publish_articles(2)
+    origin.rotate()
+    origin.publish_articles(2)
+
+    peer_store, mgr = _make_peer(tmp_path)
+
+    result = await mgr._sync_once(origin.origin, origin.serving_client(), skip_allowlist=True)
+    assert result.accepted, result.reason
+    assert result.accepted_count == 8
+
+    assert peer_store.get_highest_seq(origin.origin) == 8
+    assert peer_store.get_current_key(origin.origin) == origin.identity.public_key
+
+    followup = await mgr._sync_once(origin.origin, origin.serving_client(), skip_allowlist=True)
+    assert followup.reason == "already up to date"
+
+
+@pytest.mark.xdist_group("rotation_sync")
+async def test_unlinked_rotate_rejected(tmp_path):
+    """A self-consistent rotate record that does not chain to a trusted key
+    cannot bootstrap trust; the batch is refused."""
+    real = _OriginServer(tmp_path)
+    k0 = real.identity.public_key
+    real.publish_articles(3)
+
+    peer_store, mgr = _make_peer(tmp_path)
+    client = real.serving_client()
+    await mgr._sync_once(real.origin, client, skip_allowlist=True)
+
+    tip_rec = real.store.get_events_range(real.origin, 3, 1)[0]
+    tip_hash = compute_event_hash(encode_record(tip_rec))
+
+    attacker = Identity.generate()
+    attacker_new = Identity.generate()
+
+    rot = Record(
+        record_format=RECORD_FORMAT,
+        origin=real.origin,
+        origin_seq=4,
+        previous_event_hash=tip_hash,
+        event_id=os.urandom(32),
+        kind=KIND_ORIGIN_KEY_ROTATE,
+        schema_version=1,
+        created_at=int(time.time()),
+        actor_pubkey=attacker.public_key,
+        actor_username="evil",
+        actor_registrar=real.origin,
+        board="",
+        article_id=ZERO_ID,
+        article_num=0,
+        metadata=MetadataMap(
+            fields=[
+                metadata_bytes(
+                    1,
+                    attacker_new.public_key,
+                ),
+                metadata_bytes(
+                    2,
+                    sign_key_rotation_proof(
+                        attacker_new, real.origin, attacker.public_key, attacker_new.public_key
+                    ),
+                ),
+            ]
+        ),
+        body_hash=ZERO_HASH,
+        body_size=0,
+        actor_signature=b"\x00" * SIG_SIZE,
+        origin_signature=b"\x00" * SIG_SIZE,
+    )
+    intent = reconstruct_intent_from_record(rot)
+    rot.actor_signature = sign_intent(attacker, encode_intent(intent))
+    rot.origin_signature = attacker.sign(DOMAIN_ORIGIN_SIG + encode_unsigned_record(rot))
+
+    head = Head(
+        head_format=HEAD_FORMAT,
+        origin=real.origin,
+        latest_origin_seq=4,
+        latest_event_hash=compute_event_hash(encode_record(rot)),
+        event_count=4,
+        generated_at=int(time.time()),
+        origin_pubkey=attacker_new.public_key,
+    )
+    head.origin_signature = sign_head(attacker_new, encode_unsigned_head(head))
+
+    evil = MockClient(head=head, ranges={4: [(rot, None)]})
+
+    with pytest.raises(FirehoseError):
+        await mgr._sync_once(real.origin, evil, skip_allowlist=True)
+
+    assert peer_store.get_highest_seq(real.origin) == 3
+    assert peer_store.get_current_key(real.origin) == k0
