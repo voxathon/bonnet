@@ -558,8 +558,8 @@ class FirehoseStore:
             raise SignatureInvalid("key rotation proof verification failed")
 
         self._conn.execute(
-            "UPDATE origin_key_epochs SET end_seq=? WHERE origin=? AND end_seq IS NULL",
-            (seq, origin),
+            "UPDATE origin_key_epochs SET end_seq=?, publickey=? WHERE origin=? AND end_seq IS NULL",
+            (seq, old_pubkey, origin),
         )
         self._conn.execute(
             "INSERT INTO origin_key_epochs (origin, start_seq, end_seq, publickey, first_seen) "

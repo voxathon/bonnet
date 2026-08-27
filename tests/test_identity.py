@@ -51,8 +51,9 @@ def test_identity_store_env_var_path(tmp_path, monkeypatch):
 
 
 def test_identity_store_default_path_when_unset(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("BONNET_IDENTITIES_DB", raising=False)
+    fake_default = str(tmp_path / "default" / "identities.db")
+    monkeypatch.setattr(IdentityStore, "default_db_path", staticmethod(lambda: fake_default))
 
     original = tools.identity_store
     tools.identity_store = None
