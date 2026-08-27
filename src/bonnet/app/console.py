@@ -1749,6 +1749,8 @@ class OperatorConsole:
                 matcher_desc.append("anonymous")
             if m.unknown:
                 matcher_desc.append("unknown")
+            if m.registered:
+                matcher_desc.append("registered")
             if m.pubkey is not None:
                 matcher_desc.append(f"pubkey={m.pubkey.hex()[:16]}...")
             if m.role is not None:

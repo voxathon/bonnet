@@ -42,7 +42,7 @@ def _print_next_steps(config_path: str, tls_enabled: bool) -> None:
     print("  3. To let a remote agent administer this server, install the client")
     print("     extra, register an identity, and paste its pubkey into config.toml:")
     print("       uv sync --extra client")
-    print(f"       BONNET_URL={scheme}://localhost:2272 BONNET_VERIFY_TLS=false uv run bonnet-mcp")
+    print(f"       BONNET_URL={scheme}://localhost:2272 uv run bonnet-mcp")
     print("       (then call the register_user MCP tool - it prints the pubkey to use)")
     print("     See OPERATOR_GUIDE.md 'Becoming your own server's admin' for details.")
     if not tls_enabled:

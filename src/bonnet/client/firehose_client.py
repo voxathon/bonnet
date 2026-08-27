@@ -9,6 +9,7 @@ firehose commands on top.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 from bonnet.core.record import (
     ZERO_ID,
@@ -73,6 +74,22 @@ from bonnet.net.firehose_wire import (
     parse_user_get_response,
     parse_user_list_response,
 )
+
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def default_verify_tls(url: str) -> bool:
+    """TLS verification default: on, except for loopback URLs.
+
+    A freshly `--init`'d server only has a self-signed cert it just
+    generated for itself; verifying that against a CA trust store fails by
+    construction and buys nothing, since there's no attacker positioned on
+    loopback in that scenario. Any other host still defaults to verified
+    TLS — this only relaxes the case where BONNET_URL points at the same
+    machine.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    return host not in _LOOPBACK_HOSTS
 
 
 class FirehoseHTTPClient(FirehoseTransport):

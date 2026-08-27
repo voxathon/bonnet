@@ -37,6 +37,7 @@ class PrincipalMatcher:
     origin: str | None = None
     anonymous: bool = False
     unknown: bool = False
+    registered: bool = False
     wildcard: bool = False
 
     def matches(self, ctx: AuthContext) -> bool:
@@ -44,6 +45,8 @@ class PrincipalMatcher:
             return ctx.is_anonymous
         if self.unknown:
             return ctx.is_unknown
+        if self.registered:
+            return ctx.is_registered
         if self.wildcard:
             return True
         matched_any = False
@@ -77,6 +80,8 @@ class PrincipalMatcher:
             m.anonymous = True
         if data.get("unknown"):
             m.unknown = True
+        if data.get("registered"):
+            m.registered = True
         if data.get("wildcard"):
             m.wildcard = True
         return m

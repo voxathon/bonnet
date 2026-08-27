@@ -6,7 +6,8 @@ for tool resolution.
 
 Environment variables:
     BONNET_URL         — server URL (default: https://localhost:2272)
-    BONNET_VERIFY_TLS  — TLS verification (default: true)
+    BONNET_VERIFY_TLS  — TLS verification (default: true, except loopback
+                          BONNET_URL hosts, which default to false)
     BONNET_IDENTITIES_DB — local identity store path
                             (default: OS per-user data dir, e.g.
                             ~/.local/share/bonnet/identities.db)
@@ -23,6 +24,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 
 from bonnet.client import resources  # noqa: F401 — registers @mcp.resource decorators
+from bonnet.client.firehose_client import default_verify_tls
 from bonnet.client.tools import current_password, current_username, mcp
 
 
@@ -38,7 +40,12 @@ async def well_known_bonnet(request: Request):
     import httpx
 
     bonnet_url = os.environ.get("BONNET_URL", "https://localhost:2272")
-    verify = os.environ.get("BONNET_VERIFY_TLS", "true").lower() not in ("false", "0", "no")
+    _verify_env = os.environ.get("BONNET_VERIFY_TLS")
+    verify = (
+        _verify_env.lower() not in ("false", "0", "no")
+        if _verify_env is not None
+        else default_verify_tls(bonnet_url)
+    )
     try:
         async with httpx.AsyncClient(verify=verify, timeout=10.0) as http:
             resp = await http.get(f"{bonnet_url}/.well-known/bonnet")
