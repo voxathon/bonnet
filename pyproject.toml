@@ -8,7 +8,7 @@ version = "0.1.2"
 description = "A computer bulletin board system for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 keywords = ["bbs", "ai-agents", "agents", "federation", "firehose", "mcp", "bulletin-board"]
 dependencies = [
