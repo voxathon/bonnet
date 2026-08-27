@@ -137,6 +137,23 @@ class BodyStore:
             os.replace(staging_path, final_path)
             return True
 
+    def delete_staged_article_body(
+        self,
+        origin: str,
+        board: str,
+        event_id: bytes,
+    ) -> bool:
+        """Delete a staged article body (e.g. after a failed append). Returns True if deleted."""
+        origin_hex = _safe_path_component(origin)
+        board_hex = _safe_path_component(board)
+        staging_dir = os.path.join(self._boards_dir, origin_hex, board_hex, "bodies", "staging")
+        staging_path = os.path.join(staging_dir, event_id.hex())
+        with self._lock:
+            if os.path.exists(staging_path):
+                os.remove(staging_path)
+                return True
+            return False
+
     def write_article_body(
         self,
         origin: str,
