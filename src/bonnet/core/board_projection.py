@@ -17,19 +17,6 @@ import threading
 
 from bonnet.core.record import ZERO_ID, Record
 
-# ---------------------------------------------------------------------------
-# Kind constants
-# ---------------------------------------------------------------------------
-
-KIND_ARTICLE = "bonnet.article"
-KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
-KIND_ARTICLE_RESTORE = "bonnet.article.restore"
-KIND_ARTICLE_PURGE = "bonnet.article.purge"
-KIND_ARTICLE_PIN = "bonnet.article.pin"
-KIND_ARTICLE_UNPIN = "bonnet.article.unpin"
-KIND_THREAD_CLOSE = "bonnet.thread.close"
-KIND_THREAD_REOPEN = "bonnet.thread.reopen"
-
 VISIBILITY_ACTIVE = "active"
 VISIBILITY_CANCELLED = "cancelled"
 VISIBILITY_SUPERSEDED = "superseded"

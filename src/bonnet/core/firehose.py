@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 
 from bonnet.core.crypto import Identity
+from bonnet.core.kinds import KIND_ARTICLE, KIND_ORIGIN_KEY_ROTATE
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     HEAD_FORMAT,
@@ -74,14 +75,6 @@ class SignatureInvalid(FirehoseError):
 
 class HeadMismatch(FirehoseError):
     pass
-
-
-# ---------------------------------------------------------------------------
-# Kind constants (§11)
-# ---------------------------------------------------------------------------
-
-KIND_ARTICLE = "bonnet.article"
-KIND_ORIGIN_KEY_ROTATE = "bonnet.origin.key.rotate"
 
 
 def _key_from_intervals(intervals: list[tuple[int, int | None, bytes]], seq: int) -> bytes | None:
