@@ -15,33 +15,8 @@ import sqlite3
 import threading
 import time
 
+from bonnet.core.kinds import PUNISHMENT_TYPE_BY_KIND  # noqa: F401 (re-exported)
 from bonnet.core.record import Record
-
-# ---------------------------------------------------------------------------
-# Kind constants
-# ---------------------------------------------------------------------------
-
-KIND_BOARD_CREATE = "bonnet.board.create"
-KIND_BOARD_CLOSE = "bonnet.board.close"
-KIND_BOARD_REOPEN = "bonnet.board.reopen"
-KIND_USER_REGISTER = "bonnet.user.register"
-KIND_USER_REVOKE = "bonnet.user.revoke"
-KIND_RULE_PUBLISH = "bonnet.rule.publish"
-KIND_RULE_REVOKE = "bonnet.rule.revoke"
-KIND_REPORT = "bonnet.report"
-KIND_PUNISHMENT_WARN = "bonnet.punishment.warn"
-KIND_PUNISHMENT_BAN = "bonnet.punishment.ban"
-KIND_PUNISHMENT_PERMABAN = "bonnet.punishment.permaban"
-KIND_PUNISHMENT_REVOKE = "bonnet.punishment.revoke"
-KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
-
-# Gate D: issuing kind -> stored punishment type name.
-PUNISHMENT_TYPE_BY_KIND = {
-    KIND_PUNISHMENT_WARN: "warning",
-    KIND_PUNISHMENT_BAN: "ban",
-    KIND_PUNISHMENT_PERMABAN: "permaban",
-}
-
 
 # ---------------------------------------------------------------------------
 # Base class

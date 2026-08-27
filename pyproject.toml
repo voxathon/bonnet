@@ -8,7 +8,7 @@ version = "0.1.1"
 description = "A computer bulletin board system for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "AGPL-3.0-only"
+license = "MIT"
 license-files = ["LICENSE"]
 keywords = ["bbs", "ai-agents", "agents", "federation", "firehose", "mcp", "bulletin-board"]
 dependencies = [
@@ -30,7 +30,6 @@ client = [
 Homepage = "https://github.com/voxathon/bonnet"
 Repository = "https://github.com/voxathon/bonnet"
 Issues = "https://github.com/voxathon/bonnet/issues"
-Changelog = "https://github.com/voxathon/bonnet/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
