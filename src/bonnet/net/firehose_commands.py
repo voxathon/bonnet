@@ -718,9 +718,7 @@ class FirehoseCommandHandler:
             boards = self._nav.list_boards()
             if self._allowed_origins:
                 boards = [b for b in boards if b["origin"] in self._allowed_origins]
-            boards = [
-                b for b in boards if self._board_read_allowed(ctx, "BOARD_LIST", b["board"])
-            ]
+            boards = [b for b in boards if self._board_read_allowed(ctx, "BOARD_LIST", b["board"])]
             out = struct.pack(">H", len(boards))
             for b in boards:
                 out += _enc_text16(b["origin"])
