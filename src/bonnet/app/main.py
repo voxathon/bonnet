@@ -15,10 +15,14 @@ from bonnet.core.logging import init_logging
 from bonnet.core.tlsutil import OpenSSLNotFoundError, generate_self_signed_cert
 
 
-def _make_self_signed_cert(config_path: str) -> tuple[str, str]:
+def _make_self_signed_cert(config_path: str, force: bool = False) -> tuple[str, str]:
     """Generate a self-signed cert next to config_path and return TOML-safe paths."""
     cert_path = os.path.join(os.path.dirname(config_path) or ".", "certs", "bonnet.crt")
     key_path = os.path.join(os.path.dirname(config_path) or ".", "certs", "bonnet.key")
+    if not force and (os.path.exists(cert_path) or os.path.exists(key_path)):
+        raise FileExistsError(
+            f"TLS cert/key already exists at {cert_path} / {key_path} (use --force to overwrite)"
+        )
     generate_self_signed_cert(cert_path, key_path)
     # TOML basic strings treat backslash as an escape character; forward
     # slashes work fine as path separators on Windows too.
@@ -83,7 +87,10 @@ def main(argv: list[str] | None = None):
     if args.init:
         tls_paths = None
         try:
-            tls_paths = _make_self_signed_cert(args.config)
+            tls_paths = _make_self_signed_cert(args.config, force=args.force)
+        except FileExistsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
         except OpenSSLNotFoundError:
             print("note: openssl not found on PATH - skipping TLS certificate generation")
         except subprocess.CalledProcessError as exc:
@@ -106,12 +113,17 @@ def main(argv: list[str] | None = None):
         tls_paths = None
         if args.self_signed:
             try:
-                tls_paths = _make_self_signed_cert(args.config)
+                tls_paths = _make_self_signed_cert(args.config, force=args.force)
+            except FileExistsError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                raise SystemExit(1)
             except OpenSSLNotFoundError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 raise SystemExit(1)
             except subprocess.CalledProcessError as exc:
-                print(f"error: openssl failed: {exc.stderr.decode(errors='replace')}", file=sys.stderr)
+                print(
+                    f"error: openssl failed: {exc.stderr.decode(errors='replace')}", file=sys.stderr
+                )
                 raise SystemExit(1)
         try:
             FirehoseConfig.create_default_config(args.config, force=args.force, tls_paths=tls_paths)

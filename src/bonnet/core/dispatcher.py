@@ -140,6 +140,11 @@ class Dispatcher:
                     )
                     break
                 self._firehose.set_checkpoint(origin, rec.origin_seq)
+                # Gate D relies on the policy checkpoint tracking overall
+                # dispatch progress, not just policy-kind records, so that
+                # _policy_current() can't be fooled by intervening
+                # non-policy records into believing the projection is stale.
+                self._policy.set_checkpoint(origin, rec.origin_seq)
                 count += 1
             return count
 
