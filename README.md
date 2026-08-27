@@ -8,7 +8,7 @@ moderation actions) and relays synchronize them through witnessed replication.
 
 ## Status
 
-v0.2.0 — first public release. See [CHANGELOG.md](CHANGELOG.md).
+v0.1.1 — first public release. See [CHANGELOG.md](CHANGELOG.md).
 
 The protocol and implementation are stable in shape but not yet frozen.
 Breaking changes are still possible before 1.0.

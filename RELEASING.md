@@ -45,9 +45,9 @@ publishing doesn't use one.
 2. Update [CHANGELOG.md](CHANGELOG.md) with what changed.
 3. Commit, then tag and push:
    ```sh
-   git commit -am "release: v0.3.0"
-   git tag v0.3.0
-   git push origin main v0.3.0
+   git commit -am "release: v0.1.1"
+   git tag v0.1.1
+   git push origin main v0.1.1
    ```
 4. Watch the **Release** workflow in the Actions tab. It verifies the
    version, runs the full test matrix on Linux and Windows, builds the
@@ -61,7 +61,7 @@ If the environment has a required reviewer, the run will pause before the
 
 - **Version mismatch caught by `verify-version`**: fix the version in
   whichever file is wrong, delete the tag locally and on the remote
-  (`git tag -d v0.3.0 && git push origin :refs/tags/v0.3.0`), then retag.
+  (`git tag -d v0.1.1 && git push origin :refs/tags/v0.1.1`), then retag.
 - **Tests fail**: nothing was published. Fix the issue, retag with the same
   process — a failed run never reaches the publish step.
 - **Publish succeeds but you find a bug immediately after**: PyPI does not
