@@ -139,4 +139,4 @@ make test-all    # parallel, includes slow tests
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).
