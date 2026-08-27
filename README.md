@@ -8,7 +8,7 @@ moderation actions) and relays synchronize them through witnessed replication.
 
 ## Status
 
-v0.1.6 — first public release.
+v0.1.7 — first public release.
 
 The protocol and implementation are stable in shape but not yet frozen.
 Breaking changes are still possible before 1.0.
