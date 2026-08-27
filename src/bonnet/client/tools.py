@@ -157,7 +157,9 @@ async def register_user(username: str, password: str) -> str:
     """Register a new user identity locally and on the Bonnet server.
 
     Creates a local Ed25519 identity and publishes a bonnet.user.register
-    record to the server. Returns the registered username.
+    record to the server. Returns the registered username and the hex-encoded
+    public key — the pubkey is what you paste into a server's `admin_pubkey`
+    or an `[[acl]]` rule to grant this identity access.
     """
     store = _get_identity_store()
     try:
@@ -175,9 +177,27 @@ async def register_user(username: str, password: str) -> str:
     try:
         await _connect_authenticated(client, f"{username}:{password}")
         result = await client.publish_user_register(username, identity.public_key, flags=0)
-        return f"Registered '{username}' — event seq {result.origin_seq}"
+        return (
+            f"Registered '{username}' — event seq {result.origin_seq} — "
+            f"pubkey {identity.public_key.hex()}"
+        )
     finally:
         await client.close()
+
+
+@mcp.tool
+async def whoami(auth: str | None = None) -> str:
+    """Return the authenticated username and hex-encoded Ed25519 public key.
+
+    Useful after register_user if you need the pubkey again, e.g. to paste
+    into a server's admin_pubkey or an [[acl]] rule.
+    """
+    username, _ = _resolve_auth(auth)
+    store = _get_identity_store()
+    pubkey = store.get_pubkey(username)
+    if pubkey is None:
+        raise ValueError(f"No local identity found for '{username}'")
+    return f"{username} — pubkey {pubkey.hex()}"
 
 
 @mcp.tool
