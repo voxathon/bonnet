@@ -1,6 +1,13 @@
+from pathlib import Path
+
 import pytest
 
-from client.identity import IdentityStore
+pytest.importorskip("bcrypt")
+pytest.importorskip("cryptography")
+pytest.importorskip("fastmcp")
+
+from bonnet.client import tools
+from bonnet.client.identity import IdentityStore
 
 pytestmark = pytest.mark.slow
 
@@ -26,3 +33,34 @@ def test_identity_store(tmp_path):
             store.get_private_key("alice", "wrongpassword")
     finally:
         store.close()
+
+
+def test_identity_store_env_var_path(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "custom" / "identities.db")
+    monkeypatch.setenv("BONNET_IDENTITIES_DB", db_path)
+
+    original = tools.identity_store
+    tools.identity_store = None
+    try:
+        store = tools._get_identity_store()
+        assert str(store.db_path) == db_path
+    finally:
+        if tools.identity_store is not None:
+            tools.identity_store.close()
+        tools.identity_store = original
+
+
+def test_identity_store_default_path_when_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("BONNET_IDENTITIES_DB", raising=False)
+    fake_default = str(tmp_path / "default" / "identities.db")
+    monkeypatch.setattr(IdentityStore, "default_db_path", staticmethod(lambda: fake_default))
+
+    original = tools.identity_store
+    tools.identity_store = None
+    try:
+        store = tools._get_identity_store()
+        assert str(store.db_path) == str(Path(IdentityStore.default_db_path()))
+    finally:
+        if tools.identity_store is not None:
+            tools.identity_store.close()
+        tools.identity_store = original

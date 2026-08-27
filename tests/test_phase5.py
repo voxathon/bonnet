@@ -8,7 +8,29 @@ import struct
 
 import pytest
 
-from client.firehose_protocol import (
+from bonnet.core.crypto import Identity
+from bonnet.core.record import (
+    ZERO_HASH,
+    ZERO_ID,
+    Head,
+    Intent,
+    MetadataMap,
+    Record,
+    Witness,
+    compute_body_hash,
+    compute_event_hash,
+    encode_head,
+    encode_intent,
+    encode_record,
+    encode_unsigned_head,
+    encode_unsigned_record,
+    encode_witness,
+    metadata_text,
+    sign_head,
+    sign_intent,
+    sign_record,
+)
+from bonnet.net.firehose_wire import (
     OP_ARTICLE_BODY,
     OP_ARTICLE_GET,
     OP_ARTICLE_LIST,
@@ -53,28 +75,6 @@ from client.firehose_protocol import (
     parse_response,
     parse_user_get_response,
     parse_user_list_response,
-)
-from core.crypto import Identity
-from core.record import (
-    ZERO_HASH,
-    ZERO_ID,
-    Head,
-    Intent,
-    MetadataMap,
-    Record,
-    Witness,
-    compute_body_hash,
-    compute_event_hash,
-    encode_head,
-    encode_intent,
-    encode_record,
-    encode_unsigned_head,
-    encode_unsigned_record,
-    encode_witness,
-    metadata_text,
-    sign_head,
-    sign_intent,
-    sign_record,
 )
 
 # ---------------------------------------------------------------------------
@@ -161,7 +161,7 @@ def _make_record(
 def _make_witness(rec: Record, hostname="bbs.test") -> Witness:
     encoded = encode_record(rec)
     event_hash = compute_event_hash(encoded)
-    from core.record import make_origin_witness
+    from bonnet.core.record import make_origin_witness
 
     return make_origin_witness(
         origin=rec.origin,
@@ -579,23 +579,58 @@ class TestBanStatus:
         cmd = build_ban_status(ACTOR_PUB)
         assert cmd[0] == OP_BAN_STATUS
 
-    def test_parse_not_banned(self):
+    def test_parse_empty(self):
         resp = _success(struct.pack(">B", 0))
         result = parse_ban_status_response(resp)
+        assert result.punishments == []
         assert not result.banned
+        assert not result.blocked
 
-    def test_parse_banned(self):
-        eid = _rid(5)
-        out = struct.pack(">B", 1)  # banned
-        out += struct.pack(">B", 32) + eid
-        out += _enc_text16("bbs.test")
-        out += struct.pack(">q", -1)  # permanent
+    def _encode_punishment(
+        self, type_code, event_id, origin="bbs.test", expires_at=0, body_hash=None, body_size=0
+    ):
+        out = struct.pack(">B", type_code)
+        out += struct.pack(">q", expires_at)
+        out += struct.pack(">I", body_size)
+        out += body_hash if body_hash is not None else b"\x00" * 32
+        out += event_id
+        out += _enc_text16(origin)
+        return out
+
+    def test_parse_multi_pending(self):
+        eid_ban = _rid(1)
+        eid_warn = _rid(2)
+        out = struct.pack(">B", 2)
+        out += self._encode_punishment(2, eid_ban, expires_at=1800000000, body_size=7)
+        out += self._encode_punishment(1, eid_warn, body_hash=b"\x44" * 32)
         resp = _success(out)
 
         result = parse_ban_status_response(resp)
+        assert result.blocked
         assert result.banned
-        assert result.source_origin == "bbs.test"
-        assert result.expires_at == -1
+        ban = result.punishments[0]
+        warn = result.punishments[1]
+        assert ban.type == "ban"
+        assert ban.event_id == eid_ban.hex()
+        assert ban.origin == "bbs.test"
+        assert ban.expires_at == 1800000000
+        assert ban.body_size == 7
+
+        assert warn.type == "warning"
+        assert warn.expires_at == 0
+        assert warn.body_hash == ("44" * 32)
+
+    def test_parse_permaban_sets_banned(self):
+        out = struct.pack(">B", 1)
+        out += self._encode_punishment(3, _rid(3))
+        result = parse_ban_status_response(resp=_success(out))
+        assert result.banned
+
+    def test_parse_unknown_type_code(self):
+        out = struct.pack(">B", 1)
+        out += self._encode_punishment(9, _rid(4))
+        result = parse_ban_status_response(_success(out))
+        assert result.punishments[0].type.startswith("unknown")
 
 
 # ---------------------------------------------------------------------------

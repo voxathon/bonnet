@@ -1,22 +1,22 @@
 """Dispatcher regression tests: checkpoint failure, multi-origin rebuild,
 unknown-kind handling, and projection checkpoint invariants.
-
-Tests marked xfail document bugs scheduled for Phase 2 fixes.
 """
+
+import sqlite3
 
 import pytest
 
-from core.board_projection import BoardProjection
-from core.bodies import BodyStore
-from core.crypto import Identity
-from core.dispatcher import Dispatcher
-from core.firehose import KIND_ARTICLE, FirehoseStore
-from core.global_projections import (
+from bonnet.core.board_projection import BoardProjection, board_db_path
+from bonnet.core.bodies import BodyStore
+from bonnet.core.crypto import Identity
+from bonnet.core.dispatcher import Dispatcher
+from bonnet.core.firehose import KIND_ARTICLE, FirehoseStore
+from bonnet.core.global_projections import (
     NavProjection,
     PolicyProjection,
     UserProjection,
 )
-from core.record import (
+from bonnet.core.record import (
     Intent,
     MetadataMap,
     compute_body_hash,
@@ -372,3 +372,179 @@ def test_rebuild_is_idempotent(stack):
 
     bp = d._get_board_projection("bbs.a", "general")
     assert bp.article_count("bbs.a", "general") == 1
+
+
+# ---------------------------------------------------------------------------
+# Rebuild with uncached board projections
+# ---------------------------------------------------------------------------
+
+
+def test_rebuild_clears_uncached_board_projections(stack, tmp_path):
+    """Rebuild must delete board DBs that are not open when it starts.
+
+    Stale applied-event rows in an uncached board database must not
+    suppress replay; otherwise diverged state survives the rebuild while
+    the firehose checkpoint advances.
+    """
+    d, firehose, nav, users, policy, bs = stack
+
+    body = b"hello"
+    aid = _rid(50)
+    intent = _make_article_intent("bbs.a", _rid(1), body=body, aid_seed=50)
+    assert intent.article_id == aid
+    cancel = Intent(
+        event_id=_rid(2),
+        kind="bonnet.article.cancel",
+        origin="bbs.a",
+        actor_pubkey=ACTOR_PUB,
+        target_origin="bbs.a",
+        target_board="general",
+        target_article_id=aid,
+    )
+
+    bs.stage_article_body(
+        "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
+    )
+    _append(firehose, ORIGIN_A, intent, body)
+    _append(firehose, ORIGIN_A, cancel)
+
+    d.dispatch_origin("bbs.a")
+    bp = d._get_board_projection("bbs.a", "general")
+    art = bp.get_article_by_num("bbs.a", "general", 1)
+    assert art is not None and art.visibility == "cancelled"
+
+    d.close()
+
+    db_path = board_db_path(str(tmp_path / "boards"), "bbs.a", "general")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM articles")
+        conn.commit()
+    finally:
+        conn.close()
+
+    d2 = Dispatcher(
+        firehose=firehose,
+        nav=nav,
+        users=users,
+        policy=policy,
+        boards_dir=str(tmp_path / "boards"),
+        body_store=bs,
+    )
+    try:
+        count = d2.rebuild_all("bbs.a")
+        assert count == 2, f"rebuild should replay both records, got {count}"
+
+        bp2 = d2._get_board_projection("bbs.a", "general")
+        art2 = bp2.get_article_by_num("bbs.a", "general", 1)
+        assert art2 is not None, "rebuild must restore articles from uncached board DBs"
+        assert art2.visibility == "cancelled"
+    finally:
+        d2.close()
+
+
+# ---------------------------------------------------------------------------
+# Punishment import filtering (Gate D)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def filtered_stack(tmp_path):
+    firehose = FirehoseStore(str(tmp_path / "events.db"))
+    firehose.init_origin_key("bbs.local", ORIGIN_A_PUB)
+    firehose.init_origin_key("bbs.peer", ORIGIN_B_PUB)
+
+    nav = NavProjection(str(tmp_path / "nav.db"))
+    users = UserProjection(str(tmp_path / "users.db"))
+    policy = PolicyProjection(str(tmp_path / "policy.db"))
+    bs = BodyStore(
+        boards_dir=str(tmp_path / "boards"),
+        events_dir=str(tmp_path / "event_bodies"),
+    )
+    d = Dispatcher(
+        firehose=firehose,
+        nav=nav,
+        users=users,
+        policy=policy,
+        boards_dir=str(tmp_path / "boards"),
+        body_store=bs,
+        allowed_origins={"bbs.local", "bbs.peer", "bbs.stranger"},
+        local_origin="bbs.local",
+        punishment_import_policy={"bbs.peer": {"ban"}},
+    )
+    yield d, firehose, nav, users, policy, bs
+    d.close()
+    nav.close()
+    users.close()
+    policy.close()
+    firehose.close()
+
+
+def _append_punishment(firehose, origin_identity, origin, seq_seed, kind, punished_pubkey):
+    intent = Intent(
+        event_id=_rid(seq_seed),
+        kind=kind,
+        origin=origin,
+        actor_pubkey=ACTOR_PUB,
+        board="moderation.actions",
+        metadata=MetadataMap([metadata_bytes(1, punished_pubkey)]),
+        body_hash=compute_body_hash(b"reason"),
+        body_size=len(b"reason"),
+    )
+    _append(firehose, origin_identity, intent, b"reason")
+
+
+def test_imported_punishment_type_is_applied(filtered_stack):
+    d, firehose, nav, users, policy, bs = filtered_stack
+    target = _rid(80)
+    _append_punishment(firehose, ORIGIN_B, "bbs.peer", 1, "bonnet.punishment.ban", target)
+
+    count = d.dispatch_origin("bbs.peer")
+    assert count == 1
+    puns = policy.list_punishments_for_pubkey(target)
+    assert len(puns) == 1
+    assert puns[0]["type"] == "ban"
+
+
+def test_unimported_punishment_type_stays_relay_only(filtered_stack):
+    d, firehose, nav, users, policy, bs = filtered_stack
+    target = _rid(81)
+    _append_punishment(firehose, ORIGIN_B, "bbs.peer", 1, "bonnet.punishment.warn", target)
+    _append_punishment(firehose, ORIGIN_B, "bbs.peer", 2, "bonnet.punishment.permaban", target)
+
+    # Both records are dispatched (checkpoint advances) but not enforced.
+    count = d.dispatch_origin("bbs.peer")
+    assert count == 2
+    assert policy.list_punishments_for_pubkey(target) == []
+    assert policy.list_pending_for_pubkey(target) == []
+
+
+def test_local_origin_punishments_always_apply(filtered_stack):
+    d, firehose, nav, users, policy, bs = filtered_stack
+    target = _rid(82)
+    _append_punishment(firehose, ORIGIN_A, "bbs.local", 1, "bonnet.punishment.warn", target)
+
+    count = d.dispatch_origin("bbs.local")
+    assert count == 1
+    assert len(policy.list_pending_for_pubkey(target)) == 1
+
+
+def test_unknown_origin_punishments_default_deny(filtered_stack):
+    d, firehose, nav, users, policy, bs = filtered_stack
+    firehose.init_origin_key("bbs.stranger", ACTOR.public_key)
+    target = _rid(83)
+    _append_punishment(firehose, ACTOR, "bbs.stranger", 1, "bonnet.punishment.ban", target)
+
+    count = d.dispatch_origin("bbs.stranger")
+    assert count == 1
+    assert policy.list_punishments_for_pubkey(target) == []
+
+
+def test_import_filtering_consistent_across_replay(filtered_stack):
+    """Replay after rebuild applies the same filter — no enforcement resurrection."""
+    d, firehose, nav, users, policy, bs = filtered_stack
+    target = _rid(84)
+    _append_punishment(firehose, ORIGIN_B, "bbs.peer", 1, "bonnet.punishment.warn", target)
+
+    d.rebuild_all("bbs.peer")
+    assert policy.list_punishments_for_pubkey(target) == []

@@ -1,0 +1,6 @@
+projectKey=bonnet
+serverUrl=http://localhost:9000
+serverVersion=26.8.0.126808
+dashboardUrl=http://localhost:9000/dashboard?id=bonnet
+ceTaskId=d9977cef-8749-430e-bf66-40a1cc571640
+ceTaskUrl=http://localhost:9000/api/ce/task?id=d9977cef-8749-430e-bf66-40a1cc571640

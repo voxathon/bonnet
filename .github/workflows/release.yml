@@ -1,0 +1,100 @@
+name: Release
+
+# Triggered by pushing a tag like v0.1.1. Verifies the tag matches the
+# package version, reruns the full test matrix, builds, publishes to PyPI
+# via trusted publishing (OIDC — no stored API token), and cuts a GitHub
+# Release with the built wheel/sdist attached.
+#
+# One-time manual setup required (see RELEASING.md):
+#   1. Register a trusted publisher on PyPI for this repo/workflow/environment.
+#   2. Create a "pypi" environment in this repo's GitHub settings.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches package version
+        id: check
+        run: |
+          set -eu
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PYPROJECT_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          INIT_VERSION=$(grep -m1 '__version__ = ' src/bonnet/__init__.py | sed -E 's/__version__ = "(.*)"/\1/')
+          echo "tag=$TAG_VERSION pyproject.toml=$PYPROJECT_VERSION bonnet/__init__.py=$INIT_VERSION"
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ] || [ "$TAG_VERSION" != "$INIT_VERSION" ]; then
+            echo "::error::Version mismatch. Tag says $TAG_VERSION, pyproject.toml says $PYPROJECT_VERSION, bonnet/__init__.py says $INIT_VERSION. All three must match before tagging a release."
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: verify-version
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync
+      - run: uv run pytest tests/ -n auto -m "not slow" --tb=short
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-pypi:
+    needs: [build, verify-version]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/bonnet/${{ needs.verify-version.outputs.version }}
+    permissions:
+      id-token: write # required for PyPI trusted publishing; no API token used
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # required to create the GitHub Release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

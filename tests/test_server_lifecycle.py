@@ -4,7 +4,8 @@ import os
 
 import pytest
 
-from core.config import FirehoseConfig
+from bonnet.app.console import OperatorConsole
+from bonnet.core.config import FirehoseConfig
 
 
 @pytest.fixture
@@ -26,7 +27,7 @@ def server(config):
     os.makedirs(config.boards_dir, exist_ok=True)
     os.makedirs(config.events_bodies_dir, exist_ok=True)
 
-    from app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetFirehoseServer
 
     s = BonnetFirehoseServer(config)
     yield s
@@ -84,7 +85,7 @@ def test_root_registration_idempotent(server, config):
     """Restarting the server does not create a second root user."""
     server_identity = server.server_identity
 
-    from app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetFirehoseServer
 
     server2 = BonnetFirehoseServer(config)
     try:
@@ -97,6 +98,29 @@ def test_root_registration_idempotent(server, config):
         assert len(root_users) == 1
     finally:
         server2.close()
+
+
+async def test_register_user_rebinds_server_identity(server):
+    """REPL register-user reuses the server identity key and REPLACES its
+    existing registration row.
+
+    This test pins current semantics: the new username replaces 'root' and
+    the row carries flags=0 (no admin badge), even though the pubkey keeps
+    administrator authority via the default ACL pubkey rule. Any change to
+    this behavior must update this test deliberately.
+    """
+    result = await OperatorConsole(server)._repl_register_user(["bob"])
+    assert "bob" in result.lower()
+    assert "replaces" in result.lower()
+
+    user = server.users.get_user_by_pubkey("bbs.test", server.server_identity.public_key)
+    assert user is not None
+    assert user["username"] == "bob"
+    assert not user.get("flags", 0) & 0x01
+
+    all_users = server.users.list_users("bbs.test")
+    usernames = [u["username"] for u in all_users]
+    assert usernames == ["bob"]
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +156,7 @@ def test_identity_stable_across_restart(config):
     os.makedirs(config.boards_dir, exist_ok=True)
     os.makedirs(config.events_bodies_dir, exist_ok=True)
 
-    from app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetFirehoseServer
 
     s1 = BonnetFirehoseServer(config)
     pubkey1 = s1.server_identity.public_key

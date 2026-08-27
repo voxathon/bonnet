@@ -4,11 +4,12 @@ import os
 
 import pytest
 
-from core.bodies import BodyStore
-from core.config import FirehoseConfig
-from core.crypto import Identity
-from core.firehose import KIND_ARTICLE, FirehoseStore
-from core.record import (
+from bonnet.app.console import OperatorConsole
+from bonnet.core.bodies import BodyStore
+from bonnet.core.config import FirehoseConfig
+from bonnet.core.crypto import Identity
+from bonnet.core.firehose import KIND_ARTICLE, FirehoseStore
+from bonnet.core.record import (
     Intent,
     MetadataMap,
     compute_body_hash,
@@ -17,7 +18,7 @@ from core.record import (
     metadata_text,
     sign_intent,
 )
-from net.firehose_sync import SyncClient
+from bonnet.net.firehose_sync import SyncClient
 
 ORIGIN = Identity.from_private_key(bytes(range(1, 33)))
 ACTOR = Identity.from_private_key(bytes(range(10, 42)))
@@ -71,7 +72,7 @@ def _append(firehose, origin_identity, intent, body=b""):
 
 class MockSyncClient(SyncClient):
     async def fetch_head(self, origin):
-        from core.record import ZERO_HASH, Head
+        from bonnet.core.record import ZERO_HASH, Head
 
         return Head(
             origin=origin,
@@ -97,7 +98,7 @@ def server(tmp_path):
     os.makedirs(tmp_path / "boards", exist_ok=True)
     os.makedirs(tmp_path / "event_bodies", exist_ok=True)
 
-    from app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetFirehoseServer
 
     config = FirehoseConfig(
         origin="bbs.test",
@@ -222,12 +223,14 @@ def test_delete_origin_bodies(tmp_path):
 
 
 def test_depeer_rejects_local_origin(server):
-    result = server._cmd_depeer(["depeer", "bbs.test"])
+    console = OperatorConsole(server)
+    result = console._cmd_depeer(["depeer", "bbs.test"])
     assert "Cannot depeer" in result
 
 
 def test_depeer_unknown_origin(server):
-    result = server._cmd_depeer(["depeer", "unknown.test"])
+    console = OperatorConsole(server)
+    result = console._cmd_depeer(["depeer", "unknown.test"])
     assert "not a configured peer" in result
 
 
@@ -237,16 +240,18 @@ def test_depeer_unknown_origin(server):
 
 
 def test_purge_origin_rejects_local(server):
-    result = server._cmd_purge_origin(["purge-origin", "bbs.test"])
+    console = OperatorConsole(server)
+    result = console._cmd_purge_origin(["purge-origin", "bbs.test"])
     assert "Cannot purge" in result
 
 
 @pytest.mark.xdist_group("sync_lifecycle")
 async def test_purge_origin_rejects_active_sync(server):
+    console = OperatorConsole(server)
     mock = MockSyncClient()
     server.sync_manager.start_origin("peer.test", mock, interval=999)
 
-    result = server._cmd_purge_origin(["purge-origin", "peer.test"])
+    result = console._cmd_purge_origin(["purge-origin", "peer.test"])
     assert "active sync" in result
     assert "depeer" in result
 
@@ -254,11 +259,13 @@ async def test_purge_origin_rejects_active_sync(server):
 
 
 def test_purge_origin_no_data(server):
-    result = server._cmd_purge_origin(["purge-origin", "empty.test"])
+    console = OperatorConsole(server)
+    result = console._cmd_purge_origin(["purge-origin", "empty.test"])
     assert "no data" in result
 
 
 def test_purge_origin_removes_data(server, tmp_path):
+    console = OperatorConsole(server)
     remote_identity = Identity.generate()
     server.firehose.init_origin_key("peer.test", remote_identity.public_key)
 
@@ -286,14 +293,15 @@ def test_purge_origin_removes_data(server, tmp_path):
 
     server.dispatcher.dispatch_origin("peer.test")
 
-    result = server._cmd_purge_origin(["purge-origin", "peer.test"])
+    result = console._cmd_purge_origin(["purge-origin", "peer.test"])
     assert "Purged" in result
     assert "peer.test" not in server.firehose.list_origins()
     assert server.firehose.get_events_range("peer.test", 1, 10) == []
 
 
 def test_purge_origin_preserves_local(server):
-    result = server._cmd_purge_origin(["purge-origin", "empty.test"])
+    console = OperatorConsole(server)
+    result = console._cmd_purge_origin(["purge-origin", "empty.test"])
     assert "bbs.test" in server.firehose.list_origins()
 
 
@@ -303,16 +311,19 @@ def test_purge_origin_preserves_local(server):
 
 
 def test_reset_key_rejects_local(server):
-    result = server._cmd_reset_key(["reset-key", "bbs.test"])
+    console = OperatorConsole(server)
+    result = console._cmd_reset_key(["reset-key", "bbs.test"])
     assert "Cannot reset" in result
 
 
 def test_reset_key_no_data(server):
-    result = server._cmd_reset_key(["reset-key", "empty.test"])
+    console = OperatorConsole(server)
+    result = console._cmd_reset_key(["reset-key", "empty.test"])
     assert "no data" in result
 
 
 def test_reset_key_clears_pinning(server):
+    console = OperatorConsole(server)
     remote_identity = Identity.generate()
     server.firehose.init_origin_key("peer.test", remote_identity.public_key)
 
@@ -326,7 +337,7 @@ def test_reset_key_clears_pinning(server):
 
     assert server.firehose.get_key_for_seq("peer.test", 1) == remote_identity.public_key
 
-    result = server._cmd_reset_key(["reset-key", "peer.test"])
+    result = console._cmd_reset_key(["reset-key", "peer.test"])
     assert "Reset key" in result
 
     assert server.firehose.get_key_for_seq("peer.test", 1) is None
