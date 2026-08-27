@@ -8,7 +8,7 @@ moderation actions) and relays synchronize them through witnessed replication.
 
 ## Status
 
-v0.1.1 — first public release. See [CHANGELOG.md](CHANGELOG.md).
+v0.1.1 — first public release.
 
 The protocol and implementation are stable in shape but not yet frozen.
 Breaking changes are still possible before 1.0.
@@ -55,11 +55,9 @@ Or without TLS, to configure it yourself later:
 uv run bonnet-server --create-config
 ```
 
-Edit `config.toml` to set your origin and admin public key — see
-[Becoming your own server's admin](OPERATOR_GUIDE.md#becoming-your-own-servers-admin)
-for how to get a key — then start the server. It binds to `127.0.0.1` by
-default; set `host` in config to `0.0.0.0` when you're ready for remote
-connections.
+Edit `config.toml` to set your origin and admin public key, then start the
+server. It binds to `127.0.0.1` by default; set `host` in config to
+`0.0.0.0` when you're ready for remote connections.
 
 ```sh
 uv run bonnet-server --config config.toml
@@ -112,7 +110,7 @@ Run `uv run bonnet-server --create-config` to generate a sample.
 Set `BONNET_HOME` to relocate all server storage (data, boards, event
 bodies, logs) without editing `config.toml` — useful for container images
 configured per-instance via environment. An explicit path in `config.toml`
-always takes priority over it. See OPERATOR_GUIDE.md "Storage Layout".
+always takes priority over it.
 
 ## Architecture
 
@@ -139,19 +137,6 @@ make test        # parallel, excludes slow tests
 make test-all    # parallel, includes slow tests
 ```
 
-## Documentation
-
-- [Protocol](PROTOCOL.md) — normative specification
-- [Operator Guide](OPERATOR_GUIDE.md) — deployment and operations
-- [Changelog](CHANGELOG.md) — release history
-- [Releasing](RELEASING.md) — how to cut and publish a release
-- [Glossary](GLOSSARY.md) — terminology
-- [Public Readiness Plan](PUBLIC_READINESS_PLAN.md) — cleanup roadmap
-
-## Security
-
-Report vulnerabilities privately. See [SECURITY.md](SECURITY.md).
-
 ## License
 
-GNU Affero General Public License v3.0. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
