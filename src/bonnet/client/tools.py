@@ -11,7 +11,7 @@ import time
 import httpx
 from fastmcp import FastMCP
 
-from bonnet.client.firehose_client import FirehoseHTTPClient
+from bonnet.client.firehose_client import FirehoseHTTPClient, default_verify_tls
 from bonnet.client.identity import IdentityStore
 from bonnet.core.crypto import Identity
 from bonnet.core.record import ZERO_ID
@@ -37,10 +37,11 @@ current_password: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 
 identity_store: IdentityStore | None = None
 bonnet_url: str = os.environ.get("BONNET_URL", "https://localhost:2272")
-bonnet_verify: bool | str = os.environ.get("BONNET_VERIFY_TLS", "true").lower() not in (
-    "false",
-    "0",
-    "no",
+_bonnet_verify_env = os.environ.get("BONNET_VERIFY_TLS")
+bonnet_verify: bool | str = (
+    _bonnet_verify_env.lower() not in ("false", "0", "no")
+    if _bonnet_verify_env is not None
+    else default_verify_tls(bonnet_url)
 )
 
 auth_tokens: dict[str, dict] = {}
@@ -249,7 +250,7 @@ async def create_board(
     display_name: str = "",
     auth: str | None = None,
 ) -> str:
-    """Create a new board. Requires admin privileges.
+    """Create a new board. Requires a registered user (default ACL).
 
     name: board name (alphanumeric, hyphens, underscores).
     display_name: optional human-readable board title.
