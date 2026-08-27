@@ -130,14 +130,22 @@ class HttpSyncClient(SyncClient):
 
     def __init__(self, base_url: str, verify_tls: bool = False, allow_private_dial: bool = False):
         parsed = urlparse(base_url)
+        self._dial_host = parsed.hostname
+        self._dial_port = parsed.port or 443
+        self._allow_private_dial = allow_private_dial
         if not is_safe_dial_target(
-            parsed.hostname, parsed.port or 443, allow_private=allow_private_dial
+            self._dial_host, self._dial_port, allow_private=self._allow_private_dial
         ):
-            raise ValueError(f"unsafe dial target: {parsed.hostname}:{parsed.port or 443}")
+            raise ValueError(f"unsafe dial target: {self._dial_host}:{self._dial_port}")
         self._client = FirehoseTransport(base_url, verify=verify_tls)
         self._connected = False
 
     async def _ensure_connected(self) -> None:
+        if not is_safe_dial_target(
+            self._dial_host, self._dial_port, allow_private=self._allow_private_dial
+        ):
+            self._connected = False
+            raise ValueError(f"unsafe dial target: {self._dial_host}:{self._dial_port}")
         if not self._connected:
             await self._client.connect_anonymous()
             self._connected = True

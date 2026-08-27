@@ -481,6 +481,9 @@ class FirehoseCommandHandler:
                         )
                 if target.body_state == "purged":
                     return _error(0x0009, "Article is already purged")
+            elif kind == KIND_ARTICLE_PIN:
+                if target.pin_state != "unpinned":
+                    return _error(0x0009, "Article is already pinned")
             elif kind == KIND_ARTICLE_UNPIN:
                 if target.pin_state == "unpinned":
                     return _error(0x0009, "Article is not pinned")
@@ -531,7 +534,18 @@ class FirehoseCommandHandler:
                 intent.body_size,
             )
 
-        rec = self._firehose.append_record(self._identity, intent, actor_sig, body, created_at=now)
+        try:
+            rec = self._firehose.append_record(
+                self._identity, intent, actor_sig, body, created_at=now
+            )
+        except Exception:
+            if intent.kind == KIND_ARTICLE and intent.body_size > 0:
+                self._body_store.delete_staged_article_body(
+                    intent.origin, intent.board, intent.event_id
+                )
+            elif intent.body_size > 0:
+                self._body_store.delete_event_body(intent.origin, intent.event_id)
+            raise
 
         if intent.kind == KIND_ARTICLE and intent.body_size > 0:
             self._body_store.finalize_article_body(
