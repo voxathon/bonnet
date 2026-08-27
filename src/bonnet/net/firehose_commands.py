@@ -278,6 +278,19 @@ class FirehoseCommandHandler:
         if self._sync_manager is not None:
             self._sync_manager.queue_sync_threadsafe(origin)
 
+    def _board_read_allowed(self, ctx: FirehoseContext, cmd_name: str, board: str) -> bool:
+        """Enforce the ACL 'board' dimension for a board-scoped read.
+
+        The top-level dispatch in `handle()` only checks the 'command'
+        dimension before board is known. Every handler that reads a
+        specific board (including each board named in an aggregate,
+        cross-origin listing) must call this before touching that board's
+        data, or an ACL rule scoped to `boards = [...]` becomes a no-op and
+        a caller can reach boards on peered origins through the local
+        aggregate index regardless of what they were actually granted.
+        """
+        return self._acl.check(ctx.to_auth_context(), "read", command=cmd_name, board=board)
+
     # ------------------------------------------------------------------
     # Punishment write gate (Gate D)
     # ------------------------------------------------------------------
@@ -705,6 +718,9 @@ class FirehoseCommandHandler:
             boards = self._nav.list_boards()
             if self._allowed_origins:
                 boards = [b for b in boards if b["origin"] in self._allowed_origins]
+            boards = [
+                b for b in boards if self._board_read_allowed(ctx, "BOARD_LIST", b["board"])
+            ]
             out = struct.pack(">H", len(boards))
             for b in boards:
                 out += _enc_text16(b["origin"])
@@ -721,6 +737,7 @@ class FirehoseCommandHandler:
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _success(struct.pack(">H", 0))
         boards = self._nav.list_boards(origin)
+        boards = [b for b in boards if self._board_read_allowed(ctx, "BOARD_LIST", b["board"])]
         out = struct.pack(">H", len(boards))
         for b in boards:
             name_bytes = b["board"].encode("utf-8")
@@ -745,6 +762,8 @@ class FirehoseCommandHandler:
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _error(0x0003, "Article not found")
         board, offset = _read_text16(data, offset)
+        if not self._board_read_allowed(ctx, "ARTICLE_GET", board):
+            return _error(0x0003, "Article not found")
         selector_type, offset = _read_u8(data, offset)
 
         if selector_type == 0x01:
@@ -848,6 +867,8 @@ class FirehoseCommandHandler:
         offset = 0
         origin, offset = _read_text16(data, offset)
         board, offset = _read_text16(data, offset)
+        if not self._board_read_allowed(ctx, "ARTICLE_LIST", board):
+            return _success(struct.pack(">H", 0))
         list_offset, offset = _read_u32(data, offset)
         limit, offset = _read_u16(data, offset)
         flags, offset = _read_u8(data, offset)
@@ -914,6 +935,9 @@ class FirehoseCommandHandler:
         offset = 0
         origin, offset = _read_text16(data, offset)
         board, offset = _read_text16(data, offset)
+        if not self._board_read_allowed(ctx, "ARTICLE_SEARCH", board):
+            out = struct.pack(">H", 0) + struct.pack(">I", 0) + struct.pack(">B", 0)
+            return _success(out)
         meta_query, offset = _read_text16(data, offset)
         body_query, offset = _read_text16(data, offset)
         list_offset, offset = _read_u32(data, offset)
@@ -1041,6 +1065,8 @@ class FirehoseCommandHandler:
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _success(struct.pack(">H", 0))
         board, offset = _read_text16(data, offset)
+        if not self._board_read_allowed(ctx, "ARTICLE_QUERY", board):
+            return _success(struct.pack(">H", 0))
         filter_count, offset = _read_u8(data, offset)
 
         filters = []
@@ -1095,6 +1121,8 @@ class FirehoseCommandHandler:
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _error(0x0003, "Article body unavailable")
         board, offset = _read_text16(data, offset)
+        if not self._board_read_allowed(ctx, "ARTICLE_BODY", board):
+            return _error(0x0003, "Article body unavailable")
         article_num, offset = _read_u64(data, offset)
 
         bp = self._get_board_projection(origin, board)
