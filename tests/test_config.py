@@ -68,7 +68,7 @@ def test_path_properties(tmp_path):
 
 def test_http_host_default():
     c = FirehoseConfig()
-    assert c.http_host == "0.0.0.0"
+    assert c.http_host == "127.0.0.1"
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +461,7 @@ def test_configurable_host():
 
 def test_host_default():
     c = FirehoseConfig()
-    assert c.http_host == "0.0.0.0"
+    assert c.http_host == "127.0.0.1"
 
 
 def test_host_from_toml(tmp_path):
@@ -475,6 +475,50 @@ host = "127.0.0.1"
     )
     c = FirehoseConfig.load(path)
     assert c.http_host == "127.0.0.1"
+
+
+# ---------------------------------------------------------------------------
+# BONNET_HOME storage-path fallback
+# ---------------------------------------------------------------------------
+
+
+def test_bonnet_home_used_when_storage_paths_unset(tmp_path, monkeypatch):
+    home = str(tmp_path / "home")
+    monkeypatch.setenv("BONNET_HOME", home)
+    path = _write_config(tmp_path, '[server]\norigin = "bbs.test"\n')
+    c = FirehoseConfig.load(path)
+    assert c.data_dir == os.path.join(home, "data")
+    assert c.boards_dir == os.path.join(home, "boards")
+    assert c.events_bodies_dir == os.path.join(home, "event_bodies")
+
+
+def test_explicit_config_storage_paths_win_over_bonnet_home(tmp_path, monkeypatch):
+    home = str(tmp_path / "home")
+    monkeypatch.setenv("BONNET_HOME", home)
+    explicit_data_dir = str(tmp_path / "custom_data")
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+data_dir = "{explicit_data_dir.replace(os.sep, "/")}"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.data_dir == explicit_data_dir.replace(os.sep, "/")
+    # boards_dir/events_bodies_dir were left unset, so BONNET_HOME still
+    # applies to those independently of the explicit data_dir override.
+    assert c.boards_dir == os.path.join(home, "boards")
+    assert c.events_bodies_dir == os.path.join(home, "event_bodies")
+
+
+def test_storage_paths_default_without_bonnet_home(tmp_path, monkeypatch):
+    monkeypatch.delenv("BONNET_HOME", raising=False)
+    path = _write_config(tmp_path, '[server]\norigin = "bbs.test"\n')
+    c = FirehoseConfig.load(path)
+    assert c.data_dir == "./data"
+    assert c.boards_dir == "./boards"
+    assert c.events_bodies_dir == "./event_bodies"
 
 
 # ---------------------------------------------------------------------------

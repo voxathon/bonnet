@@ -44,7 +44,8 @@ rebuildable projection of that immutable log.
 ### Requirements
 
 Python >= 3.11 with [uv](https://docs.astral.sh/uv/). Full-text search shells
-out to ripgrep when available (search returns 503 without it).
+out to `rg`, provided automatically via the `ripgrep` PyPI package as a base
+dependency (search returns 503 in the unusual case it's unavailable).
 
 ### Known limitations
 

@@ -2,7 +2,9 @@
 
 import argparse
 import asyncio
+import os
 import signal
+import subprocess
 import sys
 import tomllib
 
@@ -10,6 +12,37 @@ from bonnet import __version__
 from bonnet.app.server import BonnetFirehoseServer
 from bonnet.core.config import FirehoseConfig
 from bonnet.core.logging import init_logging
+from bonnet.core.tlsutil import OpenSSLNotFoundError, generate_self_signed_cert
+
+
+def _make_self_signed_cert(config_path: str) -> tuple[str, str]:
+    """Generate a self-signed cert next to config_path and return TOML-safe paths."""
+    cert_path = os.path.join(os.path.dirname(config_path) or ".", "certs", "bonnet.crt")
+    key_path = os.path.join(os.path.dirname(config_path) or ".", "certs", "bonnet.key")
+    generate_self_signed_cert(cert_path, key_path)
+    # TOML basic strings treat backslash as an escape character; forward
+    # slashes work fine as path separators on Windows too.
+    return (cert_path.replace(os.sep, "/"), key_path.replace(os.sep, "/"))
+
+
+def _print_next_steps(config_path: str, tls_enabled: bool) -> None:
+    scheme = "https" if tls_enabled else "http"
+    print()
+    print("Next steps:")
+    print("  1. Start the server:")
+    print(f"       uv run bonnet-server --config {config_path}")
+    print(f"     It will listen on {scheme}://127.0.0.1:2272 and print its own public key.")
+    print("  2. The server's REPL (the 'bonnet>' prompt after startup) is already an")
+    print("     administrator - no key setup needed for local use.")
+    print("  3. To let a remote agent administer this server, install the client")
+    print("     extra, register an identity, and paste its pubkey into config.toml:")
+    print("       uv sync --extra client")
+    print(f"       BONNET_URL={scheme}://localhost:2272 BONNET_VERIFY_TLS=false uv run bonnet-mcp")
+    print("       (then call the register_user MCP tool - it prints the pubkey to use)")
+    print("     See OPERATOR_GUIDE.md 'Becoming your own server's admin' for details.")
+    if not tls_enabled:
+        print("  4. No TLS certificate was generated. Re-run with --self-signed, or see")
+        print("     README.md 'Quick Start' to configure one manually.")
 
 
 def main(argv: list[str] | None = None):
@@ -24,22 +57,89 @@ def main(argv: list[str] | None = None):
         "--create-config", action="store_true", help="Write a sample config file and exit"
     )
     parser.add_argument(
+        "--init",
+        action="store_true",
+        help=(
+            "One-shot first-run setup: write a sample config, generate a "
+            "self-signed TLS certificate if openssl is available, and print "
+            "next steps. Exits without starting the server."
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
-        help="With --create-config, overwrite an existing config file",
+        help="With --create-config or --init, overwrite an existing config file",
+    )
+    parser.add_argument(
+        "--self-signed",
+        action="store_true",
+        help=(
+            "With --create-config, also generate a self-signed TLS certificate "
+            "(via openssl) and enable TLS in the written config"
+        ),
     )
     args = parser.parse_args(argv)
 
-    if args.create_config:
+    if args.init:
+        tls_paths = None
         try:
-            FirehoseConfig.create_default_config(args.config, force=args.force)
+            tls_paths = _make_self_signed_cert(args.config)
+        except OpenSSLNotFoundError:
+            print("note: openssl not found on PATH - skipping TLS certificate generation")
+        except subprocess.CalledProcessError as exc:
+            print(
+                f"note: openssl failed, skipping TLS certificate generation: "
+                f"{exc.stderr.decode(errors='replace').strip()}"
+            )
+        try:
+            FirehoseConfig.create_default_config(args.config, force=args.force, tls_paths=tls_paths)
         except FileExistsError as exc:
             print(f"error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         print(f"Wrote sample config to {args.config}")
+        if tls_paths:
+            print(f"Generated self-signed TLS certificate at {tls_paths[0]} (CN=localhost)")
+        _print_next_steps(args.config, tls_enabled=tls_paths is not None)
         return
 
-    init_logging()
+    if args.create_config:
+        tls_paths = None
+        if args.self_signed:
+            try:
+                tls_paths = _make_self_signed_cert(args.config)
+            except OpenSSLNotFoundError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                raise SystemExit(1)
+            except subprocess.CalledProcessError as exc:
+                print(f"error: openssl failed: {exc.stderr.decode(errors='replace')}", file=sys.stderr)
+                raise SystemExit(1)
+        try:
+            FirehoseConfig.create_default_config(args.config, force=args.force, tls_paths=tls_paths)
+        except FileExistsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"Wrote sample config to {args.config}")
+        if tls_paths:
+            print(f"Generated self-signed TLS certificate at {tls_paths[0]}")
+            print(
+                "This cert has CN=localhost and is only fit for local/LAN testing. "
+                "Set BONNET_VERIFY_TLS=false on clients, or regenerate with your real "
+                "hostname before exposing this server remotely."
+            )
+        return
+
+    bonnet_home = os.environ.get("BONNET_HOME")
+    log_dir = os.path.join(bonnet_home, "logs") if bonnet_home else None
+    try:
+        init_logging(log_dir)
+    except OSError as exc:
+        # File logging is not critical to serving requests; degrade loudly
+        # instead of either crashing or silently running with no logs.
+        print(
+            f"warning: could not initialize file logging at "
+            f"'{log_dir or './logs'}': {exc}. Continuing without file logs.",
+            file=sys.stderr,
+        )
 
     try:
         config = FirehoseConfig.load(args.config)

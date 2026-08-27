@@ -58,7 +58,7 @@ def test_identity_store_default_path_when_unset(tmp_path, monkeypatch):
     tools.identity_store = None
     try:
         store = tools._get_identity_store()
-        assert str(store.db_path) == str(Path(IdentityStore.DB_PATH))
+        assert str(store.db_path) == str(Path(IdentityStore.default_db_path()))
     finally:
         if tools.identity_store is not None:
             tools.identity_store.close()

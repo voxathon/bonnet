@@ -1,13 +1,20 @@
 [server]
 origin = "bbs.example"
 hostname = "bbs.example"
-data_dir = "./data"
-boards_dir = "./boards"
-events_bodies_dir = "./event_bodies"
+# Storage paths. Default to ./data, ./boards, ./event_bodies (relative to
+# the server's working directory) unless BONNET_HOME is set, in which case
+# they default to $BONNET_HOME/data, $BONNET_HOME/boards,
+# $BONNET_HOME/event_bodies. Uncomment to pin an explicit path regardless
+# of BONNET_HOME or working directory.
+# data_dir = "./data"
+# boards_dir = "./boards"
+# events_bodies_dir = "./event_bodies"
 port = 2272
-# Bind address: 0.0.0.0 for all interfaces, 127.0.0.1 for local-only.
-host = "0.0.0.0"
+# Bind address: 127.0.0.1 for local-only, 0.0.0.0 for all interfaces.
+# Change this deliberately once you're ready to accept remote connections.
+host = "127.0.0.1"
 # admin_pubkey = "<hex-encoded Ed25519 public key for full access>"
+# See OPERATOR_GUIDE.md "Becoming your own server's admin" for how to get one.
 
 [limits]
 max_request_size = 10485760
