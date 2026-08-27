@@ -46,13 +46,20 @@ class PrincipalMatcher:
             return ctx.is_unknown
         if self.wildcard:
             return True
+        matched_any = False
         if self.pubkey is not None:
-            return ctx.pubkey == self.pubkey
+            if ctx.pubkey != self.pubkey:
+                return False
+            matched_any = True
         if self.role is not None:
-            return ctx.role == self.role
+            if ctx.role != self.role:
+                return False
+            matched_any = True
         if self.origin is not None:
-            return ctx.origin == self.origin
-        return False
+            if ctx.origin != self.origin:
+                return False
+            matched_any = True
+        return matched_any
 
     @staticmethod
     def from_dict(data: dict) -> PrincipalMatcher:

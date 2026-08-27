@@ -902,6 +902,8 @@ class OperatorConsole:
                     limit = int(p.split("=", 1)[1])
                 except ValueError:
                     return "Invalid limit"
+                if not (0 <= limit <= 0xFFFF):
+                    return "Invalid limit"
             else:
                 return f"Unknown flag: {p}"
 

@@ -320,14 +320,6 @@ class FirehoseHTTPServer:
             )
             return
 
-        if not is_anonymous:
-            addr_key = self._rate_limiter.address_key(remote_addr)
-            if not self._rate_limiter.check(addr_key):
-                await self._send_protocol_error(
-                    send, 429, "Too many requests", remote_addr, request_nonce
-                )
-                return
-
         if self._cleanup_counter % 64 == 0:
             self._rate_limiter.cleanup()
         self._cleanup_counter += 1
