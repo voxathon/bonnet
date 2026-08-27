@@ -52,10 +52,6 @@ test_client_id
 .idea/
 .vscode/
 
-# Build configuration
-*.spec
-!bonnet.spec
-
 # Local configuration
 config.toml
 opencode.json

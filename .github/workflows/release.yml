@@ -22,9 +22,12 @@ jobs:
   verify-version:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - name: Check tag matches package version
+        id: check
         run: |
           set -eu
           TAG_VERSION="${GITHUB_REF_NAME#v}"
@@ -35,6 +38,7 @@ jobs:
             echo "::error::Version mismatch. Tag says $TAG_VERSION, pyproject.toml says $PYPROJECT_VERSION, bonnet/__init__.py says $INIT_VERSION. All three must match before tagging a release."
             exit 1
           fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
 
   test:
     needs: verify-version
@@ -64,12 +68,12 @@ jobs:
           path: dist/
 
   publish-pypi:
-    needs: build
+    needs: [build, verify-version]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
       name: pypi
-      url: https://pypi.org/project/bonnet/${{ github.ref_name }}
+      url: https://pypi.org/project/bonnet/${{ needs.verify-version.outputs.version }}
     permissions:
       id-token: write # required for PyPI trusted publishing; no API token used
     steps:
