@@ -5,15 +5,28 @@ import threading
 from pathlib import Path
 
 import bcrypt
+import platformdirs
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from nacl.signing import SigningKey
 
 
 class IdentityStore:
-    DB_PATH = "./identities.db"
+    @staticmethod
+    def default_db_path() -> str:
+        """Per-user data directory for the identity store.
+
+        Not the current working directory: bonnet-mcp is typically launched
+        by an agent host (IDE, orchestrator, systemd unit) that picks its own
+        CWD, not the human operator. A CWD-relative default would silently
+        spawn a fresh, empty identity store — and orphan the agent's existing
+        keys — every time it runs from a different directory. A fixed
+        per-user path means the same store is found regardless of launch
+        directory; BONNET_IDENTITIES_DB still overrides it explicitly.
+        """
+        return os.path.join(platformdirs.user_data_dir("bonnet", appauthor=False), "identities.db")
 
     def __init__(self, db_path: str | None = None):
-        self.db_path = Path(db_path or self.DB_PATH)
+        self.db_path = Path(db_path or self.default_db_path())
         parent = self.db_path.parent
         if str(parent) not in ("", "."):
             parent.mkdir(parents=True, exist_ok=True)

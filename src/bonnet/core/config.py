@@ -157,7 +157,7 @@ class FirehoseConfig:
         peers: list = None,
         acl: ACLEvaluator = None,
         admin_pubkey_hex: str = "",
-        host: str = "0.0.0.0",
+        host: str = "127.0.0.1",
         unknown_keys: list = None,
     ):
         self.origin = _normalize_origin(origin)
@@ -290,11 +290,22 @@ class FirehoseConfig:
         tls = data.get("tls", {})
         sync = data.get("sync", {})
 
+        # BONNET_HOME only supplies a *default* for storage paths left unset
+        # in config.toml — an explicit config.toml value always wins, so a
+        # stray environment variable can't silently relocate a deliberately
+        # configured server's data.
+        bonnet_home = os.environ.get("BONNET_HOME")
+
+        def _storage_default(subdir: str, fallback: str) -> str:
+            return os.path.join(bonnet_home, subdir) if bonnet_home else fallback
+
         origin = server.get("origin", "localhost")
         hostname = server.get("hostname", "")
-        data_dir = server.get("data_dir", "./data")
-        boards_dir = server.get("boards_dir", "./boards")
-        events_bodies_dir = server.get("events_bodies_dir", "./event_bodies")
+        data_dir = server.get("data_dir") or _storage_default("data", "./data")
+        boards_dir = server.get("boards_dir") or _storage_default("boards", "./boards")
+        events_bodies_dir = server.get("events_bodies_dir") or _storage_default(
+            "event_bodies", "./event_bodies"
+        )
         port = server.get("port", 2272)
         admin_pubkey_hex = server.get("admin_pubkey", "")
 
@@ -341,40 +352,72 @@ class FirehoseConfig:
             ],
             acl=acl,
             admin_pubkey_hex=admin_pubkey_hex,
-            host=server.get("host", "0.0.0.0"),
+            host=server.get("host", "127.0.0.1"),
             unknown_keys=unknown_keys,
         )
 
     @staticmethod
-    def create_default_config(path: str, force: bool = False) -> FirehoseConfig:
+    def create_default_config(
+        path: str, force: bool = False, tls_paths: tuple[str, str] | None = None
+    ) -> FirehoseConfig:
         """Write a sample config file and return the default config.
 
         Raises FileExistsError if the path already exists unless force is
         true. Existing operator configuration must never be silently
         overwritten by a sample-generation flag.
+
+        tls_paths, if given, is a (cert_path, key_path) pair to write into
+        the sample's [tls] section with tls.enabled = true, for callers that
+        generated a certificate alongside the config (see --self-signed).
         """
         if os.path.exists(path) and not force:
             raise FileExistsError(f"config file already exists: {path} (use --force to overwrite)")
-        config = FirehoseConfig(acl=ACLEvaluator([]))
-        config._write_default(path)
+        config = FirehoseConfig(
+            acl=ACLEvaluator([]),
+            tls_enabled=tls_paths is not None,
+            tls_cert_path=tls_paths[0] if tls_paths else "",
+            tls_key_path=tls_paths[1] if tls_paths else "",
+        )
+        config._write_default(path, tls_paths=tls_paths)
         return config
 
     @staticmethod
-    def _write_default(path: str) -> None:
-        default_content = """# Bonnet server configuration sample.
+    def _write_default(path: str, tls_paths: tuple[str, str] | None = None) -> None:
+        if tls_paths:
+            cert_path, key_path = tls_paths
+            tls_section = f"""[tls]
+enabled = true
+cert_path = "{cert_path}"
+key_path = "{key_path}"
+# ca_bundle = true"""
+        else:
+            tls_section = """[tls]
+enabled = false
+# cert_path = "./certs/bonnet.crt"
+# key_path = "./certs/bonnet.key"
+# ca_bundle = true"""
+
+        default_content = f"""# Bonnet server configuration sample.
 # Operator documentation: OPERATOR_GUIDE.md
 # Protocol specification: PROTOCOL.md
 
 [server]
 origin = "localhost"
 hostname = ""
-data_dir = "./data"
-boards_dir = "./boards"
-events_bodies_dir = "./event_bodies"
+# Storage paths. Default to ./data, ./boards, ./event_bodies (relative to
+# the server's working directory) unless BONNET_HOME is set, in which case
+# they default to $BONNET_HOME/data, $BONNET_HOME/boards,
+# $BONNET_HOME/event_bodies. Uncomment to pin an explicit path regardless
+# of BONNET_HOME or working directory.
+# data_dir = "./data"
+# boards_dir = "./boards"
+# events_bodies_dir = "./event_bodies"
 port = 2272
-# Bind address: 0.0.0.0 for all interfaces, 127.0.0.1 for local-only.
-host = "0.0.0.0"
+# Bind address: 127.0.0.1 for local-only, 0.0.0.0 for all interfaces.
+# Change this deliberately once you're ready to accept remote connections.
+host = "127.0.0.1"
 # admin_pubkey = "<hex-encoded Ed25519 public key for full access>"
+# See OPERATOR_GUIDE.md "Becoming your own server's admin" for how to get one.
 
 [limits]
 max_request_size = 10485760
@@ -389,11 +432,7 @@ max_count = 1000
 timeout_seconds = 10
 result_limit = 100
 
-[tls]
-enabled = false
-# cert_path = "./certs/bonnet.crt"
-# key_path = "./certs/bonnet.key"
-# ca_bundle = true
+{tls_section}
 
 [sync]
 interval_seconds = 300

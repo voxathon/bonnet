@@ -13,7 +13,7 @@ import os
 from bonnet.app.cli import FirehoseLocalConnection
 from bonnet.app.console import OperatorConsole
 from bonnet.core.acl import ACLEvaluator, default_rules_for_admin
-from bonnet.core.binutil import set_rg_path
+from bonnet.core.binutil import resolve_rg, set_rg_path
 from bonnet.core.bodies import BodyStore
 from bonnet.core.config import FirehoseConfig
 from bonnet.core.crypto import Identity
@@ -40,6 +40,17 @@ class BonnetFirehoseServer:
         os.makedirs(config.data_dir, exist_ok=True)
         os.makedirs(config.boards_dir, exist_ok=True)
         os.makedirs(config.events_bodies_dir, exist_ok=True)
+
+        # data_dir/boards_dir/events_bodies_dir are resolved relative to the
+        # process's working directory when configured as relative paths.
+        # Logging the resolved absolute paths avoids ambiguity when the
+        # server is launched by a service manager or from an unexpected CWD.
+        log_msg(
+            "INIT: storage paths — "
+            f"data_dir={os.path.abspath(config.data_dir)}, "
+            f"boards_dir={os.path.abspath(config.boards_dir)}, "
+            f"events_bodies_dir={os.path.abspath(config.events_bodies_dir)}"
+        )
 
         set_rg_path(config.rg_path)
         log_msg(f"INIT: rg_path={config.rg_path or '(auto-resolve)'}")
@@ -283,6 +294,11 @@ class BonnetFirehoseServer:
         print(f"Anonymous key: {self.anonymous_identity.public_key.hex()}")
         log_path = get_log_path()
         print(f"Logs: {log_path}" if log_path else "Logs: disabled")
+        if not resolve_rg():
+            print(
+                "WARNING: ripgrep (rg) not found - ARTICLE_SEARCH will return 503 "
+                "until it's installed and on PATH, or [search] rg_path is set in config.toml"
+            )
 
         uv_config = uvicorn.Config(
             self.http_server,
