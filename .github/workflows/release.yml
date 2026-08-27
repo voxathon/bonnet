@@ -1,6 +1,6 @@
 name: Release
 
-# Triggered by pushing a tag like v0.1.1. Verifies the tag matches the
+# Triggered by pushing a tag. Verifies the tag matches the
 # package version, reruns the full test matrix, builds, publishes to PyPI
 # via trusted publishing (OIDC — no stored API token), and cuts a GitHub
 # Release with the built wheel/sdist attached.
