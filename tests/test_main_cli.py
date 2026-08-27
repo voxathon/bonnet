@@ -71,3 +71,96 @@ def test_create_config_refuses_existing_file_friendly_error(tmp_path, capsys, mo
     assert "already exists" in err
     assert "--force" in err
     assert os.path.exists(cfg)
+
+
+# ---------------------------------------------------------------------------
+# --check-config
+# ---------------------------------------------------------------------------
+
+
+def test_check_config_valid_file_prints_summary(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    main(["--create-config", "--config", str(cfg)])
+    capsys.readouterr()
+
+    main(["--config", str(cfg), "--check-config"])
+
+    out = capsys.readouterr().out
+    assert f"OK: {cfg} is valid." in out
+    assert "origin:" in out
+    assert "listen:" in out
+    assert "peers: 0" in out
+    assert "acl rules: 0" in out
+
+
+def test_check_config_does_not_start_server(tmp_path, capsys, monkeypatch):
+    """--check-config must exit before touching data/boards/event_bodies dirs."""
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    main(["--create-config", "--config", str(cfg)])
+    capsys.readouterr()
+
+    main(["--config", str(cfg), "--check-config"])
+
+    assert not (tmp_path / "data").exists()
+
+
+def test_check_config_missing_file_friendly_error(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    missing = str(tmp_path / "nope.toml")
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--config", missing, "--check-config"])
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert f"config file not found: {missing}" in err
+
+
+def test_check_config_invalid_config_friendly_error(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('[server]\norigin = "test"\nport = 999999\n', encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--config", str(cfg), "--check-config"])
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "invalid configuration" in captured.err
+    assert "port" in captured.err
+    assert "OK:" not in captured.out
+
+
+def test_check_config_bad_acl_rule_friendly_error(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[server]\norigin = "bbs.test"\n\n'
+        "[[acl]]\n"
+        'effect = "allow"\n'
+        'match.pubkey = "hex:not-hex"\n'
+        'actions = ["read"]\n'
+        'commands = ["*"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--config", str(cfg), "--check-config"])
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "invalid configuration in" in err
+
+
+def test_check_config_reports_unrecognized_keys(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('[server]\norigin = "bbs.test"\ntypo_field = 1\n', encoding="utf-8")
+
+    main(["--config", str(cfg), "--check-config"])
+
+    captured = capsys.readouterr()
+    assert "unrecognized config key 'server.typo_field'" in captured.err
+    assert "unrecognized key(s) ignored" in captured.out

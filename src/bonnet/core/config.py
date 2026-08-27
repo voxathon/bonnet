@@ -7,6 +7,7 @@ Config class entirely.
 
 from __future__ import annotations
 
+import glob
 import os
 import tomllib
 from dataclasses import dataclass
@@ -20,16 +21,18 @@ class PeerConfig:
 
     The import_* flags control which punishment types are applied locally
     when they arrive from this peer (Gate D). Records are always stored and
-    relayed regardless; the flags only govern enforcement.
+    relayed regardless; the flags only govern enforcement. Default is
+    opt-in: a peer confers no moderation authority until each type is
+    explicitly turned on.
     """
 
     origin: str
     hostname: str
     port: int = 2272
     verify_tls: bool = False
-    import_warnings: bool = True
-    import_temp_bans: bool = True
-    import_permabans: bool = True
+    import_warnings: bool = False
+    import_temp_bans: bool = False
+    import_permabans: bool = False
 
     def imported_punishment_types(self) -> set[str]:
         """Return the locally enforced punishment type names for this peer."""
@@ -56,7 +59,9 @@ def _as_bool(table: dict, key: str, section: str, default: bool) -> bool:
     return value
 
 
-_TOP_LEVEL_KEYS = {"server", "limits", "search", "tls", "sync", "acl"}
+_TOP_LEVEL_KEYS = {"server", "limits", "search", "tls", "sync", "acl", "include"}
+
+_INCLUDE_ALLOWED_TOP_KEYS = {"acl", "sync"}
 
 _SECTION_KEYS = {
     "server": {
@@ -67,6 +72,7 @@ _SECTION_KEYS = {
         "events_bodies_dir",
         "port",
         "admin_pubkey",
+        "admin_pubkey_file",
         "signature_lifetime_seconds",
         "clock_skew_seconds",
         "host",
@@ -126,6 +132,101 @@ def _find_unknown_keys(data: dict) -> list[str]:
             if key not in _PEER_KEYS:
                 unknown.append(f"sync.peers[{i}].{key}")
     return unknown
+
+
+def _resolve_admin_pubkey(server: dict) -> str:
+    """Resolve server.admin_pubkey, inline or via admin_pubkey_file.
+
+    admin_pubkey_file lets the key live outside the config file itself - a
+    secrets-mounted file, a path injected by an orchestrator - rather than
+    committed inline. Exactly one of the two may be set.
+    """
+    inline = server.get("admin_pubkey", "")
+    file_path = server.get("admin_pubkey_file", "")
+
+    if inline and file_path:
+        raise ValueError(
+            "config: server.admin_pubkey and server.admin_pubkey_file are "
+            "mutually exclusive — set only one"
+        )
+    if not file_path:
+        return inline
+
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            pubkey_hex = f.read().strip()
+    except OSError as exc:
+        raise ValueError(
+            f"config: could not read server.admin_pubkey_file '{file_path}': {exc}"
+        ) from exc
+
+    if not pubkey_hex:
+        raise ValueError(f"config: server.admin_pubkey_file '{file_path}' is empty")
+
+    return pubkey_hex
+
+
+def _load_include_file(inc_path: str) -> dict:
+    """Load one conf.d-style include file.
+
+    Include files may only contribute [[acl]] rules and [sync] peers —
+    anything else raises rather than being silently dropped, and a nested
+    'include' key raises rather than being silently ignored.
+    """
+    if not os.path.exists(inc_path):
+        raise FileNotFoundError(f"config: included file not found: {inc_path}")
+
+    with open(inc_path, "rb") as f:
+        inc_data = tomllib.load(f)
+
+    if "include" in inc_data:
+        raise ValueError(f"config: included file '{inc_path}' must not itself use 'include'")
+
+    for key in inc_data:
+        if key not in _INCLUDE_ALLOWED_TOP_KEYS:
+            raise ValueError(
+                f"config: included file '{inc_path}' has unsupported top-level key "
+                f"'{key}' — include files may only contain [[acl]] and [sync] (peers only)"
+            )
+
+    sync_table = inc_data.get("sync")
+    if sync_table is not None and (
+        not isinstance(sync_table, dict) or set(sync_table.keys()) - {"peers"}
+    ):
+        raise ValueError(f"config: included file '{inc_path}' [sync] may only contain 'peers'")
+
+    return inc_data
+
+
+def _resolve_includes(data: dict, base_dir: str) -> tuple[list, list, list]:
+    """Expand top-level 'include' glob patterns into merged acl/peer tables.
+
+    Returns (acl_tables, peer_tables, included) with the main file's own
+    [[acl]] / [[sync.peers]] entries first, followed by each matched include
+    file's entries in sorted-path order. `included` is a list of
+    (path, parsed_toml) pairs, kept around so callers don't have to
+    re-parse each include file for unknown-key reporting.
+    """
+    acl_tables = list(data.get("acl", []))
+    peer_tables = list(data.get("sync", {}).get("peers", []))
+    included: list[tuple[str, dict]] = []
+
+    patterns = data.get("include", [])
+    if not isinstance(patterns, list):
+        raise ValueError("config: 'include' must be a list of glob patterns")
+
+    for pattern in patterns:
+        full_pattern = pattern if os.path.isabs(pattern) else os.path.join(base_dir, pattern)
+        matches = sorted(glob.glob(full_pattern))
+        if not matches:
+            raise ValueError(f"config: include pattern '{pattern}' matched no files")
+        for inc_path in matches:
+            inc_data = _load_include_file(inc_path)
+            acl_tables.extend(inc_data.get("acl", []))
+            peer_tables.extend(inc_data.get("sync", {}).get("peers", []))
+            included.append((inc_path, inc_data))
+
+    return acl_tables, peer_tables, included
 
 
 class FirehoseConfig:
@@ -283,7 +384,13 @@ class FirehoseConfig:
         with open(path, "rb") as f:
             data = tomllib.load(f)
 
+        base_dir = os.path.dirname(os.path.abspath(path))
+        acl_tables, peer_tables, included = _resolve_includes(data, base_dir)
+
         unknown_keys = _find_unknown_keys(data)
+        for inc_path, inc_data in included:
+            rel = os.path.relpath(inc_path, base_dir)
+            unknown_keys.extend(f"{rel}:{k}" for k in _find_unknown_keys(inc_data))
 
         server = data.get("server", {})
         limits = data.get("limits", {})
@@ -308,9 +415,9 @@ class FirehoseConfig:
             "event_bodies", "./event_bodies"
         )
         port = server.get("port", 2272)
-        admin_pubkey_hex = server.get("admin_pubkey", "")
+        admin_pubkey_hex = _resolve_admin_pubkey(server)
 
-        acl = ACLEvaluator.from_toml(data)
+        acl = ACLEvaluator.from_toml({"acl": acl_tables})
 
         if not acl._rules and admin_pubkey_hex:
             from bonnet.core.acl import default_rules_for_admin
@@ -345,11 +452,11 @@ class FirehoseConfig:
                     hostname=p.get("hostname", ""),
                     port=p.get("port", 2272),
                     verify_tls=p.get("verify_tls", False),
-                    import_warnings=_as_bool(p, "import_warnings", "sync.peers", True),
-                    import_temp_bans=_as_bool(p, "import_temp_bans", "sync.peers", True),
-                    import_permabans=_as_bool(p, "import_permabans", "sync.peers", True),
+                    import_warnings=_as_bool(p, "import_warnings", "sync.peers", False),
+                    import_temp_bans=_as_bool(p, "import_temp_bans", "sync.peers", False),
+                    import_permabans=_as_bool(p, "import_permabans", "sync.peers", False),
                 )
-                for p in sync.get("peers", [])
+                for p in peer_tables
             ],
             acl=acl,
             admin_pubkey_hex=admin_pubkey_hex,
@@ -402,6 +509,14 @@ enabled = false
 # Operator documentation: OPERATOR_GUIDE.md
 # Protocol specification: PROTOCOL.md
 
+# Split a growing [[acl]] or [[sync.peers]] list into separate files with
+# conf.d-style includes. Glob patterns are resolved relative to this file;
+# each match may only contain [[acl]] and/or [sync] (peers only) — nothing
+# else, and no further 'include' of its own. Must appear before any [table]
+# header (a TOML requirement, not a Bonnet one) — this comment block is the
+# only place in this file it's legal to add it.
+# include = ["acl.d/*.toml", "peers.d/*.toml"]
+
 [server]
 origin = "localhost"
 hostname = ""
@@ -419,6 +534,9 @@ port = 2272
 host = "127.0.0.1"
 # admin_pubkey = "<hex-encoded Ed25519 public key for full access>"
 # See OPERATOR_GUIDE.md "Becoming your own server's admin" for how to get one.
+# Or point at a file instead of inlining the key (a secrets mount, a path an
+# orchestrator injects) — set exactly one of the two:
+# admin_pubkey_file = "/run/secrets/bonnet_admin_pubkey"
 
 [limits]
 max_request_size = 10485760
@@ -442,7 +560,9 @@ interval_seconds = 300
 # The origin is the peer's Bonnet origin string; hostname/port is the dial address.
 # verify_tls should be false for self-signed certs (common on LAN).
 # import_warnings, import_temp_bans, and import_permabans control which
-# punishment types are accepted from each peer (default: all true).
+# punishment types this peer's moderation actions are enforced with locally.
+# Records are always stored and relayed regardless; these flags only govern
+# whether you trust the peer's authority. Default is opt-in (all false).
 #
 # [[sync.peers]]
 # origin = "10.0.0.15"

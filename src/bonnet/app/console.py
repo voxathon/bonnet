@@ -17,11 +17,23 @@ from bonnet.core.record import (
     compute_body_hash,
     encode_intent,
     metadata_bytes,
+    metadata_i64,
     metadata_text,
     metadata_text_list,
     metadata_u64,
     sign_intent,
 )
+
+ROLE_FLAGS = {
+    "admin": 0x01,
+    "administrator": 0x01,
+    "moderator": 0x02,
+    "mod": 0x02,
+    "none": 0x00,
+    "member": 0x00,
+}
+
+DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
 class OperatorConsole:
@@ -117,6 +129,24 @@ class OperatorConsole:
         if cmd == "list-users":
             return self._cmd_list_users()
 
+        if cmd == "grant-role":
+            return self._cmd_grant_role(parts)
+
+        if cmd == "revoke-user":
+            return self._cmd_revoke_user(parts)
+
+        if cmd == "warn":
+            return self._cmd_warn(parts)
+
+        if cmd == "ban":
+            return self._cmd_ban(parts)
+
+        if cmd == "permaban":
+            return self._cmd_permaban(parts)
+
+        if cmd == "revoke-punishment":
+            return self._cmd_revoke_punishment(parts)
+
         if cmd == "ban-status":
             return self._cmd_ban_status(parts)
 
@@ -167,6 +197,19 @@ class OperatorConsole:
   query-articles <board> [filters]
                                 Query articles by structured fields
   list-users [origin]           List registered users
+  grant-role <pubkey-hex> <admin|moderator|none> [username]
+                                Set a user's role (registers them if new; username
+                                required for a first-time registration)
+  revoke-user <pubkey-hex>      Revoke a user's registration on this origin
+  warn <pubkey-hex> <reason...> [--board=<name>]
+                                Issue a warning (default board: moderation.actions)
+  ban <pubkey-hex> <duration> <reason...> [--board=<name>]
+                                Issue a temporary ban. Duration is a unix timestamp
+                                or <N>[smhdw], e.g. 7d, 24h
+  permaban <pubkey-hex> <reason...> [--board=<name>]
+                                Issue a permanent ban
+  revoke-punishment <event-id-hex> [reason...]
+                                Revoke a warning/ban/permaban by its event ID
   ban-status <pubkey-hex>       Check ban status
   event-head <origin>           Show firehose head
   event-range <origin> <start> <count>
@@ -198,6 +241,276 @@ class OperatorConsole:
             msg = resp[5 : 5 + msg_len].decode("utf-8", errors="replace")
             return f"Error 0x{code:04x}: {msg}"
         return "Unknown error"
+
+    def _sign_and_publish(
+        self,
+        kind: str,
+        *,
+        board: str = "",
+        metadata: MetadataMap = None,
+        target_origin: str = "",
+        target_board: str = "",
+        target_article_id: bytes = ZERO_ID,
+        target_event_id: bytes = ZERO_ID,
+        body: bytes = b"",
+    ) -> bytes:
+        """Sign and publish a record as the server's own identity.
+
+        Shared by every permission-management command (grant-role, revoke-user,
+        warn/ban/permaban, revoke-punishment) so each one only builds its
+        kind-specific metadata and target tuple.
+        """
+        event_id = os.urandom(32)
+        intent = Intent(
+            event_id=event_id,
+            kind=kind,
+            origin=self.config.origin,
+            actor_pubkey=self.server_identity.public_key,
+            actor_username="root",
+            actor_registrar=self.config.origin,
+            board=board,
+            target_origin=target_origin,
+            target_board=target_board,
+            target_article_id=target_article_id,
+            target_event_id=target_event_id,
+            metadata=metadata if metadata is not None else MetadataMap([]),
+            body_hash=compute_body_hash(body) if body else ZERO_ID,
+            body_size=len(body),
+        )
+
+        actor_sig = sign_intent(self.server_identity, encode_intent(intent))
+
+        from bonnet.net.firehose_commands import OP_PUBLISH_RECORD
+
+        req = struct.pack(">B", OP_PUBLISH_RECORD)
+        encoded_intent = encode_intent(intent)
+        req += struct.pack(">I", len(encoded_intent)) + encoded_intent
+        req += actor_sig
+        req += struct.pack(">I", len(body)) + body
+
+        return self._local_handle(req)
+
+    def _published_event_id(self, resp: bytes) -> str:
+        rec_len = struct.unpack(">I", resp[1:5])[0]
+        from bonnet.core.record import decode_record
+
+        return decode_record(resp[5 : 5 + rec_len]).event_id.hex()
+
+    def _parse_pubkey_arg(self, hex_str: str) -> bytes | None:
+        try:
+            pk = bytes.fromhex(hex_str)
+        except ValueError:
+            return None
+        if len(pk) != 32:
+            return None
+        return pk
+
+    def _extract_board_flag(self, tokens: list, default: str) -> tuple:
+        board = default
+        remaining = []
+        for t in tokens:
+            if t.startswith("--board="):
+                board = t.split("=", 1)[1]
+            else:
+                remaining.append(t)
+        return remaining, board
+
+    def _parse_ban_duration(self, s: str) -> int | None:
+        """Accept an absolute unix timestamp, or <N><s|m|h|d|w> relative to now."""
+        try:
+            return int(s)
+        except ValueError:
+            pass
+
+        import re
+        import time
+
+        m = re.fullmatch(r"(\d+)([smhdw])", s.strip().lower())
+        if not m:
+            return None
+        n = int(m.group(1))
+        return int(time.time()) + n * DURATION_UNIT_SECONDS[m.group(2)]
+
+    # ------------------------------------------------------------------
+    # grant-role
+    # ------------------------------------------------------------------
+
+    def _cmd_grant_role(self, parts) -> str:
+        if len(parts) < 3:
+            return "Usage: grant-role <pubkey-hex> <admin|moderator|none> [username]"
+
+        pubkey = self._parse_pubkey_arg(parts[1])
+        if pubkey is None:
+            return "Invalid hex pubkey (must be 32 bytes)"
+
+        role = parts[2].lower()
+        if role not in ROLE_FLAGS:
+            return f"Unknown role '{role}'. Use admin, moderator, or none."
+        flags = ROLE_FLAGS[role]
+
+        existing = self.users.get_user_by_pubkey(self.config.origin, pubkey)
+        if len(parts) >= 4:
+            username = parts[3]
+        elif existing is not None:
+            username = existing["username"]
+        else:
+            return "Pubkey is not yet registered on this origin — supply a username."
+
+        m = MetadataMap(
+            [
+                metadata_text(1, username),
+                metadata_bytes(2, pubkey),
+                metadata_u64(3, flags),
+            ]
+        )
+
+        resp = self._sign_and_publish("bonnet.user.register", metadata=m)
+        if resp[0] == 0x00:
+            action = "Re-registered" if existing is not None else "Registered"
+            return f"{action} '{username}' ({pubkey.hex()}) with role: {role}"
+        return self._parse_response_error(resp)
+
+    # ------------------------------------------------------------------
+    # revoke-user
+    # ------------------------------------------------------------------
+
+    def _cmd_revoke_user(self, parts) -> str:
+        if len(parts) < 2:
+            return "Usage: revoke-user <pubkey-hex>"
+
+        pubkey = self._parse_pubkey_arg(parts[1])
+        if pubkey is None:
+            return "Invalid hex pubkey (must be 32 bytes)"
+
+        existing = self.users.get_user_by_pubkey(self.config.origin, pubkey)
+        if existing is None:
+            return f"'{parts[1]}' is not a registered user on this origin."
+        if existing.get("revoked"):
+            return f"'{parts[1]}' is already revoked."
+
+        records = self.firehose.get_events_range(self.config.origin, existing["reg_seq"], 1)
+        if not records:
+            return "Could not locate the registration event (data inconsistency)."
+        reg_event_id = records[0].event_id
+
+        m = MetadataMap([metadata_bytes(1, pubkey)])
+        resp = self._sign_and_publish(
+            "bonnet.user.revoke",
+            metadata=m,
+            target_origin=self.config.origin,
+            target_event_id=reg_event_id,
+        )
+        if resp[0] == 0x00:
+            return f"Revoked '{existing['username']}' ({pubkey.hex()})."
+        return self._parse_response_error(resp)
+
+    # ------------------------------------------------------------------
+    # warn / ban / permaban
+    # ------------------------------------------------------------------
+
+    def _issue_punishment(self, kind: str, pubkey: bytes, board: str, reason: str, expires_at=None):
+        m = MetadataMap([metadata_bytes(1, pubkey)])
+        if expires_at is not None:
+            m.fields.append(metadata_i64(2, expires_at))
+        return self._sign_and_publish(
+            kind, board=board, metadata=m, body=reason.encode("utf-8")
+        )
+
+    def _cmd_warn(self, parts) -> str:
+        if len(parts) < 3:
+            return "Usage: warn <pubkey-hex> <reason...> [--board=<name>]"
+
+        pubkey = self._parse_pubkey_arg(parts[1])
+        if pubkey is None:
+            return "Invalid hex pubkey (must be 32 bytes)"
+
+        reason_tokens, board = self._extract_board_flag(parts[2:], "moderation.actions")
+        reason = " ".join(reason_tokens)
+        if not reason:
+            return "A reason is required."
+
+        resp = self._issue_punishment("bonnet.punishment.warn", pubkey, board, reason)
+        if resp[0] == 0x00:
+            return f"Warned {pubkey.hex()} on /{board}. Event: {self._published_event_id(resp)}"
+        return self._parse_response_error(resp)
+
+    def _cmd_ban(self, parts) -> str:
+        if len(parts) < 4:
+            return (
+                "Usage: ban <pubkey-hex> <duration> <reason...> [--board=<name>]\n"
+                "Duration is a unix timestamp or <N>[smhdw], e.g. 7d, 24h"
+            )
+
+        pubkey = self._parse_pubkey_arg(parts[1])
+        if pubkey is None:
+            return "Invalid hex pubkey (must be 32 bytes)"
+
+        expires_at = self._parse_ban_duration(parts[2])
+        if expires_at is None or expires_at <= 0:
+            return "Invalid duration. Use a unix timestamp or <N>[smhdw], e.g. 7d, 24h."
+
+        reason_tokens, board = self._extract_board_flag(parts[3:], "moderation.actions")
+        reason = " ".join(reason_tokens)
+        if not reason:
+            return "A reason is required."
+
+        resp = self._issue_punishment(
+            "bonnet.punishment.ban", pubkey, board, reason, expires_at=expires_at
+        )
+        if resp[0] == 0x00:
+            from datetime import datetime
+
+            until = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d %H:%M")
+            return (
+                f"Banned {pubkey.hex()} on /{board} until {until}. "
+                f"Event: {self._published_event_id(resp)}"
+            )
+        return self._parse_response_error(resp)
+
+    def _cmd_permaban(self, parts) -> str:
+        if len(parts) < 3:
+            return "Usage: permaban <pubkey-hex> <reason...> [--board=<name>]"
+
+        pubkey = self._parse_pubkey_arg(parts[1])
+        if pubkey is None:
+            return "Invalid hex pubkey (must be 32 bytes)"
+
+        reason_tokens, board = self._extract_board_flag(parts[2:], "moderation.actions")
+        reason = " ".join(reason_tokens)
+        if not reason:
+            return "A reason is required."
+
+        resp = self._issue_punishment("bonnet.punishment.permaban", pubkey, board, reason)
+        if resp[0] == 0x00:
+            return f"Permabanned {pubkey.hex()} on /{board}. Event: {self._published_event_id(resp)}"
+        return self._parse_response_error(resp)
+
+    # ------------------------------------------------------------------
+    # revoke-punishment
+    # ------------------------------------------------------------------
+
+    def _cmd_revoke_punishment(self, parts) -> str:
+        if len(parts) < 2:
+            return "Usage: revoke-punishment <event-id-hex> [reason...]"
+
+        try:
+            event_id = bytes.fromhex(parts[1])
+        except ValueError:
+            return "Invalid event ID hex"
+        if len(event_id) != 32:
+            return "Event ID must be 32 bytes (64 hex chars)"
+
+        reason = " ".join(parts[2:])
+
+        resp = self._sign_and_publish(
+            "bonnet.punishment.revoke",
+            target_origin=self.config.origin,
+            target_event_id=event_id,
+            body=reason.encode("utf-8"),
+        )
+        if resp[0] == 0x00:
+            return f"Revoked punishment {parts[1]}."
+        return self._parse_response_error(resp)
 
     def _enc_text16(self, s: str) -> bytes:
         encoded = s.encode("utf-8")

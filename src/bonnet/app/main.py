@@ -10,6 +10,7 @@ import tomllib
 
 from bonnet import __version__
 from bonnet.app.server import BonnetFirehoseServer
+from bonnet.core.acl import ACLError
 from bonnet.core.config import FirehoseConfig
 from bonnet.core.logging import init_logging
 from bonnet.core.tlsutil import OpenSSLNotFoundError, generate_self_signed_cert
@@ -49,6 +50,43 @@ def _print_next_steps(config_path: str, tls_enabled: bool) -> None:
         print("     README.md 'Quick Start' to configure one manually.")
 
 
+def _load_and_validate_config(args) -> FirehoseConfig:
+    """Load, apply CLI overrides, and validate a config file.
+
+    Every failure mode (missing file, malformed TOML, a bad ACL rule, a
+    value out of range) is converted to a single clear stderr line and
+    SystemExit(1) here, so callers - the normal startup path and
+    --check-config alike - never let a config problem escape as a raw
+    traceback.
+    """
+    try:
+        config = FirehoseConfig.load(args.config)
+    except FileNotFoundError:
+        print(f"error: config file not found: {args.config}", file=sys.stderr)
+        print("run 'bonnet-server --create-config' to generate a sample", file=sys.stderr)
+        raise SystemExit(1)
+    except tomllib.TOMLDecodeError as exc:
+        print(f"error: could not parse {args.config}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    except (ValueError, ACLError) as exc:
+        print(f"error: invalid configuration in {args.config}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    for key in config.unknown_keys:
+        print(f"warning: unrecognized config key '{key}' (ignored)", file=sys.stderr)
+
+    if args.host:
+        config.host = args.host
+
+    try:
+        config.validate()
+    except ValueError as exc:
+        print(f"error: invalid configuration: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    return config
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Bonnet firehose server")
     parser.add_argument("--version", action="version", version=f"bonnet-server {__version__}")
@@ -81,6 +119,11 @@ def main(argv: list[str] | None = None):
             "With --create-config, also generate a self-signed TLS certificate "
             "(via openssl) and enable TLS in the written config"
         ),
+    )
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="Validate the config file (including ACL rules and peers) and exit, without starting the server",
     )
     args = parser.parse_args(argv)
 
@@ -140,6 +183,20 @@ def main(argv: list[str] | None = None):
             )
         return
 
+    if args.check_config:
+        config = _load_and_validate_config(args)
+        print(f"OK: {args.config} is valid.")
+        print(f"  origin: {config.origin}")
+        print(
+            f"  listen: {config.host}:{args.port or config.port} "
+            f"({'tls' if config.tls_enabled else 'plaintext'})"
+        )
+        print(f"  peers: {len(config.peers)}")
+        print(f"  acl rules: {len(config.acl._rules)}")
+        if config.unknown_keys:
+            print(f"  {len(config.unknown_keys)} unrecognized key(s) ignored (see warnings above)")
+        return
+
     bonnet_home = os.environ.get("BONNET_HOME")
     log_dir = os.path.join(bonnet_home, "logs") if bonnet_home else None
     try:
@@ -153,24 +210,7 @@ def main(argv: list[str] | None = None):
             file=sys.stderr,
         )
 
-    try:
-        config = FirehoseConfig.load(args.config)
-    except FileNotFoundError:
-        print(f"error: config file not found: {args.config}", file=sys.stderr)
-        print("run 'bonnet-server --create-config' to generate a sample", file=sys.stderr)
-        raise SystemExit(1)
-    except tomllib.TOMLDecodeError as exc:
-        print(f"error: could not parse {args.config}: {exc}", file=sys.stderr)
-        raise SystemExit(1)
-    for key in config.unknown_keys:
-        print(f"warning: unrecognized config key '{key}' (ignored)", file=sys.stderr)
-    if args.host:
-        config.host = args.host
-    try:
-        config.validate()
-    except ValueError as exc:
-        print(f"error: invalid configuration: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+    config = _load_and_validate_config(args)
     server = BonnetFirehoseServer(config)
 
     def handle_sigterm(signum, frame):

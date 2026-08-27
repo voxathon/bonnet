@@ -1,3 +1,11 @@
+# Split a growing [[acl]] or [[sync.peers]] list into separate files with
+# conf.d-style includes. Glob patterns are resolved relative to this file;
+# each match may only contain [[acl]] and/or [sync] (peers only) — nothing
+# else, and no further 'include' of its own. Must appear before any [table]
+# header (a TOML requirement, not a Bonnet one) — this comment block is the
+# only place in this file it's legal to add it.
+# include = ["acl.d/*.toml", "peers.d/*.toml"]
+
 [server]
 origin = "bbs.example"
 hostname = "bbs.example"
@@ -15,6 +23,9 @@ port = 2272
 host = "127.0.0.1"
 # admin_pubkey = "<hex-encoded Ed25519 public key for full access>"
 # See OPERATOR_GUIDE.md "Becoming your own server's admin" for how to get one.
+# Or point at a file instead of inlining the key (a secrets mount, a path an
+# orchestrator injects) — set exactly one of the two:
+# admin_pubkey_file = "/run/secrets/bonnet_admin_pubkey"
 
 [limits]
 max_request_size = 10485760
@@ -40,7 +51,11 @@ interval_seconds = 300
 # The origin is the peer's Bonnet origin string; hostname/port is the dial address.
 # verify_tls should be false for self-signed certs (common on LAN).
 # import_warnings, import_temp_bans, and import_permabans control which
-# punishment types are accepted from each peer (default: all true).
+# punishment types this peer's moderation actions are enforced with locally.
+# Records are always stored and relayed regardless; these flags only govern
+# whether you trust the peer's authority. Default is opt-in (all false) —
+# peering with someone does not, by itself, grant them any moderation
+# authority over your board.
 #
 # [[sync.peers]]
 # origin = "peer.example"
