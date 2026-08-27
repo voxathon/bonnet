@@ -412,9 +412,7 @@ class OperatorConsole:
         m = MetadataMap([metadata_bytes(1, pubkey)])
         if expires_at is not None:
             m.fields.append(metadata_i64(2, expires_at))
-        return self._sign_and_publish(
-            kind, board=board, metadata=m, body=reason.encode("utf-8")
-        )
+        return self._sign_and_publish(kind, board=board, metadata=m, body=reason.encode("utf-8"))
 
     def _cmd_warn(self, parts) -> str:
         if len(parts) < 3:
@@ -482,7 +480,9 @@ class OperatorConsole:
 
         resp = self._issue_punishment("bonnet.punishment.permaban", pubkey, board, reason)
         if resp[0] == 0x00:
-            return f"Permabanned {pubkey.hex()} on /{board}. Event: {self._published_event_id(resp)}"
+            return (
+                f"Permabanned {pubkey.hex()} on /{board}. Event: {self._published_event_id(resp)}"
+            )
         return self._parse_response_error(resp)
 
     # ------------------------------------------------------------------
