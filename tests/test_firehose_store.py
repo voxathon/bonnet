@@ -10,8 +10,8 @@ import threading
 
 import pytest
 
-from core.crypto import Identity
-from core.firehose import (
+from bonnet.core.crypto import Identity
+from bonnet.core.firehose import (
     KIND_ARTICLE,
     KIND_ORIGIN_KEY_ROTATE,
     ArticleIdCollision,
@@ -21,7 +21,7 @@ from core.firehose import (
     HeadMismatch,
     SignatureInvalid,
 )
-from core.record import (
+from bonnet.core.record import (
     ZERO_HASH,
     Head,
     Intent,
@@ -369,7 +369,7 @@ class TestKeyEpochs:
             intent = _make_article_intent("bbs.a", _random_id(i + 1), _random_id(i + 10))
             store.append_record(ORIGIN_A, intent, _sign_intent(intent), b"test body")
 
-        from core.record import sign_key_rotation_proof
+        from bonnet.core.record import sign_key_rotation_proof
 
         proof = sign_key_rotation_proof(NEW_ORIGIN, "bbs.a", ORIGIN_A_PUB, NEW_ORIGIN_PUB)
 

@@ -1,0 +1,190 @@
+"""Entry point for the Bonnet firehose server."""
+
+import argparse
+import asyncio
+import os
+import signal
+import subprocess
+import sys
+import tomllib
+
+from bonnet import __version__
+from bonnet.app.server import BonnetFirehoseServer
+from bonnet.core.config import FirehoseConfig
+from bonnet.core.logging import init_logging
+from bonnet.core.tlsutil import OpenSSLNotFoundError, generate_self_signed_cert
+
+
+def _make_self_signed_cert(config_path: str, force: bool = False) -> tuple[str, str]:
+    """Generate a self-signed cert next to config_path and return TOML-safe paths."""
+    cert_path = os.path.join(os.path.dirname(config_path) or ".", "certs", "bonnet.crt")
+    key_path = os.path.join(os.path.dirname(config_path) or ".", "certs", "bonnet.key")
+    if not force and (os.path.exists(cert_path) or os.path.exists(key_path)):
+        raise FileExistsError(
+            f"TLS cert/key already exists at {cert_path} / {key_path} (use --force to overwrite)"
+        )
+    generate_self_signed_cert(cert_path, key_path)
+    # TOML basic strings treat backslash as an escape character; forward
+    # slashes work fine as path separators on Windows too.
+    return (cert_path.replace(os.sep, "/"), key_path.replace(os.sep, "/"))
+
+
+def _print_next_steps(config_path: str, tls_enabled: bool) -> None:
+    scheme = "https" if tls_enabled else "http"
+    print()
+    print("Next steps:")
+    print("  1. Start the server:")
+    print(f"       uv run bonnet-server --config {config_path}")
+    print(f"     It will listen on {scheme}://127.0.0.1:2272 and print its own public key.")
+    print("  2. The server's REPL (the 'bonnet>' prompt after startup) is already an")
+    print("     administrator - no key setup needed for local use.")
+    print("  3. To let a remote agent administer this server, install the client")
+    print("     extra, register an identity, and paste its pubkey into config.toml:")
+    print("       uv sync --extra client")
+    print(f"       BONNET_URL={scheme}://localhost:2272 BONNET_VERIFY_TLS=false uv run bonnet-mcp")
+    print("       (then call the register_user MCP tool - it prints the pubkey to use)")
+    print("     See OPERATOR_GUIDE.md 'Becoming your own server's admin' for details.")
+    if not tls_enabled:
+        print("  4. No TLS certificate was generated. Re-run with --self-signed, or see")
+        print("     README.md 'Quick Start' to configure one manually.")
+
+
+def main(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="Bonnet firehose server")
+    parser.add_argument("--version", action="version", version=f"bonnet-server {__version__}")
+    parser.add_argument("--config", default="config.toml", help="Path to config file")
+    parser.add_argument("--port", type=int, default=None, help="Override listen port")
+    parser.add_argument("--host", default=None, help="Override bind host")
+    parser.add_argument("--cert", default=None, help="TLS certificate path")
+    parser.add_argument("--key", default=None, help="TLS key path")
+    parser.add_argument(
+        "--create-config", action="store_true", help="Write a sample config file and exit"
+    )
+    parser.add_argument(
+        "--init",
+        action="store_true",
+        help=(
+            "One-shot first-run setup: write a sample config, generate a "
+            "self-signed TLS certificate if openssl is available, and print "
+            "next steps. Exits without starting the server."
+        ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="With --create-config or --init, overwrite an existing config file",
+    )
+    parser.add_argument(
+        "--self-signed",
+        action="store_true",
+        help=(
+            "With --create-config, also generate a self-signed TLS certificate "
+            "(via openssl) and enable TLS in the written config"
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    if args.init:
+        tls_paths = None
+        try:
+            tls_paths = _make_self_signed_cert(args.config, force=args.force)
+        except FileExistsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        except OpenSSLNotFoundError:
+            print("note: openssl not found on PATH - skipping TLS certificate generation")
+        except subprocess.CalledProcessError as exc:
+            print(
+                f"note: openssl failed, skipping TLS certificate generation: "
+                f"{exc.stderr.decode(errors='replace').strip()}"
+            )
+        try:
+            FirehoseConfig.create_default_config(args.config, force=args.force, tls_paths=tls_paths)
+        except FileExistsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"Wrote sample config to {args.config}")
+        if tls_paths:
+            print(f"Generated self-signed TLS certificate at {tls_paths[0]} (CN=localhost)")
+        _print_next_steps(args.config, tls_enabled=tls_paths is not None)
+        return
+
+    if args.create_config:
+        tls_paths = None
+        if args.self_signed:
+            try:
+                tls_paths = _make_self_signed_cert(args.config, force=args.force)
+            except FileExistsError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                raise SystemExit(1)
+            except OpenSSLNotFoundError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                raise SystemExit(1)
+            except subprocess.CalledProcessError as exc:
+                print(
+                    f"error: openssl failed: {exc.stderr.decode(errors='replace')}", file=sys.stderr
+                )
+                raise SystemExit(1)
+        try:
+            FirehoseConfig.create_default_config(args.config, force=args.force, tls_paths=tls_paths)
+        except FileExistsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"Wrote sample config to {args.config}")
+        if tls_paths:
+            print(f"Generated self-signed TLS certificate at {tls_paths[0]}")
+            print(
+                "This cert has CN=localhost and is only fit for local/LAN testing. "
+                "Set BONNET_VERIFY_TLS=false on clients, or regenerate with your real "
+                "hostname before exposing this server remotely."
+            )
+        return
+
+    bonnet_home = os.environ.get("BONNET_HOME")
+    log_dir = os.path.join(bonnet_home, "logs") if bonnet_home else None
+    try:
+        init_logging(log_dir)
+    except OSError as exc:
+        # File logging is not critical to serving requests; degrade loudly
+        # instead of either crashing or silently running with no logs.
+        print(
+            f"warning: could not initialize file logging at "
+            f"'{log_dir or './logs'}': {exc}. Continuing without file logs.",
+            file=sys.stderr,
+        )
+
+    try:
+        config = FirehoseConfig.load(args.config)
+    except FileNotFoundError:
+        print(f"error: config file not found: {args.config}", file=sys.stderr)
+        print("run 'bonnet-server --create-config' to generate a sample", file=sys.stderr)
+        raise SystemExit(1)
+    except tomllib.TOMLDecodeError as exc:
+        print(f"error: could not parse {args.config}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    for key in config.unknown_keys:
+        print(f"warning: unrecognized config key '{key}' (ignored)", file=sys.stderr)
+    if args.host:
+        config.host = args.host
+    try:
+        config.validate()
+    except ValueError as exc:
+        print(f"error: invalid configuration: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    server = BonnetFirehoseServer(config)
+
+    def handle_sigterm(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
+    try:
+        asyncio.run(server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key))
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        server.close()
+
+
+if __name__ == "__main__":
+    main()

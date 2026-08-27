@@ -1,4 +1,4 @@
-"""Tests for src/net/http_auth.py — Bonnet RFC 9421 Ed25519 profile."""
+"""Tests for src/bonnet/net/http_auth.py — Bonnet RFC 9421 Ed25519 profile."""
 
 import asyncio
 import base64
@@ -9,7 +9,7 @@ import time
 import pytest
 from nacl.signing import SigningKey
 
-from net.http_auth import (
+from bonnet.net.http_auth import (
     BONNET_TAG,
     ED25519_ALG,
     BonnetSigner,
@@ -409,7 +409,7 @@ class TestRejections:
             else None
         )
         # Use the internal function directly
-        from net.http_auth import _ed25519_sign
+        from bonnet.net.http_auth import _ed25519_sign
 
         sig = _ed25519_sign(priv, sig_base.encode())
         request_msg.set_header(
@@ -560,7 +560,7 @@ class TestPynaclCompat:
         assert len(pub) == 32
 
         msg = b"test message"
-        from net.http_auth import _ed25519_sign, _ed25519_verify
+        from bonnet.net.http_auth import _ed25519_sign, _ed25519_verify
 
         sig = _ed25519_sign(priv, msg)
         assert len(sig) == 64
@@ -569,7 +569,7 @@ class TestPynaclCompat:
     def test_wrong_key_verify_fails(self):
         sk1 = SigningKey.generate()
         sk2 = SigningKey.generate()
-        from net.http_auth import _ed25519_sign, _ed25519_verify
+        from bonnet.net.http_auth import _ed25519_sign, _ed25519_verify
 
         sig = _ed25519_sign(bytes(sk1), b"msg")
         with pytest.raises(InvalidSignature):

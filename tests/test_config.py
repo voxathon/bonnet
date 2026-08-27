@@ -1,11 +1,11 @@
-"""Tests for src/core/config.py — FirehoseConfig loading and defaults."""
+"""Tests for src/bonnet/core/config.py — FirehoseConfig loading and defaults."""
 
 import os
 
 import pytest
 
-from core.acl import ACLEvaluator
-from core.config import FirehoseConfig, PeerConfig, _normalize_origin
+from bonnet.core.acl import ACLEvaluator
+from bonnet.core.config import FirehoseConfig, PeerConfig, _normalize_origin
 
 
 def _write_config(tmp_path, content):
@@ -68,7 +68,7 @@ def test_path_properties(tmp_path):
 
 def test_http_host_default():
     c = FirehoseConfig()
-    assert c.http_host == "0.0.0.0"
+    assert c.http_host == "127.0.0.1"
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +236,77 @@ verify_tls = true
     assert c.peers[1].verify_tls is True
 
 
+def test_peer_import_flags_default_to_true(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "a.test"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    peer = c.peers[0]
+    assert peer.import_warnings is True
+    assert peer.import_temp_bans is True
+    assert peer.import_permabans is True
+
+
+def test_peer_import_flags_from_toml(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "a.test"
+import_warnings = true
+import_temp_bans = true
+import_permabans = false
+
+[[sync.peers]]
+origin = "b.test"
+hostname = "b.test"
+import_warnings = false
+import_temp_bans = false
+import_permabans = false
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.peers[0].imported_punishment_types() == {"warning", "ban"}
+    assert c.peers[1].imported_punishment_types() == set()
+
+
+def test_validate_rejects_non_bool_peer_import_flag():
+    c = FirehoseConfig(
+        peers=[PeerConfig(origin="a.test", hostname="a.test", import_warnings="yes")]
+    )
+    with pytest.raises(ValueError, match="import_warnings"):
+        c.validate()
+
+
+def test_as_bool_rejects_non_bool_toml_value(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "a.test"
+import_permabans = 1
+""",
+    )
+    with pytest.raises(ValueError, match="import_permabans"):
+        FirehoseConfig.load(path)
+
+
 # ---------------------------------------------------------------------------
 # Missing config behavior
 # ---------------------------------------------------------------------------
@@ -262,6 +333,29 @@ def test_create_default_config_creates_parent_dir(tmp_path):
     path = str(tmp_path / "nested" / "deep" / "config.toml")
     FirehoseConfig.create_default_config(path)
     assert os.path.exists(path)
+
+
+def test_create_default_config_refuses_existing_file(tmp_path):
+    path = str(tmp_path / "config.toml")
+    FirehoseConfig.create_default_config(path)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('[server]\norigin = "precious"\n')
+
+    with pytest.raises(FileExistsError):
+        FirehoseConfig.create_default_config(path)
+
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    assert "precious" in content
+
+
+def test_create_default_config_force_overwrites(tmp_path):
+    path = str(tmp_path / "config.toml")
+    FirehoseConfig.create_default_config(path)
+    config = FirehoseConfig.create_default_config(path, force=True)
+
+    assert os.path.exists(path)
+    assert config.origin == "localhost"
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +461,7 @@ def test_configurable_host():
 
 def test_host_default():
     c = FirehoseConfig()
-    assert c.http_host == "0.0.0.0"
+    assert c.http_host == "127.0.0.1"
 
 
 def test_host_from_toml(tmp_path):
@@ -381,3 +475,156 @@ host = "127.0.0.1"
     )
     c = FirehoseConfig.load(path)
     assert c.http_host == "127.0.0.1"
+
+
+# ---------------------------------------------------------------------------
+# BONNET_HOME storage-path fallback
+# ---------------------------------------------------------------------------
+
+
+def test_bonnet_home_used_when_storage_paths_unset(tmp_path, monkeypatch):
+    home = str(tmp_path / "home")
+    monkeypatch.setenv("BONNET_HOME", home)
+    path = _write_config(tmp_path, '[server]\norigin = "bbs.test"\n')
+    c = FirehoseConfig.load(path)
+    assert c.data_dir == os.path.join(home, "data")
+    assert c.boards_dir == os.path.join(home, "boards")
+    assert c.events_bodies_dir == os.path.join(home, "event_bodies")
+
+
+def test_explicit_config_storage_paths_win_over_bonnet_home(tmp_path, monkeypatch):
+    home = str(tmp_path / "home")
+    monkeypatch.setenv("BONNET_HOME", home)
+    explicit_data_dir = str(tmp_path / "custom_data")
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+data_dir = "{explicit_data_dir.replace(os.sep, "/")}"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.data_dir == explicit_data_dir.replace(os.sep, "/")
+    # boards_dir/events_bodies_dir were left unset, so BONNET_HOME still
+    # applies to those independently of the explicit data_dir override.
+    assert c.boards_dir == os.path.join(home, "boards")
+    assert c.events_bodies_dir == os.path.join(home, "event_bodies")
+
+
+def test_storage_paths_default_without_bonnet_home(tmp_path, monkeypatch):
+    monkeypatch.delenv("BONNET_HOME", raising=False)
+    path = _write_config(tmp_path, '[server]\norigin = "bbs.test"\n')
+    c = FirehoseConfig.load(path)
+    assert c.data_dir == "./data"
+    assert c.boards_dir == "./boards"
+    assert c.events_bodies_dir == "./event_bodies"
+
+
+# ---------------------------------------------------------------------------
+# Unknown key detection
+# ---------------------------------------------------------------------------
+
+
+def test_load_reports_unknown_keys(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+typo_section = true
+
+[server]
+origin = "bbs.test"
+admin_key = "abc123"
+
+[limits]
+max_requests = 5
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert sorted(c.unknown_keys) == ["limits.max_requests", "server.admin_key", "typo_section"]
+
+
+def test_load_clean_config_has_no_unknown_keys(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[tls]
+enabled = false
+
+[sync]
+interval_seconds = 300
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.unknown_keys == []
+
+
+def test_load_reports_unknown_peer_keys(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[[sync.peers]]
+origin = "peer.test"
+hostname = "peer.test"
+import_warns = true
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.unknown_keys == ["sync.peers[0].import_warns"]
+
+
+def test_constructed_config_defaults_to_no_unknown_keys():
+    c = FirehoseConfig()
+    assert c.unknown_keys == []
+
+
+# ---------------------------------------------------------------------------
+# Sample config template
+# ---------------------------------------------------------------------------
+
+
+def test_generated_sample_is_utf8_loadable_and_valid(tmp_path):
+    """--create-config output must round-trip through the real loader.
+
+    Regression guard for locale-dependent writes (cp1252 on Windows made the
+    generated file unparseable by tomllib).
+    """
+    import tomllib
+
+    path = str(tmp_path / "config.toml")
+    FirehoseConfig._write_default(path)
+
+    with open(path, "rb") as f:
+        raw = f.read()
+    data = tomllib.loads(raw.decode("utf-8"))
+    assert data["server"]["origin"] == "localhost"
+
+    c = FirehoseConfig.load(path)
+    c.validate()
+    assert c.unknown_keys == []
+
+
+def test_example_config_matches_generated_template(tmp_path):
+    """config.example.toml and the --create-config template stay in sync.
+
+    server.origin/hostname are excluded: the tracked example ships a
+    placeholder origin, the generated sample starts local.
+    """
+    import tomllib
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    example_path = os.path.join(repo_root, "config.example.toml")
+    generated_path = str(tmp_path / "generated.toml")
+    FirehoseConfig._write_default(generated_path)
+
+    def load_normalized(path):
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        data.get("server", {}).pop("origin", None)
+        data.get("server", {}).pop("hostname", None)
+        return data
+
+    assert load_normalized(example_path) == load_normalized(generated_path)
