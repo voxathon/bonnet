@@ -213,6 +213,32 @@ def test_sweep_discards_orphan_with_no_matching_record(server):
     assert not any(e == event_id for _, _, e, _ in staged)
 
 
+def test_sweep_handles_mtime_ahead_of_wall_clock(server):
+    """A staged file's mtime can read as slightly ahead of time.time() —
+    clock skew between the write and the sweep's own clock read, seen on
+    virtualized CI runners though not reproducible locally on demand.
+    min_age_seconds=0 must still sweep it: a negative age must not read as
+    'younger than every threshold including 0'."""
+    event_id = bytes(range(1, 33))
+    _stage_body(server, "general", event_id, b"future mtime")
+
+    staging_path = os.path.join(
+        server.config.boards_dir,
+        b"bbs.test".hex(),
+        b"general".hex(),
+        "bodies",
+        "staging",
+        event_id.hex(),
+    )
+    future = os.path.getmtime(staging_path) + 5
+    os.utime(staging_path, (future, future))
+
+    server._sweep_orphaned_staged_bodies(min_age_seconds=0)
+
+    staged = server.body_store.list_staged_article_bodies()
+    assert not any(e == event_id for _, _, e, _ in staged)
+
+
 def test_sweep_recovers_staged_body_with_committed_record(server):
     """A staged body whose record DID commit — the crash happened between
     append_record succeeding and finalize_article_body running — is
