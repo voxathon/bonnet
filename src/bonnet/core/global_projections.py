@@ -1,4 +1,4 @@
-"""Global projections for the Bonnet Firehose Protocol (PROTOCOL.md §14.4).
+"""Global projections for the Bonnet Firehose Protocol.
 
 nav.db     — board directory from bonnet.board.create/close/reopen
 users.db   — user registrations and revocations
@@ -448,7 +448,7 @@ class PolicyProjection(_BaseProjection):
     """Moderation policy projection: rules, reports, punishments."""
 
     def _init_schema(self) -> None:
-        # Gate D schema v2: punishments carry a type and a body reference.
+        # Schema v2: punishments carry a type and a body reference.
         # If an older untyped punishments table exists, reset this projection
         # entirely so the dispatcher replays it from the authoritative
         # firehose (projections are derived state and never authoritative).
@@ -644,7 +644,7 @@ class PolicyProjection(_BaseProjection):
                 raise
 
     def apply_punishment_ack(self, rec: Record) -> None:
-        """Record a user's acknowledgment of a punishment (Gate D).
+        """Record a user's acknowledgment of a punishment.
 
         Acks are local to the user's homeserver and reference the punishment
         event ID regardless of which origin issued it. Re-acking the same
@@ -712,7 +712,7 @@ class PolicyProjection(_BaseProjection):
         allowed_origins: set | None = None,
         now: int | None = None,
     ) -> list[dict]:
-        """Return the punishments currently gating writes by this user (Gate D).
+        """Return the punishments currently gating writes by this user.
 
         Pending means: unacknowledged warnings, unexpired temporary bans,
         and permabans — all non-revoked. When allowed_origins is provided,

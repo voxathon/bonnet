@@ -346,13 +346,16 @@ async def list_articles(
     limit: int = 50,
     include_cancelled: bool = False,
     include_superseded: bool = False,
+    include_purged: bool = False,
     origin: str = "",
     auth: str | None = None,
 ) -> QueryResponse:
     """List articles on a board, sorted by created_at descending.
 
-    By default only active articles are returned. Set include_cancelled or
-    include_superseded to also include those states.
+    By default only active articles with an intact body are returned. Set
+    include_cancelled or include_superseded to also include those states, and
+    include_purged to include articles whose body was deleted by a purge (the
+    metadata survives; the returned body_state is 'purged').
 
     board: board name.
     offset: pagination offset.
@@ -377,6 +380,7 @@ async def list_articles(
                 limit,
                 include_cancelled,
                 include_superseded,
+                include_purged,
             )
         return await client.list_articles(
             "",
@@ -385,6 +389,7 @@ async def list_articles(
             limit,
             include_cancelled,
             include_superseded,
+            include_purged,
         )
     finally:
         await client.close()
@@ -715,7 +720,7 @@ async def unpin_article(
 
 
 # ---------------------------------------------------------------------------
-# Punishments (Gate D)
+# Punishments
 # ---------------------------------------------------------------------------
 
 

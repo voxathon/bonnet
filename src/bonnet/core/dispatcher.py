@@ -1,4 +1,4 @@
-"""Dispatcher for the Bonnet Firehose Protocol (PROTOCOL.md §13).
+"""Dispatcher for the Bonnet Firehose Protocol.
 
 Processes accepted firehose records in origin sequence order and routes
 them to the appropriate projections. Implements idempotent applied-event
@@ -74,7 +74,7 @@ class Dispatcher:
         self._body_store = body_store
         self._allowed_origins = allowed_origins or set()
         self._local_origin = local_origin
-        # origin -> set of imported punishment type names (Gate D). Types from
+        # origin -> set of imported punishment type names. Types from
         # origins not present in the map are never applied locally.
         self._punishment_import_policy = punishment_import_policy or {}
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
@@ -151,7 +151,7 @@ class Dispatcher:
                     )
                     break
                 self._firehose.set_checkpoint(origin, rec.origin_seq)
-                # Gate D relies on the policy checkpoint tracking overall
+                # Punishment import relies on the policy checkpoint tracking overall
                 # dispatch progress, not just policy-kind records, so that
                 # _policy_current() can't be fooled by intervening
                 # non-policy records into believing the projection is stale.
@@ -172,7 +172,7 @@ class Dispatcher:
             self._policy.apply_punishment(rec)
 
     def _punishment_import_allowed(self, rec: Record) -> bool:
-        """Gate D: per-type, per-origin punishment import filtering.
+        """Per-type, per-origin punishment import filtering.
 
         Local punishments always apply. Federated ones apply only when the
         origin is configured with that type imported. Rejected records stay

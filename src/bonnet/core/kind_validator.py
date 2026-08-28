@@ -1,4 +1,4 @@
-"""Kind-specific validation for the Bonnet Firehose Protocol (PROTOCOL.md §12).
+"""Kind-specific validation for the Bonnet Firehose Protocol.
 
 Enforces schema rules: required metadata fields, target tuple completeness,
 same-origin restrictions, board/user lifecycle constraints, and report/punishment
@@ -45,7 +45,7 @@ class ValidationError(Exception):
 
 
 class KindValidator:
-    """Validates an Intent against its kind schema (§12).
+    """Validates an Intent against its kind schema.
 
     Dispatch is a registry (kind -> validator method) built once at
     construction, rather than an inline elif chain, so a new kind is added

@@ -1,11 +1,11 @@
-"""Firehose event store for the Bonnet Firehose Protocol (PROTOCOL.md §14.1).
+"""Firehose event store for the Bonnet Firehose Protocol.
 
-Phase 1: origin-global append-only event store with per-origin sequence
+Origin-global append-only event store with per-origin sequence
 allocation, board-local article-number counters, signed heads, equivocation
 conflict storage, key-epoch tracking for rotation, relay witness storage, and
 remote range acceptance with full chain verification.
 
-Uses raw sqlite3 (not core.orm) with BEGIN IMMEDIATE, WAL mode, and a
+Uses raw sqlite3 with BEGIN IMMEDIATE, WAL mode, and a
 threading.RLock for writer serialization.
 """
 
@@ -639,7 +639,7 @@ class FirehoseStore:
     ) -> AcceptResult:
         """Accept a contiguous range of remote records verified against a head.
 
-        Implements §17.1 acceptance rules. The caller provides pre-decoded
+        Implements the remote-range acceptance rules. The caller provides pre-decoded
         records. When the batch completes the synced range, `head` must be
         provided and is verified against the final record before being
         recorded. Intermediate batches of a multi-batch transfer pass

@@ -1,4 +1,4 @@
-"""Phase 5 tests: firehose client protocol builders/parsers and models.
+"""Firehose client protocol builders, parsers, and models.
 
 Tests round-trip encoding/decoding of all 13 command builders and response
 parsers. Uses mock data — no HTTP required.
@@ -427,6 +427,24 @@ class TestArticleList:
     def test_build(self):
         cmd = build_article_list("bbs.test", "general", 0, 10, include_cancelled=True)
         assert cmd[0] == OP_ARTICLE_LIST
+        assert cmd[-1] == 0x01
+
+    def test_build_flag_bits(self):
+        assert build_article_list("bbs.test", "general", 0, 10)[-1] == 0x00
+        assert build_article_list("bbs.test", "general", 0, 10, include_superseded=True)[-1] == 0x02
+        assert build_article_list("bbs.test", "general", 0, 10, include_purged=True)[-1] == 0x04
+        assert (
+            build_article_list(
+                "bbs.test",
+                "general",
+                0,
+                10,
+                include_cancelled=True,
+                include_superseded=True,
+                include_purged=True,
+            )[-1]
+            == 0x07
+        )
 
     def test_parse(self):
         aid = _rid(2)
