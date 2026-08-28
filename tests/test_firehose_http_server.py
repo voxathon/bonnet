@@ -20,11 +20,21 @@ from bonnet.core.dispatcher import Dispatcher
 from bonnet.core.firehose import FirehoseStore
 from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
 from bonnet.core.kind_validator import KindValidator
+from bonnet.core.record import (
+    Intent,
+    MetadataMap,
+    encode_intent,
+    metadata_bytes,
+    sign_intent,
+    sign_key_rotation_proof,
+)
 from bonnet.core.search import SearchService
+from bonnet.core.trust import TrustStore
 from bonnet.net.firehose_commands import (
     FirehoseCommandHandler,
 )
 from bonnet.net.firehose_http_server import FirehoseHTTPServer
+from bonnet.net.firehose_transport import FirehoseClientError
 from bonnet.net.firehose_wire import (
     build_board_list,
     build_event_head,
@@ -98,6 +108,7 @@ async def server_stack(tmp_path):
                 "EVENT_HEAD",
                 "EVENT_RANGE",
                 "EVENT_GET",
+                "KEY_EPOCHS",
                 "BOARD_LIST",
                 "ARTICLE_GET",
                 "ARTICLE_LIST",
@@ -257,6 +268,151 @@ async def test_discovery_anonymous_key_matches(server_stack):
 
     assert data["anonymous_key"] == anon.public_key.hex()
     assert data["anonymous_private_key"] == anon.private_key.hex()
+
+
+# ---------------------------------------------------------------------------
+# Client-side rotation trust
+# ---------------------------------------------------------------------------
+
+
+def _publish_rotation(firehose, old_identity, new_identity, origin):
+    """Append a bonnet.origin.key.rotate record directly to the firehose,
+    mirroring what OperatorConsole's rotate-key command publishes over the
+    wire."""
+    proof = sign_key_rotation_proof(
+        new_identity, origin, old_identity.public_key, new_identity.public_key
+    )
+    intent = Intent(
+        event_id=os.urandom(32),
+        kind="bonnet.origin.key.rotate",
+        origin=origin,
+        actor_pubkey=old_identity.public_key,
+        metadata=MetadataMap(
+            [
+                metadata_bytes(1, new_identity.public_key),
+                metadata_bytes(2, proof),
+            ]
+        ),
+    )
+    actor_sig = sign_intent(old_identity, encode_intent(intent))
+    firehose.append_record(old_identity, intent, actor_sig, b"")
+
+
+def _second_server(server_stack, identity):
+    """Build a second command handler/HTTP server bound to the same
+    underlying stores but signing as `identity` — stands in for 'the
+    operator rotated the key and restarted the server' without actually
+    spawning a new process."""
+    acl = ACLEvaluator(default_rules_for_admin(identity.public_key.hex()))
+    acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(anonymous=True),
+            actions=["read"],
+            commands=["EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS"],
+            boards=["*"],
+        )
+    )
+    command_handler = FirehoseCommandHandler(
+        firehose=server_stack["firehose"],
+        server_identity=identity,
+        config_origin=ORIGIN,
+        nav=server_stack["nav"],
+        users=server_stack["users"],
+        policy=server_stack["policy"],
+        body_store=server_stack["body_store"],
+        boards_dir=server_stack["config"].boards_dir,
+        acl=acl,
+        validator=KindValidator(),
+        search=SearchService(
+            boards_dir=server_stack["config"].boards_dir,
+            body_store=server_stack["body_store"],
+            max_count=server_stack["config"].search_max_count,
+            timeout_seconds=server_stack["config"].search_timeout_seconds,
+            result_limit=server_stack["config"].search_result_limit,
+        ),
+        hostname="bbs.test",
+        dispatcher=server_stack["dispatcher"],
+        allowed_origins={ORIGIN},
+    )
+    http_server = FirehoseHTTPServer(
+        command_handler=command_handler,
+        server_identity=identity,
+        config=server_stack["config"],
+        anonymous_identity=server_stack["anonymous_identity"],
+        replay_ledger=server_stack["replay_ledger"],
+        rate_limiter=server_stack["rate_limiter"],
+        users_projection=server_stack["users"],
+    )
+    return command_handler, http_server
+
+
+async def test_client_accepts_verified_rotation(server_stack):
+    """After a legitimate key rotation, a client with a pin on the old key
+    must accept the new key automatically — 'if it's valid, it's valid' —
+    instead of treating the new key as a MITM."""
+    firehose = server_stack["firehose"]
+    new_identity = Identity.generate()
+    _publish_rotation(firehose, SERVER_IDENTITY, new_identity, ORIGIN)
+
+    command_handler, http_server = _second_server(server_stack, new_identity)
+    try:
+        trust_db = server_stack["config"].data_dir + "/client_trust.db"
+        seed_store = TrustStore(trust_db)
+        seed_store.tofu_pin(ORIGIN, SERVER_PUB)
+        seed_store.close()
+
+        client = FirehoseHTTPClient("https://bbs.test", verify=False, trust_store_path=trust_db)
+        client._http = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=http_server),
+            base_url="https://bbs.test",
+            timeout=30.0,
+            verify=False,
+        )
+        try:
+            info = await client.discover()
+            assert info.public_key == new_identity.public_key.hex()
+        finally:
+            await client.close()
+
+        final_store = TrustStore(trust_db)
+        assert final_store.get_pin(ORIGIN) == new_identity.public_key
+        final_store.close()
+    finally:
+        command_handler.close()
+
+
+async def test_client_rejects_unverified_key_change(server_stack):
+    """A key change with no rotation record behind it must still be
+    rejected — this is the actual MITM case the rotation-chain check exists
+    to distinguish from a legitimate rotation."""
+    imposter_identity = Identity.generate()  # no rotation record published
+
+    command_handler, http_server = _second_server(server_stack, imposter_identity)
+    try:
+        trust_db = server_stack["config"].data_dir + "/client_trust_2.db"
+        seed_store = TrustStore(trust_db)
+        seed_store.tofu_pin(ORIGIN, SERVER_PUB)
+        seed_store.close()
+
+        client = FirehoseHTTPClient("https://bbs.test", verify=False, trust_store_path=trust_db)
+        client._http = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=http_server),
+            base_url="https://bbs.test",
+            timeout=30.0,
+            verify=False,
+        )
+        try:
+            with pytest.raises(FirehoseClientError, match="pin mismatch"):
+                await client.discover()
+        finally:
+            await client.close()
+
+        final_store = TrustStore(trust_db)
+        assert final_store.get_pin(ORIGIN) == SERVER_PUB
+        final_store.close()
+    finally:
+        command_handler.close()
 
 
 # ---------------------------------------------------------------------------

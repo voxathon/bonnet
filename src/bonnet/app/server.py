@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 from bonnet.app.cli import FirehoseLocalConnection
 from bonnet.app.console import OperatorConsole
@@ -106,11 +107,20 @@ class BonnetServer:
         )
         log_msg("INIT: Dispatcher initialized")
 
+        # Tracks the one ACL rule (if any) that grants admin by the server's
+        # own key because nothing else in config did — as opposed to a rule
+        # an operator wrote into config.toml themselves. Only this rule is
+        # safe for apply_key_rotation to mutate live: it's synthesized state
+        # we own, not operator-authored config we'd silently diverge from on
+        # the next restart.
+        self._acl_admin_rule = None
+
         acl = config.acl
         if not acl._rules and config.admin_pubkey_hex:
             acl = ACLEvaluator(default_rules_for_admin(config.admin_pubkey_hex))
         elif not acl._rules:
             acl = ACLEvaluator(default_rules_for_admin(self.server_identity.public_key.hex()))
+            self._acl_admin_rule = acl._rules[0]
             log_msg("INIT: no ACL rules configured, defaulting to server identity as admin")
         else:
             has_server_admin = any(
@@ -121,18 +131,20 @@ class BonnetServer:
             if not has_server_admin:
                 from bonnet.core.acl import ACLRule, PrincipalMatcher
 
-                acl.add_rule(
-                    ACLRule(
-                        effect="allow",
-                        matcher=PrincipalMatcher(pubkey=self.server_identity.public_key),
-                        actions=["read", "write"],
-                        commands=["*"],
-                        kinds=["*"],
-                        boards=["*"],
-                        objects=["*"],
-                    )
+                admin_rule = ACLRule(
+                    effect="allow",
+                    matcher=PrincipalMatcher(pubkey=self.server_identity.public_key),
+                    actions=["read", "write"],
+                    commands=["*"],
+                    kinds=["*"],
+                    boards=["*"],
+                    objects=["*"],
                 )
+                acl.add_rule(admin_rule)
+                self._acl_admin_rule = admin_rule
                 log_msg("INIT: added server identity to ACL as admin (not in config)")
+
+        self.acl = acl
 
         self.validator = KindValidator()
         self.search = SearchService(
@@ -273,6 +285,102 @@ class BonnetServer:
             log_msg("INIT: registered root user in firehose")
         except Exception as e:
             log_msg(f"INIT: failed to register root user: {e}")
+
+    def apply_key_rotation(self, new_identity: Identity) -> str:
+        """Rotate the server's own origin signing key live — no restart.
+
+        Publishes the bonnet.origin.key.rotate record (old key signs the
+        record, new key signs the proof — the mutual-consent scheme
+        firehose.py._apply_rotation_locked verifies), persists the new
+        private key to identity_path (old one backed up alongside it), then
+        hot-swaps every component that captured the old Identity object:
+        command_handler (signs future local publishes), http_server (signs
+        HTTP responses — its BonnetSigner bakes in the private key, so it
+        must be rebuilt, not just repointed), sync_manager (signs relay
+        witnesses for future accepted federation batches), and local_conn
+        (the console's own peer_pubkey — otherwise the console itself would
+        stop matching its ACL admin rule the moment that rule is updated
+        below).
+
+        The one thing this cannot safely do is rewrite an operator-authored
+        config.toml. If the ACL granted this server admin access through a
+        rule the operator wrote (as opposed to the automatic fallback this
+        class adds when nothing else grants admin), that rule is left alone
+        and the caller is told to update config.toml by hand — otherwise the
+        *next* restart would reload the stale key from disk and boot without
+        admin access.
+        """
+        from bonnet.core.record import (
+            Intent,
+            MetadataMap,
+            encode_intent,
+            metadata_bytes,
+            sign_intent,
+            sign_key_rotation_proof,
+        )
+
+        origin = self.config.origin
+        old_identity = self.server_identity
+
+        proof = sign_key_rotation_proof(
+            new_identity, origin, old_identity.public_key, new_identity.public_key
+        )
+        intent = Intent(
+            event_id=os.urandom(32),
+            kind="bonnet.origin.key.rotate",
+            origin=origin,
+            actor_pubkey=old_identity.public_key,
+            actor_username="root",
+            actor_registrar=origin,
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, new_identity.public_key),
+                    metadata_bytes(2, proof),
+                ]
+            ),
+        )
+        actor_sig = sign_intent(old_identity, encode_intent(intent))
+        self.firehose.append_record(old_identity, intent, actor_sig, b"")
+        self.dispatcher.dispatch_origin(origin)
+
+        identity_path = self.config.identity_path
+        backup_path = f"{identity_path}.pre-rotate-{int(time.time())}"
+        os.replace(identity_path, backup_path)
+        with open(identity_path, "wb") as f:
+            f.write(new_identity.private_key)
+
+        self.server_identity = new_identity
+        self.command_handler.set_server_identity(new_identity)
+        self.http_server.set_server_identity(new_identity)
+        self.sync_manager.set_identity(new_identity)
+        self.local_conn.server_pubkey = new_identity.public_key
+
+        acl_updated = False
+        if self._acl_admin_rule is not None:
+            self._acl_admin_rule.matcher.pubkey = new_identity.public_key
+            acl_updated = True
+
+        log_msg(
+            f"ROTATE: origin='{origin}' old={old_identity.public_key.hex()} "
+            f"new={new_identity.public_key.hex()} acl_updated={acl_updated}"
+        )
+
+        lines = [
+            f"Rotated origin '{origin}' from {old_identity.public_key.hex()} "
+            f"to {new_identity.public_key.hex()}. Effective immediately, no restart needed.",
+            f"Old identity backed up to {backup_path}.",
+        ]
+        if acl_updated:
+            lines.append("Live ACL admin rule updated to the new key.")
+        else:
+            lines.append(
+                "WARNING: this server's admin ACL rule was configured explicitly "
+                "(not the automatic fallback), so it was left untouched. If it "
+                "grants access by this server's own pubkey, update config.toml "
+                "to the new key by hand, or the next restart will boot without "
+                "admin access."
+            )
+        return "\n".join(lines)
 
     async def run(self, port: int = None, ssl_certfile: str = None, ssl_keyfile: str = None):
         import uvicorn

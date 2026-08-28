@@ -8,18 +8,25 @@ its federation peers. Pins live in a SQLite `origin_keys` table, where
 TOFU pinning is a single atomic INSERT OR IGNORE + SELECT, so concurrent
 first contact with the same origin converges on one pin instead of racing.
 
-A rotation is accepted only when the origin is currently pinned to the old
-key and the proof verifies against that key:
+A single-hop rotation is accepted only when the origin is currently pinned
+to the old key and the proof verifies against the new key, using the same
+domain-separated construction as the rest of the protocol
+(record.sign_key_rotation_proof / verify_key_rotation_proof — the new key
+attests it consents to succeed the old one; record.py separately requires
+the rotate record itself to carry a valid origin signature under the old
+key, so acceptance is mutual-consent between old and new).
 
-    payload = struct.pack('B', len(origin_bytes)) + origin_bytes
-              + old_pubkey + new_pubkey
+A multi-hop rotation (the origin rotated more than once since this pin was
+last refreshed) is not resolved by verify_rotation alone — the caller
+(net.firehose_transport) walks the intermediate hops itself, verifying each
+one with record.verify_key_rotation_proof, and only calls accept_rotation()
+once to commit the final, fully-verified endpoint.
 """
 
 from __future__ import annotations
 
 import os
 import sqlite3
-import struct
 import threading
 import time
 
@@ -128,37 +135,54 @@ class TrustStore:
             self._conn.commit()
 
     def verify_rotation(
-        self, origin: str, old_publickey: bytes, new_publickey: bytes, signature: bytes
+        self, origin: str, old_publickey: bytes, new_publickey: bytes, proof: bytes
     ) -> bool:
-        """Verify a key rotation signed by the old pinned key.
+        """Verify a single-hop key rotation proof and, if valid, commit it.
 
-        The canonical rotation payload is:
-          struct.pack('B', len(origin_bytes)) + origin_bytes + old_pubkey + new_pubkey
+        Uses record.verify_key_rotation_proof — the same domain-separated
+        construction the server verifies when applying a
+        bonnet.origin.key.rotate record, so a proof pulled straight off the
+        wire (record.metadata field 2) verifies here unmodified.
 
         Returns True if:
           - origin is currently pinned with old_publickey, AND
-          - the signature verifies against old_publickey over the payload
+          - the proof verifies against new_publickey over (origin, old, new)
         Returns False otherwise.
 
         On success, updates the pin to new_publickey and sets last_rotated.
         """
-        from bonnet.core.crypto import Identity
+        from bonnet.core.record import verify_key_rotation_proof
 
         existing = self.get_pin(origin)
         if existing is None or existing != old_publickey:
             return False
 
-        origin_bytes = origin.encode("utf-8")
-        payload = struct.pack("B", len(origin_bytes)) + origin_bytes + old_publickey + new_publickey
-
-        if not Identity.verify(old_publickey, payload, signature):
+        if not verify_key_rotation_proof(new_publickey, origin, old_publickey, proof):
             return False
 
+        return self.accept_rotation(origin, old_publickey, new_publickey)
+
+    def accept_rotation(
+        self, origin: str, expected_old_publickey: bytes, new_publickey: bytes
+    ) -> bool:
+        """Commit a pin update for a rotation already verified by the caller.
+
+        No cryptographic check happens here — this is the low-level CAS
+        primitive verify_rotation uses for the single-hop case, and that
+        net.firehose_transport's multi-hop chain walk calls directly once it
+        has independently verified every intermediate hop (a single proof
+        cannot attest a multi-hop jump, so verify_rotation's own check does
+        not apply there).
+
+        Returns True if the origin was still pinned to expected_old_publickey
+        and the update was applied; False otherwise (pin already moved, e.g.
+        a concurrent rotation).
+        """
         now = int(time.time())
         with self._lock:
             cursor = self._conn.execute(
                 "UPDATE origin_keys SET publickey=?, last_rotated=? WHERE origin=? AND publickey=?",
-                (new_publickey, now, origin, old_publickey),
+                (new_publickey, now, origin, expected_old_publickey),
             )
             if cursor.rowcount == 0:
                 return False
