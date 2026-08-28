@@ -262,6 +262,15 @@ class FirehoseCommandHandler:
                 bp.close()
             self._board_projections.clear()
 
+    def set_server_identity(self, identity: Identity) -> None:
+        """Hot-swap the identity used to sign future local publishes and
+        witness lookups (see core.record.Record vs Event: the origin
+        signature over any record appended after this call must come from
+        whichever key the key-epoch table now considers current). Used by
+        BonnetServer.apply_key_rotation — every call site here reads
+        self._identity fresh, so this is the only update this class needs."""
+        self._identity = identity
+
     def _get_board_projection(self, origin: str, board: str) -> BoardProjection:
         key = (origin, board)
         with self._boards_lock:

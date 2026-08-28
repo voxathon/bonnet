@@ -9,6 +9,7 @@ import asyncio
 import os
 import struct
 
+from bonnet.core.crypto import Identity
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     ZERO_ID,
@@ -177,6 +178,9 @@ class OperatorConsole:
         if cmd == "reset-key":
             return self._cmd_reset_key(parts)
 
+        if cmd == "rotate-key":
+            return self._cmd_rotate_key(parts)
+
         return f"Unknown command: {cmd}. Type 'help' for commands."
 
     def _cmd_help(self) -> str:
@@ -222,6 +226,9 @@ class OperatorConsole:
   depeer <origin>               Stop syncing an origin and freeze its projections
   purge-origin <origin>         Remove all firehose and projection data for an origin
   reset-key <origin>            Clear key epoch pinning for an origin
+  rotate-key                    Rotate this server's own origin signing key
+                                (publishes bonnet.origin.key.rotate; restart
+                                required afterward)
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:
@@ -1661,6 +1668,19 @@ class OperatorConsole:
             return f"Origin '{origin}' has no data."
         self.firehose.reset_origin_key(origin)
         return f"Reset key pinning for '{origin}'. Next sync will perform fresh TOFU."
+
+    def _cmd_rotate_key(self, parts) -> str:
+        """Rotate this server's own origin key, live.
+
+        Delegates to BonnetServer.apply_key_rotation, which publishes the
+        rotation record and hot-swaps every component that captured the old
+        identity (command handler, HTTP signer, sync manager, this console's
+        own peer_pubkey, and the live ACL admin rule where safe to). See
+        that method's docstring for the one case it can't fix automatically
+        — an operator-authored ACL rule in config.toml.
+        """
+        new_identity = Identity.generate()
+        return self.server.apply_key_rotation(new_identity)
 
     def _cmd_purge_origin(self, parts) -> str:
         if len(parts) < 2:

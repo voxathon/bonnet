@@ -6,13 +6,13 @@ Covers:
 """
 
 import os
-import struct
 import threading
 import time
 
 import pytest
 
 from bonnet.core.crypto import Identity
+from bonnet.core.record import sign_key_rotation_proof
 from bonnet.core.trust import TRUST_MODE_CONFIGURED, TRUST_MODE_TOFU, TrustStore
 
 
@@ -86,76 +86,120 @@ class TestConfiguredPin:
         assert info["trust_mode"] == TRUST_MODE_CONFIGURED
 
 
+def _proof(new_ident, origin, old_pub, new_pub):
+    """Build a real on-wire rotation proof: signed by the NEW key, using
+    record.py's domain-separated construction — the same bytes a
+    bonnet.origin.key.rotate record carries in metadata field 2."""
+    return sign_key_rotation_proof(new_ident, origin, old_pub, new_pub)
+
+
 class TestRotation:
     def test_valid_rotation_succeeds(self, store, keypair):
-        old_ident, old_pub = keypair
+        _old_ident, old_pub = keypair
         new_ident = Identity.generate()
         new_pub = new_ident.public_key
 
         store.tofu_pin("bbs.example.com", old_pub)
 
-        origin_bytes = b"bbs.example.com"
-        payload = struct.pack("B", len(origin_bytes)) + origin_bytes + old_pub + new_pub
-        signature = old_ident.sign(payload)
+        proof = _proof(new_ident, "bbs.example.com", old_pub, new_pub)
 
-        assert store.verify_rotation("bbs.example.com", old_pub, new_pub, signature) is True
+        assert store.verify_rotation("bbs.example.com", old_pub, new_pub, proof) is True
         assert store.get_pin("bbs.example.com") == new_pub
 
     def test_rotation_with_wrong_old_key_fails(self, store, keypair):
-        old_ident, old_pub = keypair
-        new_pub = Identity.generate().public_key
+        _old_ident, old_pub = keypair
+        new_ident = Identity.generate()
+        new_pub = new_ident.public_key
         wrong_ident = Identity.generate()
 
         store.tofu_pin("bbs.example.com", old_pub)
 
-        origin_bytes = b"bbs.example.com"
-        payload = (
-            struct.pack("B", len(origin_bytes)) + origin_bytes + wrong_ident.public_key + new_pub
-        )
-        signature = wrong_ident.sign(payload)
+        # Proof correctly attests (wrong_pub -> new_pub), but the origin is
+        # not pinned to wrong_pub, so verify_rotation's CAS check must reject
+        # it before the proof is even checked.
+        proof = _proof(new_ident, "bbs.example.com", wrong_ident.public_key, new_pub)
 
         assert (
-            store.verify_rotation("bbs.example.com", wrong_ident.public_key, new_pub, signature)
+            store.verify_rotation("bbs.example.com", wrong_ident.public_key, new_pub, proof)
             is False
         )
         assert store.get_pin("bbs.example.com") == old_pub
 
     def test_rotation_with_bad_signature_fails(self, store, keypair):
+        _old_ident, old_pub = keypair
+        new_pub = Identity.generate().public_key
+
+        store.tofu_pin("bbs.example.com", old_pub)
+
+        bad_proof = os.urandom(64)
+        assert store.verify_rotation("bbs.example.com", old_pub, new_pub, bad_proof) is False
+        assert store.get_pin("bbs.example.com") == old_pub
+
+    def test_rotation_signed_by_old_key_fails(self, store, keypair):
+        """The proof must be signed by the NEW key, not the old one — a
+        proof produced with the pre-rotation (trust.py-only) scheme must not
+        verify against the real wire format."""
         old_ident, old_pub = keypair
         new_pub = Identity.generate().public_key
 
         store.tofu_pin("bbs.example.com", old_pub)
 
-        bad_sig = os.urandom(64)
-        assert store.verify_rotation("bbs.example.com", old_pub, new_pub, bad_sig) is False
+        wrong_signer_proof = _proof(old_ident, "bbs.example.com", old_pub, new_pub)
+
+        assert (
+            store.verify_rotation("bbs.example.com", old_pub, new_pub, wrong_signer_proof) is False
+        )
         assert store.get_pin("bbs.example.com") == old_pub
 
     def test_rotation_for_unpinned_origin_fails(self, store, keypair):
-        old_ident, old_pub = keypair
-        new_pub = Identity.generate().public_key
+        _old_ident, old_pub = keypair
+        new_ident = Identity.generate()
+        new_pub = new_ident.public_key
 
-        origin_bytes = b"unknown.example.com"
-        payload = struct.pack("B", len(origin_bytes)) + origin_bytes + old_pub + new_pub
-        signature = old_ident.sign(payload)
+        proof = _proof(new_ident, "unknown.example.com", old_pub, new_pub)
 
-        assert store.verify_rotation("unknown.example.com", old_pub, new_pub, signature) is False
+        assert store.verify_rotation("unknown.example.com", old_pub, new_pub, proof) is False
 
     def test_rotation_updates_last_rotated(self, store, keypair):
-        old_ident, old_pub = keypair
-        new_pub = Identity.generate().public_key
+        _old_ident, old_pub = keypair
+        new_ident = Identity.generate()
+        new_pub = new_ident.public_key
 
         store.tofu_pin("bbs.example.com", old_pub)
         before = store.get_pin_info("bbs.example.com")["last_rotated"]
 
         time.sleep(1.1)
 
-        origin_bytes = b"bbs.example.com"
-        payload = struct.pack("B", len(origin_bytes)) + origin_bytes + old_pub + new_pub
-        signature = old_ident.sign(payload)
+        proof = _proof(new_ident, "bbs.example.com", old_pub, new_pub)
 
-        store.verify_rotation("bbs.example.com", old_pub, new_pub, signature)
+        store.verify_rotation("bbs.example.com", old_pub, new_pub, proof)
         after = store.get_pin_info("bbs.example.com")["last_rotated"]
         assert after > before
+
+
+class TestAcceptRotation:
+    """accept_rotation is the crypto-free CAS primitive the multi-hop chain
+    walk in net.firehose_transport commits through once it has verified
+    every hop itself."""
+
+    def test_accept_rotation_commits_when_pin_matches(self, store, keypair):
+        _old_ident, old_pub = keypair
+        new_pub = Identity.generate().public_key
+
+        store.tofu_pin("bbs.example.com", old_pub)
+
+        assert store.accept_rotation("bbs.example.com", old_pub, new_pub) is True
+        assert store.get_pin("bbs.example.com") == new_pub
+
+    def test_accept_rotation_fails_when_pin_moved(self, store, keypair):
+        _old_ident, old_pub = keypair
+        stale_old_pub = Identity.generate().public_key
+        new_pub = Identity.generate().public_key
+
+        store.tofu_pin("bbs.example.com", old_pub)
+
+        assert store.accept_rotation("bbs.example.com", stale_old_pub, new_pub) is False
+        assert store.get_pin("bbs.example.com") == old_pub
 
 
 class TestResetPin:

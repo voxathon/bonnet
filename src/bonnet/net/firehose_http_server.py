@@ -111,9 +111,25 @@ class FirehoseHTTPServer:
             window_seconds=getattr(config, "rate_limit_window", 1),
         )
 
-        self._signer = BonnetSigner(
-            private_key=server_identity.private_key,
-            key_id=f"ed25519:{server_identity.public_key.hex()}",
+        self._signer = self._build_signer(server_identity)
+
+        self._verifier = BonnetVerifier(
+            key_resolver=FirehoseKeyResolver(),
+            tag=FIREHOSE_TAG,
+            max_lifetime=getattr(config, "signature_lifetime_seconds", 60),
+            clock_skew=getattr(config, "clock_skew_seconds", 30),
+            request_required_components=REQUEST_REQUIRED_COMPONENTS,
+            response_required_components=RESPONSE_REQUIRED_COMPONENTS,
+        )
+
+        self._max_request_size = getattr(config, "max_request_size", 10 * 1024 * 1024)
+        self._cleanup_counter = 0
+
+    @staticmethod
+    def _build_signer(identity: Identity) -> BonnetSigner:
+        return BonnetSigner(
+            private_key=identity.private_key,
+            key_id=f"ed25519:{identity.public_key.hex()}",
             tag=FIREHOSE_TAG,
             label=FIREHOSE_LABEL,
             request_components=[
@@ -135,17 +151,15 @@ class FirehoseHTTPServer:
             ],
         )
 
-        self._verifier = BonnetVerifier(
-            key_resolver=FirehoseKeyResolver(),
-            tag=FIREHOSE_TAG,
-            max_lifetime=getattr(config, "signature_lifetime_seconds", 60),
-            clock_skew=getattr(config, "clock_skew_seconds", 30),
-            request_required_components=REQUEST_REQUIRED_COMPONENTS,
-            response_required_components=RESPONSE_REQUIRED_COMPONENTS,
-        )
-
-        self._max_request_size = getattr(config, "max_request_size", 10 * 1024 * 1024)
-        self._cleanup_counter = 0
+    def set_server_identity(self, identity: Identity) -> None:
+        """Hot-swap the identity this server signs discovery and command
+        responses with. The signer is rebuilt, not just the stored identity
+        reference — BonnetSigner bakes the private key and its keyid in at
+        construction, so leaving the old signer in place would keep signing
+        with the old key while the discovery document's public_key field
+        (read fresh from self._server_identity) claimed the new one."""
+        self._server_identity = identity
+        self._signer = self._build_signer(identity)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
