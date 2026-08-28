@@ -382,20 +382,6 @@ class TestSignVerifyRoundtrip:
         with pytest.raises(SignatureError, match="does not cover Untp-Request-Nonce"):
             await verifier.verify_response(response_msg, expected_request_nonce=valid_nonce)
 
-    @pytest.mark.asyncio
-    async def test_request_with_username(self, keypair, key_resolver, request_msg, valid_nonce):
-        priv, pub = keypair
-        request_msg.set_header("Bonnet-Username", "alice")
-        signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        now = int(time.time())
-        await signer.sign_request(
-            request_msg, nonce=valid_nonce, created=now, expires=now + 60, include_username=True
-        )
-
-        verifier = BonnetVerifier(key_resolver=key_resolver)
-        result = await verifier.verify_request(request_msg)
-        assert "bonnet-username" in result.covered_components
-
 
 # ---------------------------------------------------------------------------
 # Rejection tests

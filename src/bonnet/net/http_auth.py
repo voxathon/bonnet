@@ -514,11 +514,8 @@ def _check_temporal(
 def _check_required_components(
     components: list[str],
     required: frozenset[str],
-    msg: HTTPMessage,
 ) -> None:
     for req in required:
-        if req == "bonnet-username" and not msg.has_header("bonnet-username"):
-            continue
         if req not in components:
             raise MissingComponent(f"Required component '{req}' not covered by signature")
 
@@ -589,12 +586,9 @@ class BonnetSigner:
         nonce: str,
         created: int | None = None,
         expires: int | None = None,
-        include_username: bool = False,
         extra_components: Sequence[str] = (),
     ) -> None:
         components = list(self._request_components)
-        if include_username and msg.has_header("bonnet-username"):
-            components.append("bonnet-username")
         components.extend(extra_components)
         await self._sign(msg, components, nonce, created, expires)
 
@@ -755,7 +749,7 @@ class BonnetVerifier:
 
         if require_components:
             required = self._response_required if is_response else self._request_required
-            _check_required_components(si.components, required, msg)
+            _check_required_components(si.components, required)
 
         # Validate Content-Digest if covered
         if "content-digest" in si.components and msg.body is not None:
