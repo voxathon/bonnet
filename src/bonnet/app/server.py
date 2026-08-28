@@ -257,7 +257,13 @@ class BonnetServer:
         """
         now = time.time()
         for origin, board, event_id, staged_at in self.body_store.list_staged_article_bodies():
-            age = now - staged_at
+            # Clamped rather than a bare subtraction: a file's mtime can
+            # read as slightly ahead of this now (clock skew between the
+            # write and this read, most visible on virtualized CI runners —
+            # not reproduced locally). A negative age must never read as
+            # "younger than every threshold including 0", or the age gate
+            # silently stops gating anything at min_age_seconds=0.
+            age = max(0.0, now - staged_at)
             if age < min_age_seconds:
                 continue
             rec = self.firehose.get_event_by_id(origin, event_id)
