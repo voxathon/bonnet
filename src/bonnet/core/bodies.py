@@ -154,6 +154,49 @@ class BodyStore:
                 return True
             return False
 
+    def list_staged_article_bodies(self) -> list[tuple[str, str, bytes, float]]:
+        """List every staged article body across all boards.
+
+        Returns (origin, board, event_id, staged_at_mtime) tuples. The
+        staging directory is the only place a body can be written but never
+        reach either its final path (finalize_article_body) or deletion
+        (delete_staged_article_body) — a process killed in between the two
+        leaves a file here that nothing else looks at. Used for startup
+        orphan recovery/cleanup; read-only, skips anything that doesn't
+        parse as a hex-encoded name rather than raising.
+        """
+        results: list[tuple[str, str, bytes, float]] = []
+        if not os.path.isdir(self._boards_dir):
+            return results
+        for origin_hex in os.listdir(self._boards_dir):
+            origin_path = os.path.join(self._boards_dir, origin_hex)
+            if not os.path.isdir(origin_path):
+                continue
+            try:
+                origin = bytes.fromhex(origin_hex).decode("utf-8")
+            except ValueError:
+                continue
+            for board_hex in os.listdir(origin_path):
+                staging_dir = os.path.join(origin_path, board_hex, "bodies", "staging")
+                if not os.path.isdir(staging_dir):
+                    continue
+                try:
+                    board = bytes.fromhex(board_hex).decode("utf-8")
+                except ValueError:
+                    continue
+                for name in os.listdir(staging_dir):
+                    try:
+                        event_id = bytes.fromhex(name)
+                    except ValueError:
+                        continue
+                    path = os.path.join(staging_dir, name)
+                    try:
+                        mtime = os.path.getmtime(path)
+                    except OSError:
+                        continue
+                    results.append((origin, board, event_id, mtime))
+        return results
+
     def write_article_body(
         self,
         origin: str,

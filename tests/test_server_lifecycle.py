@@ -6,6 +6,7 @@ import pytest
 
 from bonnet.app.console import OperatorConsole
 from bonnet.core.config import FirehoseConfig
+from bonnet.core.record import Intent, MetadataMap, compute_body_hash, encode_intent, sign_intent
 
 
 @pytest.fixture
@@ -167,3 +168,114 @@ def test_identity_stable_across_restart(config):
     s2.close()
 
     assert pubkey1 == pubkey2
+
+
+# ---------------------------------------------------------------------------
+# Orphaned staged body recovery (internal/BUGS.md #4's crash-window half)
+# ---------------------------------------------------------------------------
+
+
+def _stage_body(server, board, event_id, body):
+    server.body_store.stage_article_body(
+        "bbs.test", board, event_id, body, compute_body_hash(body), len(body)
+    )
+
+
+def _append_article_record(server, board, event_id, article_id, body):
+    intent = Intent(
+        event_id=event_id,
+        kind="bonnet.article",
+        origin="bbs.test",
+        actor_pubkey=server.server_identity.public_key,
+        board=board,
+        article_id=article_id,
+        metadata=MetadataMap([]),
+        body_hash=compute_body_hash(body),
+        body_size=len(body),
+    )
+    actor_sig = sign_intent(server.server_identity, encode_intent(intent))
+    return server.firehose.append_record(server.server_identity, intent, actor_sig, body)
+
+
+def test_sweep_discards_orphan_with_no_matching_record(server):
+    """A staged body whose event was never actually committed — the append
+    crashed before the firehose transaction, not after it — is a true
+    orphan and gets discarded."""
+    event_id = bytes(range(1, 33))
+    _stage_body(server, "general", event_id, b"never appended")
+
+    staged = server.body_store.list_staged_article_bodies()
+    assert any(e == event_id for _, _, e, _ in staged)
+
+    server._sweep_orphaned_staged_bodies(min_age_seconds=0)
+
+    staged = server.body_store.list_staged_article_bodies()
+    assert not any(e == event_id for _, _, e, _ in staged)
+
+
+def test_sweep_recovers_staged_body_with_committed_record(server):
+    """A staged body whose record DID commit — the crash happened between
+    append_record succeeding and finalize_article_body running — is
+    recovered into its final path, not discarded."""
+    event_id = bytes(range(1, 33))
+    article_id = bytes(range(50, 82))
+    body = b"crashed before finalize"
+    _stage_body(server, "general", event_id, body)
+    rec = _append_article_record(server, "general", event_id, article_id, body)
+
+    server._sweep_orphaned_staged_bodies(min_age_seconds=0)
+
+    staged = server.body_store.list_staged_article_bodies()
+    assert not any(e == event_id for _, _, e, _ in staged)
+    assert server.body_store.article_body_exists("bbs.test", "general", rec.article_num)
+    recovered = server.body_store.get_article_body(
+        "bbs.test", "general", rec.article_num, compute_body_hash(body), len(body)
+    )
+    assert recovered == body
+
+
+def test_sweep_leaves_fresh_staged_bodies_alone(server):
+    """A body staged moments ago — a request still legitimately in flight —
+    must not be swept out from under it just because a sweep happens to
+    run concurrently."""
+    event_id = bytes(range(1, 33))
+    _stage_body(server, "general", event_id, b"still in flight")
+
+    server._sweep_orphaned_staged_bodies()  # default min_age_seconds
+
+    staged = server.body_store.list_staged_article_bodies()
+    assert any(e == event_id for _, _, e, _ in staged)
+
+
+def test_restart_discards_orphaned_staged_body(config):
+    """End-to-end: a body orphaned by one process's crash is cleaned up by
+    the next process's startup, without anything calling the sweep by hand."""
+    os.makedirs(config.data_dir, exist_ok=True)
+    os.makedirs(config.boards_dir, exist_ok=True)
+    os.makedirs(config.events_bodies_dir, exist_ok=True)
+
+    from bonnet.app.server import BonnetServer
+
+    s1 = BonnetServer(config)
+    event_id = bytes(range(1, 33))
+    try:
+        _stage_body(s1, "general", event_id, b"orphaned by a crash")
+        staging_path = os.path.join(
+            config.boards_dir,
+            b"bbs.test".hex(),
+            b"general".hex(),
+            "bodies",
+            "staging",
+            event_id.hex(),
+        )
+        old_time = os.path.getmtime(staging_path) - 7200
+        os.utime(staging_path, (old_time, old_time))
+    finally:
+        s1.close()
+
+    s2 = BonnetServer(config)
+    try:
+        staged = s2.body_store.list_staged_article_bodies()
+        assert not any(e == event_id for _, _, e, _ in staged)
+    finally:
+        s2.close()
