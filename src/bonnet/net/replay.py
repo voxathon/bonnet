@@ -111,8 +111,19 @@ class ReplayLedger:
             return cursor.fetchone() is not None
 
     def _cleanup_batch(self, batch_size: int = 100) -> int:
-        """Remove expired rows in bounded batches. Returns count deleted."""
-        cutoff = int(time.time()) + self._clock_skew
+        """Remove expired rows in bounded batches. Returns count deleted.
+
+        A row must survive until expires_at + clock_skew has passed (see
+        module docstring) — the same tolerance _check_temporal grants an
+        incoming request past its nominal expiry. The cutoff is therefore
+        now - clock_skew, not now + clock_skew: a row is eligible for
+        deletion only once `now` is clock_skew seconds *past* its expiry,
+        not while it's still within clock_skew of expiring. Getting the
+        sign wrong here silently deletes a nonce's row while a replay of
+        the exact same still-temporally-valid request would still pass
+        _check_temporal, defeating replay protection for it.
+        """
+        cutoff = int(time.time()) - self._clock_skew
         cursor = self._conn.execute(
             "DELETE FROM request_nonces WHERE expires_at < ? AND rowid IN "
             "(SELECT rowid FROM request_nonces WHERE expires_at < ? LIMIT ?)",
