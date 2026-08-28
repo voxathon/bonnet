@@ -146,10 +146,14 @@ class Dispatcher:
                 try:
                     self._dispatch_record(rec)
                 except Exception as e:
+                    # Skip and log rather than halt: one bad record must not
+                    # block every later record for this origin forever. The
+                    # checkpoint still advances past it, same as a successful
+                    # dispatch, so the origin doesn't get stuck retrying it.
                     log_msg(
-                        f"DISPATCH: origin='{origin}' seq={rec.origin_seq} kind='{rec.kind}' FAILED: {e}"
+                        f"DISPATCH: origin='{origin}' seq={rec.origin_seq} kind='{rec.kind}' "
+                        f"FAILED, skipping: {e}"
                     )
-                    break
                 self._firehose.set_checkpoint(origin, rec.origin_seq)
                 # Punishment import relies on the policy checkpoint tracking overall
                 # dispatch progress, not just policy-kind records, so that
