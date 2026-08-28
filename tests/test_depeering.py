@@ -98,7 +98,7 @@ def server(tmp_path):
     os.makedirs(tmp_path / "boards", exist_ok=True)
     os.makedirs(tmp_path / "event_bodies", exist_ok=True)
 
-    from bonnet.app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetServer
 
     config = FirehoseConfig(
         origin="bbs.test",
@@ -109,7 +109,7 @@ def server(tmp_path):
         port=2272,
         tls_enabled=False,
     )
-    s = BonnetFirehoseServer(config)
+    s = BonnetServer(config)
     yield s
     try:
         s.close()

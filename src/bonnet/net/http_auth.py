@@ -1,6 +1,6 @@
-"""Bonnet RFC 9421 HTTP Message Signatures profile — Ed25519 only, async-native.
+"""Firehose RFC 9421 HTTP Message Signatures profile — Ed25519 only, async-native.
 
-Implements exactly what the Bonnet Firehose Protocol requires:
+Implements exactly what the firehose protocol requires:
   - Ed25519 sign/verify via pynacl (raw 32-byte keys, no PEM)
   - Content-Digest (RFC 9530, SHA-256)
   - Signature-Input / Signature header parsing and serialization
@@ -547,7 +547,7 @@ def _ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> None
 
 
 class BonnetSigner:
-    """Signs HTTP messages with the Bonnet firehose RFC 9421 profile."""
+    """Signs HTTP messages with the firehose RFC 9421 profile."""
 
     def __init__(
         self,
@@ -644,7 +644,7 @@ class BonnetSigner:
 
 
 class BonnetVerifier:
-    """Verifies HTTP messages signed with the Bonnet firehose RFC 9421 profile."""
+    """Verifies HTTP messages signed with the firehose RFC 9421 profile."""
 
     def __init__(
         self,
@@ -679,21 +679,30 @@ class BonnetVerifier:
         require_components: bool = True,
     ) -> VerifyResult:
         result = await self._verify(msg, is_response=True, require_components=require_components)
+        # A caller passing expected_* is asking for a binding, so a missing or
+        # unsigned header is a failure rather than a reason to skip the check.
+        # Comparing an uncovered header would be worthless: it is not protected
+        # by the signature, so anyone able to replay the response can set it.
         if expected_origin is not None:
-            signed_origin = result.covered_components
-            if "bonnet-origin" in signed_origin:
-                actual = msg.header("bonnet-origin")
-                if actual != expected_origin:
-                    raise SignatureError(
-                        f"Response Bonnet-Origin {actual!r} != expected {expected_origin!r}"
-                    )
+            if not msg.has_header("bonnet-origin"):
+                raise SignatureError("Response is missing Bonnet-Origin")
+            if "bonnet-origin" not in result.covered_components:
+                raise SignatureError("Response signature does not cover Bonnet-Origin")
+            actual = msg.header("bonnet-origin")
+            if actual != expected_origin:
+                raise SignatureError(
+                    f"Response Bonnet-Origin {actual!r} != expected {expected_origin!r}"
+                )
         if expected_request_nonce is not None:
-            if msg.has_header("bonnet-request-nonce"):
-                actual = msg.header("bonnet-request-nonce")
-                if actual != expected_request_nonce:
-                    raise SignatureError(
-                        f"Response request-nonce {actual!r} != expected {expected_request_nonce!r}"
-                    )
+            if not msg.has_header("bonnet-request-nonce"):
+                raise SignatureError("Response is missing Bonnet-Request-Nonce")
+            if "bonnet-request-nonce" not in result.covered_components:
+                raise SignatureError("Response signature does not cover Bonnet-Request-Nonce")
+            actual = msg.header("bonnet-request-nonce")
+            if actual != expected_request_nonce:
+                raise SignatureError(
+                    f"Response request-nonce {actual!r} != expected {expected_request_nonce!r}"
+                )
         return result
 
     async def _verify(

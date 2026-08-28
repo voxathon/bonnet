@@ -1,4 +1,4 @@
-"""Global projections for the Bonnet Firehose Protocol.
+"""Global projections for the firehose protocol.
 
 nav.db     — board directory from bonnet.board.create/close/reopen
 users.db   — user registrations and revocations

@@ -15,7 +15,7 @@ from bonnet.core.firehose import (
     FirehoseStore,
 )
 from bonnet.core.record import (
-    DOMAIN_ORIGIN_SIG,
+    DOMAIN_RECORD_SIG,
     HEAD_FORMAT,
     RECORD_FORMAT,
     SIG_SIZE,
@@ -422,7 +422,7 @@ async def test_hostile_substitution_refused_at_acceptance(tmp_path):
         rec.actor_signature = sign_intent(
             attacker, encode_intent(reconstruct_intent_from_record(rec))
         )
-        rec.origin_signature = attacker.sign(DOMAIN_ORIGIN_SIG + encode_unsigned_record(rec))
+        rec.origin_signature = attacker.sign(DOMAIN_RECORD_SIG + encode_unsigned_record(rec))
         return rec
 
     f4 = forge(4, tip_hash)
@@ -544,7 +544,7 @@ async def test_unlinked_rotate_rejected(tmp_path):
     )
     intent = reconstruct_intent_from_record(rot)
     rot.actor_signature = sign_intent(attacker, encode_intent(intent))
-    rot.origin_signature = attacker.sign(DOMAIN_ORIGIN_SIG + encode_unsigned_record(rot))
+    rot.origin_signature = attacker.sign(DOMAIN_RECORD_SIG + encode_unsigned_record(rot))
 
     head = Head(
         head_format=HEAD_FORMAT,

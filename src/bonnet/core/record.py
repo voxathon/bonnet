@@ -1,4 +1,4 @@
-"""Canonical record codec for the Bonnet Firehose Protocol.
+"""Canonical record codec for the firehose protocol.
 
 Standalone encoder/decoder with no SQLite or networking dependencies. Covers
 crypto domain separation, primitive encodings, the metadata map, actor
@@ -39,14 +39,22 @@ MAX_METADATA_FIELDS = 256
 MAX_TEXT_FIELD = 4096
 MAX_RANGE_RESPONSE = 1 << 24
 
-DOMAIN_BODY = b"bonnet-body-1\x00"
-DOMAIN_INTENT_SIG = b"bonnet-intent-signature-1\x00"
-DOMAIN_ORIGIN_SIG = b"bonnet-origin-signature-1\x00"
-DOMAIN_EVENT_HASH = b"bonnet-event-hash-1\x00"
-DOMAIN_HEAD_SIG = b"bonnet-head-signature-1\x00"
-DOMAIN_HEAD_HASH = b"bonnet-head-hash-1\x00"
-DOMAIN_WITNESS_SIG = b"bonnet-relay-witness-signature-1\x00"
-DOMAIN_KEY_ROTATION_PROOF = b"bonnet-new-origin-key-proof-1\x00"
+# Domain separation tags. These namespace every hash and signature the ledger
+# produces, so a signature over one structure can never verify against another.
+# The `untp.` prefix is the substrate's namespace, distinct from the `bonnet.`
+# application record kinds in core.kinds. Form is <object>.<operation>.v1, kept
+# uniform even where an object has a single operation, so adding one later never
+# forces a rename. The trailing NUL keeps no tag a prefix of another.
+#
+# Changing any of these invalidates every signature and hash ever produced.
+DOMAIN_BODY = b"untp.body.hash.v1\x00"
+DOMAIN_INTENT_SIG = b"untp.intent.signature.v1\x00"
+DOMAIN_RECORD_SIG = b"untp.record.signature.v1\x00"
+DOMAIN_EVENT_HASH = b"untp.event.hash.v1\x00"
+DOMAIN_HEAD_SIG = b"untp.head.signature.v1\x00"
+DOMAIN_HEAD_HASH = b"untp.head.hash.v1\x00"
+DOMAIN_WITNESS_SIG = b"untp.witness.signature.v1\x00"
+DOMAIN_KEY_ROTATION_PROOF = b"untp.key.rotation.proof.v1\x00"
 
 # Metadata value types
 VT_BYTES = 0x01
@@ -500,13 +508,13 @@ def verify_intent_signature(actor_pubkey: bytes, encoded_intent: bytes, signatur
 
 
 def sign_record(identity: Identity, encoded_unsigned_record: bytes) -> bytes:
-    return identity.sign(DOMAIN_ORIGIN_SIG + encoded_unsigned_record)
+    return identity.sign(DOMAIN_RECORD_SIG + encoded_unsigned_record)
 
 
 def verify_record_signature(
     origin_pubkey: bytes, encoded_unsigned_record: bytes, signature: bytes
 ) -> bool:
-    return Identity.verify(origin_pubkey, DOMAIN_ORIGIN_SIG + encoded_unsigned_record, signature)
+    return Identity.verify(origin_pubkey, DOMAIN_RECORD_SIG + encoded_unsigned_record, signature)
 
 
 def sign_head(identity: Identity, encoded_unsigned_head: bytes) -> bytes:

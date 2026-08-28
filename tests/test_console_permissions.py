@@ -30,9 +30,9 @@ def server(config):
     os.makedirs(config.boards_dir, exist_ok=True)
     os.makedirs(config.events_bodies_dir, exist_ok=True)
 
-    from bonnet.app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetServer
 
-    s = BonnetFirehoseServer(config)
+    s = BonnetServer(config)
     yield s
     try:
         s.close()

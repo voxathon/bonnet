@@ -1,4 +1,4 @@
-"""Firehose wire protocol for the Bonnet Firehose Protocol.
+"""Command and response wire codec for the firehose protocol.
 
 Binary builders and parsers for all 13 command requests and responses.
 Shared by the server's federation sync and the client library.

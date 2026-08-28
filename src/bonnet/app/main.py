@@ -1,4 +1,4 @@
-"""Entry point for the Bonnet firehose server."""
+"""Entry point for the Bonnet server."""
 
 import argparse
 import asyncio
@@ -9,7 +9,7 @@ import sys
 import tomllib
 
 from bonnet import __version__
-from bonnet.app.server import BonnetFirehoseServer
+from bonnet.app.server import BonnetServer
 from bonnet.core.acl import ACLError
 from bonnet.core.config import FirehoseConfig
 from bonnet.core.logging import init_logging
@@ -88,7 +88,7 @@ def _load_and_validate_config(args) -> FirehoseConfig:
 
 
 def main(argv: list[str] | None = None):
-    parser = argparse.ArgumentParser(description="Bonnet firehose server")
+    parser = argparse.ArgumentParser(description="Bonnet server")
     parser.add_argument("--version", action="version", version=f"bonnet-server {__version__}")
     parser.add_argument("--config", default="config.toml", help="Path to config file")
     parser.add_argument("--port", type=int, default=None, help="Override listen port")
@@ -211,7 +211,7 @@ def main(argv: list[str] | None = None):
         )
 
     config = _load_and_validate_config(args)
-    server = BonnetFirehoseServer(config)
+    server = BonnetServer(config)
 
     def handle_sigterm(signum, frame):
         raise KeyboardInterrupt

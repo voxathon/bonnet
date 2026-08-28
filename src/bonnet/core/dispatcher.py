@@ -1,4 +1,4 @@
-"""Dispatcher for the Bonnet Firehose Protocol.
+"""Dispatcher for the firehose protocol.
 
 Processes accepted firehose records in origin sequence order and routes
 them to the appropriate projections. Implements idempotent applied-event

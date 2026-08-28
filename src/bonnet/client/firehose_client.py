@@ -1,4 +1,4 @@
-"""Firehose HTTP client for the Bonnet Firehose Protocol.
+"""HTTP client for the firehose protocol.
 
 High-level typed client. Connection, discovery, TOFU pinning, request
 signing, and response verification live in the shared transport

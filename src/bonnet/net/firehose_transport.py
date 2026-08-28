@@ -1,4 +1,4 @@
-"""Signed-HTTP command transport for the Bonnet Firehose Protocol.
+"""Signed-HTTP command transport for the firehose protocol.
 
 Handles discovery, TOFU key pinning, RFC 9421 request signing, response
 verification, and the binary command round-trip. Shared by the server's
@@ -49,7 +49,7 @@ class _ServerKeyResolver(KeyResolver):
 
 
 class FirehoseTransport:
-    """HTTP transport for the Bonnet firehose protocol."""
+    """HTTP transport for the firehose protocol."""
 
     def __init__(
         self,
@@ -92,7 +92,7 @@ class FirehoseTransport:
         anchor when enabled. TOFU pinning persists the key for subsequent
         connections.
         """
-        resp = await self._http.get(f"{self._base_url}/.well-known/bonnet")
+        resp = await self._http.get(f"{self._base_url}/.well-known/untp")
         resp.raise_for_status()
         data = resp.json()
         info = DiscoveryInfo(

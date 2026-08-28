@@ -1,4 +1,4 @@
-"""Firehose event store for the Bonnet Firehose Protocol.
+"""The firehose event store.
 
 Origin-global append-only event store with per-origin sequence
 allocation, board-local article-number counters, signed heads, equivocation

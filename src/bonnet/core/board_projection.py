@@ -1,4 +1,4 @@
-"""Board projection store for the Bonnet Firehose Protocol.
+"""Board projection store for the firehose protocol.
 
 Per-board SQLite database at boards/<origin>/<board>/metadata.db containing:
   - articles (metadata, lifecycle, pin, thread state)
