@@ -342,6 +342,17 @@ class UserProjection(_BaseProjection):
                 return
             self._begin()
             try:
+                # Same-origin guard, matching board_projection.py's control
+                # kinds: a remote origin cannot revoke a user it doesn't
+                # own, even via replication. Without this, any origin could
+                # publish a user.revoke naming another origin as the target
+                # and silently revoke that origin's user once this record
+                # propagates and is dispatched here.
+                if rec.origin != rec.target_origin:
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
                 revoked_pubkey = rec.metadata.get_bytes(1) or b"\x00" * 32
                 self._conn.execute(
                     "UPDATE users SET revoked=1, revoked_seq=? WHERE origin=? AND user_pubkey=?",
@@ -546,9 +557,20 @@ class PolicyProjection(_BaseProjection):
                 return
             self._begin()
             try:
+                # Same-origin guard, matching board_projection.py's control
+                # kinds: a remote origin cannot revoke a rule it doesn't
+                # own, even via replication. Also scope the UPDATE by
+                # target_origin, not just event_id — rules.event_id is a
+                # global (not per-origin) primary key in this table, so an
+                # unscoped match is one fewer layer of defense than it looks.
+                if rec.origin != rec.target_origin:
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
                 self._conn.execute(
-                    "UPDATE rules SET revoked=1 WHERE event_id=?",
-                    (rec.target_event_id,),
+                    "UPDATE rules SET revoked=1 WHERE event_id=? AND origin=?",
+                    (rec.target_event_id, rec.target_origin),
                 )
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
@@ -632,9 +654,24 @@ class PolicyProjection(_BaseProjection):
                 return
             self._begin()
             try:
+                # Same-origin guard, matching board_projection.py's control
+                # kinds: a remote origin cannot revoke a punishment it
+                # doesn't own, even via replication. Without this, any
+                # origin could publish a punishment.revoke naming another
+                # origin's punishment event_id as the target and silently
+                # lift that origin's ban/permaban once this record
+                # propagates and is dispatched here — defeating moderation
+                # across federation entirely. Also scope the UPDATE by
+                # target_origin, not just event_id — punishments.event_id
+                # is a global (not per-origin) primary key in this table.
+                if rec.origin != rec.target_origin:
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
                 self._conn.execute(
-                    "UPDATE punishments SET revoked=1, revoked_by=? WHERE event_id=?",
-                    (rec.event_id, rec.target_event_id),
+                    "UPDATE punishments SET revoked=1, revoked_by=? WHERE event_id=? AND origin=?",
+                    (rec.event_id, rec.target_event_id, rec.target_origin),
                 )
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)

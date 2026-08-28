@@ -719,6 +719,54 @@ class TestUserProjection:
         user = user_proj.get_user_by_pubkey("bbs.a", user_pubkey)
         assert user["revoked"] is True
 
+    def test_revoke_rejects_cross_origin(self, user_proj):
+        """A remote origin cannot revoke a user it doesn't own, even via
+        replication — same guard class as the article control kinds."""
+        user_pubkey = _rid(21)
+        reg_rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.user.register",
+            actor_pubkey=ACTOR_PUB,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "carol"),
+                    metadata_bytes(2, user_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        )
+        user_proj.apply_user_register(reg_rec)
+
+        cross_origin_revoke = Record(
+            origin="bbs.attacker",
+            origin_seq=1,
+            event_id=_rid(200),
+            kind="bonnet.user.revoke",
+            actor_pubkey=ACTOR_PUB,
+            target_origin="bbs.a",
+            target_event_id=_rid(1),
+            metadata=MetadataMap([metadata_bytes(1, user_pubkey)]),
+        )
+        user_proj.apply_user_revoke(cross_origin_revoke)
+
+        user = user_proj.get_user_by_pubkey("bbs.a", user_pubkey)
+        assert user["revoked"] is False
+
+        same_origin_revoke = Record(
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.user.revoke",
+            actor_pubkey=ACTOR_PUB,
+            target_origin="bbs.a",
+            target_event_id=_rid(1),
+            metadata=MetadataMap([metadata_bytes(1, user_pubkey)]),
+        )
+        user_proj.apply_user_revoke(same_origin_revoke)
+        assert user_proj.get_user_by_pubkey("bbs.a", user_pubkey)["revoked"] is True
+
     def test_list_users_excludes_revoked(self, user_proj):
         for i in range(3):
             user_pubkey = _rid(20 + i)
@@ -781,6 +829,52 @@ class TestPolicyProjection:
         assert len(rules) == 1
         assert rules[0]["rule_name"] == "no-spam"
 
+    def test_rule_revoke_rejects_cross_origin(self, policy_proj):
+        """A remote origin cannot revoke a rule it doesn't own, even via
+        replication — same guard class as punishment.revoke."""
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.rule.publish",
+            actor_pubkey=ACTOR_PUB,
+            board="moderation.rules",
+            metadata=MetadataMap([metadata_text(1, "no-spam")]),
+            body_hash=_rid(99),
+            body_size=100,
+            created_at=1700000000,
+        )
+        policy_proj.apply_rule(rec)
+
+        cross_origin_revoke = Record(
+            origin="bbs.attacker",
+            origin_seq=1,
+            event_id=_rid(200),
+            kind="bonnet.rule.revoke",
+            actor_pubkey=ACTOR_PUB,
+            target_origin="bbs.a",
+            target_event_id=_rid(1),
+            created_at=1700000100,
+        )
+        policy_proj.apply_rule_revoke(cross_origin_revoke)
+
+        rules = policy_proj.list_rules("bbs.a")
+        assert len(rules) == 1
+        assert rules[0]["revoked"] is False
+
+        same_origin_revoke = Record(
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.rule.revoke",
+            actor_pubkey=ACTOR_PUB,
+            target_origin="bbs.a",
+            target_event_id=_rid(1),
+            created_at=1700000200,
+        )
+        policy_proj.apply_rule_revoke(same_origin_revoke)
+        assert policy_proj.list_rules("bbs.a", include_revoked=True)[0]["revoked"] is True
+
     def _punish_rec(self, seq, kind, punished, event_id=None, **kwargs):
         return Record(
             origin="bbs.a",
@@ -824,6 +918,49 @@ class TestPolicyProjection:
         all_puns = policy_proj.list_punishments_for_pubkey(punished, include_revoked=True)
         assert len(all_puns) == 1
         assert all_puns[0]["revoked"] is True
+
+    def test_punishment_revoke_rejects_cross_origin(self, policy_proj):
+        """A remote origin cannot revoke a punishment it doesn't own, even
+        via replication — matching board_projection.py's control-kind
+        guard. Without this, any origin could publish a punishment.revoke
+        naming another origin's punishment as the target and silently lift
+        that origin's ban once the record propagates and is dispatched."""
+        punished = _rid(33)
+        future = int(time.time()) + 3600
+        issue_rec = self._punish_rec(
+            1,
+            "bonnet.punishment.ban",
+            punished,
+            metadata=MetadataMap([metadata_bytes(1, punished), metadata_i64(2, future)]),
+        )
+        policy_proj.apply_punishment(issue_rec)
+        assert len(policy_proj.list_pending_for_pubkey(punished)) == 1
+
+        cross_origin_revoke = Record(
+            origin="bbs.attacker",
+            origin_seq=1,
+            event_id=_rid(200),
+            kind="bonnet.punishment.revoke",
+            actor_pubkey=ACTOR_PUB,
+            target_origin="bbs.a",
+            target_event_id=_rid(1),
+            created_at=1700000100,
+        )
+        policy_proj.apply_punishment_revoke(cross_origin_revoke)
+
+        assert len(policy_proj.list_pending_for_pubkey(punished)) == 1, (
+            "cross-origin revoke must be a no-op — the ban must still be pending"
+        )
+
+        same_origin_revoke = self._punish_rec(
+            2,
+            "bonnet.punishment.revoke",
+            punished,
+            target_origin="bbs.a",
+            target_event_id=_rid(1),
+        )
+        policy_proj.apply_punishment_revoke(same_origin_revoke)
+        assert policy_proj.list_pending_for_pubkey(punished) == []
 
     def test_apply_punishment_rejects_unknown_kind(self, policy_proj):
         rec = self._punish_rec(1, "bonnet.punishment.issue", _rid(30))
