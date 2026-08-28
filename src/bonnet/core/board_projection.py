@@ -843,7 +843,7 @@ class BoardProjection:
             f"visibility IN ({placeholders})",
             "body_state != 'purged'",
         ]
-        params = [origin, board] + states
+        params: list[str | bytes] = [origin, board, *states]
 
         if text_query:
             where_parts.append("(subject LIKE ? OR tags LIKE ?)")
@@ -939,7 +939,7 @@ class BoardProjection:
         All filters are AND'd. Purged articles excluded unless visibility=purged.
         """
         where_parts = ["origin=?", "board=?"]
-        params = [origin, board]
+        params: list[str | int | bytes] = [origin, board]
 
         has_visibility_filter = False
         query_purged = False

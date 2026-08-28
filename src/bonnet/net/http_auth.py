@@ -219,6 +219,7 @@ def _parse_params(s: str, i: int) -> tuple[dict, int]:
             break
         i += 1  # skip =
         # read value
+        val: str | int
         if i < len(s) and s[i] == '"':
             val, i = _parse_quoted(s, i)
         else:

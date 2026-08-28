@@ -49,12 +49,14 @@ from bonnet.net.firehose_wire import (
 )
 
 
-def is_safe_dial_target(hostname: str, port: int, allow_private: bool = False) -> bool:
+def is_safe_dial_target(hostname: str | None, port: int, allow_private: bool = False) -> bool:
     """Validate a dial target against SSRF protections.
 
     Rejects non-global addresses by default. When allow_private is True,
     loopback, private, and link-local addresses are permitted for
-    development or LAN federation.
+    development or LAN federation. hostname may be None — urlparse(...).hostname
+    is None for a URL with no host — and that is rejected here rather than
+    pushed onto every caller as a pre-check.
     """
     if not hostname:
         return False
@@ -149,8 +151,10 @@ class HttpSyncClient(SyncClient):
         if not self._connected:
             await self._client.connect_anonymous()
             self._connected = True
+            server_pubkey = self._client._server_pubkey
+            assert server_pubkey is not None  # set by connect_anonymous()'s discover()
             log_msg(
-                f"SYNC_CLIENT: connected to server origin='{self._client._server_origin}' pubkey={self._client._server_pubkey.hex()[:16]}..."
+                f"SYNC_CLIENT: connected to server origin='{self._client._server_origin}' pubkey={server_pubkey.hex()[:16]}..."
             )
 
     async def fetch_head(self, origin: str) -> tuple[Head, bytes]:
@@ -554,7 +558,7 @@ class SyncManager:
                 return None
             new_key = rec.metadata.get_bytes(1)
             proof = rec.metadata.get_bytes(2)
-            if new_key != pk_i:
+            if new_key != pk_i or proof is None:
                 return None
             if not verify_record_signature(
                 pk_prev, encode_unsigned_record(rec), rec.origin_signature

@@ -353,6 +353,7 @@ async def create_board(
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
+        assert client._identity is not None  # set by _connect_authenticated's client.connect()
         result = await client.publish_board_create(
             name,
             client._identity.public_key,
@@ -1004,6 +1005,7 @@ async def my_punishments(auth: str | None = None) -> BanStatus:
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
+        assert client._identity is not None  # set by _connect_authenticated's client.connect()
         return await client.get_ban_status(client._identity.public_key)
     finally:
         await client.close()
