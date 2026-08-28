@@ -1,7 +1,4 @@
-"""Phase 4 tests: firehose command handler and federation sync.
-
-Tests PROTOCOL.md §18 (discovery), §19 (command transport), §17 (sync).
-"""
+"""Firehose command handler, discovery, command transport, and federation sync."""
 
 import struct
 import time
@@ -370,7 +367,7 @@ class TestPublishRecord:
 
 
 # ---------------------------------------------------------------------------
-# Punishment write gate + BAN_STATUS (Gate D)
+# Punishment write gate + BAN_STATUS
 # ---------------------------------------------------------------------------
 
 
@@ -613,7 +610,7 @@ class TestBanStatusV2:
             offset += 4
             body_hash = payload[offset : offset + 32]
             offset += 32
-            event_id = payload[offset : offset + 32]
+            _event_id = payload[offset : offset + 32]
             offset += 32
             origin_len = struct.unpack(">H", payload[offset : offset + 2])[0]
             offset += 2
@@ -797,7 +794,7 @@ class TestEventGet:
 
 class TestProjectionReads:
     def _publish_and_dispatch(self, stack):
-        h = stack["handler"]
+        _h = stack["handler"]
         d = stack["dispatcher"]
         fh = stack["firehose"]
         bs = stack["body_store"]
@@ -884,6 +881,45 @@ class TestProjectionReads:
         assert resp[0] == 0
         count = struct.unpack(">H", resp[1:3])[0]
         assert count == 1
+
+    def test_article_list_include_purged_flag(self, stack):
+        """ARTICLE_LIST flag 0x04 must reach the projection instead of being dropped.
+
+        A purge clears the body but leaves the article active, so the metadata row
+        survives and ARTICLE_GET still returns it. The list flag decides only whether
+        the listing walks past it.
+        """
+        self._publish_and_dispatch(stack)
+        h = stack["handler"]
+
+        bp = h._get_board_projection("bbs.test", "general")
+        bp.apply_purge(
+            Record(
+                origin="bbs.test",
+                origin_seq=2,
+                event_id=_rid(3),
+                kind="bonnet.article.purge",
+                actor_pubkey=ACTOR_PUB,
+                board="general",
+                target_origin="bbs.test",
+                target_board="general",
+                target_article_id=_rid(2),
+            )
+        )
+
+        def _count(flags):
+            req = struct.pack(">B", OP_ARTICLE_LIST)
+            req += _enc_text16("bbs.test")
+            req += _enc_text16("general")
+            req += struct.pack(">I", 0)  # offset
+            req += struct.pack(">H", 10)  # limit
+            req += struct.pack(">B", flags)
+            resp = h.handle(req, _anon_ctx())
+            assert resp[0] == 0
+            return struct.unpack(">H", resp[1:3])[0]
+
+        assert _count(0x00) == 0
+        assert _count(0x04) == 1
 
     def test_article_body(self, stack):
         self._publish_and_dispatch(stack)

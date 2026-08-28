@@ -874,7 +874,7 @@ class OperatorConsole:
         offset += 1
         bh_len = data[offset]
         offset += 1 + bh_len
-        body_size = struct.unpack(">Q", data[offset : offset + 8])[0]
+        _body_size = struct.unpack(">Q", data[offset : offset + 8])[0]
         offset += 8
         created_at = struct.unpack(">q", data[offset : offset + 8])[0]
         offset += 8
@@ -1015,13 +1015,13 @@ class OperatorConsole:
             offset += 1 + aid_len
             eid_len = resp[offset]
             offset += 1 + eid_len
-            visibility = resp[offset]
+            _visibility = resp[offset]
             offset += 1
-            body_state = resp[offset]
+            _body_state = resp[offset]
             offset += 1
             bh_len = resp[offset]
             offset += 1 + bh_len
-            body_size = struct.unpack(">Q", resp[offset : offset + 8])[0]
+            _body_size = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8
@@ -1102,7 +1102,7 @@ class OperatorConsole:
             return self._parse_response_error(resp)
 
         count = struct.unpack(">H", resp[1:3])[0]
-        total = struct.unpack(">I", resp[3:7])[0]
+        _total = struct.unpack(">I", resp[3:7])[0]
         truncated = resp[7]
         offset = 8
         lines = []
@@ -1121,7 +1121,7 @@ class OperatorConsole:
             offset += 1 + ap_len
             created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8
-            body_avail = resp[offset]
+            _body_avail = resp[offset]
             offset += 1
             excerpt, offset = self._read_text16(resp, offset)
 
@@ -1250,11 +1250,11 @@ class OperatorConsole:
             offset += 1 + eid_len
             visibility = resp[offset]
             offset += 1
-            body_state = resp[offset]
+            _body_state = resp[offset]
             offset += 1
             bh_len = resp[offset]
             offset += 1 + bh_len
-            body_size = struct.unpack(">Q", resp[offset : offset + 8])[0]
+            _body_size = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8

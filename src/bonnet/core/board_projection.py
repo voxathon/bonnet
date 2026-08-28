@@ -1,4 +1,4 @@
-"""Board projection store for the Bonnet Firehose Protocol (PROTOCOL.md §14.2).
+"""Board projection store for the Bonnet Firehose Protocol.
 
 Per-board SQLite database at boards/<origin>/<board>/metadata.db containing:
   - articles (metadata, lifecycle, pin, thread state)
@@ -80,12 +80,37 @@ def delete_board_dbs(boards_dir: str, origin: str) -> int:
 
 
 class ArticleProjection:
+    """One row of the articles table, as read back from a board projection."""
+
+    origin: str
+    board: str
+    article_num: int
+    article_id: bytes
+    visibility: str
+    body_state: str
+    pin_state: str
+    thread_state: str
+    subject: str
+    tags: str
+    options: str
+    content_type: str
+    author_pubkey: bytes
+    author_username: str
+    author_registrar: str
+    created_at: int
+    body_hash: bytes
+    body_size: int
+    root_article_id: bytes
+    reply_to_article_id: bytes
+    replacement_article_id: bytes | None
+    latest_control_seq: int
+    event_id: bytes
+
     __slots__ = (
         "origin",
         "board",
         "article_num",
         "article_id",
-        "message_id",
         "visibility",
         "body_state",
         "pin_state",

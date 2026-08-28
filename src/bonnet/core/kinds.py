@@ -1,4 +1,4 @@
-"""Record kind constants for the Bonnet Firehose Protocol (PROTOCOL.md §11-§12).
+"""Record kind constants for the Bonnet Firehose Protocol.
 
 Single source of truth for kind name strings and their groupings. Other
 modules import from here rather than redefining these constants locally.
@@ -37,7 +37,7 @@ PUNISHMENT_ISSUE_KINDS = frozenset(
     }
 )
 
-# Gate D: issuing kind -> stored punishment type name.
+# Issuing kind -> stored punishment type name.
 PUNISHMENT_TYPE_BY_KIND = {
     KIND_PUNISHMENT_WARN: "warning",
     KIND_PUNISHMENT_BAN: "ban",

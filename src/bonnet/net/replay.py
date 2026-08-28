@@ -1,26 +1,24 @@
-"""Persistent replay-prevention ledger for protocol v2.
+"""Persistent replay-prevention ledger.
 
-PROTOCOL_RENOVATION_PLAN §7.5:
-  Before dispatching an authenticated command, the server atomically records:
-    (client_public_key, nonce, expires_at)
-  A duplicate record fails with 409 and is never dispatched.
+Before dispatching an authenticated command the server atomically records
+(client_public_key, nonce, expires_at); a duplicate is rejected with 409 and
+never dispatched.
 
-  The initial implementation uses a small SQLite replay ledger under data_dir
-  so process restarts do not reopen the validity window. Expired rows are
-  removed in bounded batches after successful insertions and during startup.
-  Rows remain until expires_at + clock_skew_seconds has passed.
+The ledger is SQLite under data_dir, so a process restart does not reopen the
+validity window. Rows survive until expires_at + clock_skew_seconds has
+passed, and expired rows are removed in bounded batches after successful
+insertions and at startup.
 
-Schema per §12.1:
-  CREATE TABLE request_nonces (
-      publickey BLOB NOT NULL,
-      nonce BLOB NOT NULL,
-      expires_at INTEGER NOT NULL,
-      PRIMARY KEY (publickey, nonce)
-  );
-  CREATE INDEX request_nonces_expiry ON request_nonces (expires_at);
+    CREATE TABLE request_nonces (
+        publickey BLOB NOT NULL,
+        nonce BLOB NOT NULL,
+        expires_at INTEGER NOT NULL,
+        PRIMARY KEY (publickey, nonce)
+    );
+    CREATE INDEX request_nonces_expiry ON request_nonces (expires_at);
 
-The atomic check-and-insert uses INSERT OR IGNORE + checking rows-affected.
-If rows-affected == 0, the (publickey, nonce) pair already exists → replay.
+The check-and-insert is INSERT OR IGNORE plus a rows-affected check: zero
+rows affected means the (publickey, nonce) pair already exists, i.e. a replay.
 """
 
 from __future__ import annotations

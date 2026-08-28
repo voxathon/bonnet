@@ -1,4 +1,4 @@
-"""Body storage for the Bonnet Firehose Protocol (PROTOCOL.md §14.3).
+"""Body storage for the Bonnet Firehose Protocol.
 
 Article bodies are flat files under boards/<origin>/<board>/bodies/<article-num>.
 Event bodies are flat files under events/<origin>/bodies/<event-id-hex>.
@@ -20,7 +20,7 @@ class BodyError(Exception):
 
 
 def _safe_path_component(s: str) -> str:
-    """Encode a string as lowercase hex of its UTF-8 bytes (§14)."""
+    """Encode a string as lowercase hex of its UTF-8 bytes."""
     return s.encode("utf-8").hex()
 
 

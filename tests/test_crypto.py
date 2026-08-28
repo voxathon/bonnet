@@ -53,6 +53,6 @@ class TestIdentity:
     def test_identity_verify_wrong_signature(self):
         ident = Identity.generate()
         message = b"test message"
-        signature = ident.sign(message)
+        _signature = ident.sign(message)
         wrong_signature = b"x" * 64
         assert Identity.verify(ident.public_key, message, wrong_signature) is False

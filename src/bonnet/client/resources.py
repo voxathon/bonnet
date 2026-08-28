@@ -47,7 +47,7 @@ async def list_board_articles_resource(board_name: str) -> list[ArticleListItem]
     try:
         await _connect_anonymous(client)
         origin = client._server_origin or ""
-        return await client.list_articles(origin, board_name)
+        return (await client.list_articles(origin, board_name)).results
     finally:
         await client.close()
 

@@ -1,4 +1,4 @@
-"""Firehose command handler for the Bonnet Firehose Protocol (PROTOCOL.md §19).
+"""Firehose command handler for the Bonnet Firehose Protocol.
 
 Handles PUBLISH_RECORD, EVENT_HEAD, EVENT_RANGE, EVENT_GET, and projection
 read commands (BOARD_LIST, ARTICLE_GET/LIST/SEARCH/BODY, USER_GET/LIST,
@@ -48,12 +48,12 @@ KIND_THREAD_CLOSE = "bonnet.thread.close"
 KIND_THREAD_REOPEN = "bonnet.thread.reopen"
 KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
 
-# Gate D punishment type codes used by the BAN_STATUS response.
+# Punishment type codes used by the BAN_STATUS response.
 PUNISHMENT_TYPE_CODES = {"warning": 1, "ban": 2, "permaban": 3}
 
 
 # ---------------------------------------------------------------------------
-# Opcodes (§19)
+# Opcodes
 # ---------------------------------------------------------------------------
 
 OP_PUBLISH_RECORD = 0x01
@@ -214,7 +214,7 @@ class FirehoseContext:
 
 
 class FirehoseCommandHandler:
-    """Dispatches firehose protocol commands (§19)."""
+    """Dispatches firehose protocol commands."""
 
     def __init__(
         self,
@@ -292,7 +292,7 @@ class FirehoseCommandHandler:
         return self._acl.check(ctx.to_auth_context(), "read", command=cmd_name, board=board)
 
     # ------------------------------------------------------------------
-    # Punishment write gate (Gate D)
+    # Punishment write gate
     # ------------------------------------------------------------------
 
     def _policy_current(self) -> bool:
@@ -306,7 +306,7 @@ class FirehoseCommandHandler:
         return True
 
     def _punishment_gate_response(self, actor_pubkey: bytes) -> bytes | None:
-        """Return an error response if this user's writes are gated (Gate D).
+        """Return an error response if this user's writes are gated.
 
         Fails open when the policy projection is unavailable or behind the
         firehose — an outage must not block all publication.
@@ -390,7 +390,7 @@ class FirehoseCommandHandler:
             return _error(0x0000, "Internal error")
 
     # ------------------------------------------------------------------
-    # PUBLISH_RECORD (§19.1)
+    # PUBLISH_RECORD
     # ------------------------------------------------------------------
 
     def _cmd_publish(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -433,7 +433,7 @@ class FirehoseCommandHandler:
         ):
             return _error(0x0004, "Not permitted")
 
-        # Gate D write gate: administrators bypass; ack must pass so a
+        # Write gate: administrators bypass; ack must pass so a
         # punished user can acknowledge their warning.
         if kind != KIND_PUNISHMENT_ACK and ctx.role != "administrator":
             gate_error = self._punishment_gate_response(intent.actor_pubkey)
@@ -593,7 +593,7 @@ class FirehoseCommandHandler:
         )
 
     # ------------------------------------------------------------------
-    # EVENT_HEAD (§19.2)
+    # EVENT_HEAD
     # ------------------------------------------------------------------
 
     def _cmd_event_head(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -609,7 +609,7 @@ class FirehoseCommandHandler:
         return _success(struct.pack(">H", len(encoded)) + encoded)
 
     # ------------------------------------------------------------------
-    # KEY_EPOCHS (§19.21)
+    # KEY_EPOCHS
     # ------------------------------------------------------------------
 
     def _cmd_key_epochs(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -629,7 +629,7 @@ class FirehoseCommandHandler:
         return _success(payload)
 
     # ------------------------------------------------------------------
-    # EVENT_RANGE (§19.3)
+    # EVENT_RANGE
     # ------------------------------------------------------------------
 
     def _cmd_event_range(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -670,7 +670,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # EVENT_GET (§19.4)
+    # EVENT_GET
     # ------------------------------------------------------------------
 
     def _cmd_event_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -707,7 +707,7 @@ class FirehoseCommandHandler:
         )
 
     # ------------------------------------------------------------------
-    # BOARD_LIST (§19.5)
+    # BOARD_LIST
     # ------------------------------------------------------------------
 
     def _cmd_board_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -748,7 +748,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # ARTICLE_GET (§19.5)
+    # ARTICLE_GET
     # ------------------------------------------------------------------
 
     def _cmd_article_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -858,7 +858,7 @@ class FirehoseCommandHandler:
         return out
 
     # ------------------------------------------------------------------
-    # ARTICLE_LIST (§19.5)
+    # ARTICLE_LIST
     # ------------------------------------------------------------------
 
     def _cmd_article_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -894,6 +894,7 @@ class FirehoseCommandHandler:
                     limit=list_offset + limit,
                     include_cancelled=include_cancelled,
                     include_superseded=include_superseded,
+                    include_purged=include_purged,
                 )
                 for art in articles:
                     all_articles.append((art, orig))
@@ -918,6 +919,7 @@ class FirehoseCommandHandler:
             limit=limit,
             include_cancelled=include_cancelled,
             include_superseded=include_superseded,
+            include_purged=include_purged,
         )
 
         out = struct.pack(">H", len(articles))
@@ -926,7 +928,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # ARTICLE_SEARCH (§19.5)
+    # ARTICLE_SEARCH
     # ------------------------------------------------------------------
 
     def _cmd_article_search(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -1051,7 +1053,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # ARTICLE_QUERY (§19.5)
+    # ARTICLE_QUERY
     # ------------------------------------------------------------------
 
     def _cmd_article_query(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -1107,7 +1109,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # ARTICLE_BODY (§19.5)
+    # ARTICLE_BODY
     # ------------------------------------------------------------------
 
     def _cmd_article_body(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -1155,7 +1157,7 @@ class FirehoseCommandHandler:
         return _success(struct.pack(">I", len(body)) + body)
 
     # ------------------------------------------------------------------
-    # USER_GET (§19.5)
+    # USER_GET
     # ------------------------------------------------------------------
 
     def _cmd_user_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -1186,7 +1188,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # USER_LIST (§19.5)
+    # USER_LIST
     # ------------------------------------------------------------------
 
     def _cmd_user_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -1216,7 +1218,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # BAN_STATUS (§19.5)
+    # BAN_STATUS
     # ------------------------------------------------------------------
 
     def _cmd_ban_status(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -1248,7 +1250,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # EVENT_BODY (§19.5)
+    # EVENT_BODY
     # ------------------------------------------------------------------
 
     def _cmd_event_body(self, data: bytes, ctx: FirehoseContext) -> bytes:

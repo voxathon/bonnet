@@ -1,7 +1,4 @@
-"""Phase 3 tests: compositional ACL, kind validation, and search.
-
-Tests PROTOCOL.md §12 (kind schemas), §15 (search), §16 (ACL model).
-"""
+"""Compositional ACL evaluation, kind-schema validation, and search."""
 
 import pytest
 
@@ -44,7 +41,7 @@ def _rid(seed: int) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# ACL Tests (§16)
+# ACL Tests
 # ---------------------------------------------------------------------------
 
 
@@ -291,7 +288,7 @@ class TestACLEvaluator:
 
 
 # ---------------------------------------------------------------------------
-# Kind Validation Tests (§12)
+# Kind Validation Tests
 # ---------------------------------------------------------------------------
 
 
@@ -668,7 +665,7 @@ class TestKindValidator:
 
 
 # ---------------------------------------------------------------------------
-# Search Tests (§15)
+# Search Tests
 # ---------------------------------------------------------------------------
 
 
@@ -694,7 +691,7 @@ class TestSearchService:
     def _make_article_rec(self, seq, article_num, subject="Test", tags="", body=b"hello world"):
         from bonnet.core.record import Record
 
-        origin = Identity.from_private_key(bytes(range(1, 33)))
+        _origin = Identity.from_private_key(bytes(range(1, 33)))
         aid = _rid(seq + 10)
         eid = _rid(seq)
 
@@ -774,7 +771,7 @@ class TestSearchService:
         bp, body_store, search = search_env
         from bonnet.core.record import Record
 
-        origin = Identity.from_private_key(bytes(range(1, 33)))
+        _origin = Identity.from_private_key(bytes(range(1, 33)))
         other_pub = bytes(range(50, 82))
 
         rec1 = self._make_article_rec(1, 1, subject="By user")

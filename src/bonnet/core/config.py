@@ -1,4 +1,4 @@
-"""Firehose protocol configuration loader (PROTOCOL.md §16, §18).
+"""Firehose protocol configuration loader.
 
 Parses TOML config into a FirehoseConfig object with ACL rules, origin
 settings, data paths, and operational parameters. Replaces the old v3
@@ -20,7 +20,7 @@ class PeerConfig:
     """Configuration for a firehose federation peer.
 
     The import_* flags control which punishment types are applied locally
-    when they arrive from this peer (Gate D). Records are always stored and
+    when they arrive from this peer. Records are always stored and
     relayed regardless; the flags only govern enforcement. Default is
     opt-in: a peer confers no moderation authority until each type is
     explicitly turned on.
@@ -507,7 +507,6 @@ enabled = false
 
         default_content = f"""# Bonnet server configuration sample.
 # Operator documentation: OPERATOR_GUIDE.md
-# Protocol specification: PROTOCOL.md
 
 # Split a growing [[acl]] or [[sync.peers]] list into separate files with
 # conf.d-style includes. Glob patterns are resolved relative to this file;
@@ -573,7 +572,7 @@ interval_seconds = 300
 # import_temp_bans = true
 # import_permabans = false
 
-# ACL rules (§16): explicit deny-wins, conjunctive dimensions.
+# ACL rules: explicit deny-wins, conjunctive dimensions.
 # Supported matchers: pubkey, role, origin, anonymous, unknown, registered, wildcard.
 # Selector lists: commands, kinds, boards, objects. Omit = not granted. "*" = all.
 #

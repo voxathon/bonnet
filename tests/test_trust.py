@@ -1,6 +1,6 @@
 """Tests for src/bonnet/core/trust.py — atomic origin-key pinning and rotation.
 
-Exit gate (§13 Phase 3):
+Covers:
   - Origin pin first use, repeat use, mismatch, configured pin, and rotation
   - Concurrent first-contact produces one pin (atomic TOFU)
 """

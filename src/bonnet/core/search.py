@@ -1,4 +1,4 @@
-"""Body and metadata search service for the Bonnet Firehose Protocol (PROTOCOL.md §15).
+"""Body and metadata search service for the Bonnet Firehose Protocol.
 
 Metadata search queries one board's metadata.db. Body search runs ripgrep
 only against that board's flat bodies/ directory. Both enforce bounded time

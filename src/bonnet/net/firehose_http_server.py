@@ -1,4 +1,4 @@
-"""Firehose HTTP server for the Bonnet Firehose Protocol (PROTOCOL.md §18-19).
+"""Firehose HTTP server for the Bonnet Firehose Protocol.
 
 ASGI application serving:
   GET  /.well-known/bonnet  — firehose discovery document
@@ -173,7 +173,7 @@ class FirehoseHTTPServer:
                 return
 
     # ------------------------------------------------------------------
-    # Discovery (§18)
+    # Discovery
     # ------------------------------------------------------------------
 
     async def _handle_discovery(self, scope, receive, send):
@@ -226,7 +226,7 @@ class FirehoseHTTPServer:
         await self._send_raw(send, 200, headers, body)
 
     # ------------------------------------------------------------------
-    # Command dispatch (§19)
+    # Command dispatch
     # ------------------------------------------------------------------
 
     async def _handle_command(self, scope, receive, send):

@@ -301,7 +301,7 @@ def test_purge_origin_removes_data(server, tmp_path):
 
 def test_purge_origin_preserves_local(server):
     console = OperatorConsole(server)
-    result = console._cmd_purge_origin(["purge-origin", "empty.test"])
+    _result = console._cmd_purge_origin(["purge-origin", "empty.test"])
     assert "bbs.test" in server.firehose.list_origins()
 
 

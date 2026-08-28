@@ -1,8 +1,4 @@
-"""Phase 2 tests: body storage, board projections, global projections, dispatcher.
-
-Tests PROTOCOL.md §13 (state reduction), §14.2 (board projection),
-§14.3 (bodies), §14.4 (global projections).
-"""
+"""Body storage, board projections, global projections, and state reduction."""
 
 import time
 
@@ -884,7 +880,7 @@ class TestDispatcher:
         bs.stage_article_body(
             "bbs.a", "general", intent.event_id, body, intent.body_hash, intent.body_size
         )
-        rec = firehose.append_record(ORIGIN_A, intent, sig, body)
+        _rec = firehose.append_record(ORIGIN_A, intent, sig, body)
 
         count = d.dispatch_origin("bbs.a")
         assert count == 1

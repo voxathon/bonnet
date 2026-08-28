@@ -1,4 +1,4 @@
-"""Phase 1 tests for the FirehoseStore (PROTOCOL.md §14.1, §17.1).
+"""Tests for the FirehoseStore.
 
 Tests: sequence allocation, article-number allocation, idempotent resubmit,
 event ID collision, article ID collision, chain continuity, head management,
@@ -544,7 +544,7 @@ class TestEquivocation:
             "bbs.b", 1, compute_event_hash(encode_record(records2[0])), fake_identity
         )
 
-        result = store.accept_remote_range(
+        _result = store.accept_remote_range(
             "bbs.b", records2, head2, fake_identity.public_key, source="evil.test"
         )
         conflicts = store.get_conflicts("bbs.b")

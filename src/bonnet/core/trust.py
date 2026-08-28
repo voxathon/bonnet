@@ -1,28 +1,18 @@
 """Shared origin-key pinning and rotation verification.
 
-PROTOCOL_RENOVATION_PLAN §12.2:
-  The client identity database needs a separate trust table:
-    CREATE TABLE origin_keys (
-        origin TEXT PRIMARY KEY,
-        publickey BLOB NOT NULL,
-        first_seen INTEGER NOT NULL,
-        last_rotated INTEGER NOT NULL,
-        trust_mode TEXT NOT NULL
-    );
+Used by both sides: the client pins the origins it talks to, the server pins
+its federation peers. Pins live in a SQLite `origin_keys` table, where
+`trust_mode` is either 'tofu' (adopted on first contact) or 'configured'
+(supplied by the operator and never auto-adopted).
 
-  trust_mode initially supports 'tofu' and 'configured'.
+TOFU pinning is a single atomic INSERT OR IGNORE + SELECT, so concurrent
+first contact with the same origin converges on one pin instead of racing.
 
-  TOFU insertion and comparison must be one atomic database operation.
-  The shared trust implementation must replace the current read-then-insert
-  behavior and include a concurrent first-contact test.
+A rotation is accepted only when the origin is currently pinned to the old
+key and the proof verifies against that key:
 
-This module replaces the racy SyncDB.set_peer_pubkey_tofu (read-then-insert)
-with an atomic INSERT OR IGNORE + SELECT pattern. Both client origin pins
-and server peer-key pins use this implementation.
-
-Rotation verification mirrors SyncDB.rotate_peer_pubkey:
-  payload = struct.pack('B', len(origin_bytes)) + origin_bytes + old_pubkey + new_pubkey
-  verified with Identity.verify(old_pubkey, payload, signature)
+    payload = struct.pack('B', len(origin_bytes)) + origin_bytes
+              + old_pubkey + new_pubkey
 """
 
 from __future__ import annotations

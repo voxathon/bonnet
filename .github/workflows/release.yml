@@ -5,7 +5,7 @@ name: Release
 # via trusted publishing (OIDC — no stored API token), and cuts a GitHub
 # Release with the built wheel/sdist attached.
 #
-# One-time manual setup required (see RELEASING.md):
+# One-time manual setup required:
 #   1. Register a trusted publisher on PyPI for this repo/workflow/environment.
 #   2. Create a "pypi" environment in this repo's GitHub settings.
 

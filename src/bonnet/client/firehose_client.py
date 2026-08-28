@@ -1,4 +1,4 @@
-"""Firehose HTTP client for the Bonnet Firehose Protocol (PROTOCOL.md §18-19).
+"""Firehose HTTP client for the Bonnet Firehose Protocol.
 
 High-level typed client. Connection, discovery, TOFU pinning, request
 signing, and response verification live in the shared transport
@@ -379,7 +379,7 @@ class FirehoseHTTPClient(FirehoseTransport):
         return parse_publish_response(resp)
 
     # ------------------------------------------------------------------
-    # Punishments (Gate D)
+    # Punishments
     # ------------------------------------------------------------------
 
     async def _publish_punishment_issue(
@@ -468,7 +468,7 @@ class FirehoseHTTPClient(FirehoseTransport):
         return parse_publish_response(resp)
 
     async def publish_punishment_ack(self, punishment_event_id: bytes) -> PublishResult:
-        """Acknowledge a punishment as the punished user (Gate D ack flow)."""
+        """Acknowledge a punishment as the punished user."""
         if self._identity is None or self._server_origin is None:
             raise FirehoseClientError("not connected")
         eid = os.urandom(32)
@@ -543,9 +543,10 @@ class FirehoseHTTPClient(FirehoseTransport):
         limit: int = 100,
         include_cancelled: bool = False,
         include_superseded: bool = False,
+        include_purged: bool = False,
     ) -> QueryResponse:
         cmd = build_article_list(
-            origin, board, offset, limit, include_cancelled, include_superseded
+            origin, board, offset, limit, include_cancelled, include_superseded, include_purged
         )
         resp = await self._send_command(cmd)
         result = parse_article_list_response(resp, aggregate=(origin == ""))

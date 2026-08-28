@@ -444,7 +444,7 @@ def test_rebuild_clears_uncached_board_projections(stack, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Punishment import filtering (Gate D)
+# Punishment import filtering
 # ---------------------------------------------------------------------------
 
 

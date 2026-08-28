@@ -1,4 +1,4 @@
-"""Compositional ACL evaluator for the Bonnet Firehose Protocol (PROTOCOL.md §16).
+"""Compositional ACL evaluator for the Bonnet Firehose Protocol.
 
 Authorization is explicit, compositional, and default-deny. There are no
 implicit administrator, moderator, owner, origin, or root bypasses.
@@ -185,7 +185,7 @@ class AuthContext:
 
 
 class ACLEvaluator:
-    """Compositional ACL evaluator (§16).
+    """Compositional ACL evaluator.
 
     Every applicable dimension MUST pass. Within each dimension:
     1. collect rules matching the principal and action;

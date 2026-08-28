@@ -1,4 +1,4 @@
-"""Firehose wire protocol for the Bonnet Firehose Protocol (PROTOCOL.md §19).
+"""Firehose wire protocol for the Bonnet Firehose Protocol.
 
 Binary builders and parsers for all 13 command requests and responses.
 Shared by the server's federation sync and the client library.
@@ -236,7 +236,7 @@ def build_event_range(
 
 
 def build_key_epochs(origin: str) -> bytes:
-    """Build a KEY_EPOCHS request (§19.20): origin only."""
+    """Build a KEY_EPOCHS request: origin only."""
     out = struct.pack(">B", OP_KEY_EPOCHS)
     out += _enc_text16(origin)
     return out
@@ -349,6 +349,8 @@ def build_article_get(
     if selector_type == SELECTOR_BY_NUM:
         out += struct.pack(">Q", selector)
     elif selector_type == SELECTOR_BY_ID:
+        if not isinstance(selector, bytes):
+            raise ProtocolError("by-ID selector must be bytes")
         out += selector
     else:
         raise ProtocolError(f"invalid selector type {selector_type}")
@@ -446,12 +448,15 @@ def build_article_list(
     limit: int = 100,
     include_cancelled: bool = False,
     include_superseded: bool = False,
+    include_purged: bool = False,
 ) -> bytes:
     flags = 0
     if include_cancelled:
         flags |= 0x01
     if include_superseded:
         flags |= 0x02
+    if include_purged:
+        flags |= 0x04
     limit = max(1, min(limit, 65535))
     out = struct.pack(">B", OP_ARTICLE_LIST)
     out += _enc_text16(origin)
