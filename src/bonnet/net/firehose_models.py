@@ -1,4 +1,4 @@
-"""Firehose client models for the Bonnet Firehose Protocol.
+"""Client models for the firehose protocol.
 
 User-facing data models for article, board, user, ban status, event, and
 publication results. These are derived API views, not protocol primitives.

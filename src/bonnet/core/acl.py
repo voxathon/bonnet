@@ -1,4 +1,4 @@
-"""Compositional ACL evaluator for the Bonnet Firehose Protocol.
+"""Compositional ACL evaluator for the firehose protocol.
 
 Authorization is explicit, compositional, and default-deny. There are no
 implicit administrator, moderator, owner, origin, or root bypasses.

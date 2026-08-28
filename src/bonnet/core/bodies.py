@@ -1,4 +1,4 @@
-"""Body storage for the Bonnet Firehose Protocol.
+"""Body storage for the firehose protocol.
 
 Article bodies are flat files under boards/<origin>/<board>/bodies/<article-num>.
 Event bodies are flat files under events/<origin>/bodies/<event-id-hex>.

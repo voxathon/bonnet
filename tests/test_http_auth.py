@@ -23,6 +23,7 @@ from bonnet.net.http_auth import (
     KeyResolver,
     MalformedSignature,
     MissingComponent,
+    SignatureError,
     VerifyResult,
     _validate_keyid,
     _validate_nonce,
@@ -321,6 +322,65 @@ class TestSignVerifyRoundtrip:
         assert "@status" in result.covered_components
         assert "bonnet-origin" in result.covered_components
         assert "bonnet-request-nonce" in result.covered_components
+
+    # A response whose signature does not cover Bonnet-Request-Nonce is not bound
+    # to any particular request. Verification used to skip the check in that case,
+    # so such a response could be replayed against a different request.
+    UNBOUND_RESPONSE_COMPONENTS = [
+        "@status",
+        "content-type",
+        "content-digest",
+        "bonnet-protocol",
+        "bonnet-origin",
+    ]
+
+    async def _sign_unbound_response(self, priv, response_msg, nonce):
+        signer = BonnetSigner(
+            private_key=priv,
+            key_id="origin:bonnet.example.com",
+            response_components=list(self.UNBOUND_RESPONSE_COMPONENTS),
+        )
+        await signer.sign_response(response_msg, request_nonce=nonce)
+        return response_msg
+
+    @pytest.mark.asyncio
+    async def test_unbound_response_is_otherwise_valid(
+        self, keypair, key_resolver, response_msg, valid_nonce
+    ):
+        """Control: the signature itself is fine. Only the binding is missing."""
+        priv, _ = keypair
+        await self._sign_unbound_response(priv, response_msg, valid_nonce)
+
+        verifier = BonnetVerifier(key_resolver=key_resolver)
+        result = await verifier.verify_response(response_msg, expected_origin="bonnet.example.com")
+        assert "bonnet-request-nonce" not in result.covered_components
+
+    @pytest.mark.asyncio
+    async def test_response_missing_request_nonce_is_rejected(
+        self, keypair, key_resolver, response_msg, valid_nonce
+    ):
+        priv, _ = keypair
+        await self._sign_unbound_response(priv, response_msg, valid_nonce)
+        response_msg.headers.pop("Bonnet-Request-Nonce", None)
+        assert not response_msg.has_header("bonnet-request-nonce")
+
+        verifier = BonnetVerifier(key_resolver=key_resolver)
+        with pytest.raises(SignatureError, match="missing Bonnet-Request-Nonce"):
+            await verifier.verify_response(response_msg, expected_request_nonce=valid_nonce)
+
+    @pytest.mark.asyncio
+    async def test_response_uncovered_request_nonce_is_rejected(
+        self, keypair, key_resolver, response_msg, valid_nonce
+    ):
+        """An unsigned header is attacker-controlled, so matching it proves nothing."""
+        priv, _ = keypair
+        await self._sign_unbound_response(priv, response_msg, valid_nonce)
+        # Present, and holding exactly the value the caller expects — but unsigned.
+        response_msg.set_header("Bonnet-Request-Nonce", valid_nonce)
+
+        verifier = BonnetVerifier(key_resolver=key_resolver)
+        with pytest.raises(SignatureError, match="does not cover Bonnet-Request-Nonce"):
+            await verifier.verify_response(response_msg, expected_request_nonce=valid_nonce)
 
     @pytest.mark.asyncio
     async def test_request_with_username(self, keypair, key_resolver, request_msg, valid_nonce):

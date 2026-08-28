@@ -1,4 +1,4 @@
-"""Kind-specific validation for the Bonnet Firehose Protocol.
+"""Kind-specific validation for the firehose protocol.
 
 Enforces schema rules: required metadata fields, target tuple completeness,
 same-origin restrictions, board/user lifecycle constraints, and report/punishment

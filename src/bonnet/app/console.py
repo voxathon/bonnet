@@ -1,6 +1,6 @@
-"""Operator console (REPL) for a running Bonnet firehose server.
+"""Operator console (REPL) for a running Bonnet server.
 
-Extracted from BonnetFirehoseServer so the bootstrap class stays focused on
+Extracted from BonnetServer so the bootstrap class stays focused on
 component construction and lifecycle. Attribute access delegates to the
 server instance, so command bodies operate on the live components unchanged.
 """
@@ -37,7 +37,7 @@ DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
 class OperatorConsole:
-    """Interactive administration loop for a BonnetFirehoseServer."""
+    """Interactive administration loop for a BonnetServer."""
 
     def __init__(self, server):
         self.server = server

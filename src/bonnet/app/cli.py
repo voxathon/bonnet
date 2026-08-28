@@ -1,4 +1,4 @@
-"""Local REPL connection for the Bonnet firehose server.
+"""Local REPL connection for the Bonnet server.
 
 Produces a FirehoseContext for local command dispatch, bypassing HTTP
 signature verification. The local admin identity is the server's own key.

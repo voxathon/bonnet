@@ -27,9 +27,9 @@ def server(config):
     os.makedirs(config.boards_dir, exist_ok=True)
     os.makedirs(config.events_bodies_dir, exist_ok=True)
 
-    from bonnet.app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetServer
 
-    s = BonnetFirehoseServer(config)
+    s = BonnetServer(config)
     yield s
     try:
         s.close()
@@ -85,9 +85,9 @@ def test_root_registration_idempotent(server, config):
     """Restarting the server does not create a second root user."""
     server_identity = server.server_identity
 
-    from bonnet.app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetServer
 
-    server2 = BonnetFirehoseServer(config)
+    server2 = BonnetServer(config)
     try:
         user = server2.users.get_user_by_pubkey("bbs.test", server_identity.public_key)
         assert user is not None
@@ -156,13 +156,13 @@ def test_identity_stable_across_restart(config):
     os.makedirs(config.boards_dir, exist_ok=True)
     os.makedirs(config.events_bodies_dir, exist_ok=True)
 
-    from bonnet.app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetServer
 
-    s1 = BonnetFirehoseServer(config)
+    s1 = BonnetServer(config)
     pubkey1 = s1.server_identity.public_key
     s1.close()
 
-    s2 = BonnetFirehoseServer(config)
+    s2 = BonnetServer(config)
     pubkey2 = s2.server_identity.public_key
     s2.close()
 

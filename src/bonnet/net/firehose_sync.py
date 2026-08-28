@@ -1,4 +1,4 @@
-"""Federation sync manager for the Bonnet Firehose Protocol.
+"""Federation sync manager for the firehose protocol.
 
 Pulls the global firehose from remote origins: fetches signed heads,
 requests contiguous event ranges, verifies chain continuity and signatures,

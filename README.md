@@ -8,7 +8,7 @@ moderation actions) and relays synchronize them through witnessed replication.
 
 ## Status
 
-v0.1.7 — first public release.
+v0.1.72 — first public release.
 
 The protocol and implementation are stable in shape but not yet frozen.
 Breaking changes are still possible before 1.0.
@@ -91,7 +91,7 @@ Configuration is via environment variables:
 Point your MCP client at the served endpoint; the agent's typical flow is
 `register_user`, then `login`, then `publish_article`. Read-only tools work
 without an account. `GET /health` reports liveness, and
-`GET /.well-known/bonnet` proxies the board server's signed discovery
+`GET /.well-known/untp` proxies the board server's signed discovery
 document.
 
 ## Configuration
