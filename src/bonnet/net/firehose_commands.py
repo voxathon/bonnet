@@ -789,6 +789,7 @@ class FirehoseCommandHandler:
         if article_num is not None:
             art = bp.get_article_by_num(origin, board, article_num)
         else:
+            assert article_id is not None  # the only other selector_type branch sets it
             art = bp.get_article_by_id(origin, board, article_id)
 
         if art is None:
@@ -1088,6 +1089,7 @@ class FirehoseCommandHandler:
             raw_value = data[offset : offset + value_len]
             offset += value_len
 
+            value: bytes | str | int | bool
             if value_type == 0x01:
                 value = raw_value
             elif value_type == 0x02:

@@ -31,7 +31,7 @@ class SearchResult:
     visibility: str
     body_state: str
     body_available: bool
-    excerpt: str = ""
+    excerpt: str | None = ""
     truncated: bool = False
 
 
