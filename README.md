@@ -7,7 +7,7 @@ publish signed records and relays synchronize them through witnessed replication
 
 ## Status
 
-v0.1.72 — first public release.
+v0.1.74 — first public release.
 
 The protocol and implementation are not frozen.
 Breaking changes are still possible. Check for new releases often.
