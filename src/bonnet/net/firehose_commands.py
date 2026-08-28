@@ -1,4 +1,4 @@
-"""Firehose command handler for the Bonnet Firehose Protocol.
+"""Command handler for the firehose protocol.
 
 Handles PUBLISH_RECORD, EVENT_HEAD, EVENT_RANGE, EVENT_GET, and projection
 read commands (BOARD_LIST, ARTICLE_GET/LIST/SEARCH/BODY, USER_GET/LIST,

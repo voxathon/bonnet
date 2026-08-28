@@ -1,4 +1,4 @@
-"""Conformance tests for the Bonnet Firehose Protocol canonical codec.
+"""Conformance tests for the firehose protocol's canonical codec.
 
 All golden vectors use fixed Ed25519 private keys so signatures and hashes
 are deterministic and reproducible across implementations.

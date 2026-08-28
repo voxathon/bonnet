@@ -1,7 +1,7 @@
-"""Firehose HTTP server for the Bonnet Firehose Protocol.
+"""HTTP server for the firehose protocol.
 
 ASGI application serving:
-  GET  /.well-known/bonnet  — firehose discovery document
+  GET  /.well-known/untp  — firehose discovery document
   POST /command             — signed firehose command dispatch
 
 Reuses the existing http_auth.py RFC 9421 signature infrastructure with
@@ -15,6 +15,7 @@ import json
 import struct
 import time
 
+from bonnet.core.binutil import resolve_rg
 from bonnet.core.crypto import Identity
 from bonnet.core.logging import log_msg
 from bonnet.net.http_auth import (
@@ -78,7 +79,7 @@ class FirehoseKeyResolver(KeyResolver):
 
 
 class FirehoseHTTPServer:
-    """ASGI application for the Bonnet Firehose Protocol."""
+    """ASGI application for the firehose protocol."""
 
     def __init__(
         self,
@@ -151,7 +152,7 @@ class FirehoseHTTPServer:
             path = scope.get("path", "")
             method = scope.get("method", "")
 
-            if path == "/.well-known/bonnet" and method == "GET":
+            if path == "/.well-known/untp" and method == "GET":
                 await self._handle_discovery(scope, receive, send)
             elif path == "/command" and method == "POST":
                 await self._handle_command(scope, receive, send)
@@ -176,6 +177,36 @@ class FirehoseHTTPServer:
     # Discovery
     # ------------------------------------------------------------------
 
+    def _capabilities(self) -> list[str]:
+        """Optional features this server is actually able to serve right now.
+
+        Naming: `<layer>.<capability>`, matching the record kinds in
+        `core.kinds` and the domain tags in `core.record`. `untp.` marks
+        something the substrate provides; `bonnet.` marks something the
+        application on top provides. Unprefixed names are not valid.
+
+        Two rules keep this list meaningful:
+
+        Only advertise what varies. Anything every conformant implementation
+        has is part of the protocol, not a capability — it belongs in the spec.
+        A capability that is true for everyone tells a client nothing, and one
+        that duplicates a field already in this document is worse than absent.
+
+        Only advertise what is checked. Every entry must be computed from real
+        state at request time. A hardcoded capability is a claim that drifts
+        away from the truth, and it drifts fastest in exactly the deployments
+        where a client needed the answer. An honest error code beats an
+        optimistic manifest.
+
+        Note that ACL is evaluated per principal, so this list can never
+        answer "may *I* do this?" — only "could anyone?". Clients still have
+        to be ready for 0x0004.
+        """
+        capabilities = []
+        if resolve_rg():
+            capabilities.append("bonnet.per-board-body-search")
+        return capabilities
+
     async def _handle_discovery(self, scope, receive, send):
         known_origins = [self._config.origin]
         for peer in getattr(self._config, "peers", []):
@@ -192,19 +223,13 @@ class FirehoseHTTPServer:
                 "anonymous_private_key": self._anonymous_identity.private_key.hex(),
                 "command_endpoint": "/command",
                 "known_origins": known_origins,
-                "capabilities": [
-                    "global-firehose",
-                    "generic-record-kinds",
-                    "relay-hop-witness",
-                    "per-board-body-search",
-                    "origin-directory-v1",
-                ],
+                "capabilities": self._capabilities(),
             }
         ).encode("utf-8")
 
         msg = HTTPMessage(
             method="GET",
-            url=f"https://{self._config.origin}/.well-known/bonnet",
+            url=f"https://{self._config.origin}/.well-known/untp",
             headers={
                 "Content-Type": "application/json",
                 "Content-Digest": compute_content_digest(body),

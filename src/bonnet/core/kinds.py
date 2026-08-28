@@ -1,4 +1,4 @@
-"""Record kind constants for the Bonnet Firehose Protocol.
+"""Bonnet record kind constants.
 
 Single source of truth for kind name strings and their groupings. Other
 modules import from here rather than redefining these constants locally.

@@ -1,8 +1,7 @@
 """Firehose protocol configuration loader.
 
 Parses TOML config into a FirehoseConfig object with ACL rules, origin
-settings, data paths, and operational parameters. Replaces the old v3
-Config class entirely.
+settings, data paths, and operational parameters.
 """
 
 from __future__ import annotations
@@ -230,7 +229,7 @@ def _resolve_includes(data: dict, base_dir: str) -> tuple[list, list, list]:
 
 
 class FirehoseConfig:
-    """Configuration for a Bonnet firehose server."""
+    """Configuration for a Bonnet server."""
 
     def __init__(
         self,

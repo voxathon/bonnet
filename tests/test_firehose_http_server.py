@@ -213,7 +213,7 @@ async def server_stack(tmp_path):
 async def test_discovery_returns_signed_response(server_stack):
     """Discovery endpoint returns signed JSON with server key and origin."""
     c = server_stack["client"]
-    resp = await c._http.get("/.well-known/bonnet")
+    resp = await c._http.get("/.well-known/untp")
     assert resp.status_code == 200
 
     data = resp.json()
@@ -223,10 +223,28 @@ async def test_discovery_returns_signed_response(server_stack):
     assert "anonymous_key" in data
     assert "anonymous_private_key" in data
     assert data["command_endpoint"] == "/command"
-    assert "global-firehose" in data["capabilities"]
+    assert isinstance(data["capabilities"], list)
+    # Every advertised capability is namespaced by the layer that provides it.
+    assert all(c.startswith(("untp.", "bonnet.")) for c in data["capabilities"])
 
     assert "signature-input" in resp.headers
     assert "signature" in resp.headers
+
+
+async def test_discovery_capabilities_track_search_availability(server_stack, monkeypatch):
+    """Capabilities are computed, not asserted: search is listed only if rg resolves."""
+    import bonnet.net.firehose_http_server as http_server_mod
+
+    c = server_stack["client"]
+    search_cap = "bonnet.per-board-body-search"
+
+    monkeypatch.setattr(http_server_mod, "resolve_rg", lambda: "/usr/bin/rg")
+    data = (await c._http.get("/.well-known/untp")).json()
+    assert search_cap in data["capabilities"]
+
+    monkeypatch.setattr(http_server_mod, "resolve_rg", lambda: None)
+    data = (await c._http.get("/.well-known/untp")).json()
+    assert search_cap not in data["capabilities"]
 
 
 async def test_discovery_anonymous_key_matches(server_stack):
@@ -234,7 +252,7 @@ async def test_discovery_anonymous_key_matches(server_stack):
     c = server_stack["client"]
     anon = server_stack["anonymous_identity"]
 
-    resp = await c._http.get("/.well-known/bonnet")
+    resp = await c._http.get("/.well-known/untp")
     data = resp.json()
 
     assert data["anonymous_key"] == anon.public_key.hex()

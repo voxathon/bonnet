@@ -1,4 +1,4 @@
-"""MCP resources for the Bonnet Firehose Protocol.
+"""MCP resources for the firehose protocol.
 
 Read-only URI-addressed data exposed as FastMCP resources.
 All resources connect anonymously.

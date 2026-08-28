@@ -1,4 +1,4 @@
-"""MCP tools for the Bonnet Firehose Protocol.
+"""MCP tools for the firehose protocol.
 
 Exposes firehose client operations as FastMCP tools for AI agents.
 Uses IdentityStore for local key management (username:password → Ed25519).

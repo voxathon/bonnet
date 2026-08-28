@@ -1,4 +1,4 @@
-"""MCP server entry point for the Bonnet Firehose Protocol.
+"""MCP server entry point for the firehose protocol.
 
 Runs the FastMCP server with HTTP transport. Auth middleware extracts
 username:password from the Authorization header and sets context vars
@@ -33,7 +33,7 @@ async def health_check(request: Request) -> PlainTextResponse:
     return PlainTextResponse("OK")
 
 
-@mcp.custom_route("/.well-known/bonnet", methods=["GET"])
+@mcp.custom_route("/.well-known/untp", methods=["GET"])
 async def well_known_bonnet(request: Request):
     import sys
 
@@ -48,7 +48,7 @@ async def well_known_bonnet(request: Request):
     )
     try:
         async with httpx.AsyncClient(verify=verify, timeout=10.0) as http:
-            resp = await http.get(f"{bonnet_url}/.well-known/bonnet")
+            resp = await http.get(f"{bonnet_url}/.well-known/untp")
             return JSONResponse(content=resp.json(), status_code=resp.status_code)
     except Exception as e:
         print(f"error: discovery proxy failed for {bonnet_url}: {e!r}", file=sys.stderr)

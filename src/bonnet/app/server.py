@@ -1,8 +1,7 @@
-"""Bonnet Firehose Server bootstrap.
+"""Bonnet server bootstrap.
 
-Constructs all firehose protocol components, wires them into an ASGI
-HTTP server, and provides a runnable entry point. Replaces the old v3
-Bonnet server bootstrap entirely.
+Constructs the firehose protocol components, wires them into an ASGI HTTP
+server, and provides a runnable entry point.
 """
 
 from __future__ import annotations
@@ -31,8 +30,8 @@ from bonnet.net.rate_limiter import RateLimiter
 from bonnet.net.replay import ReplayLedger
 
 
-class BonnetFirehoseServer:
-    """Complete Bonnet firehose server: all components wired and runnable."""
+class BonnetServer:
+    """Complete Bonnet server: all components wired and runnable."""
 
     def __init__(self, config: FirehoseConfig):
         self.config = config
@@ -285,9 +284,7 @@ class BonnetFirehoseServer:
             ssl_keyfile = self.config.tls_key_path
 
         scheme = "https" if ssl_certfile else "http"
-        print(
-            f"Bonnet firehose server listening on {scheme}://{self.config.http_host}:{listen_port}"
-        )
+        print(f"Bonnet server listening on {scheme}://{self.config.http_host}:{listen_port}")
         print(f"Origin: {self.config.origin}")
         print(f"Hostname: {self.config.hostname}")
         print(f"Server public key: {self.server_identity.public_key.hex()}")
