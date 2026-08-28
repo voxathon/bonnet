@@ -67,6 +67,7 @@ class OperatorConsole:
             parts = line.split()
             cmd = parts[0].lower() if parts else ""
 
+            result: str | None
             if cmd == "publish-article":
                 try:
                     result = await self._repl_publish_article(parts[1:])
@@ -94,7 +95,7 @@ class OperatorConsole:
             if result:
                 print(result)
 
-    def dispatch_local_command(self, line) -> str:
+    def dispatch_local_command(self, line) -> str | None:
         parts = line.split()
         cmd = parts[0].lower()
 
@@ -897,17 +898,17 @@ class OperatorConsole:
 
         root_len = data[offset]
         offset += 1
-        root_id = data[offset : offset + root_len] if root_len else b""
+        root_id = data[offset : offset + root_len].hex() if root_len else ""
         offset += root_len
 
         reply_len = data[offset]
         offset += 1
-        reply_id = data[offset : offset + reply_len] if reply_len else b""
+        reply_id = data[offset : offset + reply_len].hex() if reply_len else ""
         offset += reply_len
 
         has_replacement = data[offset]
         offset += 1
-        replacement_id = data[offset : offset + 32] if has_replacement else b""
+        replacement_id = data[offset : offset + 32].hex() if has_replacement else ""
         offset += 32 if has_replacement else 0
 
         pin_state, offset = self._read_text16(data, offset)
@@ -1285,7 +1286,7 @@ class OperatorConsole:
 
             from datetime import datetime
 
-            ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
+            ts_display = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
 
             author_display = (
                 f"{author_username}@{author_registrar}" if author_username else author_pubkey.hex()
@@ -1300,7 +1301,9 @@ class OperatorConsole:
                 extras.append(f"thread:{thread_state}")
             extra_str = f" [{', '.join(extras)}]" if extras else ""
 
-            lines.append(f"#{article_num:4} | {subject} | {author_display} | {ts}{extra_str}")
+            lines.append(
+                f"#{article_num:4} | {subject} | {author_display} | {ts_display}{extra_str}"
+            )
 
         if not lines:
             return "No articles match."

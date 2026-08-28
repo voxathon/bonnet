@@ -858,6 +858,7 @@ class FirehoseStore:
                 anchored = head is not None and head.latest_origin_seq == last_seq
 
                 if anchored:
+                    assert head is not None  # implied by anchored, spelled out for mypy
                     final_hash = expected_prev if records[-1].origin_seq == last_seq else None
                     if final_hash is None:
                         final_hash = compute_event_hash(encode_record(records[-1]))
