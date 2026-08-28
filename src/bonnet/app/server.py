@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from typing import Protocol
 
 from bonnet.app.cli import FirehoseLocalConnection
 from bonnet.app.console import OperatorConsole
@@ -31,11 +32,16 @@ from bonnet.net.rate_limiter import RateLimiter
 from bonnet.net.replay import ReplayLedger
 
 
+class _Closeable(Protocol):
+    def close(self) -> None: ...
+
+
 class BonnetServer:
     """Complete Bonnet server: all components wired and runnable."""
 
     def __init__(self, config: FirehoseConfig):
         self.config = config
+        self._closed = False
 
         os.makedirs(config.data_dir, exist_ok=True)
         os.makedirs(config.boards_dir, exist_ok=True)
@@ -434,12 +440,12 @@ class BonnetServer:
                 pass
             await self.sync_manager.stop_all()
 
-    def close(self):
-        if hasattr(self, "_closed") and self._closed:
+    def close(self) -> None:
+        if self._closed:
             return
         self._closed = True
         first_error = None
-        for closer in [
+        closers: list[_Closeable] = [
             self.command_handler,
             self.dispatcher,
             self.firehose,
@@ -447,7 +453,8 @@ class BonnetServer:
             self.users,
             self.policy,
             self.replay_ledger,
-        ]:
+        ]
+        for closer in closers:
             try:
                 closer.close()
             except Exception as e:
