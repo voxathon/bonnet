@@ -228,7 +228,7 @@ async def test_discovery_returns_signed_response(server_stack):
     assert resp.status_code == 200
 
     data = resp.json()
-    assert data["protocol"] == "bonnet-firehose-1"
+    assert data["protocol"] == "untp-1"
     assert data["origin"] == ORIGIN
     assert data["public_key"] == SERVER_PUB.hex()
     assert "anonymous_key" in data
@@ -447,8 +447,8 @@ async def test_missing_signature_rejected(server_stack):
         headers={
             "Content-Type": "application/vnd.bonnet.command",
             "Content-Digest": compute_content_digest(cmd),
-            "Bonnet-Protocol": "bonnet-firehose-1",
-            "Bonnet-Nonce": "test-nonce",
+            "Untp-Version": "1",
+            "Untp-Nonce": "test-nonce",
         },
     )
     assert resp.status_code == 401
@@ -463,7 +463,7 @@ async def test_missing_content_digest_rejected(server_stack):
         content=cmd,
         headers={
             "Content-Type": "application/vnd.bonnet.command",
-            "Bonnet-Protocol": "bonnet-firehose-1",
+            "Untp-Version": "1",
         },
     )
     assert resp.status_code == 400
@@ -484,7 +484,7 @@ async def test_unsupported_protocol_rejected(server_stack):
         headers={
             "Content-Type": "application/vnd.bonnet.command",
             "Content-Digest": compute_content_digest(cmd),
-            "Bonnet-Protocol": "bonnet-firehose-0",
+            "Untp-Version": "0",
         },
     )
     assert resp.status_code == 426
@@ -500,7 +500,7 @@ async def test_unsupported_content_type_rejected(server_stack):
         headers={
             "Content-Type": "application/json",
             "Content-Digest": compute_content_digest(cmd),
-            "Bonnet-Protocol": "bonnet-firehose-1",
+            "Untp-Version": "1",
         },
     )
     assert resp.status_code == 415
@@ -547,8 +547,8 @@ async def test_replay_detected(server_stack):
         headers={
             "Content-Type": "application/vnd.bonnet.command",
             "Content-Digest": compute_content_digest(cmd),
-            "Bonnet-Protocol": "bonnet-firehose-1",
-            "Bonnet-Nonce": nonce,
+            "Untp-Version": "1",
+            "Untp-Nonce": nonce,
         },
         body=cmd,
     )
@@ -601,8 +601,8 @@ async def test_rate_limit_enforced(server_stack):
         headers={
             "Content-Type": "application/vnd.bonnet.command",
             "Content-Digest": compute_content_digest(cmd3),
-            "Bonnet-Protocol": "bonnet-firehose-1",
-            "Bonnet-Nonce": nonce3,
+            "Untp-Version": "1",
+            "Untp-Nonce": nonce3,
         },
         body=cmd3,
     )
@@ -629,7 +629,7 @@ async def test_oversized_body_rejected(server_stack):
         headers={
             "Content-Type": "application/vnd.bonnet.command",
             "Content-Digest": compute_content_digest(big_body),
-            "Bonnet-Protocol": "bonnet-firehose-1",
+            "Untp-Version": "1",
         },
     )
     assert resp.status_code == 413
@@ -732,7 +732,7 @@ async def test_empty_body_rejected(server_stack):
         headers={
             "Content-Type": "application/vnd.bonnet.command",
             "Content-Digest": compute_content_digest(b""),
-            "Bonnet-Protocol": "bonnet-firehose-1",
+            "Untp-Version": "1",
         },
     )
     assert resp.status_code == 400

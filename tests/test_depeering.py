@@ -490,3 +490,36 @@ def test_rotate_key_updates_live_acl_admin_rule(server):
 
     new_pubkey = server.server_identity.public_key
     assert server._acl_admin_rule.matcher.pubkey == new_pubkey
+
+
+# ---------------------------------------------------------------------------
+# list-users REPL command
+# ---------------------------------------------------------------------------
+
+
+def test_list_users_parses_multi_user_response(server):
+    """USER_LIST rows are always origin-prefixed on the wire (see
+    _cmd_user_list in firehose_commands.py), even when a specific origin was
+    requested. The console parser must account for that leading origin field
+    plus reg_seq/created_at, or every field after the first user's pubkey is
+    read from the wrong offset."""
+    console = OperatorConsole(server)
+
+    alice_pubkey = Identity.generate().public_key
+    bob_pubkey = Identity.generate().public_key
+
+    result = console._cmd_grant_role(["grant-role", alice_pubkey.hex(), "admin", "alice"])
+    assert "Registered" in result
+    result = console._cmd_grant_role(["grant-role", bob_pubkey.hex(), "moderator", "bob"])
+    assert "Registered" in result
+
+    result = console._cmd_list_users(["list-users"])
+
+    assert "alice" in result
+    assert "bob" in result
+    assert alice_pubkey.hex() in result
+    assert bob_pubkey.hex() in result
+    alice_line = next(line for line in result.splitlines() if "alice" in line)
+    bob_line = next(line for line in result.splitlines() if "bob" in line)
+    assert "[admin]" in alice_line
+    assert "[mod]" in bob_line

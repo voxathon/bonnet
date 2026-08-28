@@ -5,7 +5,7 @@ ASGI application serving:
   POST /command             — signed firehose command dispatch
 
 Reuses the existing http_auth.py RFC 9421 signature infrastructure with
-updated tag/headers for bonnet-firehose-1.
+updated tag/headers for untp-1.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from bonnet.core.binutil import resolve_rg
 from bonnet.core.crypto import Identity
 from bonnet.core.logging import log_msg
 from bonnet.net.http_auth import (
+    UNTP_LABEL,
+    UNTP_TAG,
     BonnetSigner,
     BonnetVerifier,
     DigestMismatch,
@@ -37,9 +39,6 @@ from bonnet.net.http_auth import (
 from bonnet.net.rate_limiter import RateLimiter
 from bonnet.net.replay import ReplayLedger
 
-FIREHOSE_TAG = "bonnet-firehose-1"
-FIREHOSE_LABEL = "bonnet"
-
 
 class _BodyTooLarge(Exception):
     pass
@@ -52,8 +51,8 @@ REQUEST_REQUIRED_COMPONENTS = frozenset(
         "@target-uri",
         "content-type",
         "content-digest",
-        "bonnet-protocol",
-        "bonnet-nonce",
+        "untp-version",
+        "untp-nonce",
     }
 )
 
@@ -62,9 +61,9 @@ RESPONSE_REQUIRED_COMPONENTS = frozenset(
         "@status",
         "content-type",
         "content-digest",
-        "bonnet-protocol",
-        "bonnet-origin",
-        "bonnet-request-nonce",
+        "untp-version",
+        "untp-origin",
+        "untp-request-nonce",
     }
 )
 
@@ -115,7 +114,7 @@ class FirehoseHTTPServer:
 
         self._verifier = BonnetVerifier(
             key_resolver=FirehoseKeyResolver(),
-            tag=FIREHOSE_TAG,
+            tag=UNTP_TAG,
             max_lifetime=getattr(config, "signature_lifetime_seconds", 60),
             clock_skew=getattr(config, "clock_skew_seconds", 30),
             request_required_components=REQUEST_REQUIRED_COMPONENTS,
@@ -130,24 +129,24 @@ class FirehoseHTTPServer:
         return BonnetSigner(
             private_key=identity.private_key,
             key_id=f"ed25519:{identity.public_key.hex()}",
-            tag=FIREHOSE_TAG,
-            label=FIREHOSE_LABEL,
+            tag=UNTP_TAG,
+            label=UNTP_LABEL,
             request_components=[
                 "@method",
                 "@authority",
                 "@target-uri",
                 "content-type",
                 "content-digest",
-                "bonnet-protocol",
-                "bonnet-nonce",
+                "untp-version",
+                "untp-nonce",
             ],
             response_components=[
                 "@status",
                 "content-type",
                 "content-digest",
-                "bonnet-protocol",
-                "bonnet-origin",
-                "bonnet-request-nonce",
+                "untp-version",
+                "untp-origin",
+                "untp-request-nonce",
             ],
         )
 
@@ -229,7 +228,7 @@ class FirehoseHTTPServer:
 
         body = json.dumps(
             {
-                "protocol": "bonnet-firehose-1",
+                "protocol": UNTP_TAG,
                 "origin": self._config.origin,
                 "hostname": self._config.hostname,
                 "public_key": self._server_identity.public_key.hex(),
@@ -247,8 +246,8 @@ class FirehoseHTTPServer:
             headers={
                 "Content-Type": "application/json",
                 "Content-Digest": compute_content_digest(body),
-                "Bonnet-Protocol": "bonnet-firehose-1",
-                "Bonnet-Origin": self._config.origin,
+                "Untp-Version": "1",
+                "Untp-Origin": self._config.origin,
             },
             status_code=200,
             body=body,
@@ -287,13 +286,13 @@ class FirehoseHTTPServer:
 
         headers = self._extract_headers(scope)
         content_type = headers.get("content-type", "")
-        bonnet_protocol = headers.get("bonnet-protocol", "")
+        untp_version = headers.get("untp-version", "")
         content_digest = headers.get("content-digest", "")
         sig_input = headers.get("signature-input", "")
         sig = headers.get("signature", "")
-        bonnet_nonce = headers.get("bonnet-nonce", "")
+        untp_nonce = headers.get("untp-nonce", "")
 
-        if bonnet_protocol != "bonnet-firehose-1":
+        if untp_version != "1":
             await self._send_protocol_error(send, 426, "Unsupported protocol", remote_addr, "")
             return
 
@@ -333,7 +332,7 @@ class FirehoseHTTPServer:
             return
 
         peer_public_key = bytes.fromhex(verify_result.keyid[8:])
-        nonce = verify_result.nonce or bonnet_nonce
+        nonce = verify_result.nonce or untp_nonce
         request_nonce = nonce
 
         is_anonymous = peer_public_key == self._anonymous_public_key
@@ -415,8 +414,8 @@ class FirehoseHTTPServer:
             url=f"https://{self._config.origin}/command",
             headers={
                 "Content-Type": "application/vnd.bonnet.command",
-                "Bonnet-Protocol": "bonnet-firehose-1",
-                "Bonnet-Origin": self._config.origin,
+                "Untp-Version": "1",
+                "Untp-Origin": self._config.origin,
             },
             status_code=200,
             body=response_body,
@@ -443,8 +442,8 @@ class FirehoseHTTPServer:
             url=f"https://{self._config.origin}/command",
             headers={
                 "Content-Type": "text/plain",
-                "Bonnet-Protocol": "bonnet-firehose-1",
-                "Bonnet-Origin": self._config.origin,
+                "Untp-Version": "1",
+                "Untp-Origin": self._config.origin,
             },
             status_code=status_code,
             body=body,

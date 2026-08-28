@@ -494,6 +494,92 @@ class TestBoardProjection:
         assert board_proj.get_checkpoint("bbs.a") == 0
 
 
+class TestQueryArticlesVisibilityFilter:
+    """internal/BUGS.md #2 as originally filed claimed an unsupported
+    operator on the visibility field (0x06) disabled the default
+    visibility='active' fallback and leaked cancelled/superseded articles.
+    Traced and reproduced against real data: that claim does not hold — the
+    fallback only depends on has_visibility_filter, which stays False for an
+    unsupported op, so the default still applies. What's actually broken is
+    narrower: the 'purged' sentinel value (op is meant to select EQ vs NE)
+    ignores op entirely, so a caller asking to EXCLUDE purged articles
+    (op=NE) gets treated as asking to include ONLY purged ones."""
+
+    def _make_article_record(self, seq, aid):
+        eid = _rid(seq)
+        body = b"article body"
+        intent = _make_article_intent("bbs.a", eid, aid, "general", body)
+        actor_sig = sign_intent(ACTOR, encode_intent(intent))
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=seq,
+            previous_event_hash=ZERO_HASH,
+            event_id=eid,
+            kind="bonnet.article",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=aid,
+            article_num=seq,
+            metadata=intent.metadata,
+            body_hash=intent.body_hash,
+            body_size=intent.body_size,
+            actor_signature=actor_sig,
+        )
+        rec.origin_signature = sign_record(ORIGIN_A, encode_unsigned_record(rec))
+        return rec
+
+    def _seed(self, board_proj):
+        active = self._make_article_record(seq=1, aid=_rid(11))
+        board_proj.apply_article(active)
+        other = self._make_article_record(seq=2, aid=_rid(12))
+        board_proj.apply_article(other)
+        board_proj.apply_cancel(
+            Record(
+                origin="bbs.a",
+                origin_seq=3,
+                event_id=_rid(3),
+                kind="bonnet.article.cancel",
+                actor_pubkey=ACTOR_PUB,
+                board="general",
+                target_origin="bbs.a",
+                target_board="general",
+                target_article_id=other.article_id,
+            )
+        )
+        return active, other
+
+    def test_unsupported_operator_still_defaults_to_active_only(self, board_proj):
+        """The originally-filed scenario: an unsupported operator (GT) on
+        the visibility field must not disable the safe default."""
+        self._seed(board_proj)
+        results = board_proj.query_articles("bbs.a", "general", [(0x06, 0x03, "active")])
+        assert [r.article_num for r in results] == [1]
+
+    def test_no_filter_defaults_to_active_only(self, board_proj):
+        self._seed(board_proj)
+        results = board_proj.query_articles("bbs.a", "general", [])
+        assert [r.article_num for r in results] == [1]
+
+    def test_explicit_ne_active_returns_cancelled(self, board_proj):
+        self._seed(board_proj)
+        results = board_proj.query_articles("bbs.a", "general", [(0x06, 0x02, "active")])
+        assert [(r.article_num, r.visibility) for r in results] == [(2, "cancelled")]
+
+    def test_eq_purged_returns_only_purged(self, board_proj):
+        self._seed(board_proj)
+        results = board_proj.query_articles("bbs.a", "general", [(0x06, 0x01, "purged")])
+        assert results == []
+
+    def test_ne_purged_excludes_purged_not_includes_it(self, board_proj):
+        """The real bug: NE 'purged' must mean 'exclude purged', not get
+        treated as EQ 'purged'. Neither seeded article is purged, so the
+        default active-only visibility filter still applies on top —
+        NE 'purged' doesn't by itself widen visibility, only body_state."""
+        self._seed(board_proj)
+        results = board_proj.query_articles("bbs.a", "general", [(0x06, 0x02, "purged")])
+        assert [r.article_num for r in results] == [1]
+
+
 # ---------------------------------------------------------------------------
 # Nav projection tests
 # ---------------------------------------------------------------------------
