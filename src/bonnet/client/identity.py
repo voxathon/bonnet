@@ -44,7 +44,7 @@ class IdentityStore:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS identities (
                 username TEXT PRIMARY KEY,
-                yescrypt_hash TEXT NOT NULL,
+                scrypt_hash TEXT NOT NULL,
                 auth_salt BLOB NOT NULL,
                 key_salt BLOB NOT NULL,
                 encrypted_private_key BLOB NOT NULL,
@@ -52,6 +52,14 @@ class IdentityStore:
                 registered INTEGER DEFAULT 0
             )
         """)
+        # Column used to be misnamed yescrypt_hash (yescrypt was the original
+        # intent, but it needs C bindings unavailable here, so this has always
+        # actually held a hashlib.scrypt digest). CREATE TABLE IF NOT EXISTS
+        # is a no-op against an existing DB, so an on-disk store from before
+        # this rename needs its column renamed in place.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(identities)")}
+        if "yescrypt_hash" in columns and "scrypt_hash" not in columns:
+            conn.execute("ALTER TABLE identities RENAME COLUMN yescrypt_hash TO scrypt_hash")
         conn.commit()
 
     def _derive_aes_key(self, password: str, key_salt: bytes) -> bytes:
@@ -76,10 +84,9 @@ class IdentityStore:
 
         # 1. Password storage for authentication
         auth_salt = os.urandom(16)
-        # We'll use hashlib.scrypt which is a standard library strong KDF instead of passlib yescrypt
-        # since yescrypt requires extra C bindings not available here.
-        # We store the resulting hash as a hex string.
-        yescrypt_hash = hashlib.scrypt(
+        # hashlib.scrypt: a standard-library strong KDF, used in place of
+        # yescrypt (which needs C bindings unavailable here). Stored as hex.
+        scrypt_hash = hashlib.scrypt(
             password.encode("utf-8"), salt=auth_salt, n=65536, r=8, p=2, maxmem=134217728
         ).hex()
 
@@ -99,9 +106,9 @@ class IdentityStore:
 
         conn.execute(
             """INSERT INTO identities
-               (username, yescrypt_hash, auth_salt, key_salt, encrypted_private_key, public_key)
+               (username, scrypt_hash, auth_salt, key_salt, encrypted_private_key, public_key)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            (username, yescrypt_hash, auth_salt, key_salt, encrypted_private_key, public_key),
+            (username, scrypt_hash, auth_salt, key_salt, encrypted_private_key, public_key),
         )
         conn.commit()
 
@@ -144,14 +151,12 @@ class IdentityStore:
     def verify_password(self, username: str, password: str) -> bool:
         conn = self._get_conn()
         cur = conn.cursor()
-        cur.execute(
-            "SELECT yescrypt_hash, auth_salt FROM identities WHERE username = ?", (username,)
-        )
+        cur.execute("SELECT scrypt_hash, auth_salt FROM identities WHERE username = ?", (username,))
         row = cur.fetchone()
         if not row:
             return False
 
-        expected_hash = row["yescrypt_hash"]
+        expected_hash = row["scrypt_hash"]
         auth_salt = bytes(row["auth_salt"])
 
         try:

@@ -38,6 +38,23 @@ from bonnet.core.record import (
     make_origin_witness,
 )
 from bonnet.core.search import SearchService
+from bonnet.net.firehose_wire import (
+    OP_ARTICLE_BODY,
+    OP_ARTICLE_GET,
+    OP_ARTICLE_LIST,
+    OP_ARTICLE_QUERY,
+    OP_ARTICLE_SEARCH,
+    OP_BAN_STATUS,
+    OP_BOARD_LIST,
+    OP_EVENT_BODY,
+    OP_EVENT_GET,
+    OP_EVENT_HEAD,
+    OP_EVENT_RANGE,
+    OP_KEY_EPOCHS,
+    OP_PUBLISH_RECORD,
+    OP_USER_GET,
+    OP_USER_LIST,
+)
 
 KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
 KIND_ARTICLE_RESTORE = "bonnet.article.restore"
@@ -53,24 +70,8 @@ PUNISHMENT_TYPE_CODES = {"warning": 1, "ban": 2, "permaban": 3}
 
 
 # ---------------------------------------------------------------------------
-# Opcodes
+# Opcodes — defined once in firehose_wire.py, imported above.
 # ---------------------------------------------------------------------------
-
-OP_PUBLISH_RECORD = 0x01
-OP_EVENT_HEAD = 0x02
-OP_EVENT_RANGE = 0x03
-OP_EVENT_GET = 0x04
-OP_KEY_EPOCHS = 0x05
-OP_BOARD_LIST = 0x10
-OP_ARTICLE_GET = 0x11
-OP_ARTICLE_LIST = 0x12
-OP_ARTICLE_SEARCH = 0x13
-OP_ARTICLE_QUERY = 0x15
-OP_ARTICLE_BODY = 0x14
-OP_USER_GET = 0x20
-OP_USER_LIST = 0x21
-OP_BAN_STATUS = 0x22
-OP_EVENT_BODY = 0x30
 
 CMD_NAMES = {
     OP_PUBLISH_RECORD: "PUBLISH_RECORD",

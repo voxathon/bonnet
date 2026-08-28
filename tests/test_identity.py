@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,38 @@ from bonnet.client import tools
 from bonnet.client.identity import IdentityStore
 
 pytestmark = pytest.mark.slow
+
+
+def test_identity_store_migrates_legacy_yescrypt_hash_column(tmp_path):
+    """A DB created before the yescrypt_hash -> scrypt_hash rename must keep
+    working: the column gets renamed in place on open, not left stale."""
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE identities (
+            username TEXT PRIMARY KEY,
+            yescrypt_hash TEXT NOT NULL,
+            auth_salt BLOB NOT NULL,
+            key_salt BLOB NOT NULL,
+            encrypted_private_key BLOB NOT NULL,
+            public_key BLOB NOT NULL,
+            registered INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+    store = IdentityStore(db_path)
+    try:
+        columns = {row[1] for row in store._get_conn().execute("PRAGMA table_info(identities)")}
+        assert "scrypt_hash" in columns
+        assert "yescrypt_hash" not in columns
+
+        priv, pub = store.register("alice", "secretpassword")
+        assert store.verify_password("alice", "secretpassword")
+        assert store.get_private_key("alice", "secretpassword") == priv
+    finally:
+        store.close()
 
 
 def test_identity_store(tmp_path):
