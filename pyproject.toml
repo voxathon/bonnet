@@ -61,7 +61,7 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP"]
-ignore = ["E501", "F841"]
+ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -72,9 +72,6 @@ mypy_path = "src"
 explicit_package_bases = true
 packages = ["bonnet"]
 ignore_missing_imports = true
-warn_unused_ignores = false
-warn_redundant_casts = false
-check_untyped_defs = false
+check_untyped_defs = true
 implicit_optional = true
-disable_error_code = ["attr-defined", "assignment", "arg-type", "union-attr", "return-value", "str-bytes-safe", "annotation-unchecked", "operator"]
 

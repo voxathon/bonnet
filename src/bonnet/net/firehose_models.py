@@ -1,4 +1,4 @@
-"""Firehose client models for the Bonnet Firehose Protocol (PROTOCOL.md §19).
+"""Firehose client models for the Bonnet Firehose Protocol.
 
 User-facing data models for article, board, user, ban status, event, and
 publication results. These are derived API views, not protocol primitives.
@@ -165,7 +165,7 @@ class UserInfo:
 
 @dataclass
 class PendingPunishment:
-    """A punishment currently gating a user's writes (Gate D)."""
+    """A punishment currently gating a user's writes."""
 
     type: str  # "warning" | "ban" | "permaban"
     event_id: str = ""  # hex

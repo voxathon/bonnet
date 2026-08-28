@@ -1,6 +1,6 @@
 """Tests for src/bonnet/net/replay.py — persistent replay-prevention ledger.
 
-Exit gate (§13 Phase 3):
+Covers:
   - Replays and stale/future requests fail before dispatch
   - Duplicate (pubkey, nonce) insertion fails with constraint violation
   - Expired rows are cleaned up in bounded batches

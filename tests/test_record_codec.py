@@ -1,8 +1,7 @@
-"""Phase 0 conformance tests for the Bonnet Firehose Protocol canonical codec.
+"""Conformance tests for the Bonnet Firehose Protocol canonical codec.
 
-Tests against PROTOCOL.md §4-§10 and §12.9. All golden vectors use fixed
-Ed25519 private keys so signatures and hashes are deterministic and
-reproducible across implementations.
+All golden vectors use fixed Ed25519 private keys so signatures and hashes
+are deterministic and reproducible across implementations.
 """
 
 import hashlib
@@ -158,7 +157,7 @@ class TestPrimitives:
 
 
 # ---------------------------------------------------------------------------
-# Metadata map tests (§6)
+# Metadata map tests
 # ---------------------------------------------------------------------------
 
 
@@ -289,7 +288,7 @@ class TestMetadata:
 
 
 # ---------------------------------------------------------------------------
-# Hash and signature domain tests (§4)
+# Hash and signature domain tests
 # ---------------------------------------------------------------------------
 
 
@@ -394,7 +393,7 @@ class TestCryptoDomains:
 
 
 # ---------------------------------------------------------------------------
-# Intent codec tests (§7)
+# Intent codec tests
 # ---------------------------------------------------------------------------
 
 
@@ -460,7 +459,7 @@ class TestIntent:
 
 
 # ---------------------------------------------------------------------------
-# Record codec tests (§8)
+# Record codec tests
 # ---------------------------------------------------------------------------
 
 
@@ -556,7 +555,7 @@ class TestRecord:
 
 
 # ---------------------------------------------------------------------------
-# Head codec tests (§9)
+# Head codec tests
 # ---------------------------------------------------------------------------
 
 
@@ -605,7 +604,7 @@ class TestHead:
 
 
 # ---------------------------------------------------------------------------
-# Witness codec tests (§10)
+# Witness codec tests
 # ---------------------------------------------------------------------------
 
 
@@ -674,7 +673,7 @@ class TestWitness:
 
 
 # ---------------------------------------------------------------------------
-# Key rotation proof tests (§12.9)
+# Key rotation proof tests
 # ---------------------------------------------------------------------------
 
 

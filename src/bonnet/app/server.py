@@ -1,4 +1,4 @@
-"""Bonnet Firehose Server bootstrap (PROTOCOL.md).
+"""Bonnet Firehose Server bootstrap.
 
 Constructs all firehose protocol components, wires them into an ASGI
 HTTP server, and provides a runnable entry point. Replaces the old v3

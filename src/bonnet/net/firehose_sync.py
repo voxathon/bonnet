@@ -1,4 +1,4 @@
-"""Federation sync manager for the Bonnet Firehose Protocol (PROTOCOL.md §17).
+"""Federation sync manager for the Bonnet Firehose Protocol.
 
 Pulls the global firehose from remote origins: fetches signed heads,
 requests contiguous event ranges, verifies chain continuity and signatures,
@@ -50,7 +50,7 @@ from bonnet.net.firehose_wire import (
 
 
 def is_safe_dial_target(hostname: str, port: int, allow_private: bool = False) -> bool:
-    """Validate a dial target against SSRF protections (Gate C).
+    """Validate a dial target against SSRF protections.
 
     Rejects non-global addresses by default. When allow_private is True,
     loopback, private, and link-local addresses are permitted for
