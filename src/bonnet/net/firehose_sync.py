@@ -231,6 +231,14 @@ class SyncManager:
         self._peer_last_failure: dict[str, float] = {}
         self._backoff_max = 3600
 
+    def set_identity(self, identity: Identity) -> None:
+        """Hot-swap the identity used to sign relay witnesses for future
+        accepted federation batches. Used by BonnetServer.apply_key_rotation
+        — witnesses already recorded under the old key stay as they were;
+        this only affects _create_witness for records accepted after the
+        call."""
+        self._identity = identity
+
     def start_origin(self, origin: str, client: SyncClient, interval: int = 300) -> None:
         """Start syncing an origin in the background (periodic + on-demand)."""
         if self._loop is None:

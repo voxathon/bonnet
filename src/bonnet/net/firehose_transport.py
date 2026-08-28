@@ -15,8 +15,20 @@ import time
 import httpx
 
 from bonnet.core.crypto import Identity
+from bonnet.core.kinds import KIND_ORIGIN_KEY_ROTATE
+from bonnet.core.record import (
+    encode_unsigned_record,
+    verify_key_rotation_proof,
+    verify_record_signature,
+)
 from bonnet.core.trust import TrustStore
 from bonnet.net.firehose_models import DiscoveryInfo
+from bonnet.net.firehose_wire import (
+    build_event_range,
+    build_key_epochs,
+    parse_event_range_response,
+    parse_key_epochs_response,
+)
 from bonnet.net.http_auth import (
     BonnetSigner,
     BonnetVerifier,
@@ -160,18 +172,92 @@ class FirehoseTransport:
             self._verifier = None
             raise FirehoseClientError(f"Discovery response signature verification failed: {e}")
 
-        self._pin_server_key(info.origin, self._server_pubkey)
+        await self._pin_server_key(info.origin, self._server_pubkey)
 
         return info
 
-    def _pin_server_key(self, origin: str, public_key: bytes) -> None:
-        """TOFU pin or verify the server's origin key."""
+    async def _pin_server_key(self, origin: str, public_key: bytes) -> None:
+        """TOFU pin, or accept a verified key rotation, for the server's key.
+
+        A key mismatch against the existing pin is only ever a mismatch, not
+        automatically an attack: the origin may have legitimately rotated.
+        Before rejecting, ask whether a verified chain of
+        bonnet.origin.key.rotate records connects the pinned key to the one
+        just presented, and if so, roll the pin forward instead of failing.
+        """
         if self._trust_store:
-            if not self._trust_store.tofu_pin(origin, public_key):
-                raise FirehoseClientError(f"Server key pin mismatch for origin '{origin}'")
+            if self._trust_store.tofu_pin(origin, public_key):
+                return
+            old_pubkey = self._trust_store.get_pin(origin)
+            if old_pubkey is not None and await self._verify_rotation_chain(
+                origin, old_pubkey, public_key
+            ):
+                if self._trust_store.accept_rotation(origin, old_pubkey, public_key):
+                    return
+            raise FirehoseClientError(f"Server key pin mismatch for origin '{origin}'")
         else:
             if self._server_pubkey and self._server_pubkey != public_key:
                 raise FirehoseClientError("Server key changed without rotation")
+
+    async def _verify_rotation_chain(
+        self, origin: str, old_pubkey: bytes, new_pubkey: bytes
+    ) -> bool:
+        """Check whether a chain of verified rotation records connects
+        old_pubkey (the currently pinned key) to new_pubkey (the key just
+        presented at discovery), possibly through several intermediate
+        rotations.
+
+        Mirrors firehose_sync._verify_epoch_hints: KEY_EPOCHS is only ever a
+        hint for which sequences to fetch, never trusted as data. Each
+        candidate boundary is re-fetched as a full record, and both its
+        origin signature (under the previous key) and its rotation proof
+        (under the claimed next key) are independently verified before the
+        chain advances. Uses the anonymous identity, since this runs during
+        discover() before any real identity has connected — anonymous reads
+        of KEY_EPOCHS/EVENT_RANGE are the same substrate-level access
+        federation sync already relies on.
+        """
+        try:
+            await self.connect_anonymous()
+            epochs_resp = await self.send_command(build_key_epochs(origin))
+            epochs = sorted(parse_key_epochs_response(epochs_resp), key=lambda e: e[0])
+        except Exception:
+            return False
+
+        current = old_pubkey
+        for _start_seq, end_seq, pubkey in epochs:
+            if pubkey != current:
+                continue
+            if end_seq is None:
+                break
+
+            try:
+                range_resp = await self.send_command(build_event_range(origin, end_seq, 1))
+                records = parse_event_range_response(range_resp)
+            except Exception:
+                return False
+            if len(records) != 1:
+                return False
+            rec, _witness = records[0]
+
+            if rec.kind != KIND_ORIGIN_KEY_ROTATE or rec.actor_pubkey != current:
+                return False
+            claimed_new = rec.metadata.get_bytes(1)
+            proof = rec.metadata.get_bytes(2)
+            if claimed_new is None or proof is None:
+                return False
+            if not verify_record_signature(
+                current, encode_unsigned_record(rec), rec.origin_signature
+            ):
+                return False
+            if not verify_key_rotation_proof(claimed_new, origin, current, proof):
+                return False
+
+            current = claimed_new
+            if current == new_pubkey:
+                return True
+
+        return current == new_pubkey
 
     async def connect(self, identity: Identity, username: str = "") -> None:
         """Connect with an authenticated identity."""
