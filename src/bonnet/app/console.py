@@ -1325,12 +1325,17 @@ class OperatorConsole:
         offset = 3
         lines = []
         for _ in range(count):
+            _origin, offset = self._read_text16(resp, offset)
             pk_len = resp[offset]
             offset += 1
             pubkey = resp[offset : offset + pk_len].hex()
             offset += pk_len
             username, offset = self._read_text16(resp, offset)
             flags = struct.unpack(">Q", resp[offset : offset + 8])[0]
+            offset += 8
+            _reg_seq = struct.unpack(">Q", resp[offset : offset + 8])[0]
+            offset += 8
+            _created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8
             revoked = resp[offset]
             offset += 1

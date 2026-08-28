@@ -30,6 +30,8 @@ from bonnet.net.firehose_wire import (
     parse_key_epochs_response,
 )
 from bonnet.net.http_auth import (
+    UNTP_LABEL,
+    UNTP_TAG,
     BonnetSigner,
     BonnetVerifier,
     HTTPMessage,
@@ -37,9 +39,6 @@ from bonnet.net.http_auth import (
     SignatureError,
     compute_content_digest,
 )
-
-FIREHOSE_TAG = "bonnet-firehose-1"
-FIREHOSE_LABEL = "bonnet"
 
 
 class FirehoseClientError(Exception):
@@ -126,7 +125,7 @@ class FirehoseTransport:
 
         self._verifier = BonnetVerifier(
             key_resolver=_ServerKeyResolver(self._server_pubkey),
-            tag=FIREHOSE_TAG,
+            tag=UNTP_TAG,
             max_lifetime=60,
             clock_skew=30,
             request_required_components=frozenset(
@@ -136,8 +135,8 @@ class FirehoseTransport:
                     "@target-uri",
                     "content-type",
                     "content-digest",
-                    "bonnet-protocol",
-                    "bonnet-nonce",
+                    "untp-version",
+                    "untp-nonce",
                 }
             ),
             response_required_components=frozenset(
@@ -145,9 +144,9 @@ class FirehoseTransport:
                     "@status",
                     "content-type",
                     "content-digest",
-                    "bonnet-protocol",
-                    "bonnet-origin",
-                    "bonnet-request-nonce",
+                    "untp-version",
+                    "untp-origin",
+                    "untp-request-nonce",
                 }
             ),
         )
@@ -269,24 +268,24 @@ class FirehoseTransport:
         self._signer = BonnetSigner(
             private_key=identity.private_key,
             key_id=f"ed25519:{identity.public_key.hex()}",
-            tag=FIREHOSE_TAG,
-            label=FIREHOSE_LABEL,
+            tag=UNTP_TAG,
+            label=UNTP_LABEL,
             request_components=[
                 "@method",
                 "@authority",
                 "@target-uri",
                 "content-type",
                 "content-digest",
-                "bonnet-protocol",
-                "bonnet-nonce",
+                "untp-version",
+                "untp-nonce",
             ],
             response_components=[
                 "@status",
                 "content-type",
                 "content-digest",
-                "bonnet-protocol",
-                "bonnet-origin",
-                "bonnet-request-nonce",
+                "untp-version",
+                "untp-origin",
+                "untp-request-nonce",
             ],
         )
 
@@ -302,24 +301,24 @@ class FirehoseTransport:
         self._signer = BonnetSigner(
             private_key=self._identity.private_key,
             key_id=f"ed25519:{self._identity.public_key.hex()}",
-            tag=FIREHOSE_TAG,
-            label=FIREHOSE_LABEL,
+            tag=UNTP_TAG,
+            label=UNTP_LABEL,
             request_components=[
                 "@method",
                 "@authority",
                 "@target-uri",
                 "content-type",
                 "content-digest",
-                "bonnet-protocol",
-                "bonnet-nonce",
+                "untp-version",
+                "untp-nonce",
             ],
             response_components=[
                 "@status",
                 "content-type",
                 "content-digest",
-                "bonnet-protocol",
-                "bonnet-origin",
-                "bonnet-request-nonce",
+                "untp-version",
+                "untp-origin",
+                "untp-request-nonce",
             ],
         )
 
@@ -342,8 +341,8 @@ class FirehoseTransport:
             headers={
                 "Content-Type": "application/vnd.bonnet.command",
                 "Content-Digest": compute_content_digest(cmd_bytes),
-                "Bonnet-Protocol": "bonnet-firehose-1",
-                "Bonnet-Nonce": nonce,
+                "Untp-Version": "1",
+                "Untp-Nonce": nonce,
             },
             body=cmd_bytes,
         )

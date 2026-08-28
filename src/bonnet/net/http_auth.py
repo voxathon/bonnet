@@ -8,7 +8,7 @@ Implements exactly what the firehose protocol requires:
   - Mandatory covered-component enforcement
   - created / expires / clock-skew validation
   - nonce matching and base64url-32-byte validation
-  - tag="bonnet-firehose-1" filtering
+  - tag="untp-1" filtering
   - keyid format validation (ed25519:<hex> for requests, origin:<name> for responses)
   - All public sign/verify methods are async (crypto offloaded via asyncio.to_thread)
 """
@@ -26,8 +26,8 @@ from dataclasses import dataclass, field
 import nacl.exceptions
 import nacl.signing
 
-BONNET_TAG = "bonnet-firehose-1"
-BONNET_LABEL = "bonnet"
+UNTP_TAG = "untp-1"
+UNTP_LABEL = "untp"
 ED25519_ALG = "ed25519"
 DEFAULT_MAX_LIFETIME = 60
 DEFAULT_CLOCK_SKEW = 30
@@ -39,8 +39,8 @@ REQUEST_REQUIRED_COMPONENTS = frozenset(
         "@target-uri",
         "content-type",
         "content-digest",
-        "bonnet-protocol",
-        "bonnet-nonce",
+        "untp-version",
+        "untp-nonce",
     }
 )
 
@@ -49,8 +49,8 @@ RESPONSE_REQUIRED_COMPONENTS = frozenset(
         "@status",
         "content-type",
         "content-digest",
-        "bonnet-protocol",
-        "bonnet-origin",
+        "untp-version",
+        "untp-origin",
     }
 )
 
@@ -553,8 +553,8 @@ class BonnetSigner:
         self,
         private_key: bytes,
         key_id: str,
-        tag: str = BONNET_TAG,
-        label: str = BONNET_LABEL,
+        tag: str = UNTP_TAG,
+        label: str = UNTP_LABEL,
         request_components: list[str] = None,
         response_components: list[str] = None,
     ):
@@ -570,16 +570,16 @@ class BonnetSigner:
             "@target-uri",
             "content-type",
             "content-digest",
-            "bonnet-protocol",
-            "bonnet-nonce",
+            "untp-version",
+            "untp-nonce",
         ]
         self._response_components = response_components or [
             "@status",
             "content-type",
             "content-digest",
-            "bonnet-protocol",
-            "bonnet-origin",
-            "bonnet-request-nonce",
+            "untp-version",
+            "untp-origin",
+            "untp-request-nonce",
         ]
 
     async def sign_request(
@@ -606,7 +606,7 @@ class BonnetSigner:
         created: int | None = None,
         expires: int | None = None,
     ) -> None:
-        msg.set_header("Bonnet-Request-Nonce", request_nonce)
+        msg.set_header("Untp-Request-Nonce", request_nonce)
         components = list(self._response_components)
         await self._sign(msg, components, request_nonce, created, expires)
 
@@ -649,7 +649,7 @@ class BonnetVerifier:
     def __init__(
         self,
         key_resolver: KeyResolver,
-        tag: str = BONNET_TAG,
+        tag: str = UNTP_TAG,
         max_lifetime: int = DEFAULT_MAX_LIFETIME,
         clock_skew: int = DEFAULT_CLOCK_SKEW,
         request_required_components: frozenset = None,
@@ -684,21 +684,21 @@ class BonnetVerifier:
         # Comparing an uncovered header would be worthless: it is not protected
         # by the signature, so anyone able to replay the response can set it.
         if expected_origin is not None:
-            if not msg.has_header("bonnet-origin"):
-                raise SignatureError("Response is missing Bonnet-Origin")
-            if "bonnet-origin" not in result.covered_components:
-                raise SignatureError("Response signature does not cover Bonnet-Origin")
-            actual = msg.header("bonnet-origin")
+            if not msg.has_header("untp-origin"):
+                raise SignatureError("Response is missing Untp-Origin")
+            if "untp-origin" not in result.covered_components:
+                raise SignatureError("Response signature does not cover Untp-Origin")
+            actual = msg.header("untp-origin")
             if actual != expected_origin:
                 raise SignatureError(
-                    f"Response Bonnet-Origin {actual!r} != expected {expected_origin!r}"
+                    f"Response Untp-Origin {actual!r} != expected {expected_origin!r}"
                 )
         if expected_request_nonce is not None:
-            if not msg.has_header("bonnet-request-nonce"):
-                raise SignatureError("Response is missing Bonnet-Request-Nonce")
-            if "bonnet-request-nonce" not in result.covered_components:
-                raise SignatureError("Response signature does not cover Bonnet-Request-Nonce")
-            actual = msg.header("bonnet-request-nonce")
+            if not msg.has_header("untp-request-nonce"):
+                raise SignatureError("Response is missing Untp-Request-Nonce")
+            if "untp-request-nonce" not in result.covered_components:
+                raise SignatureError("Response signature does not cover Untp-Request-Nonce")
+            actual = msg.header("untp-request-nonce")
             if actual != expected_request_nonce:
                 raise SignatureError(
                     f"Response request-nonce {actual!r} != expected {expected_request_nonce!r}"
@@ -746,11 +746,11 @@ class BonnetVerifier:
 
         if not is_response:
             _validate_nonce(nonce)
-            if msg.has_header("bonnet-nonce"):
-                header_nonce = msg.header("bonnet-nonce")
+            if msg.has_header("untp-nonce"):
+                header_nonce = msg.header("untp-nonce")
                 if header_nonce != nonce:
                     raise InvalidParameter(
-                        f"nonce param {nonce!r} != Bonnet-Nonce header {header_nonce!r}"
+                        f"nonce param {nonce!r} != Untp-Nonce header {header_nonce!r}"
                     )
 
         if require_components:

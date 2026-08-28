@@ -995,11 +995,11 @@ class BoardProjection:
                     where_parts.append(f"{col} = ?")
                     params.append(int(value))
             elif field_id == 0x06:
-                if value == "purged":
+                if value == "purged" and op == 0x01:
                     has_visibility_filter = True
                     query_purged = True
                     where_parts.append("body_state = 'purged'")
-                else:
+                elif value != "purged":
                     col = "visibility"
                     if op == 0x01:
                         has_visibility_filter = True
