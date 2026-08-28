@@ -229,12 +229,51 @@ class BonnetServer:
             if count:
                 log_msg(f"INIT: dispatched remote origin '{remote}' ({count} records)")
 
+        self._sweep_orphaned_staged_bodies()
+
         self.local_conn = FirehoseLocalConnection(
             self.server_identity.public_key,
             config.origin,
         )
 
         log_msg("INIT: complete")
+
+    def _sweep_orphaned_staged_bodies(self, min_age_seconds: int = 3600) -> None:
+        """Recover or discard article bodies a crash left in staging.
+
+        stage_article_body writes here before the firehose transaction that
+        allocates an article number; only finalize_article_body (on success)
+        or delete_staged_article_body (on failure) is meant to remove the
+        file afterward. A process killed in between the two leaves a file
+        neither served nor cleaned up (internal/BUGS.md #4). Age-gated so a
+        request that's merely still in flight isn't swept out from under it.
+
+        Two outcomes per stale entry: if the record actually committed
+        (bootstrap dispatch above would already have finalized it in the
+        ordinary case, but this is independent of dispatch state and
+        doesn't rely on that ordering), finalize it into place; if no such
+        record exists at all, the append never happened and the file is a
+        true orphan — discard it.
+        """
+        now = time.time()
+        for origin, board, event_id, staged_at in self.body_store.list_staged_article_bodies():
+            age = now - staged_at
+            if age < min_age_seconds:
+                continue
+            rec = self.firehose.get_event_by_id(origin, event_id)
+            if rec is not None and rec.article_num > 0:
+                if self.body_store.finalize_article_body(origin, board, event_id, rec.article_num):
+                    log_msg(
+                        f"INIT: recovered staged body for {origin}/{board} "
+                        f"article #{rec.article_num} (event {event_id.hex()[:16]}..., "
+                        f"age={int(age)}s)"
+                    )
+            else:
+                self.body_store.delete_staged_article_body(origin, board, event_id)
+                log_msg(
+                    f"INIT: discarded orphaned staged body {origin}/{board} "
+                    f"event {event_id.hex()[:16]}... (no matching record, age={int(age)}s)"
+                )
 
     def _ensure_root_registered(self) -> None:
         """Publish a bonnet.user.register record for the server identity if not already present."""
