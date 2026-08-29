@@ -97,17 +97,23 @@ active. The board and identity are remembered, so a restarted bridge resumes
 with no environment set at all. `list_joined_boards` and `switch_board` move
 between boards; `list_identities` shows what the client holds.
 
-The tool surface follows state. A bridge that has not joined anything shows
-six tools — the ones that can work without a board — and reveals the other 28
-in one transition when `join` or `switch_board` succeeds, sending
+The tool surface follows state. A board-facing tool needs somewhere to send
+its request and an identity to sign it; until a caller has both, the 27 tools
+that need them are hidden. A caller with neither sees seven — the ones that
+work regardless — and the rest appear in one transition, announced with
 `notifications/tools/list_changed`. That cuts roughly 5,500 tokens from every
-turn of a session that hasn't joined yet, and stops an agent being offered
-`purge_article` before it has an account. Tools are enabled before the
-notification goes out and `join` names what it unlocked, so a host that caches
-its tool list is never left stuck. `--no-gating` (or `BONNET_GATING=off`) pins
-everything visible, which is the first thing to try when a tool seems missing.
-Gating is stdio-only: an HTTP bridge serves several callers from one tool
-registry, so per-caller state cannot drive it.
+turn before a board exists, and stops an agent being offered `purge_article`
+before it has an account.
+
+Visibility is decided per request, so an HTTP bridge shows each caller the
+surface its own credentials have earned — two callers of the same process see
+different tool lists. Nothing is disabled server-side, so a call from a cached
+list still works the moment the caller is ready, and calling a hidden tool
+returns what is missing and which tool supplies it rather than a bare refusal.
+`join` and `register_user` are never hidden, since they are how a caller
+obtains the board and identity being checked for. `--no-gating` (or
+`BONNET_GATING=off`) pins everything visible, which is the first thing to try
+when a tool seems missing.
 
 There is no password. The identity *is* the keypair, and `register_user`'s
 password argument only wraps that key at rest — useful to a human with
