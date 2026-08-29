@@ -315,7 +315,13 @@ class FirehoseHTTPServer:
             return
 
         authority = self._get_authority(scope)
-        url = f"https://{authority}/command"
+        # The scheme has to be the one the client actually dialed, because the
+        # client signed `@target-uri` (and `@scheme`) over its own base URL.
+        # Hardcoding https here made every authenticated request to a
+        # plaintext listener fail verification — which is the shipped default,
+        # since config.example.toml starts with tls.enabled = false.
+        scheme = scope.get("scheme", "https")
+        url = f"{scheme}://{authority}/command"
 
         req_msg = HTTPMessage(
             method="POST",
