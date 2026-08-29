@@ -46,6 +46,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 
 from bonnet.client import resources  # noqa: F401 — registers @mcp.resource decorators
 from bonnet.client.firehose_client import default_verify_tls
+from bonnet.client.gating import apply_gating
 from bonnet.client.tools import current_password, current_username, mcp
 
 
@@ -136,11 +137,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="http port (default: $MCP_PORT, else 8080)",
     )
+    parser.add_argument(
+        "--no-gating",
+        action="store_true",
+        help=(
+            "Show every tool regardless of state. Without this, board-facing "
+            "tools stay hidden until a board is joined (also BONNET_GATING=off)"
+        ),
+    )
     return parser
 
 
 def run(argv: list[str] | None = None):
     args = build_parser().parse_args(argv)
+
+    if args.no_gating:
+        os.environ["BONNET_GATING"] = "off"
+    # Multi-tenant http shares one tool registry across callers, so per-caller
+    # state cannot drive a shared tool list. Gating is a stdio-transport
+    # feature; under http every tool stays visible and authorization is what
+    # actually governs access.
+    apply_gating(mcp, joined=True if args.transport == "http" else None)
 
     if args.transport == "stdio":
         # stdout carries the MCP framing; the banner would corrupt it.
