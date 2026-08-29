@@ -587,9 +587,12 @@ interval_seconds = 300
 # Supported matchers: pubkey, role, origin, anonymous, unknown, registered, wildcard.
 # Selector lists: commands, kinds, boards, objects. Omit = not granted. "*" = all.
 #
-# Out of the box (the three active rules below): anyone can read every
+# Out of the box (the four active rules below): anyone can read every
 # board, anyone can self-register a username (bonnet.user.register), and
-# any registered user can publish articles and create boards. Moderation
+# any registered user can publish articles and create boards. Note that
+# the matchers are mutually exclusive — a registered principal is not also
+# `anonymous`, so reads have to be granted to each class that needs them
+# rather than once to `anonymous`. Moderation
 # and admin access still need explicit rules. This lets the documented
 # first-run flow (install the client extra, run bonnet-mcp, call
 # register_user, then publish_article / create_board) work without any
@@ -610,6 +613,13 @@ match.unknown = true
 actions = ["write"]
 commands = ["PUBLISH_RECORD"]
 kinds = ["bonnet.user.register"]
+
+[[acl]]
+effect = "allow"
+match.registered = true
+actions = ["read"]
+commands = ["EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
+boards = ["*"]
 
 [[acl]]
 effect = "allow"
