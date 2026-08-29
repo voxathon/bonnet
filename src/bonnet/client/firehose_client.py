@@ -34,6 +34,7 @@ from bonnet.net.firehose_models import (
     Permissions,
     PublishResult,
     QueryResponse,
+    ReportInfo,
     SearchResponse,
     UserInfo,
 )
@@ -58,6 +59,7 @@ from bonnet.net.firehose_wire import (
     build_event_range,
     build_permissions,
     build_publish_record,
+    build_report_list,
     build_user_get,
     build_user_list,
     parse_article_body_response,
@@ -74,6 +76,7 @@ from bonnet.net.firehose_wire import (
     parse_permissions_response,
     parse_publish_response,
     parse_publish_response_raw,
+    parse_report_list_response,
     parse_user_get_response,
     parse_user_list_response,
 )
@@ -568,6 +571,20 @@ class FirehoseHTTPClient(FirehoseTransport):
         """Ask the relay what this connection's principal is allowed to do."""
         resp = await self._send_command(build_permissions(board))
         return parse_permissions_response(resp)
+
+    async def list_reports(
+        self, culprit_pubkey: bytes = b"", limit: int = 100, offset: int = 0
+    ) -> list[ReportInfo]:
+        """Fetch the moderation queue from the relay's own index.
+
+        Server-side because that is where it can be enforced: REPORT_LIST is
+        an ACL command in its own right, and reports carrying an article
+        target are filtered per board by the relay. Assembling this client
+        side from EVENT_RANGE would answer the same question with neither
+        check applied.
+        """
+        resp = await self._send_command(build_report_list(culprit_pubkey, limit, offset))
+        return parse_report_list_response(resp)
 
     async def list_boards(self, origin: str) -> list[BoardInfo]:
         cmd = build_board_list(origin)

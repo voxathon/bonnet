@@ -145,3 +145,16 @@ boards = ["*"]
 # actions = ["write"]
 # commands = ["PUBLISH_RECORD"]
 # kinds = ["bonnet.punishment.warn", "bonnet.punishment.ban", "bonnet.punishment.revoke"]
+#
+# Reading the moderation queue is a separate grant, and deliberately not in
+# the default rules above: reports name people, so REPORT_LIST would let any
+# reader enumerate every accusation on this server. Grant it with the
+# punishment authority it goes with. Reports whose target board the caller
+# cannot read are filtered out server-side regardless.
+#
+# [[acl]]
+# effect = "allow"
+# match.role = "moderator"
+# actions = ["read"]
+# commands = ["REPORT_LIST"]
+# boards = ["*"]

@@ -54,6 +54,7 @@ from bonnet.net.firehose_wire import (
     OP_KEY_EPOCHS,
     OP_PERMISSIONS,
     OP_PUBLISH_RECORD,
+    OP_REPORT_LIST,
     OP_USER_GET,
     OP_USER_LIST,
 )
@@ -91,6 +92,7 @@ CMD_NAMES = {
     OP_USER_GET: "USER_GET",
     OP_USER_LIST: "USER_LIST",
     OP_BAN_STATUS: "BAN_STATUS",
+    OP_REPORT_LIST: "REPORT_LIST",
     OP_EVENT_BODY: "EVENT_BODY",
 }
 
@@ -100,6 +102,7 @@ READ_OPS = frozenset(
         OP_EVENT_HEAD,
         OP_EVENT_RANGE,
         OP_PERMISSIONS,
+        OP_REPORT_LIST,
         OP_EVENT_GET,
         OP_KEY_EPOCHS,
         OP_BOARD_LIST,
@@ -128,6 +131,17 @@ def _success(payload: bytes = b"") -> bytes:
 def _error(code: int, message: str) -> bytes:
     msg_bytes = message.encode("utf-8")
     return b"\x01" + struct.pack(">H", code) + struct.pack(">H", len(msg_bytes)) + msg_bytes
+
+
+def _pad32(value: bytes) -> bytes:
+    """Exactly 32 bytes: truncated, or zero-padded if short.
+
+    Rows written before the reports projection recorded a reporter carry an
+    empty key, and the wire format is fixed-width. Built without a NUL escape
+    on purpose — heredoc-written escapes have twice put literal NUL bytes into
+    source files in this repo.
+    """
+    return (value + bytes(32))[:32]
 
 
 def _enc_text16(s: str) -> bytes:
@@ -371,6 +385,8 @@ class FirehoseCommandHandler:
                 return self._cmd_event_range(data, ctx)
             elif opcode == OP_EVENT_GET:
                 return self._cmd_event_get(data, ctx)
+            elif opcode == OP_REPORT_LIST:
+                return self._cmd_report_list(data, ctx)
             elif opcode == OP_PERMISSIONS:
                 return self._cmd_permissions(data, ctx)
             elif opcode == OP_KEY_EPOCHS:
@@ -642,6 +658,64 @@ class FirehoseCommandHandler:
             payload += struct.pack(">Q", start_seq)
             payload += struct.pack(">Q", end_seq if end_seq is not None else 0)
             payload += pubkey
+        return _success(payload)
+
+    # ------------------------------------------------------------------
+    # REPORT_LIST
+    # ------------------------------------------------------------------
+
+    def _cmd_report_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
+        """The moderation queue, filtered where the ACL can reach it.
+
+        Reports name people and point at boards, which is exactly why this is
+        a command and not something a client assembles for itself. Two
+        enforcement points exist here and neither is available to a client
+        scanning the event log:
+
+        1. `REPORT_LIST` is its own ACL command, so an operator can grant the
+           queue to moderators and to nobody else.
+        2. A report carrying an article target is filtered through
+           `_board_read_allowed` for *that* board. Without it, an ACL rule
+           scoped to `boards = [...]` would be a no-op here — a caller barred
+           from a board could still enumerate every accusation made in it,
+           which is the failure `_board_read_allowed` exists to prevent.
+
+        Reports with an event target or no target carry no board to check and
+        are governed by the command grant alone.
+        """
+        offset = 0
+        key_len, offset = _read_u8(data, offset)
+        culprit = data[offset : offset + key_len] if key_len else None
+        offset += key_len
+        limit, offset = _read_u16(data, offset)
+        page_offset, offset = _read_u16(data, offset)
+
+        rows = self._policy.list_reports(
+            culprit_pubkey=culprit, limit=limit or 100, offset=page_offset
+        )
+
+        visible = [
+            r
+            for r in rows
+            if not r["target_board"]
+            or self._board_read_allowed(ctx, "REPORT_LIST", r["target_board"])
+        ]
+
+        payload = struct.pack(">H", len(visible))
+        for r in visible:
+            payload += r["event_id"]
+            payload += _enc_text16(r["origin"])
+            payload += struct.pack(">Q", r["origin_seq"])
+            payload += _pad32(r["reporter_pubkey"])
+            payload += _enc_text16(r["reporter_username"])
+            payload += r["culprit_pubkey"]
+            payload += _enc_text16(r["target_origin"])
+            payload += _enc_text16(r["target_board"])
+            payload += r["target_article_id"]
+            payload += r["target_event_id"]
+            payload += r["body_hash"]
+            payload += struct.pack(">I", r["body_size"])
+            payload += struct.pack(">Q", max(0, r["created_at"]))
         return _success(payload)
 
     # ------------------------------------------------------------------

@@ -129,6 +129,13 @@ only key rotation a user has. `register_user` documents the trade-offs.
 
 Read-only tools work without an account.
 
+Moderation is a two-step loop: any registered user may `report` an article,
+which files a signed accusation naming its author; a moderator reads the queue
+with `list_reports` and decides separately whether a punishment follows.
+Reading the queue is its own permission and is **not** granted by default —
+reports name people — so the shipped config pairs it with the commented
+moderator rules.
+
 `my_permissions` asks the board what your identity is actually allowed to do
 — the relay evaluates its ACL for your key and returns the commands and record
 kinds it would permit, scoped to a board if you name one. It answers for the
