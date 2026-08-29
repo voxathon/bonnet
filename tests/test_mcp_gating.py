@@ -117,7 +117,7 @@ async def test_join_reports_what_it_unlocked(bridge):
     result = await tools.join("https://bbs.test", "scout")
 
     assert "publish_article" in result["tools_unlocked"]
-    assert len(result["tools_unlocked"]) == 27
+    assert len(result["tools_unlocked"]) == 29
 
 
 async def test_a_restarted_bridge_starts_ready(bridge):

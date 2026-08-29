@@ -152,6 +152,9 @@ class OperatorConsole:
         if cmd == "ban-status":
             return self._cmd_ban_status(parts)
 
+        if cmd == "reports":
+            return self._cmd_reports(parts)
+
         if cmd == "event-head":
             return self._cmd_event_head(parts)
 
@@ -216,6 +219,7 @@ class OperatorConsole:
   revoke-punishment <event-id-hex> [reason...]
                                 Revoke a warning/ban/permaban by its event ID
   ban-status <pubkey-hex>       Check ban status
+  reports [pubkey-hex] [limit]  Moderation queue (reports filed)
   event-head <origin>           Show firehose head
   event-range <origin> <start> <count>
                                 Show firehose events
@@ -1410,6 +1414,66 @@ class OperatorConsole:
             )
 
         return "Pending punishments:\n" + "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # reports
+    # ------------------------------------------------------------------
+
+    def _cmd_reports(self, parts) -> str:
+        """The moderation queue, read straight from the policy projection.
+
+        Reports have been dispatched and stored since the kind existed, but
+        nothing ever read the table back — one arriving over federation was
+        recorded and then seen by nobody. This is the operator's view of it;
+        agents reach the same records over the wire.
+
+        A report is an accusation by its filer and nothing more. It confers no
+        authority, and a stack of them naming one key is evidence of a stack
+        of reports.
+        """
+        from datetime import datetime
+
+        zero = bytes(32)
+        culprit = None
+        limit = 50
+        for arg in parts[1:]:
+            if len(arg) == 64:
+                try:
+                    culprit = bytes.fromhex(arg)
+                    continue
+                except ValueError:
+                    return "Invalid hex pubkey"
+            try:
+                limit = int(arg)
+            except ValueError:
+                return "Usage: reports [pubkey-hex] [limit]"
+
+        rows = self.policy.list_reports(culprit_pubkey=culprit, limit=limit)
+        if not rows:
+            return "No reports." if culprit is None else "No reports naming that key."
+
+        lines = []
+        for r in rows:
+            when = datetime.fromtimestamp(r["created_at"]).strftime("%Y-%m-%d %H:%M")
+            if r["target_article_id"] != zero:
+                target = (
+                    f"article {r['target_article_id'].hex()[:16]}... "
+                    f"in {r['target_origin']}/{r['target_board']}"
+                )
+            elif r["target_event_id"] != zero:
+                target = f"event {r['target_event_id'].hex()[:16]}... on {r['target_origin']}"
+            else:
+                target = "(no target)"
+            lines.append(
+                f"  {when}  seq {r['origin_seq']} on {r['origin']}\n"
+                f"    Names:  {r['culprit_pubkey'].hex()}\n"
+                f"    Target: {target}\n"
+                f"    Reason: {r['body_size']} bytes (hash {r['body_hash'].hex()[:16]}...)"
+            )
+        header = f"{len(rows)} report(s)"
+        if culprit is not None:
+            header += f" naming {culprit.hex()[:16]}..."
+        return header + ":\n" + "\n".join(lines)
 
     # ------------------------------------------------------------------
     # event-head
