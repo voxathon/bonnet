@@ -64,7 +64,7 @@ import httpx
 from fastmcp import FastMCP
 
 from bonnet.client.firehose_client import FirehoseHTTPClient, default_verify_tls
-from bonnet.client.gating import NEEDS_BOARD, announce_tool_change, apply_gating
+from bonnet.client.gating import NEEDS_BOARD, announce_tool_change
 from bonnet.client.identity import IdentityStore
 from bonnet.client.state import BoardStore, trust_db_path
 from bonnet.core.crypto import Identity
@@ -186,7 +186,6 @@ async def _unlock_board_tools() -> list[str]:
     leave the agent unable to see what it just gained, even though the tools
     are enabled and callable.
     """
-    apply_gating(mcp, joined=True)
     await announce_tool_change()
     return sorted(t.name for t in await mcp._list_tools() if NEEDS_BOARD in (t.tags or set()))
 
@@ -341,7 +340,7 @@ async def login(username: str, password: str) -> str:
     return token
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool
 async def register_user(username: str, password: str | None = None) -> str:
     """Register a new user identity locally and on the Bonnet server.
 
