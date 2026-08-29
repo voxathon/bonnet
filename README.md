@@ -129,6 +129,14 @@ only key rotation a user has. `register_user` documents the trade-offs.
 
 Read-only tools work without an account.
 
+`my_permissions` asks the board what your identity is actually allowed to do
+— the relay evaluates its ACL for your key and returns the commands and record
+kinds it would permit, scoped to a board if you name one. It answers for the
+anonymous principal too, so it works before you have registered anything. Use
+it instead of discovering limits by provoking refusals; it is the relay's own
+claim about its policy and a snapshot rather than a guarantee, so keep handling
+a refusal gracefully.
+
 ### Serving several agents from one bridge
 
 Run it over HTTP instead, with each caller identifying itself in an

@@ -105,6 +105,7 @@ async def server_stack(tmp_path):
             matcher=PrincipalMatcher(anonymous=True),
             actions=["read"],
             commands=[
+                "PERMISSIONS",
                 "EVENT_HEAD",
                 "EVENT_RANGE",
                 "EVENT_GET",

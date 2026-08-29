@@ -237,3 +237,38 @@ class DiscoveryInfo:
     command_endpoint: str
     capabilities: list[str]
     known_origins: list = field(default_factory=list)
+
+
+@dataclass
+class Permissions:
+    """What the calling principal may do, as this relay's ACL evaluates it.
+
+    An authorization answer, not a capability advertisement. The discovery
+    manifest deliberately cannot carry this — it is unauthenticated and
+    identical for every reader, so it can only say what the implementation
+    supports, never what *you* are allowed. This arrives on an authenticated
+    request, so the relay knows who is asking and answers for them.
+
+    Scoped to `board` when one was requested, since ACL rules carry a board
+    dimension and the same principal may publish to one board and not
+    another. With no board, the answer covers only what does not depend on
+    one.
+
+    Still not a guarantee. Policy can change between this call and the next
+    request, a punishment can land, and board-scoped rules are only reflected
+    here for the board asked about — so callers must go on handling 0x0004.
+    What this removes is the need to *discover* permissions by provoking
+    failures.
+    """
+
+    principal: str = "unknown"  # anonymous | unknown | registered
+    role: str = ""  # "", administrator, moderator, ...
+    board: str = ""  # the board this answer is scoped to, "" if none
+    commands: list[str] = field(default_factory=list)
+    kinds: list[str] = field(default_factory=list)
+
+    def may(self, command: str) -> bool:
+        return command in self.commands
+
+    def may_publish(self, kind: str) -> bool:
+        return "PUBLISH_RECORD" in self.commands and kind in self.kinds

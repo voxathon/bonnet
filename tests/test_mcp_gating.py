@@ -30,6 +30,7 @@ UNGATED = {
     "login",
     "join",
     "register_user",
+    "my_permissions",
     "list_joined_boards",
     "switch_board",
     "list_identities",
