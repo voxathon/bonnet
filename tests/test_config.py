@@ -197,6 +197,70 @@ admin_pubkey = "{pubkey}"
     assert any(r.matcher.pubkey == bytes.fromhex(pubkey) for r in c.acl._rules)
 
 
+def test_load_admin_pubkey_grants_admin_alongside_existing_acl_rules(tmp_path):
+    """admin_pubkey must grant admin even when [[acl]] already has rules —
+    it used to only take effect when the [[acl]] table was completely
+    empty. This is exactly the documented first-run flow: keep the sample
+    config's default rules, uncomment admin_pubkey."""
+    pubkey = "ab" * 32
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+admin_pubkey = "{pubkey}"
+
+[[acl]]
+effect = "allow"
+match.anonymous = true
+actions = ["read"]
+commands = ["BOARD_LIST"]
+boards = ["*"]
+
+[[acl]]
+effect = "allow"
+match.registered = true
+actions = ["write"]
+commands = ["PUBLISH_RECORD"]
+kinds = ["bonnet.article"]
+boards = ["*"]
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert len(c.acl._rules) == 3
+    admin_bytes = bytes.fromhex(pubkey)
+    assert any(r.matcher.pubkey == admin_bytes and r.effect == "allow" for r in c.acl._rules), (
+        "admin_pubkey must still grant admin when other [[acl]] rules exist"
+    )
+
+
+def test_load_admin_pubkey_not_duplicated_if_already_present(tmp_path):
+    """If config.toml already has an explicit rule for admin_pubkey's own
+    key, loading must not add a second, redundant one."""
+    pubkey = "ef" * 32
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+admin_pubkey = "{pubkey}"
+
+[[acl]]
+effect = "allow"
+match.pubkey = "hex:{pubkey}"
+actions = ["read", "write"]
+commands = ["*"]
+kinds = ["*"]
+boards = ["*"]
+objects = ["*"]
+""",
+    )
+    c = FirehoseConfig.load(path)
+    admin_bytes = bytes.fromhex(pubkey)
+    matching = [r for r in c.acl._rules if r.matcher.pubkey == admin_bytes and r.effect == "allow"]
+    assert len(matching) == 1
+
+
 def test_load_no_admin_no_acl(tmp_path):
     path = _write_config(
         tmp_path,

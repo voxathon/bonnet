@@ -151,6 +151,60 @@ def test_close_releases_resources(server):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# admin_pubkey ACL wiring
+# ---------------------------------------------------------------------------
+
+
+def test_admin_pubkey_grants_admin_alongside_existing_acl_rules(tmp_path):
+    """A FirehoseConfig built directly (not via .load()) with admin_pubkey_hex
+    set AND pre-existing [[acl]] rules must still grant that key admin — the
+    bug was that it only worked when acl._rules was completely empty. The
+    server's own identity must still also be admin (the documented
+    invariant), not replaced by the configured key."""
+    from bonnet.app.server import BonnetServer
+    from bonnet.core.acl import ACLEvaluator, ACLRule, PrincipalMatcher
+
+    admin_hex = "cd" * 32
+    config = FirehoseConfig(
+        origin="bbs.test",
+        hostname="bbs.test",
+        data_dir=str(tmp_path / "data"),
+        boards_dir=str(tmp_path / "boards"),
+        events_bodies_dir=str(tmp_path / "event_bodies"),
+        port=2272,
+        tls_enabled=False,
+        admin_pubkey_hex=admin_hex,
+        acl=ACLEvaluator(
+            [
+                ACLRule(
+                    effect="allow",
+                    matcher=PrincipalMatcher(anonymous=True),
+                    actions=["read"],
+                    commands=["BOARD_LIST"],
+                    boards=["*"],
+                )
+            ]
+        ),
+    )
+    os.makedirs(config.data_dir, exist_ok=True)
+    os.makedirs(config.boards_dir, exist_ok=True)
+    os.makedirs(config.events_bodies_dir, exist_ok=True)
+
+    s = BonnetServer(config)
+    try:
+        admin_bytes = bytes.fromhex(admin_hex)
+        assert any(r.matcher.pubkey == admin_bytes and r.effect == "allow" for r in s.acl._rules), (
+            "configured admin_pubkey must be granted admin"
+        )
+        assert any(
+            r.matcher.pubkey == s.server_identity.public_key and r.effect == "allow"
+            for r in s.acl._rules
+        ), "the server's own identity must still be its own admin regardless of what's configured"
+    finally:
+        s.close()
+
+
 def test_identity_stable_across_restart(config):
     """Server identity is the same after restart."""
     os.makedirs(config.data_dir, exist_ok=True)

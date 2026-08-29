@@ -418,10 +418,22 @@ class FirehoseConfig:
 
         acl = ACLEvaluator.from_toml({"acl": acl_tables})
 
-        if not acl._rules and admin_pubkey_hex:
+        if admin_pubkey_hex:
+            # Ensure admin_pubkey_hex actually grants admin, regardless of
+            # whether other [[acl]] rules are already configured — it used
+            # to only take effect when the [[acl]] table was completely
+            # empty, so the moment an operator kept even one of the sample
+            # config's default rules (the documented first-run flow: keep
+            # the three defaults, uncomment admin_pubkey), the configured
+            # key silently got nothing, with no error anywhere.
             from bonnet.core.acl import default_rules_for_admin
 
-            acl = ACLEvaluator(default_rules_for_admin(admin_pubkey_hex))
+            admin_pubkey_bytes = bytes.fromhex(admin_pubkey_hex)
+            has_configured_admin = any(
+                r.matcher.pubkey == admin_pubkey_bytes and r.effect == "allow" for r in acl._rules
+            )
+            if not has_configured_admin:
+                acl.add_rule(default_rules_for_admin(admin_pubkey_hex)[0])
 
         return FirehoseConfig(
             origin=origin,

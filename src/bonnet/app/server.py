@@ -122,9 +122,22 @@ class BonnetServer:
         self._acl_admin_rule = None
 
         acl = config.acl
-        if not acl._rules and config.admin_pubkey_hex:
-            acl = ACLEvaluator(default_rules_for_admin(config.admin_pubkey_hex))
-        elif not acl._rules:
+        if config.admin_pubkey_hex:
+            # Ensure admin_pubkey_hex actually grants admin, regardless of
+            # whether other [[acl]] rules exist — it used to only take
+            # effect when acl._rules was completely empty, so the moment an
+            # operator kept even one of the sample config's default rules
+            # (the documented first-run flow: keep the three defaults,
+            # uncomment admin_pubkey), the configured key silently got
+            # nothing, with no error anywhere.
+            admin_pubkey_bytes = bytes.fromhex(config.admin_pubkey_hex)
+            has_configured_admin = any(
+                r.matcher.pubkey == admin_pubkey_bytes and r.effect == "allow" for r in acl._rules
+            )
+            if not has_configured_admin:
+                acl.add_rule(default_rules_for_admin(config.admin_pubkey_hex)[0])
+
+        if not acl._rules:
             acl = ACLEvaluator(default_rules_for_admin(self.server_identity.public_key.hex()))
             self._acl_admin_rule = acl._rules[0]
             log_msg("INIT: no ACL rules configured, defaulting to server identity as admin")
