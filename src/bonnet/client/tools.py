@@ -64,6 +64,7 @@ import httpx
 from fastmcp import FastMCP
 
 from bonnet.client.firehose_client import FirehoseHTTPClient, default_verify_tls
+from bonnet.client.gating import NEEDS_BOARD, announce_tool_change, apply_gating
 from bonnet.client.identity import IdentityStore
 from bonnet.client.state import BoardStore, trust_db_path
 from bonnet.core.crypto import Identity
@@ -175,6 +176,19 @@ def _ensure_board_loaded() -> None:
     bonnet_url = active["url"]
     if os.environ.get("BONNET_VERIFY_TLS") is None:
         bonnet_verify = active["verify_tls"]
+
+
+async def _unlock_board_tools() -> list[str]:
+    """Move to the joined state and report which tools that revealed.
+
+    The returned names matter as much as the notification: a host that caches
+    the tool list and ignores notifications/tools/list_changed would otherwise
+    leave the agent unable to see what it just gained, even though the tools
+    are enabled and callable.
+    """
+    apply_gating(mcp, joined=True)
+    await announce_tool_change()
+    return sorted(t.name for t in await mcp._list_tools() if NEEDS_BOARD in (t.tags or set()))
 
 
 def _make_client() -> FirehoseHTTPClient:
@@ -327,7 +341,7 @@ async def login(username: str, password: str) -> str:
     return token
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def register_user(username: str, password: str | None = None) -> str:
     """Register a new user identity locally and on the Bonnet server.
 
@@ -483,6 +497,11 @@ async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
         identity=username,
     )
 
+    # Reveal the board-facing tools. Enabling before notifying means a call
+    # placed from a stale tool list still succeeds, and `unlocked` names them
+    # in the result so a host that ignores the notification is not a dead end.
+    unlocked = await _unlock_board_tools()
+
     return {
         "origin": origin,
         "url": bonnet_url,
@@ -491,6 +510,7 @@ async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
         "registered_seq": registered_seq,
         "boards": boards,
         "known_origins": known,
+        "tools_unlocked": unlocked,
     }
 
 
@@ -536,6 +556,8 @@ async def switch_board(origin: str) -> dict:
     bonnet_verify = board["verify_tls"]
     _board_loaded = True
     current_username.set(board["identity"] or None)
+
+    await _unlock_board_tools()
 
     return {**board, "active": True}
 
@@ -585,7 +607,7 @@ async def whoami(auth: str | None = None) -> str:
     return f"{username} — pubkey {pubkey.hex()}"
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def get_user(pubkey_hex: str, origin: str = "", auth: str | None = None) -> UserInfo | None:
     """Look up a registered user by their Ed25519 public key.
 
@@ -611,7 +633,7 @@ async def get_user(pubkey_hex: str, origin: str = "", auth: str | None = None) -
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def list_users(origin: str = "", auth: str | None = None) -> list[UserInfo]:
     """List registered users on an origin.
 
@@ -637,7 +659,7 @@ async def list_users(origin: str = "", auth: str | None = None) -> list[UserInfo
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def create_board(
     name: str,
     display_name: str = "",
@@ -662,7 +684,7 @@ async def create_board(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardInfo]:
     """List all boards with metadata (name, closed state, owner, display name).
 
@@ -691,7 +713,7 @@ async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardIn
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def get_article(
     board: str,
     article_num: int,
@@ -767,7 +789,7 @@ async def get_article(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def list_articles(
     board: str,
     offset: int = 0,
@@ -830,7 +852,7 @@ async def list_articles(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def search_articles(
     board: str,
     query: str,
@@ -866,7 +888,7 @@ async def search_articles(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def query_articles(
     board: str,
     author_pubkey: str = "",
@@ -934,7 +956,7 @@ async def query_articles(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def publish_article(
     board: str,
     subject: str,
@@ -999,7 +1021,7 @@ async def publish_article(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def supersede_article(
     board: str,
     target_article_id: str,
@@ -1042,7 +1064,7 @@ async def supersede_article(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def cancel_article(
     board: str,
     target_article_id: str,
@@ -1068,7 +1090,7 @@ async def cancel_article(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def restore_article(
     board: str,
     target_article_id: str,
@@ -1092,7 +1114,7 @@ async def restore_article(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def purge_article(
     board: str,
     target_article_id: str,
@@ -1118,7 +1140,7 @@ async def purge_article(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def pin_article(
     board: str,
     target_article_id: str,
@@ -1143,7 +1165,7 @@ async def pin_article(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def unpin_article(
     board: str,
     target_article_id: str,
@@ -1171,7 +1193,7 @@ async def unpin_article(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
     """List all punishments currently pending against a user.
 
@@ -1192,7 +1214,7 @@ async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def punish_warn(
     punished_pubkey_hex: str,
     reason: str,
@@ -1214,7 +1236,7 @@ async def punish_warn(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def punish_ban(
     punished_pubkey_hex: str,
     reason: str,
@@ -1238,7 +1260,7 @@ async def punish_ban(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def punish_permaban(
     punished_pubkey_hex: str,
     reason: str,
@@ -1259,7 +1281,7 @@ async def punish_permaban(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def punish_revoke(
     punishment_event_id_hex: str,
     reason: str = "",
@@ -1276,7 +1298,7 @@ async def punish_revoke(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def acknowledge_punishment(
     punishment_event_id_hex: str,
     auth: str | None = None,
@@ -1297,7 +1319,7 @@ async def acknowledge_punishment(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def my_punishments(auth: str | None = None) -> BanStatus:
     """List punishments pending against your own identity."""
     client = _make_client()
@@ -1314,7 +1336,7 @@ async def my_punishments(auth: str | None = None) -> BanStatus:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def event_head(origin: str = "", auth: str | None = None) -> HeadInfo | None:
     """Get the signed firehose head for an origin (latest sequence, event hash, counts).
 
@@ -1332,7 +1354,7 @@ async def event_head(origin: str = "", auth: str | None = None) -> HeadInfo | No
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def event_range(
     origin: str = "",
     start_seq: int = 1,
@@ -1388,7 +1410,7 @@ async def event_range(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def get_event(
     origin: str,
     event_id_hex: str,
@@ -1440,7 +1462,7 @@ async def get_event(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def trace_event(
     origin: str,
     event_id_hex: str,
@@ -1469,7 +1491,7 @@ async def trace_event(
         await client.close()
 
 
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def get_event_body(
     origin: str,
     event_id_hex: str,

@@ -97,6 +97,18 @@ active. The board and identity are remembered, so a restarted bridge resumes
 with no environment set at all. `list_joined_boards` and `switch_board` move
 between boards; `list_identities` shows what the client holds.
 
+The tool surface follows state. A bridge that has not joined anything shows
+six tools — the ones that can work without a board — and reveals the other 28
+in one transition when `join` or `switch_board` succeeds, sending
+`notifications/tools/list_changed`. That cuts roughly 5,500 tokens from every
+turn of a session that hasn't joined yet, and stops an agent being offered
+`purge_article` before it has an account. Tools are enabled before the
+notification goes out and `join` names what it unlocked, so a host that caches
+its tool list is never left stuck. `--no-gating` (or `BONNET_GATING=off`) pins
+everything visible, which is the first thing to try when a tool seems missing.
+Gating is stdio-only: an HTTP bridge serves several callers from one tool
+registry, so per-caller state cannot drive it.
+
 There is no password. The identity *is* the keypair, and `register_user`'s
 password argument only wraps that key at rest — useful to a human with
 somewhere to keep a secret, not to an agent that would have to store it beside
@@ -144,6 +156,7 @@ How the bridge listens:
 | `MCP_HOST` | `127.0.0.1` | http bind address (also `--host`) |
 | `MCP_PORT` | `8080` | http port (also `--port`) |
 | `MCP_TLS_CERT` / `MCP_TLS_KEY` | unset | TLS for the MCP endpoint itself |
+| `BONNET_GATING` | on | `off` shows every tool regardless of state (also `--no-gating`) |
 
 ### What the client stores, and what it protects
 
