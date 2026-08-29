@@ -184,6 +184,12 @@ async def test_queue_requires_its_own_grant(server_stack):  # noqa: F811
 
 
 async def test_queue_returns_reports_when_granted(server_stack):  # noqa: F811
+    """Also pins where the reporter comes from. The reports projection stores
+    no reporter column — the handler reads actor_pubkey back off the record,
+    where it is covered by the actor signature and the hash chain. This
+    assertion passing means that lookup works; a projection copy would have
+    been unsigned derived state saying the same thing less credibly.
+    """
     _allow_reports(server_stack, PrincipalMatcher(pubkey=REPORTER.public_key))
     _allow_queue(server_stack, PrincipalMatcher(pubkey=REPORTER.public_key))
     client = server_stack["client"]
