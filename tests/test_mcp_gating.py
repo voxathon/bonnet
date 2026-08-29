@@ -34,6 +34,9 @@ UNGATED = {
     "switch_origin",
     "list_identities",
     "whoami",
+    "open_board",
+    "leave_board",
+    "back",
 }
 
 # Tools tagged NEEDS_ORIGIN but not NEEDS_IDENTITY: they fall back to the
