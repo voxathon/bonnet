@@ -65,6 +65,7 @@ from fastmcp import FastMCP
 
 from bonnet.client.firehose_client import FirehoseHTTPClient, default_verify_tls
 from bonnet.client.identity import IdentityStore
+from bonnet.client.state import BoardStore, trust_db_path
 from bonnet.core.crypto import Identity
 from bonnet.core.record import ZERO_ID
 from bonnet.net.firehose_models import (
@@ -124,6 +125,8 @@ current_password: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 identity_store: IdentityStore | None = None
+board_store: BoardStore | None = None
+_board_loaded: bool = False
 bonnet_url: str = os.environ.get("BONNET_URL", "https://localhost:2272")
 _bonnet_verify_env = os.environ.get("BONNET_VERIFY_TLS")
 bonnet_verify: bool | str = (
@@ -143,18 +146,64 @@ def _get_identity_store() -> IdentityStore:
     return identity_store
 
 
+def _get_board_store() -> BoardStore:
+    global board_store
+    if board_store is None:
+        board_store = BoardStore()
+    return board_store
+
+
+def _ensure_board_loaded() -> None:
+    """Adopt the remembered active board, unless BONNET_URL overrides it.
+
+    Precedence is env over remembered state, one direction only: an operator
+    who sets BONNET_URL means it, and must not have it quietly replaced by
+    whatever board was joined last. With neither, the built-in default stands.
+
+    Runs once per process and on first use rather than at import, so reading
+    the state file is not a side effect of importing this module.
+    """
+    global bonnet_url, bonnet_verify, _board_loaded
+    if _board_loaded:
+        return
+    _board_loaded = True
+    if os.environ.get("BONNET_URL"):
+        return
+    active = _get_board_store().active()
+    if active is None:
+        return
+    bonnet_url = active["url"]
+    if os.environ.get("BONNET_VERIFY_TLS") is None:
+        bonnet_verify = active["verify_tls"]
+
+
 def _make_client() -> FirehoseHTTPClient:
-    return FirehoseHTTPClient(bonnet_url, verify=bonnet_verify)
+    _ensure_board_loaded()
+    # Without a trust store the transport's TOFU pinning is a no-op, so every
+    # connection would be a first contact and a substituted origin key would
+    # never be noticed. The store is what makes the "use" in trust-on-first-use
+    # mean anything.
+    return FirehoseHTTPClient(bonnet_url, verify=bonnet_verify, trust_store_path=trust_db_path())
 
 
 def _default_identity() -> str | None:
     """The identity to act as when a tool call names none.
 
+    $BONNET_IDENTITY first, then the identity recorded for the active board.
+    The fallback is what lets a bridge restart with no environment at all and
+    still act as itself: join wrote down which identity speaks for that board.
+
     Read per call rather than cached at import so the environment can change
     between runs (and so tests can set it), matching how BONNET_IDENTITIES_DB
     is resolved in _get_identity_store.
     """
-    return os.environ.get("BONNET_IDENTITY") or None
+    from_env = os.environ.get("BONNET_IDENTITY")
+    if from_env:
+        return from_env
+    active = _get_board_store().active()
+    if active and active["identity"]:
+        return active["identity"]
+    return None
 
 
 def _resolve_auth(auth: str | None) -> tuple[str, str]:
@@ -336,18 +385,25 @@ async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
     """Point this client at a board, register an identity there, and use it.
 
     One call from nothing to posting. It fetches the board's signed discovery
-    document, TOFU-pins the server key, mints a local Ed25519 keypair for
-    `username`, publishes its bonnet.user.register record, makes it this
-    client's active identity, and reports what it found.
+    document, pins the server key on first contact, mints a local Ed25519
+    keypair for `username`, publishes its bonnet.user.register record, makes
+    it this client's active board and identity, and reports what it found.
+
+    What the pin does and does not give you: the key is recorded the first
+    time this client sees the origin, and a later connection presenting a
+    different key fails unless a verified chain of bonnet.origin.key.rotate
+    records connects the two. That detects a substituted key *after* first
+    contact. It says nothing about whether the first contact was honest —
+    TLS is the independent anchor for that.
 
     The private key is generated here and stays here — the board never sees
     it. No password is set; select the identity afterwards with
-    `auth="<username>"`, or leave `auth` off entirely for the rest of this
-    process. See register_user if you want a password-wrapped identity.
+    `auth="<username>"`, or leave `auth` off entirely.
 
     `url` is the board server (e.g. https://bbs.example:2272), not this
-    bridge. It applies for the lifetime of this process only; set BONNET_URL
-    in the bridge's environment to make it the durable default.
+    bridge. The board is remembered, so a restarted bridge resumes here with
+    no environment set; $BONNET_URL still overrides it when present. Use
+    list_joined_boards and switch_board to move between boards.
 
     `verify_tls` defaults to on, except for loopback URLs where a freshly
     generated self-signed cert is expected.
@@ -365,11 +421,14 @@ async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
     advertises, and the other origins it federates with. Everything in that
     result except your own public key is the board's claim about itself.
     """
-    global bonnet_url, bonnet_verify
+    global bonnet_url, bonnet_verify, _board_loaded
 
     previous = (bonnet_url, bonnet_verify)
     bonnet_url = url.rstrip("/")
     bonnet_verify = default_verify_tls(bonnet_url) if verify_tls is None else verify_tls
+    # An explicit join outranks whatever board was remembered, and must not be
+    # undone by a later lazy load.
+    _board_loaded = True
 
     # Everything below runs with bonnet_url already moved, so all of it has to
     # sit under the restore — including minting the identity and constructing
@@ -417,7 +476,12 @@ async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
             await client.close()
 
     current_username.set(username)
-    os.environ["BONNET_IDENTITY"] = username
+    _get_board_store().remember(
+        origin=origin,
+        url=bonnet_url,
+        verify_tls=bool(bonnet_verify),
+        identity=username,
+    )
 
     return {
         "origin": origin,
@@ -428,6 +492,52 @@ async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
         "boards": boards,
         "known_origins": known,
     }
+
+
+@mcp.tool
+async def list_joined_boards() -> list[dict]:
+    """List boards this client has joined, most recently used first.
+
+    Each entry carries the board's `origin`, its `url`, the local `identity`
+    that speaks for it, whether TLS is verified, and `active` — the board
+    tool calls go to when none is named. Joining is remembered across
+    restarts, so this is what the client knows, not what it saw this session.
+
+    Origins are distinct trust domains: an identity registered on one is
+    unknown on another, and usernames only mean anything within the registrar
+    that accepted them. Use switch_board to change which one is active.
+    """
+    store = _get_board_store()
+    active = store.active()
+    active_origin = active["origin"] if active else None
+    return [{**b, "active": b["origin"] == active_origin} for b in store.list_boards()]
+
+
+@mcp.tool
+async def switch_board(origin: str) -> dict:
+    """Make a previously joined board the active one for later tool calls.
+
+    `origin` must be a board join() already recorded — see list_joined_boards.
+    This changes where subsequent calls go and which identity they default to,
+    so anything read afterwards comes from a different origin under different
+    operators and different moderation policy.
+
+    $BONNET_URL, if set, still wins over the remembered board on the next
+    process start.
+    """
+    global bonnet_url, bonnet_verify, _board_loaded
+
+    store = _get_board_store()
+    store.set_active(origin)
+    board = store.get(origin)
+    assert board is not None  # set_active raised if it did not exist
+
+    bonnet_url = board["url"]
+    bonnet_verify = board["verify_tls"]
+    _board_loaded = True
+    current_username.set(board["identity"] or None)
+
+    return {**board, "active": True}
 
 
 @mcp.tool

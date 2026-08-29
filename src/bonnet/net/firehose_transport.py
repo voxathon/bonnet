@@ -81,6 +81,7 @@ class FirehoseTransport:
         self._discovery: DiscoveryInfo | None = None
         self._signer: BonnetSigner | None = None
         self._verifier: BonnetVerifier | None = None
+        self._trust_store_path = trust_store_path
         self._trust_store: TrustStore | None = None
         if trust_store_path:
             self._trust_store = TrustStore(trust_store_path)

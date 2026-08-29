@@ -23,11 +23,15 @@ pytestmark = pytest.mark.slow
 @pytest.fixture
 def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
     """Route tools._make_client at the in-process server, on a temp store."""
+    monkeypatch.setenv("BONNET_CLIENT_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("BONNET_IDENTITIES_DB", str(tmp_path / "identities.db"))
     monkeypatch.delenv("BONNET_IDENTITY", raising=False)
+    monkeypatch.delenv("BONNET_URL", raising=False)
 
-    saved = (tools.identity_store, tools.bonnet_url, tools.bonnet_verify)
+    saved = (tools.identity_store, tools.board_store, tools.bonnet_url, tools.bonnet_verify)
     tools.identity_store = None
+    tools.board_store = None
+    tools._board_loaded = False
 
     # Mirror the shipped default policy: matchers are mutually exclusive, so a
     # principal that has just registered stops being `unknown` and needs reads
@@ -64,9 +68,11 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
 
     yield server_stack
 
-    if tools.identity_store is not None:
-        tools.identity_store.close()
-    tools.identity_store, tools.bonnet_url, tools.bonnet_verify = saved
+    for store in (tools.identity_store, tools.board_store):
+        if store is not None:
+            store.close()
+    tools.identity_store, tools.board_store, tools.bonnet_url, tools.bonnet_verify = saved
+    tools._board_loaded = False
     tools.current_username.set(None)
 
 

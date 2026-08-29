@@ -30,13 +30,16 @@ def store(tmp_path):
 @pytest.fixture
 def wired_store(tmp_path, monkeypatch):
     """Point the module-level singleton at a temp store for _resolve_auth."""
+    monkeypatch.setenv("BONNET_CLIENT_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("BONNET_IDENTITIES_DB", str(tmp_path / "identities.db"))
-    original = tools.identity_store
+    saved = (tools.identity_store, tools.board_store)
     tools.identity_store = None
+    tools.board_store = None
     yield tools._get_identity_store()
-    if tools.identity_store is not None:
-        tools.identity_store.close()
-    tools.identity_store = original
+    for store in (tools.identity_store, tools.board_store):
+        if store is not None:
+            store.close()
+    tools.identity_store, tools.board_store = saved
 
 
 # --- store-level ---------------------------------------------------------

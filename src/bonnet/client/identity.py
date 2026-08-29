@@ -26,9 +26,10 @@ import threading
 from pathlib import Path
 
 import bcrypt
-import platformdirs
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from nacl.signing import SigningKey
+
+from bonnet.client.state import client_dir
 
 
 class IdentityStore:
@@ -42,9 +43,13 @@ class IdentityStore:
         spawn a fresh, empty identity store — and orphan the agent's existing
         keys — every time it runs from a different directory. A fixed
         per-user path means the same store is found regardless of launch
-        directory; BONNET_IDENTITIES_DB still overrides it explicitly.
+        directory.
+
+        Shares the client state directory with joined boards and pinned
+        origin keys, so BONNET_CLIENT_DIR relocates all of a client's durable
+        state together. BONNET_IDENTITIES_DB still overrides this file alone.
         """
-        return os.path.join(platformdirs.user_data_dir("bonnet", appauthor=False), "identities.db")
+        return os.path.join(client_dir(), "identities.db")
 
     def __init__(self, db_path: str | None = None):
         self.db_path = Path(db_path or self.default_db_path())
