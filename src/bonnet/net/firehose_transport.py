@@ -89,6 +89,16 @@ class FirehoseTransport:
     async def close(self) -> None:
         await self._http.aclose()
 
+    @property
+    def server_origin(self) -> str | None:
+        """The connected server's origin, or None before discovery."""
+        return self._server_origin
+
+    @property
+    def discovery(self) -> DiscoveryInfo | None:
+        """The parsed discovery document, or None before discovery."""
+        return self._discovery
+
     # ------------------------------------------------------------------
     # Discovery and connection
     # ------------------------------------------------------------------
