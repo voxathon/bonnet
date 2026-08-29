@@ -44,6 +44,8 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import Tool
 
+from bonnet.client import needs as needs_module
+
 #: Tag marking a tool that cannot function without somewhere to send a
 #: request. Applied at definition, so adding an origin-facing tool means
 #: tagging it rather than editing a list here that would silently drift out
@@ -144,23 +146,37 @@ def _needs_identity(tool: Tool) -> bool:
     return NEEDS_IDENTITY in (tool.tags or set())
 
 
-def _missing_for(tool: Tool) -> str | None:
+async def _missing_for(tool: Tool) -> str | None:
     """What this caller lacks to call `tool` specifically, or None.
 
-    Checks only the prerequisites the tool's own tags declare it needs — a
-    NEEDS_ORIGIN-only tool is never blocked on identity, which is the bug
-    this replaces: the old single predicate ANDed both requirements for
-    every gated tool, hiding read tools that only need an origin behind
-    having an identity too.
+    Two layers, in order. The local heuristic (origin present? identity
+    present, if this tool's implementation calls _connect_authenticated
+    unconditionally?) is checked first and is dispositive on its own — no
+    origin means no request can be sent, and a tool that always signs as
+    someone will raise before the relay is even asked, regardless of what
+    its ACL permits. Only once that passes does PERMISSIONS get a say: it
+    can hide a tool the local heuristic would otherwise show (the caller has
+    an identity, but the relay's ACL does not grant what this tool needs),
+    never reveal one the local heuristic hides. When PERMISSIONS itself is
+    unavailable — denied, unsupported, unreachable — this stops at the local
+    answer, which is the same answer gating gave before PERMISSIONS existed.
     """
     if _needs_origin(tool):
         reason = _origin_missing()
         if reason is not None:
             return reason
+
     if _needs_identity(tool):
         reason = _identity_missing()
         if reason is not None:
             return reason
+
+    allowed = await needs_module.check(tool.name)
+    if allowed is False:
+        return (
+            f"{tool.name} is not permitted for this identity, per the relay's own "
+            f"PERMISSIONS. Call my_permissions to see what is."
+        )
     return None
 
 
@@ -176,7 +192,7 @@ class GatingMiddleware(Middleware):
         tools = await call_next(context)
         if not gating_enabled():
             return tools
-        return [t for t in tools if _missing_for(t) is None]
+        return [t for t in tools if await _missing_for(t) is None]
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         if not gating_enabled():
@@ -184,7 +200,7 @@ class GatingMiddleware(Middleware):
 
         tool = await _lookup(context)
         if tool is not None:
-            reason = _missing_for(tool)
+            reason = await _missing_for(tool)
             if reason is not None:
                 # Never a bare refusal: say what is missing and what fixes it,
                 # so a caller working from a stale tool list is redirected

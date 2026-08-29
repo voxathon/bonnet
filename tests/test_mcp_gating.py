@@ -80,6 +80,19 @@ def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
             boards=["*"],
         )
     )
+    # server_stack grants the anonymous principal every other read command but
+    # not ARTICLE_QUERY — filling that gap so the PERMISSIONS-based gate sees
+    # the full READ_ONLY set as actually permitted for anonymous, matching
+    # what these tests assert.
+    server_stack["command_handler"]._acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(anonymous=True),
+            actions=["read"],
+            commands=["ARTICLE_QUERY"],
+            boards=["*"],
+        )
+    )
 
     app = server_stack["server"]
 
@@ -267,6 +280,40 @@ async def test_gating_off_also_lifts_the_call_block(bridge, monkeypatch):
 
     async with Client(tools.mcp) as c:
         assert await c.call_tool("list_boards", {"origin": ORIGIN}) is not None
+
+
+# --- narrowed by the relay's actual PERMISSIONS ----------------------------
+
+
+async def test_permissions_hides_a_tool_the_local_heuristic_would_show(bridge):
+    """Having an identity is necessary but not sufficient. The local
+    heuristic alone (origin + identity present) cannot distinguish a caller
+    who may publish bonnet.article from one who may not — only the relay's
+    own PERMISSIONS answer can, and it must be able to hide a tool the local
+    heuristic would otherwise leave visible."""
+    from bonnet.core.acl import ACLRule, PrincipalMatcher
+
+    acl = bridge["command_handler"]._acl
+    # Give "registered" a real PERMISSIONS answer (the fixture otherwise
+    # never grants that command to registered, so this scenario would
+    # silently fall back to the identity-only heuristic and prove nothing).
+    acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(registered=True),
+            actions=["read"],
+            commands=["PERMISSIONS"],
+            boards=["*"],
+        )
+    )
+
+    await tools.join("https://bbs.test", "scout")
+    tools.current_username.set("scout")
+
+    # scout holds an identity, so the local heuristic alone would show
+    # publish_article — but nothing here granted PUBLISH_RECORD to
+    # "registered", so the relay's own PERMISSIONS answer says no.
+    assert "publish_article" not in await _visible()
 
 
 async def test_notification_is_best_effort_outside_a_request(bridge):
