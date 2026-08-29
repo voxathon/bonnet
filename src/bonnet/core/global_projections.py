@@ -706,6 +706,57 @@ class PolicyProjection(_BaseProjection):
                 self._rollback()
                 raise
 
+    def list_reports(
+        self, culprit_pubkey: bytes | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict]:
+        """The moderation queue: reports filed, newest first.
+
+        `apply_report` has been writing this table since reports were
+        dispatched, but nothing read it back, so a report arriving over
+        federation was stored and then seen by nobody. This is the read side.
+
+        A report is an accusation, not a verdict. It records who filed it
+        (`origin`/`origin_seq` locate the signed record), who they name
+        (`culprit_pubkey`), and what they point at — an article
+        (`target_origin`/`target_board`/`target_article_id`), an event
+        (`target_event_id`), or nothing at all. The validator enforces
+        exactly one of those three shapes, so a caller can switch on which
+        target fields are non-zero without worrying about mixtures.
+
+        The reason is the record body and is not stored here; fetch it with
+        `body_hash` if it is wanted.
+        """
+        sql = (
+            "SELECT event_id, origin, origin_seq, culprit_pubkey, target_origin, "
+            "target_board, target_article_id, target_event_id, body_hash, body_size, "
+            "created_at FROM reports "
+        )
+        params: tuple = ()
+        if culprit_pubkey is not None:
+            sql += "WHERE culprit_pubkey=? "
+            params = (culprit_pubkey,)
+        sql += "ORDER BY created_at DESC, origin_seq DESC LIMIT ? OFFSET ?"
+        params = params + (limit, offset)
+
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "event_id": bytes(r[0]),
+                "origin": r[1],
+                "origin_seq": r[2],
+                "culprit_pubkey": bytes(r[3]),
+                "target_origin": r[4],
+                "target_board": r[5],
+                "target_article_id": bytes(r[6]),
+                "target_event_id": bytes(r[7]),
+                "body_hash": bytes(r[8]),
+                "body_size": r[9],
+                "created_at": r[10],
+            }
+            for r in rows
+        ]
+
     def list_punishments_for_pubkey(
         self, pubkey: bytes, include_revoked: bool = False
     ) -> list[dict]:

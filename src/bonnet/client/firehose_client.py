@@ -300,6 +300,57 @@ class FirehoseHTTPClient(FirehoseTransport):
             reason,
         )
 
+    async def publish_report(
+        self,
+        culprit_pubkey: bytes,
+        reason: str,
+        target_origin: str = "",
+        target_board: str = "",
+        target_article_id: bytes = ZERO_ID,
+        target_event_id: bytes = ZERO_ID,
+        board: str = "",
+    ) -> PublishResult:
+        """File a report naming a culprit, optionally pointing at evidence.
+
+        An accusation, not a verdict — any user who may publish can file one,
+        and it grants the filer no authority. Punishment is a separate kind
+        issued by whoever the ACL grants that power to.
+
+        The validator accepts exactly three target shapes and rejects any
+        mixture: a complete article tuple (origin + board + article_id), an
+        event (origin + event_id), or no target at all. Passing a partial
+        tuple is a validation error rather than a silently weaker report, so
+        callers should send a whole shape or none.
+
+        The reason is the record body, which the validator does not require —
+        but a report nobody can read the grounds for is not worth filing.
+        """
+        if self._identity is None or self._server_origin is None:
+            raise FirehoseClientError("not connected")
+
+        body = reason.encode("utf-8")
+        m = MetadataMap([metadata_bytes(1, culprit_pubkey)])
+        intent = Intent(
+            event_id=os.urandom(32),
+            kind="bonnet.report",
+            origin=self._server_origin,
+            actor_pubkey=self._identity.public_key,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            board=board,
+            target_origin=target_origin,
+            target_board=target_board,
+            target_article_id=target_article_id,
+            target_event_id=target_event_id,
+            metadata=m,
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
+        )
+        actor_sig = sign_intent(self._identity, encode_intent(intent))
+        cmd = build_publish_record(intent, actor_sig, body)
+        resp = await self._send_command(cmd)
+        return parse_publish_response(resp)
+
     async def publish_pin(
         self,
         board: str,
