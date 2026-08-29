@@ -1,6 +1,6 @@
 """State-dependent tool visibility.
 
-A caller that has no board or no usable identity is shown only the tools that
+A caller that has no origin or no usable identity is shown only the tools that
 can work without them, and the rest appear in one transition once it does.
 
 Gating is decided per request, not by mutating a shared registry, so two
@@ -30,14 +30,14 @@ UNGATED = {
     "login",
     "join",
     "register_user",
-    "list_joined_boards",
-    "switch_board",
+    "list_joined_origins",
+    "switch_origin",
     "list_identities",
     "whoami",
 }
 
-# Tools tagged NEEDS_BOARD but not NEEDS_IDENTITY: they fall back to the
-# anonymous principal, so a board alone is enough — no identity required.
+# Tools tagged NEEDS_ORIGIN but not NEEDS_IDENTITY: they fall back to the
+# anonymous principal, so an origin alone is enough — no identity required.
 READ_ONLY = {
     "get_user",
     "list_users",
@@ -58,15 +58,15 @@ READ_ONLY = {
 
 @pytest.fixture
 def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
-    """A tools module wired to the in-process board, with state isolated."""
+    """A tools module wired to the in-process origin, with state isolated."""
     monkeypatch.setenv("BONNET_CLIENT_DIR", str(tmp_path / "state"))
     for var in ("BONNET_IDENTITY", "BONNET_URL", "BONNET_GATING"):
         monkeypatch.delenv(var, raising=False)
 
-    saved = (tools.identity_store, tools.board_store, tools.bonnet_url, tools.bonnet_verify)
+    saved = (tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify)
     tools.identity_store = None
-    tools.board_store = None
-    tools._board_loaded = False
+    tools.origin_store = None
+    tools._origin_loaded = False
 
     if not any(isinstance(m, GatingMiddleware) for m in tools.mcp.middleware):
         tools.mcp.add_middleware(GatingMiddleware())
@@ -97,11 +97,11 @@ def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
 
     yield server_stack
 
-    for store in (tools.identity_store, tools.board_store):
+    for store in (tools.identity_store, tools.origin_store):
         if store is not None:
             store.close()
-    tools.identity_store, tools.board_store, tools.bonnet_url, tools.bonnet_verify = saved
-    tools._board_loaded = False
+    tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify = saved
+    tools._origin_loaded = False
     tools.current_username.set(None)
 
 
@@ -114,7 +114,7 @@ async def _visible() -> set[str]:
 
 
 async def test_unready_shows_only_what_can_work(bridge):
-    """Board-facing tools need somewhere to send a request and an identity to
+    """Origin-facing tools need somewhere to send a request and an identity to
     sign it; with neither they can only fail, at a cost every turn."""
     assert await _visible() == UNGATED
 
@@ -152,7 +152,7 @@ async def test_a_restarted_bridge_starts_ready(bridge):
 
 async def test_env_configured_bridge_is_not_gated(bridge, monkeypatch):
     """The documented env-var flow: BONNET_URL plus an identity, never joined.
-    Gating on a remembered board alone would strand it behind a join it does
+    Gating on a remembered origin alone would strand it behind a join it does
     not need."""
     tools._get_identity_store().register("scout")
     monkeypatch.setenv("BONNET_URL", "https://bbs.test")
@@ -162,7 +162,7 @@ async def test_env_configured_bridge_is_not_gated(bridge, monkeypatch):
 
 
 async def test_a_url_without_an_identity_is_still_gated(bridge, monkeypatch):
-    """Write tools still need an identity — a board with nothing to sign as
+    """Write tools still need an identity — an origin with nothing to sign as
     cannot publish."""
     monkeypatch.setenv("BONNET_URL", "https://bbs.test")
     monkeypatch.setenv("BONNET_IDENTITY", "nonexistent")
@@ -170,10 +170,10 @@ async def test_a_url_without_an_identity_is_still_gated(bridge, monkeypatch):
     assert "publish_article" not in await _visible()
 
 
-async def test_a_board_alone_reveals_the_read_tools(bridge, monkeypatch):
-    """The bug this replaces: a caller with a board but no identity could see
-    none of the 13 tools that only need a board, because the old gate ANDed
-    identity into every board-facing tool regardless of whether the tool
+async def test_an_origin_alone_reveals_the_read_tools(bridge, monkeypatch):
+    """The bug this replaces: a caller with an origin but no identity could see
+    none of the 13 tools that only need an origin, because the old gate ANDed
+    identity into every origin-facing tool regardless of whether the tool
     itself needed one. README promises read-only tools work without an
     account — this is that promise, checked."""
     monkeypatch.setenv("BONNET_URL", "https://bbs.test")
@@ -207,7 +207,7 @@ async def test_two_callers_see_different_surfaces(bridge):
 
     assert "publish_article" in ready
     assert "publish_article" not in unready
-    # "stranger" has a board (joined by "scout") but no local identity of its
+    # "stranger" has an origin (joined by "scout") but no local identity of its
     # own, so it gets the read tools and nothing that writes or answers for a
     # specific caller.
     assert unready == UNGATED | READ_ONLY
@@ -256,7 +256,7 @@ async def test_gating_off_shows_everything(bridge, monkeypatch):
 async def test_gating_off_also_lifts_the_call_block(bridge, monkeypatch):
     """The hatch has to cover both halves. Visible-but-uncallable would only
     half-answer the question an operator reaches for it to settle: this call
-    is gated without the hatch (no board, no identity) and goes through with
+    is gated without the hatch (no origin, no identity) and goes through with
     it."""
     async with Client(tools.mcp) as c:
         with pytest.raises(Exception) as exc:

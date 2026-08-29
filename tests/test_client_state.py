@@ -1,4 +1,4 @@
-"""Durable client state: origin-key pins and remembered boards.
+"""Durable client state: origin-key pins and remembered origins.
 
 The pin tests are the load-bearing ones. TOFU only means something if the pin
 outlives the process that made it — otherwise every connection is a first
@@ -14,7 +14,7 @@ pytest.importorskip("fastmcp")
 
 from bonnet.client import tools
 from bonnet.client.firehose_client import FirehoseHTTPClient
-from bonnet.client.state import BoardStore, trust_db_path
+from bonnet.client.state import OriginStore, trust_db_path
 from bonnet.core.crypto import Identity
 from bonnet.core.trust import TrustStore
 from bonnet.net.firehose_transport import FirehoseClientError
@@ -31,18 +31,18 @@ def client_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("BONNET_URL", raising=False)
     monkeypatch.delenv("BONNET_VERIFY_TLS", raising=False)
 
-    saved = (tools.identity_store, tools.board_store, tools.bonnet_url, tools.bonnet_verify)
+    saved = (tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify)
     tools.identity_store = None
-    tools.board_store = None
-    tools._board_loaded = False
+    tools.origin_store = None
+    tools._origin_loaded = False
 
     yield tmp_path / "state"
 
-    for store in (tools.identity_store, tools.board_store):
+    for store in (tools.identity_store, tools.origin_store):
         if store is not None:
             store.close()
-    tools.identity_store, tools.board_store, tools.bonnet_url, tools.bonnet_verify = saved
-    tools._board_loaded = False
+    tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify = saved
+    tools._origin_loaded = False
     tools.current_username.set(None)
 
 
@@ -125,11 +125,11 @@ async def test_a_substituted_origin_key_is_rejected(server_stack, client_dir):  
         await client.close()
 
 
-# --- remembered boards ----------------------------------------------------
+# --- remembered origins ----------------------------------------------------
 
 
-def test_board_store_round_trips(tmp_path):
-    store = BoardStore(str(tmp_path / "boards.db"))
+def test_origin_store_round_trips(tmp_path):
+    store = OriginStore(str(tmp_path / "origins.db"))
     try:
         store.remember("bbs.test", "https://bbs.test", True, "scout")
 
@@ -140,7 +140,7 @@ def test_board_store_round_trips(tmp_path):
 
 
 def test_rejoining_keeps_the_original_joined_at(tmp_path):
-    store = BoardStore(str(tmp_path / "boards.db"))
+    store = OriginStore(str(tmp_path / "origins.db"))
     try:
         store.remember("bbs.test", "https://bbs.test", True, "scout")
         first = store.get("bbs.test")["joined_at"]
@@ -151,19 +151,19 @@ def test_rejoining_keeps_the_original_joined_at(tmp_path):
         store.close()
 
 
-def test_switching_active_board_requires_a_joined_one(tmp_path):
-    store = BoardStore(str(tmp_path / "boards.db"))
+def test_switching_active_origin_requires_a_joined_one(tmp_path):
+    store = OriginStore(str(tmp_path / "origins.db"))
     try:
-        with pytest.raises(ValueError, match="No joined board"):
+        with pytest.raises(ValueError, match="No joined origin"):
             store.set_active("never.joined")
     finally:
         store.close()
 
 
-def test_forgotten_active_board_reads_as_none(tmp_path):
+def test_forgotten_active_origin_reads_as_none(tmp_path):
     """A dangling active pointer degrades to 'nothing selected' rather than
     breaking every later call."""
-    store = BoardStore(str(tmp_path / "boards.db"))
+    store = OriginStore(str(tmp_path / "origins.db"))
     try:
         store.remember("bbs.test", "https://bbs.test", True, "scout")
         store.forget("bbs.test")
@@ -176,33 +176,33 @@ def test_forgotten_active_board_reads_as_none(tmp_path):
 # --- resolution order -----------------------------------------------------
 
 
-def test_remembered_board_supplies_url_and_identity(client_dir):
+def test_remembered_origin_supplies_url_and_identity(client_dir):
     """The restart case: no environment at all, and the client still knows
     where it is and who it is."""
-    tools._get_board_store().remember("bbs.test", "https://bbs.test", False, "scout")
-    tools._board_loaded = False
+    tools._get_origin_store().remember("bbs.test", "https://bbs.test", False, "scout")
+    tools._origin_loaded = False
 
-    tools._ensure_board_loaded()
+    tools._ensure_origin_loaded()
 
     assert tools.bonnet_url == "https://bbs.test"
     assert tools._default_identity() == "scout"
 
 
-def test_bonnet_url_overrides_the_remembered_board(client_dir, monkeypatch):
-    """An operator who sets BONNET_URL means it; a board joined later must not
+def test_bonnet_url_overrides_the_remembered_origin(client_dir, monkeypatch):
+    """An operator who sets BONNET_URL means it; an origin joined later must not
     silently redirect them."""
-    tools._get_board_store().remember("bbs.test", "https://bbs.test", False, "scout")
+    tools._get_origin_store().remember("bbs.test", "https://bbs.test", False, "scout")
     monkeypatch.setenv("BONNET_URL", "https://elsewhere.example")
     tools.bonnet_url = "https://elsewhere.example"
-    tools._board_loaded = False
+    tools._origin_loaded = False
 
-    tools._ensure_board_loaded()
+    tools._ensure_origin_loaded()
 
     assert tools.bonnet_url == "https://elsewhere.example"
 
 
 def test_bonnet_identity_overrides_the_remembered_one(client_dir, monkeypatch):
-    tools._get_board_store().remember("bbs.test", "https://bbs.test", False, "scout")
+    tools._get_origin_store().remember("bbs.test", "https://bbs.test", False, "scout")
     monkeypatch.setenv("BONNET_IDENTITY", "other")
 
     assert tools._default_identity() == "other"
