@@ -30,11 +30,29 @@ UNGATED = {
     "login",
     "join",
     "register_user",
-    "my_permissions",
     "list_joined_boards",
     "switch_board",
     "list_identities",
     "whoami",
+}
+
+# Tools tagged NEEDS_BOARD but not NEEDS_IDENTITY: they fall back to the
+# anonymous principal, so a board alone is enough — no identity required.
+READ_ONLY = {
+    "get_user",
+    "list_users",
+    "list_boards",
+    "get_article",
+    "list_articles",
+    "search_articles",
+    "query_articles",
+    "ban_status",
+    "event_head",
+    "event_range",
+    "get_event",
+    "trace_event",
+    "get_event_body",
+    "my_permissions",
 }
 
 
@@ -117,7 +135,7 @@ async def test_join_reports_what_it_unlocked(bridge):
     result = await tools.join("https://bbs.test", "scout")
 
     assert "publish_article" in result["tools_unlocked"]
-    assert len(result["tools_unlocked"]) == 29
+    assert len(result["tools_unlocked"]) == 30
 
 
 async def test_a_restarted_bridge_starts_ready(bridge):
@@ -144,12 +162,26 @@ async def test_env_configured_bridge_is_not_gated(bridge, monkeypatch):
 
 
 async def test_a_url_without_an_identity_is_still_gated(bridge, monkeypatch):
-    """Both halves are required — a board with nothing to sign as cannot
-    publish."""
+    """Write tools still need an identity — a board with nothing to sign as
+    cannot publish."""
     monkeypatch.setenv("BONNET_URL", "https://bbs.test")
     monkeypatch.setenv("BONNET_IDENTITY", "nonexistent")
 
     assert "publish_article" not in await _visible()
+
+
+async def test_a_board_alone_reveals_the_read_tools(bridge, monkeypatch):
+    """The bug this replaces: a caller with a board but no identity could see
+    none of the 13 tools that only need a board, because the old gate ANDed
+    identity into every board-facing tool regardless of whether the tool
+    itself needed one. README promises read-only tools work without an
+    account — this is that promise, checked."""
+    monkeypatch.setenv("BONNET_URL", "https://bbs.test")
+
+    visible = await _visible()
+    assert READ_ONLY <= visible
+    assert "publish_article" not in visible
+    assert "create_board" not in visible
 
 
 async def test_register_user_is_never_gated(bridge, monkeypatch):
@@ -175,7 +207,10 @@ async def test_two_callers_see_different_surfaces(bridge):
 
     assert "publish_article" in ready
     assert "publish_article" not in unready
-    assert unready == UNGATED
+    # "stranger" has a board (joined by "scout") but no local identity of its
+    # own, so it gets the read tools and nothing that writes or answers for a
+    # specific caller.
+    assert unready == UNGATED | READ_ONLY
 
 
 # --- never stranded -------------------------------------------------------

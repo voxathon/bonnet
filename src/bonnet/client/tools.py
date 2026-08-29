@@ -64,7 +64,7 @@ import httpx
 from fastmcp import FastMCP
 
 from bonnet.client.firehose_client import FirehoseHTTPClient, default_verify_tls
-from bonnet.client.gating import NEEDS_BOARD, announce_tool_change
+from bonnet.client.gating import NEEDS_BOARD, NEEDS_IDENTITY, announce_tool_change
 from bonnet.client.identity import IdentityStore
 from bonnet.client.state import BoardStore, trust_db_path
 from bonnet.core.crypto import Identity
@@ -562,12 +562,7 @@ async def switch_board(origin: str) -> dict:
     return {**board, "active": True}
 
 
-# Ungated, like join and register_user: introspection is most needed by a
-# caller that does not yet know what it can do, and the anonymous principal
-# has permissions worth asking about. It needs a board endpoint but no
-# identity, which the current two-state gate cannot express — the tiering
-# work is where it gets its proper place.
-@mcp.tool
+@mcp.tool(tags={NEEDS_BOARD})
 async def my_permissions(board: str = "", auth: str | None = None) -> dict:
     """Ask the board what this identity is actually allowed to do.
 
@@ -711,7 +706,7 @@ async def list_users(origin: str = "", auth: str | None = None) -> list[UserInfo
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def create_board(
     name: str,
     display_name: str = "",
@@ -1008,7 +1003,7 @@ async def query_articles(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def publish_article(
     board: str,
     subject: str,
@@ -1073,7 +1068,7 @@ async def publish_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def supersede_article(
     board: str,
     target_article_id: str,
@@ -1116,7 +1111,7 @@ async def supersede_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def cancel_article(
     board: str,
     target_article_id: str,
@@ -1142,7 +1137,7 @@ async def cancel_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def restore_article(
     board: str,
     target_article_id: str,
@@ -1166,7 +1161,7 @@ async def restore_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def purge_article(
     board: str,
     target_article_id: str,
@@ -1192,7 +1187,7 @@ async def purge_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def pin_article(
     board: str,
     target_article_id: str,
@@ -1217,7 +1212,7 @@ async def pin_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def unpin_article(
     board: str,
     target_article_id: str,
@@ -1245,7 +1240,7 @@ async def unpin_article(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def report(
     board: str,
     article_num: int,
@@ -1295,7 +1290,7 @@ async def report(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def list_reports(
     culprit_pubkey_hex: str = "",
     limit: int = 100,
@@ -1353,7 +1348,7 @@ async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def punish_warn(
     punished_pubkey_hex: str,
     reason: str,
@@ -1375,7 +1370,7 @@ async def punish_warn(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def punish_ban(
     punished_pubkey_hex: str,
     reason: str,
@@ -1399,7 +1394,7 @@ async def punish_ban(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def punish_permaban(
     punished_pubkey_hex: str,
     reason: str,
@@ -1420,7 +1415,7 @@ async def punish_permaban(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def punish_revoke(
     punishment_event_id_hex: str,
     reason: str = "",
@@ -1437,7 +1432,7 @@ async def punish_revoke(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def acknowledge_punishment(
     punishment_event_id_hex: str,
     auth: str | None = None,
@@ -1458,7 +1453,7 @@ async def acknowledge_punishment(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
 async def my_punishments(auth: str | None = None) -> BanStatus:
     """List punishments pending against your own identity."""
     client = _make_client()

@@ -7,16 +7,18 @@ always present and always current. That makes it the one durable place to put
 "where are you, and what can you do from here" — which is what this module
 uses it for.
 
-A board-facing tool needs two things to work at all: somewhere to send the
-request, and an identity to sign it with. Until a caller has both, the ~28
-tools that need them can only fail, while costing tokens on every turn and
-inviting calls like `purge_article` from an agent with no account. So they are
-hidden until a caller is ready, and revealed in one transition when it is.
+A board-facing tool needs somewhere to send a request; most also need an
+identity to sign it with. Until a caller has what a given tool needs, that
+tool can only fail, while costing tokens on every turn and inviting calls
+like `purge_article` from an agent with no account. So it is hidden until the
+caller is ready for it, and revealed once it is.
 
-Two states, deliberately, not a wizard. A visibility change invalidates the
-prompt prefix, and that cost is per *transition*, not per tool moved — so the
-design batches every change into as few flips as possible rather than walking
-an agent through a sequence of questions.
+Three states, not a wizard: no board, board-but-no-identity, or both. 13 read
+tools fall back to the anonymous principal, so they need only a board — the
+other 16 board-facing tools need an identity too. A visibility change
+invalidates the prompt prefix, and that cost is per *transition*, not per
+tool moved — so the design batches every change into as few flips as
+possible rather than walking an agent through a sequence of questions.
 
 **Why middleware rather than enable()/disable().** Server-level visibility
 transforms mutate one shared registry, which ties gating to a single caller's
@@ -42,10 +44,22 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import Tool
 
-#: Tag marking a tool that cannot function without a board and an identity.
-#: Applied at definition, so adding a board-facing tool means tagging it
-#: rather than editing a list here that would silently drift out of date.
+#: Tag marking a tool that cannot function without somewhere to send a
+#: request. Applied at definition, so adding a board-facing tool means
+#: tagging it rather than editing a list here that would silently drift out
+#: of date.
 NEEDS_BOARD = "needs_board"
+
+#: Tag marking a tool that additionally cannot function without an identity
+#: to sign as. Independent of NEEDS_BOARD: 13 read tools take NEEDS_BOARD
+#: alone because they fall back to the anonymous principal — a board and
+#: nothing else is enough to call them. (publish_article also calls
+#: connect_anonymous, but only in its reply-lookup sub-step; the publish
+#: itself always needs an identity, so it carries both tags — a naive scan
+#: for the anonymous fallback would miscount it as a 14th read tool.)
+#: Everything that writes, or that answers on behalf of a specific caller
+#: (list_reports, my_punishments), needs both tags.
+NEEDS_IDENTITY = "needs_identity"
 
 
 def gating_enabled() -> bool:
@@ -58,26 +72,28 @@ def gating_enabled() -> bool:
     )
 
 
-def missing_prerequisite() -> str | None:
-    """What this caller still lacks, or None if it can use board tools.
+def _board_missing() -> str | None:
+    """Why this caller has nowhere to send a board-facing request, or None.
 
-    Both halves are required and each names its own remedy, because an agent
-    told only "not ready" cannot act on it.
-
-    The board half accepts an explicit $BONNET_URL as well as a remembered
-    board: a bridge configured entirely through its environment is pointed at
-    a server and must not be told to join one it was already given.
+    Accepts an explicit $BONNET_URL as well as a remembered board: a bridge
+    configured entirely through its environment is pointed at a server and
+    must not be told to join one it was already given.
     """
-    # Imported here, not at module scope: tools imports this module for the
-    # NEEDS_BOARD tag it decorates with, so a top-level import would cycle.
-    from bonnet.client.tools import _default_identity, _get_identity_store, current_username
+    if os.environ.get("BONNET_URL") or _has_board():
+        return None
+    return (
+        "no board: this client is not pointed at a Bonnet server. "
+        "Call join(url, username) to pin one and register, or set "
+        "$BONNET_URL. list_joined_boards shows boards already known."
+    )
 
-    if not (os.environ.get("BONNET_URL") or _has_board()):
-        return (
-            "no board: this client is not pointed at a Bonnet server. "
-            "Call join(url, username) to pin one and register, or set "
-            "$BONNET_URL. list_joined_boards shows boards already known."
-        )
+
+def _identity_missing() -> str | None:
+    """Why this caller has no identity to sign as, or None."""
+    # Imported here, not at module scope: tools imports this module for the
+    # NEEDS_BOARD/NEEDS_IDENTITY tags it decorates with, so a top-level
+    # import would cycle.
+    from bonnet.client.tools import _default_identity, _get_identity_store, current_username
 
     name = current_username.get() or _default_identity()
     if not name:
@@ -96,6 +112,18 @@ def missing_prerequisite() -> str | None:
     return None
 
 
+def missing_prerequisite() -> str | None:
+    """What this caller lacks to use every board-facing tool, or None.
+
+    The combined answer — both a board and an identity. Individual tools
+    need less: a read tool tagged NEEDS_BOARD alone works from _board_missing
+    alone, since it can fall back to the anonymous principal. Gating checks
+    each tool's actual tags via _missing_for; this stays as the aggregate
+    "is this caller fully set up" answer other code can ask for.
+    """
+    return _board_missing() or _identity_missing()
+
+
 def _has_board() -> bool:
     from bonnet.client.tools import _get_board_store
 
@@ -103,12 +131,36 @@ def _has_board() -> bool:
 
 
 def caller_is_ready() -> bool:
-    """True if the current caller can use board-facing tools."""
+    """True if the current caller can use every board-facing tool."""
     return missing_prerequisite() is None
 
 
 def _needs_board(tool: Tool) -> bool:
     return NEEDS_BOARD in (tool.tags or set())
+
+
+def _needs_identity(tool: Tool) -> bool:
+    return NEEDS_IDENTITY in (tool.tags or set())
+
+
+def _missing_for(tool: Tool) -> str | None:
+    """What this caller lacks to call `tool` specifically, or None.
+
+    Checks only the prerequisites the tool's own tags declare it needs — a
+    NEEDS_BOARD-only tool is never blocked on identity, which is the bug this
+    replaces: the old single predicate ANDed both requirements for every
+    gated tool, hiding read tools that only need a board behind having an
+    identity too.
+    """
+    if _needs_board(tool):
+        reason = _board_missing()
+        if reason is not None:
+            return reason
+    if _needs_identity(tool):
+        reason = _identity_missing()
+        if reason is not None:
+            return reason
+    return None
 
 
 class GatingMiddleware(Middleware):
@@ -121,18 +173,18 @@ class GatingMiddleware(Middleware):
 
     async def on_list_tools(self, context: MiddlewareContext, call_next) -> Sequence[Tool]:
         tools = await call_next(context)
-        if not gating_enabled() or caller_is_ready():
+        if not gating_enabled():
             return tools
-        return [t for t in tools if not _needs_board(t)]
+        return [t for t in tools if _missing_for(t) is None]
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         if not gating_enabled():
             return await call_next(context)
 
-        reason = missing_prerequisite()
-        if reason is not None:
-            tool = await _lookup(context)
-            if tool is not None and _needs_board(tool):
+        tool = await _lookup(context)
+        if tool is not None:
+            reason = _missing_for(tool)
+            if reason is not None:
                 # Never a bare refusal: say what is missing and what fixes it,
                 # so a caller working from a stale tool list is redirected
                 # rather than stranded.
