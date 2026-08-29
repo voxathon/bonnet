@@ -66,6 +66,8 @@ from fastmcp import FastMCP
 from bonnet.client.firehose_client import FirehoseHTTPClient, default_verify_tls
 from bonnet.client.gating import NEEDS_IDENTITY, NEEDS_ORIGIN, announce_tool_change
 from bonnet.client.identity import IdentityStore
+from bonnet.client.needs import invalidate as _invalidate_permissions_cache
+from bonnet.client.needs import needs
 from bonnet.client.state import OriginStore, trust_db_path
 from bonnet.core.crypto import Identity
 from bonnet.core.record import ZERO_ID
@@ -186,7 +188,12 @@ async def _unlock_origin_tools() -> list[str]:
     the tool list and ignores notifications/tools/list_changed would otherwise
     leave the agent unable to see what it just gained, even though the tools
     are enabled and callable.
+
+    join and switch_origin both call this, and both change the (origin,
+    identity) pair PERMISSIONS is cached under — so this is also where that
+    cache is invalidated, rather than duplicating the call at each caller.
     """
+    _invalidate_permissions_cache()
     await announce_tool_change()
     return sorted(t.name for t in await mcp._list_tools() if NEEDS_ORIGIN in (t.tags or set()))
 
@@ -386,6 +393,10 @@ async def register_user(username: str, password: str | None = None) -> str:
     try:
         await _connect_authenticated(client, f"{username}:{password}" if password else username)
         result = await client.publish_user_register(username, identity.public_key, flags=0)
+        # Registering changes what this identity's PERMISSIONS answer says —
+        # `unknown` becomes `registered` — so a cached pre-registration
+        # answer must not survive it.
+        _invalidate_permissions_cache()
         return (
             f"Registered '{username}' — event seq {result.origin_seq} — "
             f"pubkey {identity.public_key.hex()}"
@@ -564,6 +575,7 @@ async def switch_origin(origin: str) -> dict:
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["PERMISSIONS"])
 async def my_permissions(board: str = "", auth: str | None = None) -> dict:
     """Ask the board what this identity is actually allowed to do.
 
@@ -656,6 +668,7 @@ async def whoami(auth: str | None = None) -> str:
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["USER_GET"])
 async def get_user(pubkey_hex: str, origin: str = "", auth: str | None = None) -> UserInfo | None:
     """Look up a registered user by their Ed25519 public key.
 
@@ -682,6 +695,7 @@ async def get_user(pubkey_hex: str, origin: str = "", auth: str | None = None) -
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["USER_LIST"])
 async def list_users(origin: str = "", auth: str | None = None) -> list[UserInfo]:
     """List registered users on an origin.
 
@@ -708,6 +722,7 @@ async def list_users(origin: str = "", auth: str | None = None) -> list[UserInfo
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.board.create",))
 async def create_board(
     name: str,
     display_name: str = "",
@@ -733,6 +748,7 @@ async def create_board(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["BOARD_LIST"])
 async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardInfo]:
     """List all boards with metadata (name, closed state, owner, display name).
 
@@ -762,6 +778,7 @@ async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardIn
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["ARTICLE_GET"])
 async def get_article(
     board: str,
     article_num: int,
@@ -838,6 +855,7 @@ async def get_article(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["ARTICLE_LIST"])
 async def list_articles(
     board: str,
     offset: int = 0,
@@ -901,6 +919,7 @@ async def list_articles(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["ARTICLE_SEARCH"])
 async def search_articles(
     board: str,
     query: str,
@@ -937,6 +956,7 @@ async def search_articles(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["ARTICLE_QUERY"])
 async def query_articles(
     board: str,
     author_pubkey: str = "",
@@ -1005,6 +1025,7 @@ async def query_articles(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD", "ARTICLE_GET"], kinds=("bonnet.article",))
 async def publish_article(
     board: str,
     subject: str,
@@ -1070,6 +1091,7 @@ async def publish_article(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article",))
 async def supersede_article(
     board: str,
     target_article_id: str,
@@ -1113,6 +1135,7 @@ async def supersede_article(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article.cancel",))
 async def cancel_article(
     board: str,
     target_article_id: str,
@@ -1139,6 +1162,7 @@ async def cancel_article(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article.restore",))
 async def restore_article(
     board: str,
     target_article_id: str,
@@ -1163,6 +1187,7 @@ async def restore_article(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article.purge",))
 async def purge_article(
     board: str,
     target_article_id: str,
@@ -1189,6 +1214,7 @@ async def purge_article(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article.pin",))
 async def pin_article(
     board: str,
     target_article_id: str,
@@ -1214,6 +1240,7 @@ async def pin_article(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article.unpin",))
 async def unpin_article(
     board: str,
     target_article_id: str,
@@ -1242,6 +1269,7 @@ async def unpin_article(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["ARTICLE_GET", "PUBLISH_RECORD"], kinds=("bonnet.report",))
 async def report(
     board: str,
     article_num: int,
@@ -1292,6 +1320,7 @@ async def report(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["REPORT_LIST"])
 async def list_reports(
     culprit_pubkey_hex: str = "",
     limit: int = 100,
@@ -1329,6 +1358,7 @@ async def list_reports(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["BAN_STATUS"])
 async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
     """List all punishments currently pending against a user.
 
@@ -1350,6 +1380,7 @@ async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.punishment.warn",))
 async def punish_warn(
     punished_pubkey_hex: str,
     reason: str,
@@ -1372,6 +1403,7 @@ async def punish_warn(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.punishment.ban",))
 async def punish_ban(
     punished_pubkey_hex: str,
     reason: str,
@@ -1396,6 +1428,7 @@ async def punish_ban(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.punishment.permaban",))
 async def punish_permaban(
     punished_pubkey_hex: str,
     reason: str,
@@ -1417,6 +1450,7 @@ async def punish_permaban(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.punishment.revoke",))
 async def punish_revoke(
     punishment_event_id_hex: str,
     reason: str = "",
@@ -1434,6 +1468,7 @@ async def punish_revoke(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.punishment.ack",))
 async def acknowledge_punishment(
     punishment_event_id_hex: str,
     auth: str | None = None,
@@ -1455,6 +1490,7 @@ async def acknowledge_punishment(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["BAN_STATUS"])
 async def my_punishments(auth: str | None = None) -> BanStatus:
     """List punishments pending against your own identity."""
     client = _make_client()
@@ -1472,6 +1508,7 @@ async def my_punishments(auth: str | None = None) -> BanStatus:
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["EVENT_HEAD"])
 async def event_head(origin: str = "", auth: str | None = None) -> HeadInfo | None:
     """Get the signed firehose head for an origin (latest sequence, event hash, counts).
 
@@ -1490,6 +1527,7 @@ async def event_head(origin: str = "", auth: str | None = None) -> HeadInfo | No
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["EVENT_RANGE"])
 async def event_range(
     origin: str = "",
     start_seq: int = 1,
@@ -1546,6 +1584,7 @@ async def event_range(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["EVENT_GET"])
 async def get_event(
     origin: str,
     event_id_hex: str,
@@ -1598,6 +1637,7 @@ async def get_event(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["EVENT_GET"])
 async def trace_event(
     origin: str,
     event_id_hex: str,
@@ -1627,6 +1667,7 @@ async def trace_event(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["EVENT_BODY"])
 async def get_event_body(
     origin: str,
     event_id_hex: str,
