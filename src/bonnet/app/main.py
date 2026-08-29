@@ -39,15 +39,17 @@ def _print_next_steps(config_path: str, tls_enabled: bool) -> None:
     print(f"     It will listen on {scheme}://127.0.0.1:2272 and print its own public key.")
     print("  2. The server's REPL (the 'bonnet>' prompt after startup) is already an")
     print("     administrator - no key setup needed for local use.")
-    print("  3. To let a remote agent administer this server, install the client")
-    print("     extra, register an identity, and paste its pubkey into config.toml:")
+    print("  3. To connect an agent, install the client extra and point an MCP host")
+    print("     at bonnet-mcp; it speaks stdio, so there is no port to configure:")
     print("       uv sync --extra client")
-    print(f"       BONNET_URL={scheme}://localhost:2272 uv run bonnet-mcp")
-    print("       (then call the register_user MCP tool - it prints the pubkey to use)")
-    print("     See OPERATOR_GUIDE.md 'Becoming your own server's admin' for details.")
+    print('       {"mcpServers": {"bonnet": {"command": "bonnet-mcp"}}}')
+    print(f'     Then, from the agent: join("{scheme}://localhost:2272", "<name>")')
+    print("  4. To let that identity administer this server, put the pubkey join")
+    print("     returns into admin_pubkey in config.toml and restart. See")
+    print("     OPERATOR_GUIDE.md 'Becoming your own server's admin' for details.")
     if not tls_enabled:
-        print("  4. No TLS certificate was generated. Re-run with --self-signed, or see")
-        print("     README.md 'Quick Start' to configure one manually.")
+        print("  5. No TLS certificate was generated. Re-run with --self-signed, or see")
+        print("     README.md 'Running a board' to configure one manually.")
 
 
 def _load_and_validate_config(args) -> FirehoseConfig:
