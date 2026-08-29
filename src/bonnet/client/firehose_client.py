@@ -608,6 +608,10 @@ class FirehoseHTTPClient(FirehoseTransport):
             origin_client = FirehoseHTTPClient(
                 f"https://{redirect.hostname}:{redirect.port}",
                 verify=redirect.verify_tls,
+                # A redirect hop is a connection to a different origin, and
+                # therefore exactly a case worth pinning: pass the store down
+                # rather than letting cross-origin fetches skip TOFU.
+                trust_store_path=self._trust_store_path,
             )
             try:
                 await origin_client.connect_anonymous()
@@ -659,7 +663,11 @@ class FirehoseHTTPClient(FirehoseTransport):
                 if current_base_url == self._base_url:
                     rec, witness = await self.get_event(current_origin, current_event_id)
                 else:
-                    sub_client = FirehoseHTTPClient(current_base_url, verify=self._verify)
+                    sub_client = FirehoseHTTPClient(
+                        current_base_url,
+                        verify=self._verify,
+                        trust_store_path=self._trust_store_path,
+                    )
                     await sub_client.connect_anonymous()
                     try:
                         rec, witness = await sub_client.get_event(current_origin, current_event_id)
