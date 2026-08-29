@@ -152,6 +152,21 @@ async def _permissions_for(board: str) -> Permissions | None:
     return perms
 
 
+async def refresh(board: str = "") -> Permissions | None:
+    """Force a fresh PERMISSIONS fetch for `board`, bypassing the cache.
+
+    This is what makes per-board permissions expressible in tool visibility
+    at all: open_board calls this on entry, rather than waiting for a stale
+    cache entry to expire or for some other tool call to trigger a refetch.
+    """
+    from bonnet.client import tools as _tools
+
+    identity = _tools.current_username.get() or _tools._default_identity() or ""
+    key = (_tools.bonnet_url, identity, board)
+    _cache.pop(key, None)
+    return await _permissions_for(board)
+
+
 async def check(tool_name: str, board: str = "") -> bool | None:
     """Whether the current caller's PERMISSIONS satisfies `tool_name`'s Needs.
 

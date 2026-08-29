@@ -82,7 +82,7 @@ async def test_inline_body_is_unchecked(patch_client):
     body = b"hello world"
     client = patch_client(FakeClient(_make_view(body, body)))
 
-    view = await tools.get_article("b", 1)
+    view = await tools.get_article(1, board="b")
 
     assert view.body == body
     assert view.body_check == "unchecked"
@@ -94,7 +94,7 @@ async def test_separately_fetched_body_matching_hash_is_matched(patch_client):
     view_in = _make_view(None, body, body_state="remote")
     client = patch_client(FakeClient(view_in, body_result=body))
 
-    view = await tools.get_article("b", 1)
+    view = await tools.get_article(1, board="b")
 
     assert client.body_fetched
     assert view.body == body
@@ -114,7 +114,7 @@ async def test_separately_fetched_body_with_wrong_bytes_is_mismatched(patch_clie
     view_in = _make_view(None, honest, body_state="remote")
     client = patch_client(FakeClient(view_in, body_result=tampered))
 
-    view = await tools.get_article("b", 1)
+    view = await tools.get_article(1, board="b")
 
     assert client.body_fetched
     assert view.body_check == "mismatched"
@@ -127,10 +127,10 @@ async def test_mismatched_is_distinguishable_from_unchecked(patch_client):
     honest = b"hello world"
     view_in = _make_view(None, honest, body_state="remote")
     patch_client(FakeClient(view_in, body_result=b"different!!"))
-    mismatched = (await tools.get_article("b", 1)).body_check
+    mismatched = (await tools.get_article(1, board="b")).body_check
 
     patch_client(FakeClient(_make_view(honest, honest)))
-    unchecked = (await tools.get_article("b", 1)).body_check
+    unchecked = (await tools.get_article(1, board="b")).body_check
 
     assert mismatched == "mismatched"
     assert unchecked == "unchecked"
