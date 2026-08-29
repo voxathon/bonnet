@@ -272,3 +272,37 @@ class Permissions:
 
     def may_publish(self, kind: str) -> bool:
         return "PUBLISH_RECORD" in self.commands and kind in self.kinds
+
+
+@dataclass
+class ReportInfo:
+    """One filed report, as the relay's moderation queue holds it.
+
+    An accusation by `reporter_pubkey` naming `culprit_pubkey`, carrying at
+    most one target: an article (`target_origin`/`target_board`/
+    `target_article_id`), an event (`target_event_id`), or nothing. The
+    validator enforces exactly one of those shapes, so `target_kind` can be
+    switched on without inspecting which fields happen to be zero.
+
+    Filing one confers no authority over the named key and takes no action
+    against them. A pile of reports naming one user is evidence of a pile of
+    reports.
+
+    The reason is the record body and is not inlined here; fetch it by
+    `event_id` when the grounds matter.
+    """
+
+    event_id: str = ""  # hex
+    origin: str = ""
+    origin_seq: int = 0
+    reporter_pubkey: str = ""  # hex
+    reporter_username: str = ""
+    culprit_pubkey: str = ""  # hex
+    target_kind: str = "none"  # article | event | none
+    target_origin: str = ""
+    target_board: str = ""
+    target_article_id: str = ""  # hex
+    target_event_id: str = ""  # hex
+    body_hash: str = ""  # hex
+    body_size: int = 0
+    created_at: int = 0

@@ -12,7 +12,7 @@ import pytest
 from bonnet.core.acl import ACLRule, PrincipalMatcher
 from bonnet.core.crypto import Identity
 from bonnet.core.record import ZERO_ID
-from bonnet.net.firehose_wire import ProtocolError
+from bonnet.net.firehose_wire import ProtocolError, build_report_list
 from tests.test_firehose_http_server import (  # noqa: F401
     ORIGIN,
     SERVER_IDENTITY,
@@ -24,12 +24,21 @@ CULPRIT = Identity.from_private_key(bytes(range(130, 162)))
 
 
 def _allow_reports(stack, matcher):
+    """Grant permission to *file* reports, and only that.
+
+    Deliberately write-only. ACL dimensions are evaluated independently across
+    every matching rule, so a rule granting `read` with `boards = ["*"]` would
+    also satisfy the board dimension of a REPORT_LIST check — silently
+    defeating any board-scoped restriction on the queue. `_check_dimension`
+    filters rules by action first, so a write-only grant cannot leak into a
+    read check.
+    """
     stack["command_handler"]._acl.add_rule(
         ACLRule(
             effect="allow",
             matcher=matcher,
-            actions=["read", "write"],
-            commands=["PUBLISH_RECORD", "PERMISSIONS"],
+            actions=["write"],
+            commands=["PUBLISH_RECORD"],
             kinds=["bonnet.report"],
             boards=["*"],
         )
@@ -147,3 +156,107 @@ def test_default_config_lets_users_report_but_not_punish():
     assert may("bonnet.report")
     assert not may("bonnet.punishment.ban")
     assert not may("bonnet.punishment.permaban")
+
+
+# --- REPORT_LIST: the queue as a command, not a client-side scan -----------
+
+
+def _allow_queue(stack, matcher, boards=None):
+    stack["command_handler"]._acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=matcher,
+            actions=["read"],
+            commands=["REPORT_LIST"],
+            boards=boards if boards is not None else ["*"],
+        )
+    )
+
+
+async def test_queue_requires_its_own_grant(server_stack):  # noqa: F811
+    """The reason this is an opcode: an operator can withhold it. A caller
+    with every ordinary read permission still cannot enumerate accusations."""
+    client = server_stack["client"]
+    await client.connect_anonymous()
+
+    with pytest.raises(ProtocolError, match="error 4"):
+        await client.list_reports()
+
+
+async def test_queue_returns_reports_when_granted(server_stack):  # noqa: F811
+    _allow_reports(server_stack, PrincipalMatcher(pubkey=REPORTER.public_key))
+    _allow_queue(server_stack, PrincipalMatcher(pubkey=REPORTER.public_key))
+    client = server_stack["client"]
+    await client.connect(REPORTER)
+    await client.publish_report(
+        culprit_pubkey=CULPRIT.public_key,
+        reason="spam",
+        target_origin=ORIGIN,
+        target_board="general",
+        target_article_id=bytes(range(32)),
+    )
+
+    reports = await client.list_reports()
+
+    assert len(reports) == 1
+    assert reports[0].culprit_pubkey == CULPRIT.public_key.hex()
+    assert reports[0].reporter_pubkey == REPORTER.public_key.hex()
+    assert reports[0].target_kind == "article"
+    assert reports[0].target_board == "general"
+
+
+async def test_board_scoped_acl_filters_the_queue(server_stack):  # noqa: F811
+    """The check a client-side scan over EVENT_RANGE cannot make. A caller
+    granted the queue for one board must not see accusations made in another
+    — otherwise a `boards = [...]` rule is a no-op here, exactly what
+    _board_read_allowed exists to prevent."""
+    _allow_reports(server_stack, PrincipalMatcher(pubkey=REPORTER.public_key))
+    client = server_stack["client"]
+    await client.connect(REPORTER)
+    for board in ("open", "secret"):
+        await client.publish_report(
+            culprit_pubkey=CULPRIT.public_key,
+            reason=f"about {board}",
+            target_origin=ORIGIN,
+            target_board=board,
+            target_article_id=bytes(range(32)),
+        )
+    _allow_queue(server_stack, PrincipalMatcher(pubkey=REPORTER.public_key), boards=["open"])
+
+    reports = await client.list_reports()
+
+    assert [r.target_board for r in reports] == ["open"]
+
+
+async def test_untargeted_reports_need_only_the_command_grant(server_stack):  # noqa: F811
+    """A report with no board carries nothing to check per board, so the
+    command grant governs it alone — it must not be silently dropped."""
+    _allow_reports(server_stack, PrincipalMatcher(pubkey=REPORTER.public_key))
+    _allow_queue(server_stack, PrincipalMatcher(pubkey=REPORTER.public_key), boards=["open"])
+    client = server_stack["client"]
+    await client.connect(REPORTER)
+    await client.publish_report(culprit_pubkey=CULPRIT.public_key, reason="general concern")
+
+    reports = await client.list_reports()
+
+    assert len(reports) == 1
+    assert reports[0].target_kind == "none"
+
+
+async def test_queue_filters_by_culprit(server_stack):  # noqa: F811
+    _allow_reports(server_stack, PrincipalMatcher(pubkey=REPORTER.public_key))
+    _allow_queue(server_stack, PrincipalMatcher(pubkey=REPORTER.public_key))
+    client = server_stack["client"]
+    await client.connect(REPORTER)
+    other = Identity.generate()
+    await client.publish_report(culprit_pubkey=CULPRIT.public_key, reason="a")
+    await client.publish_report(culprit_pubkey=other.public_key, reason="b")
+
+    named = await client.list_reports(CULPRIT.public_key)
+
+    assert len(named) == 1
+    assert named[0].culprit_pubkey == CULPRIT.public_key.hex()
+
+
+def test_request_round_trips():
+    assert build_report_list()[0] == 0x23
