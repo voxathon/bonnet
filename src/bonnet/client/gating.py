@@ -44,6 +44,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import Tool
 
+from bonnet.client import cursor
 from bonnet.client import needs as needs_module
 
 #: Tag marking a tool that cannot function without somewhere to send a
@@ -171,7 +172,7 @@ async def _missing_for(tool: Tool) -> str | None:
         if reason is not None:
             return reason
 
-    allowed = await needs_module.check(tool.name)
+    allowed = await needs_module.check(tool.name, cursor.current_board.get() or "")
     if allowed is False:
         return (
             f"{tool.name} is not permitted for this identity, per the relay's own "

@@ -63,6 +63,8 @@ import time
 import httpx
 from fastmcp import FastMCP
 
+from bonnet.client import cursor
+from bonnet.client import needs as needs_module
 from bonnet.client.firehose_client import FirehoseHTTPClient, default_verify_tls
 from bonnet.client.gating import NEEDS_IDENTITY, NEEDS_ORIGIN, announce_tool_change
 from bonnet.client.identity import IdentityStore
@@ -568,10 +570,65 @@ async def switch_origin(origin: str) -> dict:
     bonnet_verify = entry["verify_tls"]
     _origin_loaded = True
     current_username.set(entry["identity"] or None)
+    # A board open on the origin just left may not even exist here.
+    cursor.clear_board()
 
     await _unlock_origin_tools()
 
     return {**entry, "active": True}
+
+
+@mcp.tool
+async def open_board(board: str) -> dict:
+    """Enter a board: make it the default for board-scoped tool calls.
+
+    board-scoped tools (get_article, list_articles, publish_article, and the
+    rest) still accept an explicit `board=` at any time — the cursor this
+    sets is a default, not a lock, and origin="" aggregate reads are
+    unaffected by it. What changes is what a call omitting `board=` means.
+
+    This also re-fetches PERMISSIONS scoped to this board, which is the only
+    way per-board ACL rules become visible in the tool list: a caller
+    granted PUBLISH_RECORD on one board and not another sees that reflected
+    here, not just on refusal.
+    """
+    if not board:
+        raise ValueError("board is required")
+    cursor.set_board(board)
+    perms = await needs_module.refresh(board)
+    await announce_tool_change()
+    return {
+        "board": board,
+        "commands": perms.commands if perms is not None else None,
+        "kinds": perms.kinds if perms is not None else None,
+    }
+
+
+@mcp.tool
+async def leave_board() -> dict:
+    """Exit the current board, returning to the origin-level view.
+
+    Never hidden: every state this cursor can be in needs a way out that is
+    not itself gated, including when the relay's own PERMISSIONS answer has
+    narrowed everything else to nothing.
+    """
+    cursor.clear_board()
+    await announce_tool_change()
+    return {"board": None}
+
+
+@mcp.tool
+async def back() -> dict:
+    """Step up one level: reading an article -> its board; a board -> the
+    origin. A no-op, not an error, when already at the top."""
+    if cursor.current_article_num.get() is not None:
+        cursor.clear_article()
+        return {"state": "board", "board": cursor.current_board.get()}
+    if cursor.current_board.get() is not None:
+        cursor.clear_board()
+        await announce_tool_change()
+        return {"state": "origin"}
+    return {"state": "origin"}
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
@@ -780,13 +837,19 @@ async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardIn
 @mcp.tool(tags={NEEDS_ORIGIN})
 @needs(commands=["ARTICLE_GET"])
 async def get_article(
-    board: str,
     article_num: int,
+    *,
+    board: str = "",
     include_body: bool = True,
     origin: str = "",
     auth: str | None = None,
 ) -> ArticleView | None:
     """Get a single article by board and article number.
+
+    Reading an article makes it the navigation cursor's current one — see
+    open_board's docstring for the state this is part of. board defaults to
+    whatever open_board last set; pass it explicitly to read from a
+    different board without leaving the current one.
 
     Returns the full article including subject, tags, body (if available),
     author info, projected state (active/cancelled/superseded), and lifecycle
@@ -822,11 +885,12 @@ async def get_article(
     meaningful. 'mismatched' still populates `body`, for inspection rather
     than use. None of these values say anything about the content itself.
 
-    board: board name.
     article_num: article number (starts at 1).
+    board: board name (defaults to the board open_board last set).
     include_body: whether to fetch the article body content.
     origin: origin to query (defaults to server's origin).
     """
+    board = cursor.resolve_board(board)
     client = _make_client()
     try:
         if auth:
@@ -849,6 +913,8 @@ async def get_article(
                 # body unavailable/purged or unreachable — leave it unset;
                 # signature verification failures still propagate
                 pass
+        if view is not None:
+            cursor.set_article(board, article_num, view.article_id)
         return view
     finally:
         await client.close()
@@ -857,7 +923,7 @@ async def get_article(
 @mcp.tool(tags={NEEDS_ORIGIN})
 @needs(commands=["ARTICLE_LIST"])
 async def list_articles(
-    board: str,
+    board: str = "",
     offset: int = 0,
     limit: int = 50,
     include_cancelled: bool = False,
@@ -880,11 +946,12 @@ async def list_articles(
     different moderation policy — check each item's origin before treating
     entries as comparable.
 
-    board: board name.
+    board: board name (defaults to the board open_board last set).
     offset: pagination offset.
     limit: max articles to return.
     origin: origin to query (empty = aggregate across all known origins).
     """
+    board = cursor.resolve_board(board)
     if offset < 0:
         raise ValueError("offset must be non-negative")
     if limit < 1:
@@ -921,8 +988,9 @@ async def list_articles(
 @mcp.tool(tags={NEEDS_ORIGIN})
 @needs(commands=["ARTICLE_SEARCH"])
 async def search_articles(
-    board: str,
     query: str,
+    *,
+    board: str = "",
     offset: int = 0,
     limit: int = 50,
     origin: str = "",
@@ -935,9 +1003,10 @@ async def search_articles(
     endorsement; a result ranks by recency alone.
 
     query: substring to search for in subject and tags.
-    board: board name.
+    board: board name (defaults to the board open_board last set).
     origin: origin to query (empty = aggregate across all known origins).
     """
+    board = cursor.resolve_board(board)
     if offset < 0:
         raise ValueError("offset must be non-negative")
     if limit < 1:
@@ -958,7 +1027,7 @@ async def search_articles(
 @mcp.tool(tags={NEEDS_ORIGIN})
 @needs(commands=["ARTICLE_QUERY"])
 async def query_articles(
-    board: str,
+    board: str = "",
     author_pubkey: str = "",
     username: str = "",
     tag: str = "",
@@ -980,6 +1049,7 @@ async def query_articles(
     them, so two origins may host different users under the same name. Filter
     by author_pubkey when you need the results to be one specific author.
 
+    board: board name (defaults to the board open_board last set).
     author_pubkey: hex Ed25519 public key to filter by author.
     username: filter by author username.
     tag: filter by tag (substring match).
@@ -988,6 +1058,7 @@ async def query_articles(
     pinned_only: only show pinned articles.
     origin: origin to query (defaults to server's origin).
     """
+    board = cursor.resolve_board(board)
     if offset < 0:
         raise ValueError("offset must be non-negative")
     if limit < 1:
@@ -1027,9 +1098,10 @@ async def query_articles(
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 @needs(commands=["PUBLISH_RECORD", "ARTICLE_GET"], kinds=("bonnet.article",))
 async def publish_article(
-    board: str,
     subject: str,
     content: str,
+    *,
+    board: str = "",
     tags: str = "",
     reply_to_article_id: str = "",
     auth: str | None = None,
@@ -1040,14 +1112,15 @@ async def publish_article(
     to hard-delete use purge_article, to replace use supersede_article.
     The article is signed with your Ed25519 key.
 
-    board: board name.
     subject: article subject line.
     content: article body text.
+    board: board name (defaults to the board open_board last set).
     tags: comma-separated tags (optional).
     reply_to_article_id: hex article ID of the article being replied to (optional).
     """
     import os as _os
 
+    board = cursor.resolve_board(board)
     article_id = _os.urandom(32)
     tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     body = content.encode("utf-8")
@@ -1093,10 +1166,11 @@ async def publish_article(
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 @needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article",))
 async def supersede_article(
-    board: str,
     target_article_id: str,
     subject: str,
     content: str,
+    *,
+    board: str = "",
     tags: str = "",
     auth: str | None = None,
 ) -> str:
@@ -1105,14 +1179,16 @@ async def supersede_article(
     Only the original author may supersede. The superseded article's
     visibility becomes 'superseded' and this article carries the link.
 
-    board: board where the target article lives.
     target_article_id: hex article ID of the article being superseded.
     subject: subject line for the replacement article.
     content: body text for the replacement article.
+    board: board where the target article lives (defaults to the board
+        open_board last set).
     tags: comma-separated tags (optional).
     """
     import os as _os
 
+    board = cursor.resolve_board(board)
     supersedes_id = _validate_article_id(target_article_id)
     article_id = _os.urandom(32)
     tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
@@ -1137,19 +1213,22 @@ async def supersede_article(
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 @needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article.cancel",))
 async def cancel_article(
-    board: str,
     target_article_id: str,
+    *,
+    board: str = "",
     reason: str = "",
     origin: str = "",
     auth: str | None = None,
 ) -> str:
     """Cancel an article (soft delete). Author or moderator may cancel.
 
-    board: board where the target article lives.
     target_article_id: hex article ID of the article to cancel.
+    board: board where the target article lives (defaults to the board
+        open_board last set).
     origin: origin to query (defaults to server's origin).
     reason: optional human-readable cancellation reason.
     """
+    board = cursor.resolve_board(board)
     aid = _validate_article_id(target_article_id)
     client = _make_client()
     try:
@@ -1164,17 +1243,20 @@ async def cancel_article(
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 @needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article.restore",))
 async def restore_article(
-    board: str,
     target_article_id: str,
+    *,
+    board: str = "",
     reason: str = "",
     origin: str = "",
     auth: str | None = None,
 ) -> str:
     """Restore a previously cancelled article. Author or moderator.
 
-    board: board where the target article lives.
     target_article_id: hex article ID of the cancelled article to restore.
+    board: board where the target article lives (defaults to the board
+        open_board last set).
     """
+    board = cursor.resolve_board(board)
     aid = _validate_article_id(target_article_id)
     client = _make_client()
     try:
@@ -1189,19 +1271,22 @@ async def restore_article(
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 @needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article.purge",))
 async def purge_article(
-    board: str,
     target_article_id: str,
     reason: str,
+    *,
+    board: str = "",
     origin: str = "",
     auth: str | None = None,
 ) -> str:
     """Purge an article's body (hard delete). The author or a moderator/admin may purge.
     Irreversible — the body is deleted but the event metadata is retained in the firehose.
 
-    board: board where the target article lives.
     target_article_id: hex article ID of the article to purge.
     reason: human-readable purge reason (required).
+    board: board where the target article lives (defaults to the board
+        open_board last set).
     """
+    board = cursor.resolve_board(board)
     aid = _validate_article_id(target_article_id)
     client = _make_client()
     try:
@@ -1216,18 +1301,21 @@ async def purge_article(
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 @needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article.pin",))
 async def pin_article(
-    board: str,
     target_article_id: str,
+    *,
+    board: str = "",
     priority: int = 0,
     origin: str = "",
     auth: str | None = None,
 ) -> str:
     """Pin an article to the top of the board. Moderator/admin only.
 
-    board: board where the target article lives.
     target_article_id: hex article ID of the article to pin.
+    board: board where the target article lives (defaults to the board
+        open_board last set).
     priority: higher values appear more prominent.
     """
+    board = cursor.resolve_board(board)
     aid = _validate_article_id(target_article_id)
     client = _make_client()
     try:
@@ -1242,16 +1330,19 @@ async def pin_article(
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 @needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article.unpin",))
 async def unpin_article(
-    board: str,
     target_article_id: str,
+    *,
+    board: str = "",
     origin: str = "",
     auth: str | None = None,
 ) -> str:
     """Remove a pin from an article. Moderator/admin only.
 
-    board: board where the target article lives.
     target_article_id: hex article ID of the article to unpin.
+    board: board where the target article lives (defaults to the board
+        open_board last set).
     """
+    board = cursor.resolve_board(board)
     aid = _validate_article_id(target_article_id)
     client = _make_client()
     try:
@@ -1271,9 +1362,10 @@ async def unpin_article(
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 @needs(commands=["ARTICLE_GET", "PUBLISH_RECORD"], kinds=("bonnet.report",))
 async def report(
-    board: str,
     article_num: int,
     reason: str,
+    *,
+    board: str = "",
     origin: str = "",
     auth: str | None = None,
 ) -> str:
@@ -1298,6 +1390,7 @@ async def report(
     if not reason.strip():
         raise ValueError("A report needs a reason — moderators act on the grounds, not the flag")
 
+    board = cursor.resolve_board(board)
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
