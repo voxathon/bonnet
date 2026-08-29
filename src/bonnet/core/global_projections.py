@@ -472,18 +472,6 @@ class PolicyProjection(_BaseProjection):
                 DELETE FROM projection_checkpoint;
             """)
 
-        # Schema v2 for reports: record who filed one. Without the reporter a
-        # moderation queue cannot say who is accusing whom, which is both the
-        # first thing a moderator needs and the only way report-brigading is
-        # visible at all. Same treatment as above — drop and let the dispatcher
-        # replay it from the firehose, which is authoritative.
-        rcols = {row[1] for row in self._conn.execute("PRAGMA table_info(reports)")}
-        if rcols and "reporter_pubkey" not in rcols:
-            self._conn.executescript("""
-                DROP TABLE IF EXISTS reports;
-                DELETE FROM applied_events;
-                DELETE FROM projection_checkpoint;
-            """)
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS rules (
                 event_id        BLOB PRIMARY KEY,
@@ -500,8 +488,6 @@ class PolicyProjection(_BaseProjection):
                 event_id        BLOB PRIMARY KEY,
                 origin          TEXT NOT NULL,
                 origin_seq      INTEGER NOT NULL,
-                reporter_pubkey BLOB NOT NULL DEFAULT x'',
-                reporter_username TEXT NOT NULL DEFAULT '',
                 culprit_pubkey  BLOB NOT NULL,
                 target_origin   TEXT NOT NULL DEFAULT '',
                 target_board    TEXT NOT NULL DEFAULT '',
@@ -603,17 +589,14 @@ class PolicyProjection(_BaseProjection):
                 culprit = rec.metadata.get_bytes(1) or b"\x00" * 32
                 self._conn.execute(
                     "INSERT OR REPLACE INTO reports "
-                    "(event_id, origin, origin_seq, reporter_pubkey, reporter_username, "
-                    "culprit_pubkey, "
+                    "(event_id, origin, origin_seq, culprit_pubkey, "
                     "target_origin, target_board, target_article_id, target_event_id, "
                     "body_hash, body_size, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         rec.event_id,
                         rec.origin,
                         rec.origin_seq,
-                        rec.actor_pubkey,
-                        rec.actor_username or "",
                         culprit,
                         rec.target_origin,
                         rec.target_board,
@@ -745,8 +728,7 @@ class PolicyProjection(_BaseProjection):
         `body_hash` if it is wanted.
         """
         sql = (
-            "SELECT event_id, origin, origin_seq, reporter_pubkey, reporter_username, "
-            "culprit_pubkey, target_origin, "
+            "SELECT event_id, origin, origin_seq, culprit_pubkey, target_origin, "
             "target_board, target_article_id, target_event_id, body_hash, body_size, "
             "created_at FROM reports "
         )
@@ -764,16 +746,14 @@ class PolicyProjection(_BaseProjection):
                 "event_id": bytes(r[0]),
                 "origin": r[1],
                 "origin_seq": r[2],
-                "reporter_pubkey": bytes(r[3]),
-                "reporter_username": r[4],
-                "culprit_pubkey": bytes(r[5]),
-                "target_origin": r[6],
-                "target_board": r[7],
-                "target_article_id": bytes(r[8]),
-                "target_event_id": bytes(r[9]),
-                "body_hash": bytes(r[10]),
-                "body_size": r[11],
-                "created_at": r[12],
+                "culprit_pubkey": bytes(r[3]),
+                "target_origin": r[4],
+                "target_board": r[5],
+                "target_article_id": bytes(r[6]),
+                "target_event_id": bytes(r[7]),
+                "body_hash": bytes(r[8]),
+                "body_size": r[9],
+                "created_at": r[10],
             }
             for r in rows
         ]

@@ -1366,3 +1366,40 @@ class TestDispatcher:
         art = bp.get_article_by_id("bbs.a", "general", aid)
         assert art.body_state == "purged"
         assert not bs.article_body_exists("bbs.a", "general", 1)
+
+
+def test_reopening_a_policy_projection_preserves_derived_state(tmp_path):
+    """Opening an existing projection must not wipe it.
+
+    A schema migration here clears `applied_events` and
+    `projection_checkpoint` deliberately, to force the dispatcher to replay
+    from the authoritative firehose. Those clears are shared by every table in
+    this projection, so one left running unconditionally turns every startup
+    into a full replay — correct in the end, but silently expensive, and
+    invisible to tests that only ever build fresh databases. That is exactly
+    how it slipped in once.
+    """
+    path = str(tmp_path / "policy.db")
+
+    p = PolicyProjection(path)
+    p._conn.execute(
+        "INSERT INTO reports (event_id, origin, origin_seq, culprit_pubkey, target_origin,"
+        " target_board, target_article_id, target_event_id, body_hash, body_size, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (bytes(32), "o", 1, bytes(32), "", "", bytes(32), bytes(32), bytes(32), 4, 1),
+    )
+    p._conn.execute(
+        "INSERT INTO applied_events (event_id, origin, origin_seq, kind, applied_at)"
+        " VALUES (?,?,?,?,?)",
+        (bytes(32), "o", 1, "bonnet.report", 1),
+    )
+    p._conn.commit()
+    p.close()
+
+    reopened = PolicyProjection(path)
+    try:
+        assert len(reopened.list_reports()) == 1
+        applied = reopened._conn.execute("SELECT COUNT(*) FROM applied_events").fetchone()[0]
+        assert applied == 1, "reopening cleared applied_events — every start would replay"
+    finally:
+        reopened.close()

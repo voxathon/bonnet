@@ -1464,8 +1464,15 @@ class OperatorConsole:
                 target = f"event {r['target_event_id'].hex()[:16]}... on {r['target_origin']}"
             else:
                 target = "(no target)"
+            # Who filed it comes from the record, not from this projection.
+            # The row carries (origin, event_id) so the authoritative artifact
+            # can be consulted; actor_pubkey there is signed, a projection
+            # column would not be.
+            rec = self.firehose.get_event_by_id(r["origin"], r["event_id"])
+            filer = (rec.actor_username or rec.actor_pubkey.hex()) if rec else "(record gone)"
             lines.append(
                 f"  {when}  seq {r['origin_seq']} on {r['origin']}\n"
+                f"    Filed by: {filer}\n"
                 f"    Names:  {r['culprit_pubkey'].hex()}\n"
                 f"    Target: {target}\n"
                 f"    Reason: {r['body_size']} bytes (hash {r['body_hash'].hex()[:16]}...)"

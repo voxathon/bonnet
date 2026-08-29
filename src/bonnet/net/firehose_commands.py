@@ -136,10 +136,10 @@ def _error(code: int, message: str) -> bytes:
 def _pad32(value: bytes) -> bytes:
     """Exactly 32 bytes: truncated, or zero-padded if short.
 
-    Rows written before the reports projection recorded a reporter carry an
-    empty key, and the wire format is fixed-width. Built without a NUL escape
-    on purpose — heredoc-written escapes have twice put literal NUL bytes into
-    source files in this repo.
+    The wire format is fixed-width, and a key read back off a record can be
+    absent if the record has since been purged from this origin. Built without
+    a NUL escape on purpose — heredoc-written escapes have twice put literal
+    NUL bytes into source files in this repo.
     """
     return (value + bytes(32))[:32]
 
@@ -672,6 +672,11 @@ class FirehoseCommandHandler:
         enforcement points exist here and neither is available to a client
         scanning the event log:
 
+        The reporter is read back off each record rather than stored again in
+        the projection. Projections are derived views over records and keep
+        (origin, event_id) precisely so the record can be consulted; the
+        signed field there is the authoritative one.
+
         1. `REPORT_LIST` is its own ACL command, so an operator can grant the
            queue to moderators and to nobody else.
         2. A report carrying an article target is filtered through
@@ -703,11 +708,22 @@ class FirehoseCommandHandler:
 
         payload = struct.pack(">H", len(visible))
         for r in visible:
+            # Who filed it comes from the record, not from this projection.
+            # The record is the authoritative artifact: actor_pubkey there is
+            # covered by the actor signature, the origin countersignature and
+            # the hash chain. A copy denormalized into a projection column
+            # would be unsigned derived state saying the same thing less
+            # credibly — and the row already carries the (origin, event_id)
+            # needed to go ask.
+            rec = self._firehose.get_event_by_id(r["origin"], r["event_id"])
+            reporter = rec.actor_pubkey if rec else b""
+            reporter_name = rec.actor_username if rec else ""
+
             payload += r["event_id"]
             payload += _enc_text16(r["origin"])
             payload += struct.pack(">Q", r["origin_seq"])
-            payload += _pad32(r["reporter_pubkey"])
-            payload += _enc_text16(r["reporter_username"])
+            payload += _pad32(reporter)
+            payload += _enc_text16(reporter_name)
             payload += r["culprit_pubkey"]
             payload += _enc_text16(r["target_origin"])
             payload += _enc_text16(r["target_board"])
