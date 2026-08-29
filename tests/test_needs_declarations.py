@@ -93,20 +93,28 @@ OPTIONAL_CALLS = {
     "get_article": {"get_article_body"},  # remote-body fallback; failure is caught
 }
 
-_CALL_RE = re.compile(r"\bclient\.(\w+)\(")
+# needs_module.<method> -> the PERMISSIONS command it issues on the caller's
+# behalf (needs.py, not firehose_client.py). Only open_board calls into this
+# module today, via refresh() -> _permissions_for() -> client.get_permissions().
+NEEDS_MODULE_COMMANDS = {
+    "refresh": "PERMISSIONS",
+}
+
+_CALL_RE = re.compile(r"\b(client|needs_module)\.(\w+)\(")
 
 
 def _client_calls(tool_name: str) -> set[str]:
     fn = getattr(tools, tool_name)
     src = inspect.getsource(fn)
-    calls = set(_CALL_RE.findall(src))
-    return calls - OPTIONAL_CALLS.get(tool_name, set())
+    optional = OPTIONAL_CALLS.get(tool_name, set())
+    return {name for _prefix, name in _CALL_RE.findall(src) if name not in optional}
 
 
 @pytest.mark.parametrize("tool_name", sorted(NEEDS))
 def test_declared_commands_match_the_calls_the_tool_makes(tool_name):
     calls = _client_calls(tool_name)
-    expected_commands = {CLIENT_COMMANDS[c] for c in calls if c in CLIENT_COMMANDS}
+    commands = {**CLIENT_COMMANDS, **NEEDS_MODULE_COMMANDS}
+    expected_commands = {commands[c] for c in calls if c in commands}
 
     declared = NEEDS[tool_name]
     assert set(declared.commands) == expected_commands, (

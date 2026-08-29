@@ -10,11 +10,11 @@ Four states, reached without a wizard:
 - **in a board** — `open_board(name)` was called, or a board-scoped tool was
   called with an explicit `board=`. That board becomes the default for
   later board-scoped calls that omit it.
-- **reading an article** — `get_article` returned something. The article
-  becomes available as the cursor's third field, though today only `board`
-  is consumed as a default elsewhere; the read itself is what puts a caller
-  in this state, not a separate "open" call — matching gating's own "not a
-  wizard" stance.
+- **reading an article** — `get_article` returned something. The read itself
+  is what puts a caller in this state, not a separate "open" call — matching
+  gating's own "not a wizard" stance. Article-scoped action tools
+  (cancel/restore/purge/pin/unpin_article, report) default their target from
+  it, mirroring how board-scoped tools default `board` from the level above.
 
 State is per-caller via contextvars, the same mechanism current_username
 already uses in tools.py — an http bridge serving several callers must not
@@ -83,4 +83,41 @@ def resolve_board(explicit: str) -> str:
     raise ValueError(
         "no board given and none open: pass board=, or call open_board(name) "
         "first. list_boards shows what exists."
+    )
+
+
+def resolve_article_id(explicit: str, board: str) -> str:
+    """`explicit` if given, else the open article's ID — scoped to `board`.
+
+    Only defaults when the open article actually belongs to `board`: the
+    cursor's article and board fields are set together by set_article/
+    clear_article, but `board` here is the *already-resolved* target of this
+    call (which may itself have come from an explicit override), and it must
+    not silently act on an article read from a different board.
+    """
+    if explicit:
+        return explicit
+    if current_article_board.get() == board:
+        article_id = current_article_id.get()
+        if article_id:
+            return article_id
+    raise ValueError(
+        "no target_article_id given and no matching article open: pass "
+        "target_article_id=, or call get_article(article_num, board=...) "
+        "first to open one."
+    )
+
+
+def resolve_article_num(explicit: int, board: str) -> int:
+    """Like resolve_article_id, but for report's article_num selector."""
+    if explicit:
+        return explicit
+    if current_article_board.get() == board:
+        article_num = current_article_num.get()
+        if article_num is not None:
+            return article_num
+    raise ValueError(
+        "no article_num given and no matching article open: pass "
+        "article_num=, or call get_article(article_num, board=...) first "
+        "to open one."
     )

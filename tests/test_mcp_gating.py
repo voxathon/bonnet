@@ -18,7 +18,7 @@ pytest.importorskip("fastmcp")
 
 from fastmcp import Client
 
-from bonnet.client import gating, tools
+from bonnet.client import cursor, gating, tools
 from bonnet.client.firehose_client import FirehoseHTTPClient
 from bonnet.client.gating import GatingMiddleware
 from bonnet.core.acl import ACLRule, PrincipalMatcher
@@ -34,9 +34,9 @@ UNGATED = {
     "switch_origin",
     "list_identities",
     "whoami",
-    "open_board",
     "leave_board",
     "back",
+    "where_am_i",
 }
 
 # Tools tagged NEEDS_ORIGIN but not NEEDS_IDENTITY: they fall back to the
@@ -56,6 +56,7 @@ READ_ONLY = {
     "trace_event",
     "get_event_body",
     "my_permissions",
+    "open_board",
 }
 
 
@@ -151,7 +152,7 @@ async def test_join_reports_what_it_unlocked(bridge):
     result = await tools.join("https://bbs.test", "scout")
 
     assert "publish_article" in result["tools_unlocked"]
-    assert len(result["tools_unlocked"]) == 30
+    assert len(result["tools_unlocked"]) == 31
 
 
 async def test_a_restarted_bridge_starts_ready(bridge):
@@ -198,6 +199,21 @@ async def test_an_origin_alone_reveals_the_read_tools(bridge, monkeypatch):
     assert READ_ONLY <= visible
     assert "publish_article" not in visible
     assert "create_board" not in visible
+
+
+async def test_open_board_is_hidden_with_no_origin(bridge):
+    """The bug that motivated tagging open_board NEEDS_ORIGIN: calling it
+    before join/switch_origin used to silently "succeed" against whatever
+    bonnet_url happened to default to, cursor left pointed at a board on an
+    origin never actually reached. Gating it out makes that state
+    unreachable instead of just quiet."""
+    assert "open_board" not in await _visible()
+
+    async with Client(tools.mcp) as c:
+        with pytest.raises(Exception) as exc:
+            await c.call_tool("open_board", {"board": "general"})
+    assert "unavailable" in str(exc.value)
+    assert cursor.current_board.get() is None
 
 
 async def test_register_user_is_never_gated(bridge, monkeypatch):
