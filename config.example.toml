@@ -87,8 +87,14 @@ interval_seconds = 300
 effect = "allow"
 match.anonymous = true
 actions = ["read"]
-commands = ["EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
+commands = ["PERMISSIONS", "EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
 boards = ["*"]
+
+[[acl]]
+effect = "allow"
+match.unknown = true
+actions = ["read"]
+commands = ["PERMISSIONS"]
 
 [[acl]]
 effect = "allow"
@@ -101,7 +107,7 @@ kinds = ["bonnet.user.register"]
 effect = "allow"
 match.registered = true
 actions = ["read"]
-commands = ["EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
+commands = ["PERMISSIONS", "EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
 boards = ["*"]
 
 [[acl]]
