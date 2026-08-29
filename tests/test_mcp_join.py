@@ -28,10 +28,10 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
     monkeypatch.delenv("BONNET_IDENTITY", raising=False)
     monkeypatch.delenv("BONNET_URL", raising=False)
 
-    saved = (tools.identity_store, tools.board_store, tools.bonnet_url, tools.bonnet_verify)
+    saved = (tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify)
     tools.identity_store = None
-    tools.board_store = None
-    tools._board_loaded = False
+    tools.origin_store = None
+    tools._origin_loaded = False
 
     # Mirror the shipped default policy: matchers are mutually exclusive, so a
     # principal that has just registered stops being `unknown` and needs reads
@@ -68,11 +68,11 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
 
     yield server_stack
 
-    for store in (tools.identity_store, tools.board_store):
+    for store in (tools.identity_store, tools.origin_store):
         if store is not None:
             store.close()
-    tools.identity_store, tools.board_store, tools.bonnet_url, tools.bonnet_verify = saved
-    tools._board_loaded = False
+    tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify = saved
+    tools._origin_loaded = False
     tools.current_username.set(None)
 
 
@@ -127,8 +127,8 @@ async def test_rejoining_reuses_the_existing_keypair(wired):
 
 
 async def test_a_failed_join_does_not_redirect_the_client(wired):
-    """A half-applied join would silently send every later tool call to a
-    board the agent never successfully joined."""
+    """A half-applied join would silently send every later tool call to an
+    origin the agent never successfully joined."""
     await tools.join("https://bbs.test", "scout")
     before = tools.bonnet_url
 

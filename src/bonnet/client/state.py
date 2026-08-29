@@ -7,10 +7,10 @@ client itself learns and must not forget between processes:
 - **Pinned origin keys.** TOFU is meaningless without persistence — if the
   pin dies with the process, every connection is a first contact and there is
   nothing to detect a substituted key against. The trust store lives here.
-- **Boards that have been joined.** `join` learns a URL, an origin, and which
-  identity speaks for it. Kept here, a restarted bridge picks up where it left
-  off instead of needing that handed back to it; and more than one board can
-  be remembered, which a single BONNET_URL cannot express.
+- **Origins that have been joined.** `join` learns a URL, an origin, and
+  which identity speaks for it. Kept here, a restarted bridge picks up where
+  it left off instead of needing that handed back to it; and more than one
+  origin can be remembered, which a single BONNET_URL cannot express.
 
 Everything here sits beside the identity store in the per-user data directory,
 for the reason IdentityStore.default_db_path already gives: the bridge is
@@ -30,7 +30,7 @@ from pathlib import Path
 
 import platformdirs
 
-_ACTIVE_BOARD = "active_board"
+_ACTIVE_ORIGIN = "active_origin"
 
 
 def client_dir() -> str:
@@ -45,16 +45,20 @@ def trust_db_path() -> str:
     return os.path.join(client_dir(), "trust.db")
 
 
-def boards_db_path() -> str:
-    """Where joined boards are recorded."""
-    return os.path.join(client_dir(), "boards.db")
+def origins_db_path() -> str:
+    """Where joined origins are recorded."""
+    return os.path.join(client_dir(), "origins.db")
 
 
-class BoardStore:
-    """Boards this client has joined, and which one is currently active."""
+class OriginStore:
+    """Origins this client has joined, and which one is currently active.
+
+    An origin here is the board server's identity (the codebase model is
+    origin -> boards -> articles) — not a board, the topic area inside one.
+    """
 
     def __init__(self, db_path: str | None = None):
-        self.db_path = Path(db_path or boards_db_path())
+        self.db_path = Path(db_path or origins_db_path())
         parent = self.db_path.parent
         if str(parent) not in ("", "."):
             parent.mkdir(parents=True, exist_ok=True)
@@ -64,7 +68,7 @@ class BoardStore:
 
     def _init_db(self) -> None:
         self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS boards (
+            CREATE TABLE IF NOT EXISTS origins (
                 origin TEXT PRIMARY KEY,
                 url TEXT NOT NULL,
                 verify_tls INTEGER NOT NULL,
@@ -89,10 +93,10 @@ class BoardStore:
         identity: str,
         make_active: bool = True,
     ) -> None:
-        """Record a joined board, keeping its original joined_at on re-join."""
+        """Record a joined origin, keeping its original joined_at on re-join."""
         now = int(time.time())
         self._conn.execute(
-            """INSERT INTO boards (origin, url, verify_tls, identity, joined_at, last_used)
+            """INSERT INTO origins (origin, url, verify_tls, identity, joined_at, last_used)
                VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(origin) DO UPDATE SET
                    url=excluded.url,
@@ -104,43 +108,43 @@ class BoardStore:
         if make_active:
             self._conn.execute(
                 "INSERT OR REPLACE INTO client_state (key, value) VALUES (?, ?)",
-                (_ACTIVE_BOARD, origin),
+                (_ACTIVE_ORIGIN, origin),
             )
         self._conn.commit()
 
     def get(self, origin: str) -> dict | None:
-        row = self._conn.execute("SELECT * FROM boards WHERE origin = ?", (origin,)).fetchone()
+        row = self._conn.execute("SELECT * FROM origins WHERE origin = ?", (origin,)).fetchone()
         return self._row_to_dict(row) if row else None
 
-    def list_boards(self) -> list[dict]:
-        rows = self._conn.execute("SELECT * FROM boards ORDER BY last_used DESC").fetchall()
+    def list_origins(self) -> list[dict]:
+        rows = self._conn.execute("SELECT * FROM origins ORDER BY last_used DESC").fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def active(self) -> dict | None:
-        """The board tool calls default to, or None if none is selected.
+        """The origin tool calls default to, or None if none is selected.
 
-        A dangling pointer — an active board that was later forgotten — reads
-        as None rather than raising, so a half-cleaned store degrades to "no
-        board selected" instead of breaking every call.
+        A dangling pointer — an active origin that was later forgotten —
+        reads as None rather than raising, so a half-cleaned store degrades
+        to "no origin selected" instead of breaking every call.
         """
         row = self._conn.execute(
-            "SELECT value FROM client_state WHERE key = ?", (_ACTIVE_BOARD,)
+            "SELECT value FROM client_state WHERE key = ?", (_ACTIVE_ORIGIN,)
         ).fetchone()
         return self.get(row["value"]) if row else None
 
     def set_active(self, origin: str) -> None:
         if self.get(origin) is None:
-            raise ValueError(f"No joined board with origin '{origin}'")
+            raise ValueError(f"No joined origin '{origin}'")
         self._conn.execute(
             "INSERT OR REPLACE INTO client_state (key, value) VALUES (?, ?)",
-            (_ACTIVE_BOARD, origin),
+            (_ACTIVE_ORIGIN, origin),
         )
         self._conn.commit()
 
     def forget(self, origin: str) -> bool:
-        """Drop a board. Its pinned key is left alone — forgetting a board is
-        not a reason to stop recognising the key it presented."""
-        cur = self._conn.execute("DELETE FROM boards WHERE origin = ?", (origin,))
+        """Drop an origin. Its pinned key is left alone — forgetting an
+        origin is not a reason to stop recognising the key it presented."""
+        cur = self._conn.execute("DELETE FROM origins WHERE origin = ?", (origin,))
         self._conn.commit()
         return cur.rowcount > 0
 

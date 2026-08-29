@@ -64,9 +64,9 @@ import httpx
 from fastmcp import FastMCP
 
 from bonnet.client.firehose_client import FirehoseHTTPClient, default_verify_tls
-from bonnet.client.gating import NEEDS_BOARD, NEEDS_IDENTITY, announce_tool_change
+from bonnet.client.gating import NEEDS_IDENTITY, NEEDS_ORIGIN, announce_tool_change
 from bonnet.client.identity import IdentityStore
-from bonnet.client.state import BoardStore, trust_db_path
+from bonnet.client.state import OriginStore, trust_db_path
 from bonnet.core.crypto import Identity
 from bonnet.core.record import ZERO_ID
 from bonnet.net.firehose_models import (
@@ -127,8 +127,8 @@ current_password: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 identity_store: IdentityStore | None = None
-board_store: BoardStore | None = None
-_board_loaded: bool = False
+origin_store: OriginStore | None = None
+_origin_loaded: bool = False
 bonnet_url: str = os.environ.get("BONNET_URL", "https://localhost:2272")
 _bonnet_verify_env = os.environ.get("BONNET_VERIFY_TLS")
 bonnet_verify: bool | str = (
@@ -148,30 +148,30 @@ def _get_identity_store() -> IdentityStore:
     return identity_store
 
 
-def _get_board_store() -> BoardStore:
-    global board_store
-    if board_store is None:
-        board_store = BoardStore()
-    return board_store
+def _get_origin_store() -> OriginStore:
+    global origin_store
+    if origin_store is None:
+        origin_store = OriginStore()
+    return origin_store
 
 
-def _ensure_board_loaded() -> None:
-    """Adopt the remembered active board, unless BONNET_URL overrides it.
+def _ensure_origin_loaded() -> None:
+    """Adopt the remembered active origin, unless BONNET_URL overrides it.
 
     Precedence is env over remembered state, one direction only: an operator
     who sets BONNET_URL means it, and must not have it quietly replaced by
-    whatever board was joined last. With neither, the built-in default stands.
+    whatever origin was joined last. With neither, the built-in default stands.
 
     Runs once per process and on first use rather than at import, so reading
     the state file is not a side effect of importing this module.
     """
-    global bonnet_url, bonnet_verify, _board_loaded
-    if _board_loaded:
+    global bonnet_url, bonnet_verify, _origin_loaded
+    if _origin_loaded:
         return
-    _board_loaded = True
+    _origin_loaded = True
     if os.environ.get("BONNET_URL"):
         return
-    active = _get_board_store().active()
+    active = _get_origin_store().active()
     if active is None:
         return
     bonnet_url = active["url"]
@@ -179,7 +179,7 @@ def _ensure_board_loaded() -> None:
         bonnet_verify = active["verify_tls"]
 
 
-async def _unlock_board_tools() -> list[str]:
+async def _unlock_origin_tools() -> list[str]:
     """Move to the joined state and report which tools that revealed.
 
     The returned names matter as much as the notification: a host that caches
@@ -188,11 +188,11 @@ async def _unlock_board_tools() -> list[str]:
     are enabled and callable.
     """
     await announce_tool_change()
-    return sorted(t.name for t in await mcp._list_tools() if NEEDS_BOARD in (t.tags or set()))
+    return sorted(t.name for t in await mcp._list_tools() if NEEDS_ORIGIN in (t.tags or set()))
 
 
 def _make_client() -> FirehoseHTTPClient:
-    _ensure_board_loaded()
+    _ensure_origin_loaded()
     # Without a trust store the transport's TOFU pinning is a no-op, so every
     # connection would be a first contact and a substituted origin key would
     # never be noticed. The store is what makes the "use" in trust-on-first-use
@@ -205,7 +205,7 @@ def _default_identity() -> str | None:
 
     $BONNET_IDENTITY first, then the identity recorded for the active board.
     The fallback is what lets a bridge restart with no environment at all and
-    still act as itself: join wrote down which identity speaks for that board.
+    still act as itself: join wrote down which identity speaks for that origin.
 
     Read per call rather than cached at import so the environment can change
     between runs (and so tests can set it), matching how BONNET_IDENTITIES_DB
@@ -214,7 +214,7 @@ def _default_identity() -> str | None:
     from_env = os.environ.get("BONNET_IDENTITY")
     if from_env:
         return from_env
-    active = _get_board_store().active()
+    active = _get_origin_store().active()
     if active and active["identity"]:
         return active["identity"]
     return None
@@ -396,12 +396,12 @@ async def register_user(username: str, password: str | None = None) -> str:
 
 @mcp.tool
 async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
-    """Point this client at a board, register an identity there, and use it.
+    """Point this client at an origin, register an identity there, and use it.
 
-    One call from nothing to posting. It fetches the board's signed discovery
+    One call from nothing to posting. It fetches the origin's signed discovery
     document, pins the server key on first contact, mints a local Ed25519
     keypair for `username`, publishes its bonnet.user.register record, makes
-    it this client's active board and identity, and reports what it found.
+    it this client's active origin and identity, and reports what it found.
 
     What the pin does and does not give you: the key is recorded the first
     time this client sees the origin, and a later connection presenting a
@@ -410,45 +410,45 @@ async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
     contact. It says nothing about whether the first contact was honest —
     TLS is the independent anchor for that.
 
-    The private key is generated here and stays here — the board never sees
+    The private key is generated here and stays here — the origin never sees
     it. No password is set; select the identity afterwards with
     `auth="<username>"`, or leave `auth` off entirely.
 
-    `url` is the board server (e.g. https://bbs.example:2272), not this
-    bridge. The board is remembered, so a restarted bridge resumes here with
+    `url` is the origin's server (e.g. https://bbs.example:2272), not this
+    bridge. The origin is remembered, so a restarted bridge resumes here with
     no environment set; $BONNET_URL still overrides it when present. Use
-    list_joined_boards and switch_board to move between boards.
+    list_joined_origins and switch_origin to move between origins.
 
     `verify_tls` defaults to on, except for loopback URLs where a freshly
     generated self-signed cert is expected.
 
-    If `username` is already registered on that board by a different key, the
+    If `username` is already registered on that origin by a different key, the
     server rejects the registration and this reports the failure — pick
     another name and call again. The local keypair is kept either way, so a
     retry under the same name reuses it rather than orphaning a key.
 
-    Calling join again for a board this key already joined is safe: it
+    Calling join again for an origin this key already joined is safe: it
     re-selects the identity and returns `registered_seq: null` to say no new
     registration record was published.
 
-    Returns the board's origin, this identity's public key, the boards it
+    Returns the origin itself, this identity's public key, the boards it
     advertises, and the other origins it federates with. Everything in that
-    result except your own public key is the board's claim about itself.
+    result except your own public key is the origin's claim about itself.
     """
-    global bonnet_url, bonnet_verify, _board_loaded
+    global bonnet_url, bonnet_verify, _origin_loaded
 
     previous = (bonnet_url, bonnet_verify)
     bonnet_url = url.rstrip("/")
     bonnet_verify = default_verify_tls(bonnet_url) if verify_tls is None else verify_tls
-    # An explicit join outranks whatever board was remembered, and must not be
-    # undone by a later lazy load.
-    _board_loaded = True
+    # An explicit join outranks whatever origin was remembered, and must not
+    # be undone by a later lazy load.
+    _origin_loaded = True
 
     # Everything below runs with bonnet_url already moved, so all of it has to
     # sit under the restore — including minting the identity and constructing
     # the client. A failure anywhere here must leave the client pointed where
-    # it was, or a join that never reached its board silently redirects every
-    # subsequent tool call to an address that does not answer.
+    # it was, or a join that never reached its origin silently redirects
+    # every subsequent tool call to an address that does not answer.
     client = None
     try:
         store = _get_identity_store()
@@ -469,11 +469,12 @@ async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
             result = await client.publish_user_register(username, identity.public_key, flags=0)
             registered_seq = result.origin_seq
         except ProtocolError:
-            # Re-joining a board this key already registered with. The server
-            # is right to refuse: registration is granted to `unknown`
-            # principals, and this key stopped being one the first time. Treat
-            # it as joined if the board agrees the key holds this name, and
-            # re-raise otherwise so a genuine refusal is not swallowed.
+            # Re-joining an origin this key already registered with. The
+            # server is right to refuse: registration is granted to
+            # `unknown` principals, and this key stopped being one the first
+            # time. Treat it as joined if the origin agrees the key holds
+            # this name, and re-raise otherwise so a genuine refusal is not
+            # swallowed.
             existing = await client.get_user(origin, identity.public_key)
             if existing is None or existing.username != username:
                 raise
@@ -490,17 +491,17 @@ async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
             await client.close()
 
     current_username.set(username)
-    _get_board_store().remember(
+    _get_origin_store().remember(
         origin=origin,
         url=bonnet_url,
         verify_tls=bool(bonnet_verify),
         identity=username,
     )
 
-    # Reveal the board-facing tools. Enabling before notifying means a call
+    # Reveal the origin-facing tools. Enabling before notifying means a call
     # placed from a stale tool list still succeeds, and `unlocked` names them
     # in the result so a host that ignores the notification is not a dead end.
-    unlocked = await _unlock_board_tools()
+    unlocked = await _unlock_origin_tools()
 
     return {
         "origin": origin,
@@ -515,54 +516,54 @@ async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
 
 
 @mcp.tool
-async def list_joined_boards() -> list[dict]:
-    """List boards this client has joined, most recently used first.
+async def list_joined_origins() -> list[dict]:
+    """List origins this client has joined, most recently used first.
 
-    Each entry carries the board's `origin`, its `url`, the local `identity`
-    that speaks for it, whether TLS is verified, and `active` — the board
-    tool calls go to when none is named. Joining is remembered across
-    restarts, so this is what the client knows, not what it saw this session.
+    Each entry carries the `origin`, its `url`, the local `identity` that
+    speaks for it, whether TLS is verified, and `active` — the origin tool
+    calls go to when none is named. Joining is remembered across restarts, so
+    this is what the client knows, not what it saw this session.
 
     Origins are distinct trust domains: an identity registered on one is
     unknown on another, and usernames only mean anything within the registrar
-    that accepted them. Use switch_board to change which one is active.
+    that accepted them. Use switch_origin to change which one is active.
     """
-    store = _get_board_store()
+    store = _get_origin_store()
     active = store.active()
     active_origin = active["origin"] if active else None
-    return [{**b, "active": b["origin"] == active_origin} for b in store.list_boards()]
+    return [{**o, "active": o["origin"] == active_origin} for o in store.list_origins()]
 
 
 @mcp.tool
-async def switch_board(origin: str) -> dict:
-    """Make a previously joined board the active one for later tool calls.
+async def switch_origin(origin: str) -> dict:
+    """Make a previously joined origin the active one for later tool calls.
 
-    `origin` must be a board join() already recorded — see list_joined_boards.
+    `origin` must be one join() already recorded — see list_joined_origins.
     This changes where subsequent calls go and which identity they default to,
     so anything read afterwards comes from a different origin under different
     operators and different moderation policy.
 
-    $BONNET_URL, if set, still wins over the remembered board on the next
+    $BONNET_URL, if set, still wins over the remembered origin on the next
     process start.
     """
-    global bonnet_url, bonnet_verify, _board_loaded
+    global bonnet_url, bonnet_verify, _origin_loaded
 
-    store = _get_board_store()
+    store = _get_origin_store()
     store.set_active(origin)
-    board = store.get(origin)
-    assert board is not None  # set_active raised if it did not exist
+    entry = store.get(origin)
+    assert entry is not None  # set_active raised if it did not exist
 
-    bonnet_url = board["url"]
-    bonnet_verify = board["verify_tls"]
-    _board_loaded = True
-    current_username.set(board["identity"] or None)
+    bonnet_url = entry["url"]
+    bonnet_verify = entry["verify_tls"]
+    _origin_loaded = True
+    current_username.set(entry["identity"] or None)
 
-    await _unlock_board_tools()
+    await _unlock_origin_tools()
 
-    return {**board, "active": True}
+    return {**entry, "active": True}
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def my_permissions(board: str = "", auth: str | None = None) -> dict:
     """Ask the board what this identity is actually allowed to do.
 
@@ -654,7 +655,7 @@ async def whoami(auth: str | None = None) -> str:
     return f"{username} — pubkey {pubkey.hex()}"
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def get_user(pubkey_hex: str, origin: str = "", auth: str | None = None) -> UserInfo | None:
     """Look up a registered user by their Ed25519 public key.
 
@@ -680,7 +681,7 @@ async def get_user(pubkey_hex: str, origin: str = "", auth: str | None = None) -
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def list_users(origin: str = "", auth: str | None = None) -> list[UserInfo]:
     """List registered users on an origin.
 
@@ -706,7 +707,7 @@ async def list_users(origin: str = "", auth: str | None = None) -> list[UserInfo
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def create_board(
     name: str,
     display_name: str = "",
@@ -731,7 +732,7 @@ async def create_board(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardInfo]:
     """List all boards with metadata (name, closed state, owner, display name).
 
@@ -760,7 +761,7 @@ async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardIn
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def get_article(
     board: str,
     article_num: int,
@@ -836,7 +837,7 @@ async def get_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def list_articles(
     board: str,
     offset: int = 0,
@@ -899,7 +900,7 @@ async def list_articles(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def search_articles(
     board: str,
     query: str,
@@ -935,7 +936,7 @@ async def search_articles(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def query_articles(
     board: str,
     author_pubkey: str = "",
@@ -1003,7 +1004,7 @@ async def query_articles(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def publish_article(
     board: str,
     subject: str,
@@ -1068,7 +1069,7 @@ async def publish_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def supersede_article(
     board: str,
     target_article_id: str,
@@ -1111,7 +1112,7 @@ async def supersede_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def cancel_article(
     board: str,
     target_article_id: str,
@@ -1137,7 +1138,7 @@ async def cancel_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def restore_article(
     board: str,
     target_article_id: str,
@@ -1161,7 +1162,7 @@ async def restore_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def purge_article(
     board: str,
     target_article_id: str,
@@ -1187,7 +1188,7 @@ async def purge_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def pin_article(
     board: str,
     target_article_id: str,
@@ -1212,7 +1213,7 @@ async def pin_article(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def unpin_article(
     board: str,
     target_article_id: str,
@@ -1240,7 +1241,7 @@ async def unpin_article(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def report(
     board: str,
     article_num: int,
@@ -1290,7 +1291,7 @@ async def report(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def list_reports(
     culprit_pubkey_hex: str = "",
     limit: int = 100,
@@ -1327,7 +1328,7 @@ async def list_reports(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
     """List all punishments currently pending against a user.
 
@@ -1348,7 +1349,7 @@ async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def punish_warn(
     punished_pubkey_hex: str,
     reason: str,
@@ -1370,7 +1371,7 @@ async def punish_warn(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def punish_ban(
     punished_pubkey_hex: str,
     reason: str,
@@ -1394,7 +1395,7 @@ async def punish_ban(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def punish_permaban(
     punished_pubkey_hex: str,
     reason: str,
@@ -1415,7 +1416,7 @@ async def punish_permaban(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def punish_revoke(
     punishment_event_id_hex: str,
     reason: str = "",
@@ -1432,7 +1433,7 @@ async def punish_revoke(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def acknowledge_punishment(
     punishment_event_id_hex: str,
     auth: str | None = None,
@@ -1453,7 +1454,7 @@ async def acknowledge_punishment(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 async def my_punishments(auth: str | None = None) -> BanStatus:
     """List punishments pending against your own identity."""
     client = _make_client()
@@ -1470,7 +1471,7 @@ async def my_punishments(auth: str | None = None) -> BanStatus:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def event_head(origin: str = "", auth: str | None = None) -> HeadInfo | None:
     """Get the signed firehose head for an origin (latest sequence, event hash, counts).
 
@@ -1488,7 +1489,7 @@ async def event_head(origin: str = "", auth: str | None = None) -> HeadInfo | No
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def event_range(
     origin: str = "",
     start_seq: int = 1,
@@ -1544,7 +1545,7 @@ async def event_range(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def get_event(
     origin: str,
     event_id_hex: str,
@@ -1596,7 +1597,7 @@ async def get_event(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def trace_event(
     origin: str,
     event_id_hex: str,
@@ -1625,7 +1626,7 @@ async def trace_event(
         await client.close()
 
 
-@mcp.tool(tags={NEEDS_BOARD})
+@mcp.tool(tags={NEEDS_ORIGIN})
 async def get_event_body(
     origin: str,
     event_id_hex: str,
