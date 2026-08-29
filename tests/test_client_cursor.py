@@ -49,7 +49,7 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
             matcher=PrincipalMatcher(registered=True),
             actions=["write"],
             commands=["PUBLISH_RECORD"],
-            kinds=["bonnet.board.create", "bonnet.article"],
+            kinds=["bonnet.board.create", "bonnet.article", "bonnet.article.cancel"],
             boards=["*"],
         )
     )
@@ -181,3 +181,72 @@ async def test_back_pops_article_then_board(wired):
     # Idempotent at the top.
     third = await tools.back()
     assert third == {"state": "origin"}
+
+
+# --- acting on the open article -----------------------------------------
+
+
+async def test_target_article_id_defaults_from_the_open_article(wired):
+    await _join_and_create_board("general")
+    await tools.open_board("general")
+    await tools.publish_article("hello", "body")
+    view = await tools.get_article(1)
+
+    result = await tools.cancel_article(reason="testing")
+    assert "Cancel event published" in result
+
+    cancelled = await tools.get_article(1)
+    assert cancelled.visibility == "cancelled"
+    assert cancelled.article_id == view.article_id
+
+
+async def test_target_article_id_required_without_an_open_article(wired):
+    await _join_and_create_board("general")
+    await tools.open_board("general")
+
+    with pytest.raises(ValueError, match="no target_article_id given and no matching article open"):
+        await tools.cancel_article(reason="testing")
+
+
+async def test_target_article_id_not_reused_across_boards(wired):
+    """The cursor's article belongs to the board it was read on — acting on
+    a different board must not silently reuse it."""
+    await _join_and_create_board("general")
+    await tools.create_board("other")
+    await tools.open_board("general")
+    await tools.publish_article("hello", "body")
+    await tools.get_article(1)
+
+    with pytest.raises(ValueError, match="no target_article_id given and no matching article open"):
+        await tools.cancel_article(board="other", reason="testing")
+
+
+# --- where_am_i -----------------------------------------------------------
+
+
+async def test_where_am_i_tracks_every_transition(wired):
+    disconnected = await tools.where_am_i()
+    assert disconnected["state"] == "disconnected"
+
+    await tools.join("https://bbs.test", "scout")
+    on_origin = await tools.where_am_i()
+    assert on_origin["state"] == "on_origin"
+    assert on_origin["origin"] == ORIGIN
+    assert on_origin["identity"] == "scout"
+
+    await tools.create_board("general")
+    await tools.open_board("general")
+    in_board = await tools.where_am_i()
+    assert in_board["state"] == "in_board"
+    assert in_board["board"] == "general"
+
+    await tools.publish_article("hello", "body")
+    await tools.get_article(1)
+    reading = await tools.where_am_i()
+    assert reading["state"] == "reading_article"
+    assert reading["article_num"] == 1
+
+    await tools.back()
+    await tools.back()
+    back_to_origin = await tools.where_am_i()
+    assert back_to_origin["state"] == "on_origin"
