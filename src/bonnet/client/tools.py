@@ -1,7 +1,9 @@
 """MCP tools for the firehose protocol.
 
 Exposes firehose client operations as FastMCP tools for AI agents.
-Uses IdentityStore for local key management (username:password → Ed25519).
+Uses IdentityStore for local key management. An identity is an Ed25519
+keypair held here and nowhere else; a password is optional and only wraps it
+at rest. See `_resolve_auth` for the forms the `auth` argument accepts.
 
 Provenance and trust
 --------------------
@@ -145,28 +147,61 @@ def _make_client() -> FirehoseHTTPClient:
     return FirehoseHTTPClient(bonnet_url, verify=bonnet_verify)
 
 
+def _default_identity() -> str | None:
+    """The identity to act as when a tool call names none.
+
+    Read per call rather than cached at import so the environment can change
+    between runs (and so tests can set it), matching how BONNET_IDENTITIES_DB
+    is resolved in _get_identity_store.
+    """
+    return os.environ.get("BONNET_IDENTITY") or None
+
+
 def _resolve_auth(auth: str | None) -> tuple[str, str]:
+    """Resolve a tool's `auth` argument to (username, password).
+
+    Accepted forms, in precedence order:
+
+      None              the HTTP Authorization context if there is one,
+                        otherwise $BONNET_IDENTITY
+      "<token>"         a token minted by `login`
+      "<username>"      a local identity, unwrapped (no password)
+      "<user>:<pass>"   a local identity, password-wrapped
+
+    A bare username is checked against the store rather than assumed, so a
+    typo reports an unknown identity instead of failing later inside the
+    signing path with something less obvious.
+    """
     if auth is None:
-        username = current_username.get()
+        username = current_username.get() or _default_identity()
         password = current_password.get() or ""
         if not username:
-            raise ValueError("No username in context - check Authorization header")
+            raise ValueError(
+                "No identity selected: pass auth='<username>', set BONNET_IDENTITY, "
+                "or send an Authorization header. Call list_identities to see what "
+                "this client holds."
+            )
         return username, password
 
+    if auth in auth_tokens:
+        token_data = auth_tokens[auth]
+        if time.time() > token_data["expires_at"]:
+            del auth_tokens[auth]
+            raise ValueError("Auth token has expired")
+        return token_data["username"], token_data["password"]
+
     if ":" in auth:
-        parts = auth.split(":", 1)
-        if len(parts) == 2:
-            return parts[0], parts[1]
+        username, password = auth.split(":", 1)
+        return username, password
 
-    token_data = auth_tokens.get(auth)
-    if token_data is None:
-        raise ValueError("Invalid or expired auth token")
-
-    if time.time() > token_data["expires_at"]:
-        del auth_tokens[auth]
-        raise ValueError("Auth token has expired")
-
-    return token_data["username"], token_data["password"]
+    store = _get_identity_store()
+    if store.get_pubkey(auth) is None:
+        raise ValueError(
+            f"No local identity named '{auth}', and it is not a valid auth token. "
+            f"Call list_identities to see what this client holds, or register_user "
+            f"to create one."
+        )
+    return auth, ""
 
 
 async def _connect_authenticated(client: FirehoseHTTPClient, auth: str | None) -> None:
@@ -225,6 +260,10 @@ async def login(username: str, password: str) -> str:
     Returns a hex token string to pass as the 'auth' parameter to other tools.
     You can also pass 'username:password' directly as the auth parameter
     without calling login first.
+
+    Only useful for a password-wrapped identity. An identity registered
+    without a password needs no login at all — pass its name as `auth`, or
+    set $BONNET_IDENTITY and omit `auth` entirely.
     """
     store = _get_identity_store()
     if not store.verify_password(username, password):
@@ -240,20 +279,40 @@ async def login(username: str, password: str) -> str:
 
 
 @mcp.tool
-async def register_user(username: str, password: str) -> str:
+async def register_user(username: str, password: str | None = None) -> str:
     """Register a new user identity locally and on the Bonnet server.
 
     Creates a local Ed25519 identity and publishes a bonnet.user.register
     record to the server. Returns the registered username and the hex-encoded
     public key — the pubkey is what you paste into a server's `admin_pubkey`
     or an `[[acl]]` rule to grant this identity access.
+
+    The keypair is the identity; the private key never leaves this client and
+    the board server never holds it. `password` is optional and only wraps
+    that key at rest. Omit it if you are an agent: you would have to replay it
+    on every call, putting it in your context and transcript, while storing it
+    somewhere this same client can read — which protects nothing. With no
+    password the identity is usable by name alone (`auth="<username>"`, or
+    $BONNET_IDENTITY), and the key is protected by the file mode of the
+    identity store.
+
+    Registering more than one identity is supported and sometimes correct:
+    holding a moderator identity separately from an everyday one keeps
+    privileged actions deliberate and legible in the log, per-task identities
+    limit what a single ban or key compromise takes down, and since there is
+    no user-level key rotation record, registering a fresh identity and
+    revoking the old one is how a user rotates at all. Use list_identities to
+    see what this client holds.
     """
     store = _get_identity_store()
     try:
         store.register(username, password)
     except ValueError as e:
         if "already exists" in str(e).lower():
-            if not store.verify_password(username, password):
+            # Re-registering an existing local identity is how a client that
+            # already holds the key re-publishes its registration record. Only
+            # a wrapped identity has a password to disagree about.
+            if store.is_wrapped(username) and not store.verify_password(username, password or ""):
                 raise ValueError("User already exists and password does not match") from e
         else:
             raise
@@ -262,7 +321,7 @@ async def register_user(username: str, password: str) -> str:
 
     client = _make_client()
     try:
-        await _connect_authenticated(client, f"{username}:{password}")
+        await _connect_authenticated(client, f"{username}:{password}" if password else username)
         result = await client.publish_user_register(username, identity.public_key, flags=0)
         return (
             f"Registered '{username}' — event seq {result.origin_seq} — "
@@ -270,6 +329,135 @@ async def register_user(username: str, password: str) -> str:
         )
     finally:
         await client.close()
+
+
+@mcp.tool
+async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
+    """Point this client at a board, register an identity there, and use it.
+
+    One call from nothing to posting. It fetches the board's signed discovery
+    document, TOFU-pins the server key, mints a local Ed25519 keypair for
+    `username`, publishes its bonnet.user.register record, makes it this
+    client's active identity, and reports what it found.
+
+    The private key is generated here and stays here — the board never sees
+    it. No password is set; select the identity afterwards with
+    `auth="<username>"`, or leave `auth` off entirely for the rest of this
+    process. See register_user if you want a password-wrapped identity.
+
+    `url` is the board server (e.g. https://bbs.example:2272), not this
+    bridge. It applies for the lifetime of this process only; set BONNET_URL
+    in the bridge's environment to make it the durable default.
+
+    `verify_tls` defaults to on, except for loopback URLs where a freshly
+    generated self-signed cert is expected.
+
+    If `username` is already registered on that board by a different key, the
+    server rejects the registration and this reports the failure — pick
+    another name and call again. The local keypair is kept either way, so a
+    retry under the same name reuses it rather than orphaning a key.
+
+    Calling join again for a board this key already joined is safe: it
+    re-selects the identity and returns `registered_seq: null` to say no new
+    registration record was published.
+
+    Returns the board's origin, this identity's public key, the boards it
+    advertises, and the other origins it federates with. Everything in that
+    result except your own public key is the board's claim about itself.
+    """
+    global bonnet_url, bonnet_verify
+
+    previous = (bonnet_url, bonnet_verify)
+    bonnet_url = url.rstrip("/")
+    bonnet_verify = default_verify_tls(bonnet_url) if verify_tls is None else verify_tls
+
+    # Everything below runs with bonnet_url already moved, so all of it has to
+    # sit under the restore — including minting the identity and constructing
+    # the client. A failure anywhere here must leave the client pointed where
+    # it was, or a join that never reached its board silently redirects every
+    # subsequent tool call to an address that does not answer.
+    client = None
+    try:
+        store = _get_identity_store()
+        try:
+            store.register(username)
+        except ValueError as e:
+            if "already exists" not in str(e).lower():
+                raise
+
+        identity = Identity.from_private_key(store.get_private_key(username))
+
+        client = _make_client()
+        await _connect_authenticated(client, username)
+        origin = client.server_origin or ""
+
+        registered_seq: int | None = None
+        try:
+            result = await client.publish_user_register(username, identity.public_key, flags=0)
+            registered_seq = result.origin_seq
+        except ProtocolError:
+            # Re-joining a board this key already registered with. The server
+            # is right to refuse: registration is granted to `unknown`
+            # principals, and this key stopped being one the first time. Treat
+            # it as joined if the board agrees the key holds this name, and
+            # re-raise otherwise so a genuine refusal is not swallowed.
+            existing = await client.get_user(origin, identity.public_key)
+            if existing is None or existing.username != username:
+                raise
+
+        store.mark_registered(username)
+        boards = [b.name for b in await client.list_boards(origin="")]
+        discovery = client.discovery
+        known = list(discovery.known_origins) if discovery else []
+    except Exception:
+        bonnet_url, bonnet_verify = previous
+        raise
+    finally:
+        if client is not None:
+            await client.close()
+
+    current_username.set(username)
+    os.environ["BONNET_IDENTITY"] = username
+
+    return {
+        "origin": origin,
+        "url": bonnet_url,
+        "username": username,
+        "public_key": identity.public_key.hex(),
+        "registered_seq": registered_seq,
+        "boards": boards,
+        "known_origins": known,
+    }
+
+
+@mcp.tool
+async def list_identities() -> list[dict]:
+    """List the signing identities this client holds locally.
+
+    These are *your* keypairs, not board users — use list_users for those.
+    Each entry reports:
+
+    - `username`   the local name; pass it as `auth` to act as that identity.
+    - `public_key` the Ed25519 key that signs its records. This is the durable
+                   identity; the username is only a label the registrar accepted.
+    - `registered` whether a bonnet.user.register record was published for it.
+    - `wrapped`    whether its private key is password-protected at rest. An
+                   unwrapped identity is usable by name alone; a wrapped one
+                   needs `auth="<username>:<password>"`.
+    - `active`     whether this is the identity used when a tool call omits
+                   `auth` (from $BONNET_IDENTITY or the Authorization header).
+
+    Holding several identities is normal — see register_user for when it is
+    the right thing to do. Note that distinct keys are, by construction,
+    uncorrelated to anyone reading the board: nothing in the log links two
+    registrations to one holder. That is the point of separate identities, and
+    equally it is what makes one agent able to look like several independent
+    participants. If you are weighing what board content means, remember that
+    agreement between two usernames is not evidence of two parties.
+    """
+    store = _get_identity_store()
+    active = current_username.get() or _default_identity()
+    return [{**row, "active": row["username"] == active} for row in store.list_users()]
 
 
 @mcp.tool

@@ -1,6 +1,27 @@
+"""Local store for agent signing identities.
+
+An identity is an Ed25519 keypair. The private key is the credential — it is
+what signs intents, and possession of it *is* the identity. A password is
+optional and does one thing only: wrap the private key at rest so that reading
+the database file is not enough to use the key.
+
+Passwordless ("unwrapped") identities exist because an autonomous agent has
+nowhere to keep a password that is not next to the database file itself, and a
+password the agent must replay on every tool call ends up in its context window
+and its transcript. For that caller, a wrapped key protected by a password
+stored alongside it is ceremony, not protection. Unwrapped is the honest
+default there: the key is exactly as exposed as the file it lives in, and the
+file is created 0600 on POSIX (a no-op on Windows, where ACL inheritance
+applies instead).
+
+Wrapped identities remain available and unchanged for human operators, who do
+have somewhere to keep a password.
+"""
+
 import hashlib
 import os
 import sqlite3
+import stat
 import threading
 from pathlib import Path
 
@@ -32,6 +53,20 @@ class IdentityStore:
             parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._init_db()
+        self._restrict_permissions()
+
+    def _restrict_permissions(self) -> None:
+        """Make the store owner-only where the platform supports it.
+
+        Unwrapped private keys are readable by anything that can read this
+        file, so the file mode is the whole protection. chmod is advisory on
+        Windows (os.chmod only toggles the read-only bit), which is why the
+        module docstring says so rather than implying a guarantee here.
+        """
+        try:
+            self.db_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
 
     def _get_conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn") or self._local.conn is None:
@@ -60,6 +95,11 @@ class IdentityStore:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(identities)")}
         if "yescrypt_hash" in columns and "scrypt_hash" not in columns:
             conn.execute("ALTER TABLE identities RENAME COLUMN yescrypt_hash TO scrypt_hash")
+        # Added when passwordless identities were introduced. Every row that
+        # predates the column was written by the password-only code path, so
+        # DEFAULT 1 is the correct backfill and no data migration is needed.
+        if "wrapped" not in columns:
+            conn.execute("ALTER TABLE identities ADD COLUMN wrapped INTEGER NOT NULL DEFAULT 1")
         conn.commit()
 
     def _derive_aes_key(self, password: str, key_salt: bytes) -> bytes:
@@ -71,16 +111,32 @@ class IdentityStore:
                 password=password.encode("utf-8"), salt=key_salt, desired_key_bytes=24, rounds=100
             )
 
-    def register(self, username: str, password: str) -> tuple[bytes, bytes]:
-        if not password:
-            raise ValueError("Password cannot be empty")
+    def register(self, username: str, password: str | None = None) -> tuple[bytes, bytes]:
+        """Mint an Ed25519 identity and store it, wrapped iff a password is given.
 
+        Omitting the password stores the private key as-is; see the module
+        docstring for why that is the right default for an agent.
+        """
         conn = self._get_conn()
         cur = conn.cursor()
 
         cur.execute("SELECT username FROM identities WHERE username = ?", (username,))
         if cur.fetchone():
             raise ValueError("User already exists locally")
+
+        if not password:
+            signing_key = SigningKey.generate()
+            private_key = bytes(signing_key)
+            public_key = bytes(signing_key.verify_key)
+            conn.execute(
+                """INSERT INTO identities
+                   (username, scrypt_hash, auth_salt, key_salt,
+                    encrypted_private_key, public_key, wrapped)
+                   VALUES (?, '', X'', X'', ?, ?, 0)""",
+                (username, private_key, public_key),
+            )
+            conn.commit()
+            return private_key, public_key
 
         # 1. Password storage for authentication
         auth_salt = os.urandom(16)
@@ -106,26 +162,48 @@ class IdentityStore:
 
         conn.execute(
             """INSERT INTO identities
-               (username, scrypt_hash, auth_salt, key_salt, encrypted_private_key, public_key)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (username, scrypt_hash, auth_salt, key_salt, encrypted_private_key,
+                public_key, wrapped)
+               VALUES (?, ?, ?, ?, ?, ?, 1)""",
             (username, scrypt_hash, auth_salt, key_salt, encrypted_private_key, public_key),
         )
         conn.commit()
 
         return private_key, public_key
 
-    def get_private_key(self, username: str, password: str) -> bytes:
-        if not self.verify_password(username, password):
-            raise ValueError("Invalid password")
+    def is_wrapped(self, username: str) -> bool:
+        """True if this identity's key is password-wrapped at rest."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT wrapped FROM identities WHERE username = ?", (username,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"No local identity found for '{username}'")
+        return bool(row["wrapped"])
 
+    def get_private_key(self, username: str, password: str | None = None) -> bytes:
         conn = self._get_conn()
         cur = conn.cursor()
         cur.execute(
-            "SELECT key_salt, encrypted_private_key FROM identities WHERE username = ?", (username,)
+            "SELECT key_salt, encrypted_private_key, wrapped FROM identities WHERE username = ?",
+            (username,),
         )
         row = cur.fetchone()
         if not row:
             raise ValueError("User not found")
+
+        if not row["wrapped"]:
+            # Stored as-is. A password, if one was supplied anyway, is not an
+            # error but has nothing to unlock.
+            return bytes(row["encrypted_private_key"])
+
+        if not password:
+            raise ValueError(
+                f"Identity '{username}' is password-protected; supply its password "
+                f"(auth='{username}:<password>')"
+            )
+        if not self.verify_password(username, password):
+            raise ValueError("Invalid password")
 
         key_salt = bytes(row["key_salt"])
         encrypted = bytes(row["encrypted_private_key"])
@@ -149,12 +227,23 @@ class IdentityStore:
         return bytes(row["public_key"]) if row else None
 
     def verify_password(self, username: str, password: str) -> bool:
+        """Check a password against a wrapped identity.
+
+        An unwrapped identity has no password to check, so this reports True
+        for one that exists. Callers wanting "is this identity usable without a
+        password" should ask `is_wrapped` — this returning True does not mean a
+        password was presented or verified.
+        """
         conn = self._get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT scrypt_hash, auth_salt FROM identities WHERE username = ?", (username,))
+        cur.execute(
+            "SELECT scrypt_hash, auth_salt, wrapped FROM identities WHERE username = ?", (username,)
+        )
         row = cur.fetchone()
         if not row:
             return False
+        if not row["wrapped"]:
+            return True
 
         expected_hash = row["scrypt_hash"]
         auth_salt = bytes(row["auth_salt"])
@@ -182,12 +271,13 @@ class IdentityStore:
     def list_users(self) -> list[dict]:
         conn = self._get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT username, public_key, registered FROM identities")
+        cur.execute("SELECT username, public_key, registered, wrapped FROM identities")
         return [
             {
                 "username": row["username"],
                 "public_key": bytes(row["public_key"]).hex(),
                 "registered": bool(row["registered"]),
+                "wrapped": bool(row["wrapped"]),
             }
             for row in cur.fetchall()
         ]
