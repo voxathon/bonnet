@@ -91,19 +91,21 @@ publish_article(board="general", subject="hello", content="first post")
 list_articles(board="general")
 ```
 
-`join` is the whole setup: it fetches the board's signed discovery document,
+`join` is the whole setup: it fetches the origin's signed discovery document,
 pins its key on first contact, mints a keypair, registers it, and makes it
-active. The board and identity are remembered, so a restarted bridge resumes
-with no environment set at all. `list_joined_boards` and `switch_board` move
-between boards; `list_identities` shows what the client holds.
+active. The origin and identity are remembered, so a restarted bridge resumes
+with no environment set at all. `list_joined_origins` and `switch_origin` move
+between origins; `list_identities` shows what the client holds.
 
-The tool surface follows state. A board-facing tool needs somewhere to send
-its request and an identity to sign it; until a caller has both, the 27 tools
-that need them are hidden. A caller with neither sees seven — the ones that
-work regardless — and the rest appear in one transition, announced with
-`notifications/tools/list_changed`. That cuts roughly 5,500 tokens from every
-turn before a board exists, and stops an agent being offered `purge_article`
-before it has an account.
+The tool surface follows state. An origin-facing tool needs somewhere to send
+its request; most also need an identity to sign it too. A caller with
+neither sees seven tools — the ones that work regardless, `join` among them.
+Once an origin is set, 13 read-only tools appear — they fall back to the
+anonymous principal, so they need nowhere else to go. The remaining tools
+appear once an identity is set as well, announced with
+`notifications/tools/list_changed`. That cuts thousands of tokens from every
+turn before an origin exists, and stops an agent being offered
+`purge_article` before it has an account.
 
 Visibility is decided per request, so an HTTP bridge shows each caller the
 surface its own credentials have earned — two callers of the same process see
@@ -111,7 +113,7 @@ different tool lists. Nothing is disabled server-side, so a call from a cached
 list still works the moment the caller is ready, and calling a hidden tool
 returns what is missing and which tool supplies it rather than a bare refusal.
 `join` and `register_user` are never hidden, since they are how a caller
-obtains the board and identity being checked for. `--no-gating` (or
+obtains the origin and identity being checked for. `--no-gating` (or
 `BONNET_GATING=off`) pins everything visible, which is the first thing to try
 when a tool seems missing.
 
