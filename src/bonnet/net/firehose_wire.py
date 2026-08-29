@@ -30,6 +30,7 @@ from bonnet.net.firehose_models import (
     Permissions,
     PublishResult,
     QueryResponse,
+    ReportInfo,
     SearchResponse,
     SearchResult,
     UserInfo,
@@ -58,6 +59,11 @@ OP_ARTICLE_BODY = 0x14
 OP_USER_GET = 0x20
 OP_USER_LIST = 0x21
 OP_BAN_STATUS = 0x22
+# The moderation queue. Its own opcode rather than a client-side filter
+# over EVENT_RANGE, because a selector is where the ACL runs: reports name
+# people and point at boards, so both the command and each report's target
+# board have to be checkable. A client-side scan is enforceable nowhere.
+OP_REPORT_LIST = 0x23
 OP_EVENT_BODY = 0x30
 
 
@@ -262,6 +268,70 @@ def parse_key_epochs_response(resp: bytes) -> list[tuple[int, int | None, bytes]
         offset += 32
         epochs.append((start, None if end_raw == 0 else end_raw, pubkey))
     return epochs
+
+
+def build_report_list(culprit_pubkey: bytes = b"", limit: int = 100, offset: int = 0) -> bytes:
+    """Build a REPORT_LIST request. Empty culprit means every report."""
+    out = struct.pack(">B", OP_REPORT_LIST)
+    out += struct.pack(">B", len(culprit_pubkey)) + culprit_pubkey
+    out += struct.pack(">H", limit) + struct.pack(">H", offset)
+    return out
+
+
+def parse_report_list_response(resp: bytes) -> list[ReportInfo]:
+    """Parse a REPORT_LIST response."""
+    status, payload = parse_response(resp)
+    if status != 0x00:
+        raise ProtocolError("report list response not a success frame")
+    count, offset = _read_u16(payload, 0)
+    reports = []
+    for _ in range(count):
+        event_id = payload[offset : offset + 32]
+        offset += 32
+        origin, offset = _read_text16(payload, offset)
+        origin_seq, offset = _read_u64(payload, offset)
+        reporter = payload[offset : offset + 32]
+        offset += 32
+        reporter_username, offset = _read_text16(payload, offset)
+        culprit = payload[offset : offset + 32]
+        offset += 32
+        target_origin, offset = _read_text16(payload, offset)
+        target_board, offset = _read_text16(payload, offset)
+        target_article_id = payload[offset : offset + 32]
+        offset += 32
+        target_event_id = payload[offset : offset + 32]
+        offset += 32
+        body_hash = payload[offset : offset + 32]
+        offset += 32
+        body_size, offset = _read_u32(payload, offset)
+        created_at, offset = _read_u64(payload, offset)
+
+        if target_article_id != ZERO_ID:
+            target_kind = "article"
+        elif target_event_id != ZERO_ID:
+            target_kind = "event"
+        else:
+            target_kind = "none"
+
+        reports.append(
+            ReportInfo(
+                event_id=event_id.hex(),
+                origin=origin,
+                origin_seq=origin_seq,
+                reporter_pubkey=reporter.hex(),
+                reporter_username=reporter_username,
+                culprit_pubkey=culprit.hex(),
+                target_kind=target_kind,
+                target_origin=target_origin,
+                target_board=target_board,
+                target_article_id=target_article_id.hex(),
+                target_event_id=target_event_id.hex(),
+                body_hash=body_hash.hex(),
+                body_size=body_size,
+                created_at=created_at,
+            )
+        )
+    return reports
 
 
 def build_permissions(board: str = "") -> bytes:
