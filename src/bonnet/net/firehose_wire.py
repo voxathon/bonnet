@@ -27,6 +27,7 @@ from bonnet.net.firehose_models import (
     BoardInfo,
     HeadInfo,
     PendingPunishment,
+    Permissions,
     PublishResult,
     QueryResponse,
     SearchResponse,
@@ -43,6 +44,11 @@ OP_EVENT_HEAD = 0x02
 OP_EVENT_RANGE = 0x03
 OP_EVENT_GET = 0x04
 OP_KEY_EPOCHS = 0x05
+# Authorization introspection: what may *this* principal do. Substrate
+# range because it describes the caller's relationship to the relay, not
+# bulletin-board semantics, and must be able to report on substrate
+# opcodes as well as application ones.
+OP_PERMISSIONS = 0x06
 OP_BOARD_LIST = 0x10
 OP_ARTICLE_GET = 0x11
 OP_ARTICLE_LIST = 0x12
@@ -256,6 +262,37 @@ def parse_key_epochs_response(resp: bytes) -> list[tuple[int, int | None, bytes]
         offset += 32
         epochs.append((start, None if end_raw == 0 else end_raw, pubkey))
     return epochs
+
+
+def build_permissions(board: str = "") -> bytes:
+    """Build a PERMISSIONS request, optionally scoped to one board.
+
+    An empty board asks only about what does not depend on one; ACL rules
+    carry a board dimension, so a principal may publish to `general` and not
+    to `staff`, and a board-independent answer cannot express that.
+    """
+    return struct.pack(">B", OP_PERMISSIONS) + _enc_text16(board)
+
+
+def parse_permissions_response(resp: bytes) -> Permissions:
+    """Parse a PERMISSIONS response."""
+    status, payload = parse_response(resp)
+    if status != 0x00:
+        raise ProtocolError("permissions response not a success frame")
+    principal, offset = _read_text16(payload, 0)
+    role, offset = _read_text16(payload, offset)
+    board, offset = _read_text16(payload, offset)
+    count, offset = _read_u16(payload, offset)
+    commands = []
+    for _ in range(count):
+        name, offset = _read_text16(payload, offset)
+        commands.append(name)
+    count, offset = _read_u16(payload, offset)
+    kinds = []
+    for _ in range(count):
+        name, offset = _read_text16(payload, offset)
+        kinds.append(name)
+    return Permissions(principal=principal, role=role, board=board, commands=commands, kinds=kinds)
 
 
 def parse_event_range_response(resp: bytes) -> list[tuple[Record, Witness]]:

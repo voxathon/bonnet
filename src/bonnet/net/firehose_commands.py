@@ -25,6 +25,7 @@ from bonnet.core.firehose import (
 )
 from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
 from bonnet.core.kind_validator import KindValidator, ValidationError
+from bonnet.core.kinds import ALL_KNOWN_KINDS
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     SIG_SIZE,
@@ -51,6 +52,7 @@ from bonnet.net.firehose_wire import (
     OP_EVENT_HEAD,
     OP_EVENT_RANGE,
     OP_KEY_EPOCHS,
+    OP_PERMISSIONS,
     OP_PUBLISH_RECORD,
     OP_USER_GET,
     OP_USER_LIST,
@@ -79,6 +81,7 @@ CMD_NAMES = {
     OP_EVENT_RANGE: "EVENT_RANGE",
     OP_EVENT_GET: "EVENT_GET",
     OP_KEY_EPOCHS: "KEY_EPOCHS",
+    OP_PERMISSIONS: "PERMISSIONS",
     OP_BOARD_LIST: "BOARD_LIST",
     OP_ARTICLE_GET: "ARTICLE_GET",
     OP_ARTICLE_LIST: "ARTICLE_LIST",
@@ -96,6 +99,7 @@ READ_OPS = frozenset(
     {
         OP_EVENT_HEAD,
         OP_EVENT_RANGE,
+        OP_PERMISSIONS,
         OP_EVENT_GET,
         OP_KEY_EPOCHS,
         OP_BOARD_LIST,
@@ -367,6 +371,8 @@ class FirehoseCommandHandler:
                 return self._cmd_event_range(data, ctx)
             elif opcode == OP_EVENT_GET:
                 return self._cmd_event_get(data, ctx)
+            elif opcode == OP_PERMISSIONS:
+                return self._cmd_permissions(data, ctx)
             elif opcode == OP_KEY_EPOCHS:
                 return self._cmd_key_epochs(data, ctx)
             elif opcode == OP_BOARD_LIST:
@@ -636,6 +642,65 @@ class FirehoseCommandHandler:
             payload += struct.pack(">Q", start_seq)
             payload += struct.pack(">Q", end_seq if end_seq is not None else 0)
             payload += pubkey
+        return _success(payload)
+
+    # ------------------------------------------------------------------
+    # PERMISSIONS
+    # ------------------------------------------------------------------
+
+    def _cmd_permissions(self, data: bytes, ctx: FirehoseContext) -> bytes:
+        """Report what this principal may do, as the ACL evaluates it now.
+
+        Enumerates rather than guesses: every command name and every known
+        kind is put through the same ACLEvaluator the enforcing paths use, so
+        the answer cannot drift from what a real request would get. That is
+        the whole point — a client that infers permissions from anything else
+        is maintaining a second, divergent copy of this policy.
+
+        Scoped to the board in the request when one is given. ACL rules carry
+        a board dimension, so the same principal may publish to one board and
+        not another, and a board-independent answer cannot express that.
+
+        This is deliberately an ordinary ACL-gated read: an operator who does
+        not want policy shape enumerated can deny it like anything else, and
+        the shipped default grants it to every principal class so the answer
+        is available exactly when a caller most needs it — before it knows
+        what else it can do.
+        """
+        board, _ = _read_text16(data, 0)
+        auth = ctx.to_auth_context()
+        scope = board or None
+
+        principal = "registered" if ctx.is_registered else "unknown"
+        if ctx.is_anonymous:
+            principal = "anonymous"
+
+        commands = [
+            name
+            for opcode, name in sorted(CMD_NAMES.items())
+            if self._acl.check(
+                auth,
+                "write" if opcode in WRITE_OPS else "read",
+                command=name,
+                board=scope,
+            )
+        ]
+
+        kinds = []
+        if "PUBLISH_RECORD" in commands:
+            kinds = [
+                kind
+                for kind in sorted(ALL_KNOWN_KINDS)
+                if self._acl.check(auth, "write", command="PUBLISH_RECORD", kind=kind, board=scope)
+            ]
+
+        payload = _enc_text16(principal) + _enc_text16(ctx.role or "") + _enc_text16(board)
+        payload += struct.pack(">H", len(commands))
+        for name in commands:
+            payload += _enc_text16(name)
+        payload += struct.pack(">H", len(kinds))
+        for kind in kinds:
+            payload += _enc_text16(kind)
         return _success(payload)
 
     # ------------------------------------------------------------------

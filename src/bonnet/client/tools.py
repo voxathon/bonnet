@@ -561,6 +561,58 @@ async def switch_board(origin: str) -> dict:
     return {**board, "active": True}
 
 
+# Ungated, like join and register_user: introspection is most needed by a
+# caller that does not yet know what it can do, and the anonymous principal
+# has permissions worth asking about. It needs a board endpoint but no
+# identity, which the current two-state gate cannot express — the tiering
+# work is where it gets its proper place.
+@mcp.tool
+async def my_permissions(board: str = "", auth: str | None = None) -> dict:
+    """Ask the board what this identity is actually allowed to do.
+
+    The relay evaluates its ACL for the key you are connecting with and
+    returns the commands and record kinds it would permit. Use it instead of
+    discovering limits by provoking failures: a tool that returns "not
+    permitted" has already published a rejected request into someone's logs.
+
+    `board` scopes the answer. ACL rules carry a board dimension, so the same
+    identity may publish to one board and not another; with no board the
+    answer covers only what does not depend on one.
+
+    Returns `principal` (anonymous / unknown / registered), `role`, the
+    `commands` permitted, and the `kinds` publishable via PUBLISH_RECORD.
+
+    Two caveats worth keeping. This is the relay's own claim about its policy,
+    trustworthy exactly as far as the relay is — like everything else on a
+    read path, it is a signed assertion by the host you asked, not something
+    you can verify independently. And it is a snapshot: policy can change, a
+    punishment can land between this call and your next request, so keep
+    handling a refusal gracefully rather than treating this as a guarantee.
+    """
+    client = _make_client()
+    try:
+        if auth:
+            await _connect_authenticated(client, auth)
+        else:
+            try:
+                await _connect_authenticated(client, None)
+            except ValueError:
+                # No identity selected — still a meaningful question, since
+                # the anonymous principal has permissions of its own and this
+                # is exactly when a caller most needs to know them.
+                await _connect_anonymous(client)
+        perms = await client.get_permissions(board)
+        return {
+            "principal": perms.principal,
+            "role": perms.role,
+            "board": perms.board,
+            "commands": perms.commands,
+            "kinds": perms.kinds,
+        }
+    finally:
+        await client.close()
+
+
 @mcp.tool
 async def list_identities() -> list[dict]:
     """List the signing identities this client holds locally.

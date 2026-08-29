@@ -31,6 +31,7 @@ from bonnet.net.firehose_models import (
     BanStatus,
     BoardInfo,
     HeadInfo,
+    Permissions,
     PublishResult,
     QueryResponse,
     SearchResponse,
@@ -55,6 +56,7 @@ from bonnet.net.firehose_wire import (
     build_event_get,
     build_event_head,
     build_event_range,
+    build_permissions,
     build_publish_record,
     build_user_get,
     build_user_list,
@@ -69,6 +71,7 @@ from bonnet.net.firehose_wire import (
     parse_event_get_response,
     parse_event_head_response,
     parse_event_range_response,
+    parse_permissions_response,
     parse_publish_response,
     parse_publish_response_raw,
     parse_user_get_response,
@@ -509,6 +512,11 @@ class FirehoseHTTPClient(FirehoseTransport):
     # ------------------------------------------------------------------
     # Projection reads
     # ------------------------------------------------------------------
+
+    async def get_permissions(self, board: str = "") -> Permissions:
+        """Ask the relay what this connection's principal is allowed to do."""
+        resp = await self._send_command(build_permissions(board))
+        return parse_permissions_response(resp)
 
     async def list_boards(self, origin: str) -> list[BoardInfo]:
         cmd = build_board_list(origin)

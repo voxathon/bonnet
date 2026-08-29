@@ -91,14 +91,16 @@ def test_check_config_valid_file_prints_summary(tmp_path, capsys, monkeypatch):
     assert "origin:" in out
     assert "listen:" in out
     assert "peers: 0" in out
-    # The generated default ships four bootstrap rules (anonymous read,
-    # unknown self-registration, registered-user read, registered-user
-    # publish/board-create) so the documented first-run flow works out of the
-    # box — see FirehoseConfig._write_default. Registered users need their own
-    # read rule because the principal matchers are mutually exclusive: once a
-    # key registers it stops matching `anonymous`, and without this it could
-    # publish but not read anything back.
-    assert "acl rules: 4" in out
+    # The generated default ships five bootstrap rules (anonymous read,
+    # unknown PERMISSIONS, unknown self-registration, registered-user read,
+    # registered-user publish/board-create) so the documented first-run flow
+    # works out of the box — see FirehoseConfig._write_default. Registered
+    # users need their own read rule because the principal matchers are
+    # mutually exclusive: once a key registers it stops matching `anonymous`,
+    # and without this it could publish but not read anything back. The
+    # `unknown` class gets PERMISSIONS so a caller can ask what it may do
+    # before it has done anything.
+    assert "acl rules: 5" in out
 
 
 def test_check_config_does_not_start_server(tmp_path, capsys, monkeypatch):
