@@ -22,8 +22,8 @@ pytest.importorskip("bcrypt")
 pytest.importorskip("cryptography")
 pytest.importorskip("fastmcp")
 
-from bonnet.client import tools
-from bonnet.client.needs import NEEDS
+from bonnet.gateway import tools
+from bonnet.gateway.needs import NEEDS
 
 # client method -> PERMISSIONS command it issues (firehose_client.py).
 CLIENT_COMMANDS = {
@@ -139,7 +139,7 @@ def test_every_origin_facing_tool_has_a_declaration():
     """A tool tagged NEEDS_ORIGIN with no Needs would silently fall all the
     way back to the coarse identity-only heuristic forever, never getting a
     real PERMISSIONS answer — this catches a tool added without one."""
-    from bonnet.client.gating import NEEDS_ORIGIN
+    from bonnet.gateway.gating import NEEDS_ORIGIN
 
     async def _tools():
         return await tools.mcp._list_tools()

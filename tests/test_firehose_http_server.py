@@ -11,7 +11,6 @@ import time
 import httpx
 import pytest
 
-from bonnet.client.firehose_client import FirehoseHTTPClient
 from bonnet.core.acl import ACLEvaluator, ACLRule, PrincipalMatcher, default_rules_for_admin
 from bonnet.core.bodies import BodyStore
 from bonnet.core.config import FirehoseConfig
@@ -30,6 +29,7 @@ from bonnet.core.record import (
 )
 from bonnet.core.search import SearchService
 from bonnet.core.trust import TrustStore
+from bonnet.gateway.firehose_client import FirehoseHTTPClient
 from bonnet.net.firehose_commands import (
     FirehoseCommandHandler,
 )

@@ -6,8 +6,8 @@ pytest.importorskip("bcrypt")
 pytest.importorskip("cryptography")
 pytest.importorskip("fastmcp")
 
-from bonnet.client import tools
-from bonnet.client.identity import IdentityStore
+from bonnet.gateway import tools
+from bonnet.gateway.identity import IdentityStore
 
 pytestmark = pytest.mark.slow
 

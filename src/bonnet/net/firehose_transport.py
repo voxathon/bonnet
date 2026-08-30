@@ -3,7 +3,7 @@
 Handles discovery, TOFU key pinning, RFC 9421 request signing, response
 verification, and the binary command round-trip. Shared by the server's
 federation sync (bonnet.net.firehose_sync) and the client library
-(bonnet.client.firehose_client), which layers typed methods on top.
+(bonnet.gateway.firehose_client), which layers typed methods on top.
 """
 
 from __future__ import annotations
