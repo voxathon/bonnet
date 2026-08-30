@@ -62,6 +62,7 @@ from bonnet.gateway import (
 from bonnet.gateway.firehose_client import default_verify_tls
 from bonnet.gateway.gating import GatingMiddleware
 from bonnet.gateway.registry import TenantError
+from bonnet.gateway.session import SessionStateMiddleware
 from bonnet.gateway.tools import current_password, current_username, mcp
 
 
@@ -156,6 +157,11 @@ class AuthMiddleware(Middleware):
 
 
 mcp.add_middleware(AuthMiddleware())
+# Between the two, and the order is load-bearing in both directions: the
+# session key is scoped by the tenant AuthMiddleware resolves, and gating
+# reads the cursor this restores — `_missing_for` consults board-scoped
+# PERMISSIONS, so an unhydrated cursor would answer for the wrong board.
+mcp.add_middleware(SessionStateMiddleware())
 # After AuthMiddleware: gating reads the tenant that one resolves from the
 # request's API key, so it must see a populated context.
 mcp.add_middleware(GatingMiddleware())

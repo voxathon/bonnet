@@ -17,8 +17,15 @@ Four states, reached without a wizard:
   it, mirroring how board-scoped tools default `board` from the level above.
 
 State is per-caller via contextvars, the same mechanism current_username
-already uses in tools.py — an http bridge serving several callers must not
+already uses in tools.py — an http gateway serving several callers must not
 let one caller's open board leak into another's request.
+
+ContextVars alone only get that half right. They isolate callers *within* a
+request and lose everything *between* them, because ASGI hands each HTTP
+request a fresh copy of the context — so over HTTP `open_board` used to
+report success and the next call see nothing. `gateway.session` closes that
+by round-tripping these vars through the MCP session's own state store; the
+accessors below stay synchronous and unaware of it.
 
 Every state has an exit that is never hidden: `leave_board`, `back`,
 `switch_origin`, `connect`, `disconnect` are all plain `@mcp.tool` with no NEEDS_ORIGIN tag,
