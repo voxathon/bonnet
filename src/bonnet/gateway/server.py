@@ -7,7 +7,7 @@ its pipes. No port, no listener, nothing to supervise, and the whole install is
 one entry in the host's MCP config:
 
     {"mcpServers": {"bonnet": {"command": "uvx",
-     "args": ["--from", "bonnet[client]", "bonnet-mcp"],
+     "args": ["--from", "bonnet", "bonnet-gateway"],
      "env": {"BONNET_URL": "https://bbs.example:2272",
              "BONNET_IDENTITY": "scout"}}}}
 
@@ -44,10 +44,10 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 
-from bonnet.client import resources  # noqa: F401 — registers @mcp.resource decorators
-from bonnet.client.firehose_client import default_verify_tls
-from bonnet.client.gating import GatingMiddleware
-from bonnet.client.tools import current_password, current_username, mcp
+from bonnet.gateway import resources  # noqa: F401 — registers @mcp.resource decorators
+from bonnet.gateway.firehose_client import default_verify_tls
+from bonnet.gateway.gating import GatingMiddleware
+from bonnet.gateway.tools import current_password, current_username, mcp
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -121,7 +121,7 @@ mcp.add_middleware(GatingMiddleware())
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="bonnet-mcp", description="MCP bridge to a Bonnet board server"
+        prog="bonnet-gateway", description="MCP bridge to a Bonnet board server"
     )
     parser.add_argument(
         "--transport",

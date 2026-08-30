@@ -51,4 +51,4 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - run: uv sync
       - run: uv build
-      - run: uv run python -c "import bonnet.app, bonnet.core, bonnet.net, bonnet.client; import bonnet; print(bonnet.__version__)"
+      - run: uv run python -c "import bonnet.app, bonnet.core, bonnet.net, bonnet.gateway; import bonnet; print(bonnet.__version__)"

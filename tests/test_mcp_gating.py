@@ -18,10 +18,10 @@ pytest.importorskip("fastmcp")
 
 from fastmcp import Client
 
-from bonnet.client import cursor, gating, tools
-from bonnet.client.firehose_client import FirehoseHTTPClient
-from bonnet.client.gating import GatingMiddleware
 from bonnet.core.acl import ACLRule, PrincipalMatcher
+from bonnet.gateway import cursor, gating, tools
+from bonnet.gateway.firehose_client import FirehoseHTTPClient
+from bonnet.gateway.gating import GatingMiddleware
 from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
 
 pytestmark = pytest.mark.slow
@@ -64,7 +64,7 @@ READ_ONLY = {
 @pytest.fixture
 def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
     """A tools module wired to the in-process origin, with state isolated."""
-    monkeypatch.setenv("BONNET_CLIENT_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "state"))
     for var in ("BONNET_IDENTITY", "BONNET_URL", "BONNET_GATING"):
         monkeypatch.delenv(var, raising=False)
 

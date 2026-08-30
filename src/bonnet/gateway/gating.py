@@ -45,8 +45,8 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import Tool
 
-from bonnet.client import cursor
-from bonnet.client import needs as needs_module
+from bonnet.gateway import cursor
+from bonnet.gateway import needs as needs_module
 
 #: Tag marking a tool that cannot function without somewhere to send a
 #: request. Applied at definition, so adding an origin-facing tool means
@@ -97,7 +97,7 @@ def _identity_missing() -> str | None:
     # Imported here, not at module scope: tools imports this module for the
     # NEEDS_ORIGIN/NEEDS_IDENTITY tags it decorates with, so a top-level
     # import would cycle.
-    from bonnet.client.tools import (
+    from bonnet.gateway.tools import (
         _default_identity,
         _default_origin,
         _get_identity_store,
@@ -141,7 +141,7 @@ def _has_origin() -> bool:
     an origin after `disconnect()` (disconnect forgets nothing), but this
     caller's context no longer has one active, and gating must see that.
     """
-    from bonnet.client.tools import _ensure_origin_loaded, current_origin_url
+    from bonnet.gateway.tools import _ensure_origin_loaded, current_origin_url
 
     _ensure_origin_loaded()
     return current_origin_url.get() is not None

@@ -63,16 +63,16 @@ import time
 import httpx
 from fastmcp import FastMCP
 
-from bonnet.client import cursor
-from bonnet.client import needs as needs_module
-from bonnet.client.firehose_client import FirehoseHTTPClient, default_verify_tls
-from bonnet.client.gating import NEEDS_IDENTITY, NEEDS_ORIGIN, announce_tool_change
-from bonnet.client.identity import IdentityStore
-from bonnet.client.needs import invalidate as _invalidate_permissions_cache
-from bonnet.client.needs import needs
-from bonnet.client.state import OriginStore, trust_db_path
 from bonnet.core.crypto import Identity
 from bonnet.core.record import ZERO_ID
+from bonnet.gateway import cursor
+from bonnet.gateway import needs as needs_module
+from bonnet.gateway.firehose_client import FirehoseHTTPClient, default_verify_tls
+from bonnet.gateway.gating import NEEDS_IDENTITY, NEEDS_ORIGIN, announce_tool_change
+from bonnet.gateway.identity import IdentityStore
+from bonnet.gateway.needs import invalidate as _invalidate_permissions_cache
+from bonnet.gateway.needs import needs
+from bonnet.gateway.paths import OriginStore, trust_db_path
 from bonnet.net.firehose_models import (
     ArticleView,
     BanStatus,
@@ -135,9 +135,7 @@ current_password: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # (its self-asserted name from discovery, e.g. "bbs.example"), which is what
 # IdentityStore keys registrations under; current_origin_url is where to send
 # requests to reach it. They are set together, but are not the same value.
-current_origin: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "origin", default=None
-)
+current_origin: contextvars.ContextVar[str | None] = contextvars.ContextVar("origin", default=None)
 current_origin_url: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "origin_url", default=None
 )
@@ -246,7 +244,7 @@ async def _unlock_origin_tools() -> list[str]:
     identity) pair PERMISSIONS is cached under — so this is also where that
     cache is invalidated, rather than duplicating the call at each caller.
     """
-    from bonnet.client.gating import _missing_for
+    from bonnet.gateway.gating import _missing_for
 
     _invalidate_permissions_cache()
     await announce_tool_change()
@@ -514,7 +512,11 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         "boards": boards,
         "known_origins": known,
         "identities": [
-            {"username": i["username"], "public_key": i["public_key"], "registered": i["registered"]}
+            {
+                "username": i["username"],
+                "public_key": i["public_key"],
+                "registered": i["registered"],
+            }
             for i in identities
         ],
         "tools_unlocked": unlocked,
