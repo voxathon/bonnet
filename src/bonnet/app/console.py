@@ -176,6 +176,9 @@ class OperatorConsole:
         if cmd == "depeer":
             return self._cmd_depeer(parts)
 
+        if cmd == "resume-origin":
+            return self._cmd_resume_origin(parts)
+
         if cmd == "purge-origin":
             return self._cmd_purge_origin(parts)
 
@@ -229,6 +232,7 @@ class OperatorConsole:
   debug-acl                     Dump ACL state
   rebuild [origin]              Rebuild projections from firehose (retries failed records)
   depeer <origin>               Stop syncing an origin and freeze its projections
+  resume-origin <origin>        Clear a 'diverged' halt and let sync retry
   purge-origin <origin>         Remove all firehose and projection data for an origin
   reset-key <origin>            Clear key epoch pinning for an origin
   rotate-key                    Rotate this server's own origin signing key
@@ -1505,13 +1509,24 @@ class OperatorConsole:
 
         head = decode_head(resp[3 : 3 + head_len])
 
-        return (
+        out = (
             f"Origin: {head.origin}\n"
             f"Latest seq: {head.latest_origin_seq}\n"
             f"Event count: {head.event_count}\n"
             f"Latest hash: {head.latest_event_hash.hex()}\n"
             f"Pubkey: {head.origin_pubkey.hex()}"
         )
+
+        # A halted origin looks completely normal from its head alone — the
+        # numbers are whatever we last accepted. Say so here, where an
+        # operator actually looks, rather than only in the log.
+        status = self.firehose.get_sync_status(origin)
+        if status["status"] != "ok":
+            out += (
+                f"\nSync status: {status['status']} ({status['detail']})\n"
+                f"Sync is halted. See 'resume-origin {origin}'."
+            )
+        return out
 
     # ------------------------------------------------------------------
     # event-range
@@ -1760,6 +1775,31 @@ class OperatorConsole:
         """
         new_identity = Identity.generate()
         return self.server.apply_key_rotation(new_identity)
+
+    def _cmd_resume_origin(self, parts) -> str:
+        """Clear a divergence halt so the next cycle retries.
+
+        Deliberately does not resolve the divergence — retrying against an
+        unchanged peer will simply halt again, because a forked chain cannot
+        re-converge from this side. This is for after the origin has repaired
+        itself, or alongside reset-key / purge-origin when the operator has
+        decided to take the peer's branch instead.
+        """
+        if len(parts) < 2:
+            return "Usage: resume-origin <origin>"
+        origin = parts[1]
+        status = self.firehose.get_sync_status(origin)
+        if status["status"] != "diverged":
+            return f"Origin '{origin}' is not halted (status: {status['status']})."
+        self.firehose.clear_sync_status(origin)
+        conflicts = len(self.firehose.get_conflicts(origin))
+        return (
+            f"Cleared the divergence halt on '{origin}' (was: {status['detail']}).\n"
+            f"Sync will retry on the next cycle. {conflicts} conflict record(s) kept "
+            f"as evidence.\n"
+            f"If the origin's history has not changed, it will halt again — see "
+            f"'reset-key {origin}' or 'purge-origin {origin}' to adopt its branch."
+        )
 
     def _cmd_purge_origin(self, parts) -> str:
         if len(parts) < 2:

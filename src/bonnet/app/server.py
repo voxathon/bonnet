@@ -243,6 +243,7 @@ class BonnetServer:
                 log_msg(f"INIT: dispatched remote origin '{remote}' ({count} records)")
 
         self._sweep_orphaned_staged_bodies()
+        self._verify_origin_tips()
 
         self.local_conn = FirehoseLocalConnection(
             self.server_identity.public_key,
@@ -250,6 +251,37 @@ class BonnetServer:
         )
 
         log_msg("INIT: complete")
+
+    def _verify_origin_tips(self) -> None:
+        """Check each origin's recorded tip against the record stored at it.
+
+        `origin_state.current_event_hash` is maintained alongside `events`
+        rather than derived from it, so a crash mid-transaction or a restored
+        database can leave the two disagreeing. That is worth catching on its
+        own terms: sync compares an incoming record's previous_event_hash
+        against this value, so a drifted tip makes every honest peer look like
+        it is serving a broken chain, and the relay would blame the peer
+        forever for our own inconsistency.
+
+        One indexed lookup per origin. Only `origin_state` is rewritten —
+        the events are signed and are never touched here.
+        """
+        for origin in self.firehose.list_origins():
+            consistent, recorded, actual = self.firehose.check_tip(origin)
+            if consistent:
+                continue
+            if actual is None:
+                log_msg(
+                    f"INIT: origin '{origin}' records a tip with no stored record at "
+                    f"its sequence — leaving alone, this needs an operator"
+                )
+                continue
+            self.firehose.repair_tip(origin)
+            log_msg(
+                f"INIT: repaired tip for origin '{origin}' "
+                f"(recorded={recorded.hex()[:16] if recorded else None} "
+                f"actual={actual.hex()[:16]})"
+            )
 
     def _sweep_orphaned_staged_bodies(self, min_age_seconds: int = 3600) -> None:
         """Recover or discard article bodies a crash left in staging.
