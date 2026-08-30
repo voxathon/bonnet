@@ -9,7 +9,7 @@ is the shipped default, so that is the out-of-the-box configuration.
 import httpx
 import pytest
 
-from bonnet.client.firehose_client import FirehoseHTTPClient
+from bonnet.gateway.firehose_client import FirehoseHTTPClient
 from bonnet.net.firehose_wire import build_board_list, parse_board_list_response
 from tests.test_firehose_http_server import (  # noqa: F401
     ORIGIN,

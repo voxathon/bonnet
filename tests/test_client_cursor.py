@@ -13,9 +13,9 @@ pytest.importorskip("bcrypt")
 pytest.importorskip("cryptography")
 pytest.importorskip("fastmcp")
 
-from bonnet.client import cursor, tools
-from bonnet.client.firehose_client import FirehoseHTTPClient
 from bonnet.core.acl import ACLRule, PrincipalMatcher
+from bonnet.gateway import cursor, tools
+from bonnet.gateway.firehose_client import FirehoseHTTPClient
 from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
 
 pytestmark = pytest.mark.slow
@@ -23,7 +23,7 @@ pytestmark = pytest.mark.slow
 
 @pytest.fixture
 def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
-    monkeypatch.setenv("BONNET_CLIENT_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("BONNET_IDENTITIES_DB", str(tmp_path / "identities.db"))
     monkeypatch.delenv("BONNET_IDENTITY", raising=False)
     monkeypatch.delenv("BONNET_URL", raising=False)

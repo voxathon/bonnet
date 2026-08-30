@@ -16,10 +16,6 @@ dependencies = [
     "httpx>=0.27.0",
     "uvicorn>=0.30.0",
     "ripgrep>=14.1.0",
-]
-
-[project.optional-dependencies]
-client = [
     "fastmcp>=3.0.0",
     "bcrypt>=5.0.0",
     "cryptography>=42.0.0",
@@ -42,7 +38,7 @@ dev = [
 
 [project.scripts]
 bonnet-server = "bonnet.app.main:main"
-bonnet-mcp = "bonnet.client._cli:run"
+bonnet-gateway = "bonnet.gateway.server:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bonnet"]

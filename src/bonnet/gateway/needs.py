@@ -124,7 +124,7 @@ async def _permissions_for(board: str) -> Permissions | None:
     # Imported here, not at module scope: tools imports this module for the
     # needs()/NEEDS registry it decorates with, so a top-level import would
     # cycle the same way gating.py's does.
-    from bonnet.client import tools as _tools
+    from bonnet.gateway import tools as _tools
 
     identity = _tools.current_username.get() or _tools._default_identity() or ""
     key = (_tools._current_url(), identity, board)
@@ -159,7 +159,7 @@ async def refresh(board: str = "") -> Permissions | None:
     at all: open_board calls this on entry, rather than waiting for a stale
     cache entry to expire or for some other tool call to trigger a refetch.
     """
-    from bonnet.client import tools as _tools
+    from bonnet.gateway import tools as _tools
 
     identity = _tools.current_username.get() or _tools._default_identity() or ""
     key = (_tools._current_url(), identity, board)

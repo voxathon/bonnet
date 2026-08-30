@@ -12,11 +12,11 @@ pytest.importorskip("bcrypt")
 pytest.importorskip("cryptography")
 pytest.importorskip("fastmcp")
 
-from bonnet.client import tools
-from bonnet.client.firehose_client import FirehoseHTTPClient
-from bonnet.client.state import OriginStore, trust_db_path
 from bonnet.core.crypto import Identity
 from bonnet.core.trust import TrustStore
+from bonnet.gateway import tools
+from bonnet.gateway.firehose_client import FirehoseHTTPClient
+from bonnet.gateway.paths import OriginStore, trust_db_path
 from bonnet.net.firehose_transport import FirehoseClientError
 from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
 
@@ -24,8 +24,8 @@ pytestmark = pytest.mark.slow
 
 
 @pytest.fixture
-def client_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("BONNET_CLIENT_DIR", str(tmp_path / "state"))
+def gateway_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("BONNET_IDENTITIES_DB", str(tmp_path / "state" / "identities.db"))
     monkeypatch.delenv("BONNET_IDENTITY", raising=False)
     monkeypatch.delenv("BONNET_URL", raising=False)
@@ -66,7 +66,7 @@ def _client(app, base_url: str, trust_path: str) -> FirehoseHTTPClient:
     return client
 
 
-async def test_the_mcp_client_is_built_with_a_trust_store(client_dir):
+async def test_the_mcp_client_is_built_with_a_trust_store(gateway_dir):
     """Without this the transport's pinning code never runs: _pin_server_key
     is a no-op when _trust_store is None."""
     client = tools._make_client()
@@ -76,11 +76,11 @@ async def test_the_mcp_client_is_built_with_a_trust_store(client_dir):
         await client.close()
 
 
-async def test_trust_store_lives_under_the_client_dir(client_dir):
-    assert trust_db_path() == str(client_dir / "trust.db")
+async def test_trust_store_lives_under_the_gateway_dir(gateway_dir):
+    assert trust_db_path() == str(gateway_dir / "trust.db")
 
 
-async def test_first_contact_records_a_pin(server_stack, client_dir):  # noqa: F811
+async def test_first_contact_records_a_pin(server_stack, gateway_dir):  # noqa: F811
     path = trust_db_path()
     client = _client(server_stack["server"], "https://bbs.test", path)
     try:
@@ -95,7 +95,7 @@ async def test_first_contact_records_a_pin(server_stack, client_dir):  # noqa: F
         store.close()
 
 
-async def test_pin_survives_a_new_client(server_stack, client_dir):  # noqa: F811
+async def test_pin_survives_a_new_client(server_stack, gateway_dir):  # noqa: F811
     """A restarted bridge must recognise the key it saw before — this is the
     whole difference between TOFU and trusting whatever shows up."""
     path = trust_db_path()
@@ -113,7 +113,7 @@ async def test_pin_survives_a_new_client(server_stack, client_dir):  # noqa: F81
         store.close()
 
 
-async def test_a_substituted_origin_key_is_rejected(server_stack, client_dir):  # noqa: F811
+async def test_a_substituted_origin_key_is_rejected(server_stack, gateway_dir):  # noqa: F811
     """The point of the pin: a different key for a known origin fails rather
     than being silently adopted."""
     path = trust_db_path()
@@ -182,7 +182,7 @@ def test_forgotten_active_origin_reads_as_none(tmp_path):
 # --- resolution order -----------------------------------------------------
 
 
-def test_remembered_origin_supplies_url_and_identity(client_dir):
+def test_remembered_origin_supplies_url_and_identity(gateway_dir):
     """The restart case: no environment at all, and the client still knows
     where it is and who it is."""
     tools._get_origin_store().remember("bbs.test", "https://bbs.test", False, "scout")
@@ -194,7 +194,7 @@ def test_remembered_origin_supplies_url_and_identity(client_dir):
     assert tools._default_identity() == "scout"
 
 
-def test_bonnet_url_overrides_the_remembered_origin(client_dir, monkeypatch):
+def test_bonnet_url_overrides_the_remembered_origin(gateway_dir, monkeypatch):
     """An operator who sets BONNET_URL means it; an origin connected later
     must not silently redirect them."""
     tools._get_origin_store().remember("bbs.test", "https://bbs.test", False, "scout")
@@ -206,7 +206,7 @@ def test_bonnet_url_overrides_the_remembered_origin(client_dir, monkeypatch):
     assert tools._current_url() == "https://elsewhere.example"
 
 
-def test_bonnet_identity_overrides_the_remembered_one(client_dir, monkeypatch):
+def test_bonnet_identity_overrides_the_remembered_one(gateway_dir, monkeypatch):
     tools._get_origin_store().remember("bbs.test", "https://bbs.test", False, "scout")
     monkeypatch.setenv("BONNET_IDENTITY", "other")
 

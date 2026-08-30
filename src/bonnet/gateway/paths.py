@@ -18,7 +18,7 @@ for the reason IdentityStore.default_db_path already gives: the bridge is
 launched by an agent host that chooses its own working directory, so anything
 CWD-relative silently becomes a fresh empty store on the next launch.
 
-BONNET_CLIENT_DIR relocates all of it. BONNET_IDENTITIES_DB still overrides
+BONNET_GATEWAY_DIR relocates all of it. BONNET_IDENTITIES_DB still overrides
 the identity store's path on its own, since it predates this module.
 """
 
@@ -34,21 +34,21 @@ import platformdirs
 _ACTIVE_ORIGIN = "active_origin"
 
 
-def client_dir() -> str:
+def gateway_dir() -> str:
     """Directory holding this client's durable state."""
-    return os.environ.get("BONNET_CLIENT_DIR") or platformdirs.user_data_dir(
+    return os.environ.get("BONNET_GATEWAY_DIR") or platformdirs.user_data_dir(
         "bonnet", appauthor=False
     )
 
 
 def trust_db_path() -> str:
     """Where origin-key pins are persisted."""
-    return os.path.join(client_dir(), "trust.db")
+    return os.path.join(gateway_dir(), "trust.db")
 
 
 def origins_db_path() -> str:
     """Where joined origins are recorded."""
-    return os.path.join(client_dir(), "origins.db")
+    return os.path.join(gateway_dir(), "origins.db")
 
 
 class OriginStore:

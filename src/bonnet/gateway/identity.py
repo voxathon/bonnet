@@ -29,7 +29,7 @@ import bcrypt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from nacl.signing import SigningKey
 
-from bonnet.client.state import client_dir
+from bonnet.gateway.paths import gateway_dir
 
 
 class IdentityStore:
@@ -37,7 +37,7 @@ class IdentityStore:
     def default_db_path() -> str:
         """Per-user data directory for the identity store.
 
-        Not the current working directory: bonnet-mcp is typically launched
+        Not the current working directory: bonnet-gateway is typically launched
         by an agent host (IDE, orchestrator, systemd unit) that picks its own
         CWD, not the human operator. A CWD-relative default would silently
         spawn a fresh, empty identity store — and orphan the agent's existing
@@ -46,10 +46,10 @@ class IdentityStore:
         directory.
 
         Shares the client state directory with joined boards and pinned
-        origin keys, so BONNET_CLIENT_DIR relocates all of a client's durable
+        origin keys, so BONNET_GATEWAY_DIR relocates all of a client's durable
         state together. BONNET_IDENTITIES_DB still overrides this file alone.
         """
-        return os.path.join(client_dir(), "identities.db")
+        return os.path.join(gateway_dir(), "identities.db")
 
     def __init__(self, db_path: str | None = None):
         self.db_path = Path(db_path or self.default_db_path())

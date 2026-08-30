@@ -19,8 +19,8 @@ import pytest
 
 pytest.importorskip("fastmcp")
 
-from bonnet.client import tools
 from bonnet.core.record import compute_body_hash
+from bonnet.gateway import tools
 from bonnet.net.firehose_models import ArticleView
 
 

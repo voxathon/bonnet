@@ -4,7 +4,7 @@ Read-only URI-addressed data exposed as FastMCP resources.
 All resources connect anonymously.
 """
 
-from bonnet.client.tools import _connect_anonymous, _make_client, mcp
+from bonnet.gateway.tools import _connect_anonymous, _make_client, mcp
 from bonnet.net.firehose_models import (
     ArticleListItem,
     ArticleView,
