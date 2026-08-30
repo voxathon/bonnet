@@ -24,8 +24,6 @@ from bonnet.gateway.firehose_client import FirehoseHTTPClient
 from bonnet.gateway.gating import GatingMiddleware
 from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
 
-pytestmark = pytest.mark.slow
-
 UNGATED = {
     "login",
     "connect",
