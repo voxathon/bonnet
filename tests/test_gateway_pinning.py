@@ -35,8 +35,6 @@ from tests.test_firehose_http_server import (  # noqa: F401
     server_stack,
 )
 
-pytestmark = pytest.mark.slow
-
 REMOTE = "https://bbs.test"
 
 
