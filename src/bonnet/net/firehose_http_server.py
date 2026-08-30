@@ -379,7 +379,20 @@ class FirehoseHTTPServer:
         else:
             if self._users is not None:
                 user = self._users.get_user_by_pubkey(self._config.origin, peer_public_key)
-                if user is not None and not user.get("revoked", False):
+                successor = user.get("superseded_by") if user else None
+                if successor is not None:
+                    # The key rotated. It stops authenticating from the moment
+                    # the rotation dispatches — that is the point of rotating
+                    # after a compromise. Logged with the successor so a
+                    # client still holding the retired key gets a diagnosable
+                    # failure instead of an unexplained demotion to unknown.
+                    log_msg(
+                        f"AUTH: origin='{self._config.origin}' key "
+                        f"{peer_public_key.hex()[:16]} was superseded by "
+                        f"{successor.hex()[:16]}; treating as unknown"
+                    )
+                    is_unknown = True
+                elif user is not None and not user.get("revoked", False):
                     is_registered = True
                     flags = user.get("flags", 0)
                     if flags & 0x01:
