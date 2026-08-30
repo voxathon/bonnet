@@ -17,8 +17,6 @@ from bonnet.gateway import tenancy, tools
 from bonnet.gateway.firehose_client import FirehoseHTTPClient
 from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
 
-pytestmark = pytest.mark.slow
-
 
 @pytest.fixture
 def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811

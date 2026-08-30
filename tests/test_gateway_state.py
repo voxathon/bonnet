@@ -21,8 +21,6 @@ from bonnet.gateway.paths import trust_db_path
 from bonnet.net.firehose_transport import FirehoseClientError
 from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
 
-pytestmark = pytest.mark.slow
-
 
 @pytest.fixture
 def gateway_dir(tmp_path, monkeypatch):

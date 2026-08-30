@@ -7,8 +7,6 @@ pytest.importorskip("fastmcp")
 from bonnet.gateway import tenancy, tools
 from bonnet.gateway.identity import IdentityStore
 
-pytestmark = pytest.mark.slow
-
 ORIGIN = "bbs.test"
 
 

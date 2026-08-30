@@ -34,8 +34,6 @@ from bonnet.gateway.firehose_client import FirehoseHTTPClient
 from bonnet.gateway.server import mcp
 from tests.test_firehose_http_server import server_stack  # noqa: F401
 
-pytestmark = pytest.mark.slow
-
 #: Set by the http_gateway fixture, which picks the port at run time.
 URL = ""
 
