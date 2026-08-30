@@ -31,6 +31,9 @@ UNGATED = {
     "connect",
     "disconnect",
     "register",
+    # How a caller accepts the key connect asked it about — gating it behind
+    # having an origin would be circular, since accepting is what produces one.
+    "trust_origin_key",
     "list_joined_origins",
     "switch_origin",
     "list_identities",

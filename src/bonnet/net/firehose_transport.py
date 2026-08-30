@@ -1,9 +1,18 @@
 """Signed-HTTP command transport for the firehose protocol.
 
-Handles discovery, TOFU key pinning, RFC 9421 request signing, response
+Handles discovery, origin-key pinning, RFC 9421 request signing, response
 verification, and the binary command round-trip. Shared by the server's
 federation sync (bonnet.net.firehose_sync) and the client library
 (bonnet.gateway.firehose_client), which layers typed methods on top.
+
+Pinning has two modes, and the split is deliberate: this module *reports* what
+kind of key event happened and never decides what to do about it. Under
+PIN_MODE_AUTO — the default, and what federation sync uses — a key is adopted
+on first contact and rolled forward when a rotation chain connects it, which
+is the historical behaviour. Under PIN_MODE_CONFIRM nothing is adopted at all;
+the presented key is recorded as pending and PinConfirmationRequired is
+raised for the caller to resolve. The gateway chooses the mode; see
+`bonnet.gateway.tools._pin_mode_for`.
 """
 
 from __future__ import annotations
@@ -45,6 +54,40 @@ class FirehoseClientError(Exception):
     pass
 
 
+#: Adopt any key on first contact, and any change a rotation chain connects.
+#: The historical behaviour, and what every non-gateway caller wants.
+PIN_MODE_AUTO = "auto"
+
+#: Adopt nothing without an explicit decision. Records the presented key as
+#: pending and raises PinConfirmationRequired.
+PIN_MODE_CONFIRM = "confirm"
+
+
+class PinConfirmationRequired(FirehoseClientError):
+    """A key was presented that this client has not agreed to trust.
+
+    Subclasses FirehoseClientError deliberately: a caller that catches the
+    broad type and treats this as a failed connection is *right* to, because
+    the connection did fail — nothing was pinned and nothing is trusted.
+    Handling it specially is an improvement, not a correctness requirement.
+
+    `evidence` describes what the origin offered in support of a changed key.
+    It is the origin's own account, signed by the key being replaced, and is
+    carried for the caller to weigh — it does not decide anything here.
+    """
+
+    def __init__(self, origin: str, presented_key: bytes, kind: str, evidence: str = ""):
+        self.origin = origin
+        self.presented_key = presented_key
+        self.fingerprint = presented_key.hex()
+        self.kind = kind  # "new" | "changed"
+        self.evidence = evidence
+        super().__init__(
+            f"origin '{origin}' presented a key this client has not accepted "
+            f"({kind}); fingerprint {self.fingerprint}"
+        )
+
+
 class _ServerKeyResolver(KeyResolver):
     """Resolves the server's key for response verification."""
 
@@ -68,6 +111,7 @@ class FirehoseTransport:
         timeout: float = 30.0,
         verify: bool | str = True,
         trust_store_path: str = None,
+        pin_mode: str = PIN_MODE_AUTO,
     ):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
@@ -82,6 +126,7 @@ class FirehoseTransport:
         self._signer: BonnetSigner | None = None
         self._verifier: BonnetVerifier | None = None
         self._trust_store_path = trust_store_path
+        self._pin_mode = pin_mode
         self._trust_store: TrustStore | None = None
         if trust_store_path:
             self._trust_store = TrustStore(trust_store_path)
@@ -187,27 +232,65 @@ class FirehoseTransport:
         return info
 
     async def _pin_server_key(self, origin: str, public_key: bytes) -> None:
-        """TOFU pin, or accept a verified key rotation, for the server's key.
+        """Pin the server's key, or report that a decision is needed.
 
-        A key mismatch against the existing pin is only ever a mismatch, not
-        automatically an attack: the origin may have legitimately rotated.
-        Before rejecting, ask whether a verified chain of
+        Under PIN_MODE_AUTO this is the historical behaviour: adopt on first
+        contact, and roll the pin forward when a chain of
         bonnet.origin.key.rotate records connects the pinned key to the one
-        just presented, and if so, roll the pin forward instead of failing.
+        presented. A mismatch with no such chain fails.
+
+        Under PIN_MODE_CONFIRM nothing is adopted here at all. Anything other
+        than "already pinned to exactly this key" is recorded as pending and
+        raised for the caller to decide — including a change whose rotation
+        chain verifies, because that chain is the origin's own account of its
+        key history signed by the key being replaced. It is testimony, not
+        proof; a holder of the old key produces an identical one. The chain
+        walk still runs, and its outcome rides along as `evidence`, but it
+        does not decide.
         """
-        if self._trust_store:
-            if self._trust_store.tofu_pin(origin, public_key):
-                return
-            old_pubkey = self._trust_store.get_pin(origin)
-            if old_pubkey is not None and await self._verify_rotation_chain(
-                origin, old_pubkey, public_key
-            ):
-                if self._trust_store.accept_rotation(origin, old_pubkey, public_key):
-                    return
-            raise FirehoseClientError(f"Server key pin mismatch for origin '{origin}'")
-        else:
+        if not self._trust_store:
             if self._server_pubkey and self._server_pubkey != public_key:
                 raise FirehoseClientError("Server key changed without rotation")
+            return
+
+        pinned = self._trust_store.get_pin(origin)
+        if pinned == public_key:
+            return  # already trusted, nothing to decide
+
+        if self._pin_mode == PIN_MODE_CONFIRM:
+            if pinned is None:
+                self._trust_store.record_pending(
+                    origin,
+                    public_key,
+                    "new",
+                    url=self._base_url,
+                    verify_tls=str(self._verify),
+                )
+                raise PinConfirmationRequired(origin, public_key, "new")
+            evidence = (
+                "chain_verified"
+                if await self._verify_rotation_chain(origin, pinned, public_key)
+                else "no_chain"
+            )
+            self._trust_store.record_pending(
+                origin,
+                public_key,
+                "changed",
+                evidence,
+                url=self._base_url,
+                verify_tls=str(self._verify),
+            )
+            raise PinConfirmationRequired(origin, public_key, "changed", evidence)
+
+        if self._trust_store.tofu_pin(origin, public_key):
+            return
+        old_pubkey = self._trust_store.get_pin(origin)
+        if old_pubkey is not None and await self._verify_rotation_chain(
+            origin, old_pubkey, public_key
+        ):
+            if self._trust_store.accept_rotation(origin, old_pubkey, public_key):
+                return
+        raise FirehoseClientError(f"Server key pin mismatch for origin '{origin}'")
 
     async def _verify_rotation_chain(
         self, origin: str, old_pubkey: bytes, new_pubkey: bytes

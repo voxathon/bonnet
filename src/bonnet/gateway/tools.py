@@ -65,9 +65,14 @@ from fastmcp import FastMCP
 
 from bonnet.core.crypto import Identity
 from bonnet.core.record import ZERO_ID
+from bonnet.core.trust import TrustStore
 from bonnet.gateway import cursor, tenancy
 from bonnet.gateway import needs as needs_module
-from bonnet.gateway.firehose_client import FirehoseHTTPClient, default_verify_tls
+from bonnet.gateway.firehose_client import (
+    FirehoseHTTPClient,
+    default_verify_tls,
+    is_loopback,
+)
 from bonnet.gateway.gating import NEEDS_IDENTITY, NEEDS_ORIGIN, announce_tool_change
 from bonnet.gateway.identity import IdentityStore
 from bonnet.gateway.needs import invalidate as _invalidate_permissions_cache
@@ -83,6 +88,11 @@ from bonnet.net.firehose_models import (
     ReportInfo,
     SearchResponse,
     UserInfo,
+)
+from bonnet.net.firehose_transport import (
+    PIN_MODE_AUTO,
+    PIN_MODE_CONFIRM,
+    PinConfirmationRequired,
 )
 from bonnet.net.firehose_wire import ProtocolError
 
@@ -268,11 +278,37 @@ def _make_client(url: str | None = None, verify: bool | str | None = None) -> Fi
     never be noticed. The store is what makes the "use" in trust-on-first-use
     mean anything.
     """
+    target = url if url is not None else _current_url()
     return FirehoseHTTPClient(
-        url if url is not None else _current_url(),
+        target,
         verify=verify if verify is not None else _current_verify(),
         trust_store_path=tenant_trust_db_path(),
+        pin_mode=_pin_mode_for(target),
     )
+
+
+def _pin_mode_for(url: str) -> str:
+    """Whether connecting to `url` needs an explicit decision about its key.
+
+    Three exemptions, all policy rather than claims about evidence:
+
+    - **$BONNET_PIN_PROMPT=off**, the automation escape hatch, matching what
+      BONNET_GATING=off does for visibility.
+    - **Loopback**, for the reason `is_loopback` gives: a freshly `--init`'d
+      server minted its own certificate moments ago, so there is no
+      independent anchor to confirm the key against and nobody positioned
+      between a machine and itself. Prompting there is ceremony.
+    - **The anonymous tenant**, which has no operator behind it to ask and is
+      read-only regardless. Asking a caller that cannot act on the answer is
+      worse than not asking.
+    """
+    if (os.environ.get("BONNET_PIN_PROMPT") or "").strip().lower() in ("off", "0", "false", "no"):
+        return PIN_MODE_AUTO
+    if is_loopback(url):
+        return PIN_MODE_AUTO
+    if tenancy.is_anonymous():
+        return PIN_MODE_AUTO
+    return PIN_MODE_CONFIRM
 
 
 def _default_identity() -> str | None:
@@ -436,19 +472,30 @@ async def login(username: str, password: str) -> str:
 
 @mcp.tool
 async def connect(url: str, verify_tls: bool | None = None) -> dict:
-    """Point this client at an origin: discover it, pin its key, make it active.
+    """Point this client at an origin: discover it, settle its key, make it active.
 
-    Fetches the origin's signed discovery document, pins the server key on
-    first contact, makes it this client's active origin, and reports what it
-    found. No identity is involved — this step establishes *where*, not *who*.
-    Call `register` afterwards to mint or select an identity to act as.
+    Fetches the origin's signed discovery document and reports what it found.
+    No identity is involved — this step establishes *where*, not *who*. Call
+    `register` afterwards to mint or select an identity to act as.
 
-    What the pin does and does not give you: the key is recorded the first
-    time this client sees the origin, and a later connection presenting a
-    different key fails unless a verified chain of bonnet.origin.key.rotate
-    records connects the two. That detects a substituted key *after* first
-    contact. It says nothing about whether the first contact was honest —
-    TLS is the independent anchor for that.
+    **This may come back asking a question rather than connecting.** When the
+    origin presents a key this client has not already accepted, the result is
+    `{"pin_required": true, ...}` with a fingerprint and an explanation, the
+    key is *not* adopted, and no origin becomes active — call
+    `trust_origin_key` to accept or refuse it. That happens on first contact
+    with an origin, and again if its key ever changes. Check `pin_required`
+    before assuming you are connected.
+
+    Loopback origins are exempt and connect straight through: a server that
+    just generated its own certificate offers nothing to check the key
+    against, and there is nobody between a machine and itself.
+
+    What a pin does and does not give you: once accepted, a later connection
+    presenting a different key stops and asks again rather than proceeding.
+    That detects a substituted key *after* the key was accepted. It says
+    nothing about whether that first acceptance was well-founded — TLS, or
+    confirming the fingerprint out of band, is the independent anchor for
+    that.
 
     `url` is the origin's server (e.g. https://bbs.example:2272), not this
     bridge. The origin is remembered, so a restarted bridge resumes here with
@@ -492,6 +539,15 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         discovery = client.discovery
         known = list(discovery.known_origins) if discovery else []
         identities = _get_identity_store().list_users(origin)
+    except PinConfirmationRequired as pending:
+        # Caught ahead of the generic handler, but restoring the same state:
+        # this origin is *not* active, because nothing about its key has been
+        # accepted yet. Reported rather than raised, since a decision waiting
+        # is not a failure and the caller has somewhere to go next.
+        current_origin_url.set(previous[0])
+        current_origin_verify.set(previous[1])
+        current_origin.set(previous[2])
+        return _pin_prompt(pending, resolved_url)
     except Exception:
         current_origin_url.set(previous[0])
         current_origin_verify.set(previous[1])
@@ -534,6 +590,187 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         ],
         "tools_unlocked": unlocked,
     }
+
+
+_PIN_PROMPT_NEW = (
+    "This client has never seen {origin} before, so there is nothing to check "
+    "its key against. Accepting records the key and makes every later "
+    "connection verifiable against it; a substituted key after that is "
+    "detected. It says nothing about whether *this* first contact is honest — "
+    "TLS is the only independent anchor for that. If you can confirm the "
+    "fingerprint out of band, do."
+)
+
+_PIN_PROMPT_CHANGED = (
+    "WARNING: {origin} is presenting a different key than the one this client "
+    "pinned. This is exactly what pinning exists to catch. It is also what a "
+    "legitimate re-key looks like when the operator did not publish a rotation "
+    "record, and what a regenerated development certificate looks like — from "
+    "here those are indistinguishable. Do not accept on the strength of this "
+    "message: confirm the new fingerprint through a channel that is not this "
+    "connection. Accepting replaces the pinned key permanently."
+)
+
+_EVIDENCE_NOTE = {
+    "chain_verified": (
+        "The origin also presented a chain of rotation records that verifies "
+        "back to the pinned key. Weigh that for what it is: the origin's own "
+        "account of its key history, signed by the key being replaced. Whoever "
+        "holds the old key can produce an identical one, so it is consistent "
+        "testimony rather than evidence the rotation was legitimate."
+    ),
+    "no_chain": (
+        "No rotation records connect the pinned key to this one. The origin is "
+        "not even claiming a key history here."
+    ),
+}
+
+
+def _decode_verify(stored: str) -> bool:
+    """Read back a TLS verify setting recorded with a pending key.
+
+    Stored as text because the transport's `verify` is either a boolean or a
+    path to a CA bundle. Only the boolean forms are reachable from here —
+    every gateway path resolves it to a bool before a client is built — so
+    anything else is read as "verify", the fail-safe direction, rather than
+    widening the tool's own argument to a shape no agent should be passing.
+    Revisit if a CA-bundle path ever becomes settable through the gateway.
+    """
+    if stored == "False":
+        return False
+    return True
+
+
+def _pin_prompt(pending: PinConfirmationRequired, url: str) -> dict:
+    """The decision `connect` hands back instead of adopting a key."""
+    body = (_PIN_PROMPT_NEW if pending.kind == "new" else _PIN_PROMPT_CHANGED).format(
+        origin=pending.origin or url
+    )
+    note = _EVIDENCE_NOTE.get(pending.evidence)
+    return {
+        "pin_required": True,
+        "kind": pending.kind,
+        "origin": pending.origin,
+        "url": url,
+        "fingerprint": pending.fingerprint,
+        "rotation_evidence": pending.evidence or None,
+        "message": body if note is None else f"{body}\n\n{note}",
+        "next": (
+            f"trust_origin_key(fingerprint='{pending.fingerprint}', decision='accept')"
+            f" to accept, or decision='decline' to refuse. Nothing is trusted "
+            f"and no origin is active until you do."
+        ),
+    }
+
+
+@mcp.tool
+async def trust_origin_key(
+    fingerprint: str,
+    decision: str,
+    origin: str = "",
+) -> dict:
+    """Accept or refuse an origin key that `connect` asked you about.
+
+    `connect` records a key rather than adopting it whenever this client has
+    not already agreed to that exact key, and returns the decision to you.
+    Nothing is trusted, and no origin becomes active, until this is called.
+
+    `fingerprint` is the full 64-character hex key from that result and must
+    match the key still on offer. That is a compare-and-swap, not a
+    safeguard against you agreeing too readily: you can copy a value back
+    trivially, and the point is that it binds this decision to one specific
+    key, so a candidate that changed between the prompt and the answer is
+    caught rather than silently accepted.
+
+    `decision`:
+      accept   record the key and complete the connection. Returns what
+               connect would have, so there is no need to call it again.
+      decline  forget the offered key and stay disconnected. Nothing is
+               remembered about the refusal, so connecting again will ask
+               again — there is deliberately no permanent "never ask" state
+               to get stuck in.
+
+    `origin` names which pending decision you mean, and defaults to the only
+    one outstanding. Pass it when more than one is waiting; where_am_i lists
+    them.
+
+    Accepting a *changed* key is the consequential case. Confirm the
+    fingerprint through some channel other than the connection presenting it
+    before you do — a connection cannot vouch for itself.
+    """
+    if decision not in ("accept", "decline"):
+        raise ValueError(f"decision must be 'accept' or 'decline', got {decision!r}")
+
+    store = TrustStore(tenant_trust_db_path())
+    try:
+        outstanding = store.list_pending()
+        if not outstanding:
+            raise ValueError("no origin key is awaiting a decision. Call connect(url) first.")
+        if origin:
+            match = next((p for p in outstanding if p["origin"] == origin), None)
+            if match is None:
+                raise ValueError(
+                    f"no pending key for origin '{origin}'. Waiting: "
+                    f"{', '.join(p['origin'] for p in outstanding)}"
+                )
+        elif len(outstanding) > 1:
+            raise ValueError(
+                "more than one origin key is awaiting a decision; pass origin=. "
+                f"Waiting: {', '.join(p['origin'] for p in outstanding)}"
+            )
+        else:
+            match = outstanding[0]
+
+        if match["publickey"].hex() != fingerprint.strip().lower():
+            raise ValueError(
+                f"fingerprint does not match the key on offer for "
+                f"'{match['origin']}'. Expected {match['publickey'].hex()}. "
+                f"Call connect(url) again to see the current offer — if this "
+                f"keeps happening, the key is changing between requests."
+            )
+
+        target = match["origin"]
+        if decision == "decline":
+            store.clear_pending(target)
+            return {
+                "origin": target,
+                "decision": "declined",
+                "state": "disconnected",
+                "detail": (
+                    "Key refused and forgotten. No origin is active. Connecting "
+                    "to this origin again will ask again."
+                ),
+            }
+
+        pinned = store.get_pin(target)
+        if pinned is None:
+            accepted = store.tofu_pin(target, match["publickey"])
+        else:
+            # accept_rotation is a compare-and-swap against the key that was
+            # pinned when the offer was made, so a pin that moved underneath
+            # this decision fails rather than being clobbered.
+            accepted = store.accept_rotation(target, pinned, match["publickey"])
+        if not accepted:
+            raise ValueError(
+                f"the pin for '{target}' changed while this decision was "
+                f"outstanding; nothing was written. Call connect(url) again."
+            )
+        store.clear_pending(target)
+        # Recorded when the key was offered. On first contact nothing else
+        # knows this origin's URL or TLS setting yet — it is in no joined
+        # list — so this is the only way back to it, and re-deriving the
+        # verify default here would quietly turn TLS verification back on for
+        # a caller who had deliberately passed verify_tls=False.
+        reconnect_to = match["url"]
+        reconnect_verify = _decode_verify(match["verify_tls"])
+    finally:
+        store.close()
+
+    entry = _get_origin_store().get(target)
+    return await connect(
+        reconnect_to or (entry["url"] if entry else _current_url()),
+        verify_tls=reconnect_verify,
+    )
 
 
 @mcp.tool
@@ -810,6 +1047,16 @@ async def where_am_i() -> dict:
     else:
         state = "disconnected"
 
+    # A pin decision outstanding is the one piece of state that can leave a
+    # caller unable to proceed with no visible reason — the origin looks
+    # unset and every origin tool is hidden. Reported here so an agent that
+    # wandered off and came back can still find it.
+    store = TrustStore(tenant_trust_db_path())
+    try:
+        waiting = store.list_pending()
+    finally:
+        store.close()
+
     return {
         "state": state,
         "origin": current_origin.get(),
@@ -818,6 +1065,16 @@ async def where_am_i() -> dict:
         "board": board,
         "article_num": article_num,
         "article_id": cursor.current_article_id.get(),
+        "pending_pin": [
+            {
+                "origin": p["origin"],
+                "url": p["url"],
+                "kind": p["kind"],
+                "fingerprint": p["publickey"].hex(),
+                "rotation_evidence": p["evidence"] or None,
+            }
+            for p in waiting
+        ],
     }
 
 
@@ -1106,6 +1363,14 @@ async def get_article(
                     actual_hash = compute_body_hash(body).hex()
                     ok = len(body) == view.body_size and actual_hash == view.body_hash
                     view.body_check = "matched" if ok else "mismatched"
+            except PinConfirmationRequired:
+                # A remote body redirects to its own origin, whose key this
+                # client has not accepted. The candidate is recorded (see
+                # where_am_i), and the body is simply unavailable — which the
+                # view already models. Failing the whole read would be worse:
+                # the article and its metadata are fine, and it is only the
+                # bytes from an unaccepted third party that are withheld.
+                pass
             except (ProtocolError, httpx.HTTPError):
                 # body unavailable/purged or unreachable — leave it unset;
                 # signature verification failures still propagate
