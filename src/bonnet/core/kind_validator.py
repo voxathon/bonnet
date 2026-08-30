@@ -23,6 +23,7 @@ from bonnet.core.kinds import (
     KIND_REPORT,
     KIND_RULE_PUBLISH,
     KIND_RULE_REVOKE,
+    KIND_USER_KEY_ROTATE,
     KIND_USER_REGISTER,
     KIND_USER_REVOKE,
     PIN_THREAD_CONTROL_KINDS,
@@ -58,6 +59,7 @@ class KindValidator:
             KIND_ARTICLE: self._validate_article,
             KIND_USER_REGISTER: self._validate_user_register,
             KIND_USER_REVOKE: self._validate_user_revoke,
+            KIND_USER_KEY_ROTATE: self._validate_user_key_rotate,
             KIND_RULE_PUBLISH: self._validate_rule_publish,
             KIND_RULE_REVOKE: self._validate_event_target,
             KIND_REPORT: self._validate_report,
@@ -169,6 +171,36 @@ class KindValidator:
         if intent.metadata.get_bytes(1) is None:
             raise ValidationError(
                 "bonnet.user.revoke requires metadata field 1 (revoked user public key)"
+            )
+
+    def _validate_user_key_rotate(self, intent: Intent) -> None:
+        """An actor succeeding its own signing key.
+
+        The subject is always the actor itself — `firehose_commands` already
+        requires `intent.actor_pubkey == ctx.peer_pubkey`, so the old key is
+        necessarily the authenticated caller and there is no target tuple to
+        carry a third party. Mutual consent comes from the pair of signatures:
+        the record is signed by the outgoing key, and field 2 is a rotation
+        proof signed by the incoming one (verified at apply time, since only
+        the projection knows the origin string to bind it to).
+        """
+        self._require_empty_board(intent)
+        self._require_empty_article_targets(intent)
+        self._require_empty_targets(intent)
+
+        m = intent.metadata
+        new_pubkey = m.get_bytes(1)
+        if new_pubkey is None:
+            raise ValidationError(
+                "bonnet.user.key.rotate requires metadata field 1 (new actor public key)"
+            )
+        if m.get_bytes(2) is None:
+            raise ValidationError(
+                "bonnet.user.key.rotate requires metadata field 2 (new-key proof signature)"
+            )
+        if new_pubkey == intent.actor_pubkey:
+            raise ValidationError(
+                "bonnet.user.key.rotate must name a different key than the actor's own"
             )
 
     # ------------------------------------------------------------------

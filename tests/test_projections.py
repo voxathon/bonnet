@@ -27,6 +27,7 @@ from bonnet.core.record import (
     metadata_text,
     metadata_u64,
     sign_intent,
+    sign_key_rotation_proof,
     sign_record,
 )
 
@@ -766,6 +767,148 @@ class TestUserProjection:
         )
         user_proj.apply_user_revoke(same_origin_revoke)
         assert user_proj.get_user_by_pubkey("bbs.a", user_pubkey)["revoked"] is True
+
+    # ------------------------------------------------------------------
+    # Actor key rotation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _register(user_proj, pubkey, username="dave", flags=0, origin="bbs.a", seq=1):
+        user_proj.apply_user_register(
+            Record(
+                origin=origin,
+                origin_seq=seq,
+                event_id=_rid(seq),
+                kind="bonnet.user.register",
+                actor_pubkey=ACTOR_PUB,
+                metadata=MetadataMap(
+                    [
+                        metadata_text(1, username),
+                        metadata_bytes(2, pubkey),
+                        metadata_u64(3, flags),
+                    ]
+                ),
+            )
+        )
+
+    @staticmethod
+    def _rotate_rec(old_identity, new_identity, origin="bbs.a", seq=2, proof=None):
+        if proof is None:
+            proof = sign_key_rotation_proof(
+                new_identity, origin, old_identity.public_key, new_identity.public_key
+            )
+        return Record(
+            origin=origin,
+            origin_seq=seq,
+            event_id=_rid(seq),
+            kind="bonnet.user.key.rotate",
+            actor_pubkey=old_identity.public_key,
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, new_identity.public_key),
+                    metadata_bytes(2, proof),
+                ]
+            ),
+        )
+
+    def test_rotate_carries_identity_forward(self, user_proj):
+        old, new = Identity.generate(), Identity.generate()
+        self._register(user_proj, old.public_key, username="dave", flags=2)
+
+        user_proj.apply_user_key_rotate(self._rotate_rec(old, new))
+
+        carried = user_proj.get_user_by_pubkey("bbs.a", new.public_key)
+        assert carried is not None
+        assert carried["username"] == "dave"
+        assert carried["flags"] == 2
+        assert carried["superseded_by"] is None
+
+    def test_rotate_retires_the_old_key(self, user_proj):
+        old, new = Identity.generate(), Identity.generate()
+        self._register(user_proj, old.public_key)
+
+        user_proj.apply_user_key_rotate(self._rotate_rec(old, new))
+
+        retired = user_proj.get_user_by_pubkey("bbs.a", old.public_key)
+        # The row survives, so records signed by the old key still resolve a
+        # username — but the successor is what stops it authenticating.
+        assert retired is not None
+        assert retired["username"] == "dave"
+        assert retired["superseded_by"] == new.public_key
+        # Retirement is not revocation; the two must stay distinguishable.
+        assert retired["revoked"] is False
+        assert user_proj.get_key_successor("bbs.a", old.public_key) == new.public_key
+
+    def test_rotate_rejects_a_proof_signed_by_the_wrong_key(self, user_proj):
+        old, new, impostor = Identity.generate(), Identity.generate(), Identity.generate()
+        self._register(user_proj, old.public_key)
+
+        # Correctly shaped proof over the right pair, signed by neither party.
+        bad_proof = sign_key_rotation_proof(impostor, "bbs.a", old.public_key, new.public_key)
+        user_proj.apply_user_key_rotate(self._rotate_rec(old, new, proof=bad_proof))
+
+        assert user_proj.get_user_by_pubkey("bbs.a", new.public_key) is None
+        assert user_proj.get_key_successor("bbs.a", old.public_key) is None
+
+    def test_rotate_rejects_a_proof_bound_to_another_origin(self, user_proj):
+        """The proof commits to the origin, so it cannot be lifted between them."""
+        old, new = Identity.generate(), Identity.generate()
+        self._register(user_proj, old.public_key)
+
+        elsewhere = sign_key_rotation_proof(new, "bbs.elsewhere", old.public_key, new.public_key)
+        user_proj.apply_user_key_rotate(self._rotate_rec(old, new, proof=elsewhere))
+
+        assert user_proj.get_key_successor("bbs.a", old.public_key) is None
+
+    def test_rotate_ignores_a_key_this_origin_never_registered(self, user_proj):
+        """Scoped by lookup: an origin can only rotate keys registered with it."""
+        old, new = Identity.generate(), Identity.generate()
+        self._register(user_proj, old.public_key, origin="bbs.a")
+
+        # Same keys, but the record was published by a different origin.
+        user_proj.apply_user_key_rotate(self._rotate_rec(old, new, origin="bbs.attacker"))
+
+        assert user_proj.get_key_successor("bbs.a", old.public_key) is None
+        assert user_proj.get_user_by_pubkey("bbs.a", old.public_key)["superseded_by"] is None
+
+    def test_rotate_is_idempotent(self, user_proj):
+        old, new = Identity.generate(), Identity.generate()
+        self._register(user_proj, old.public_key)
+        rec = self._rotate_rec(old, new)
+
+        user_proj.apply_user_key_rotate(rec)
+        user_proj.apply_user_key_rotate(rec)
+
+        assert user_proj.get_key_successor("bbs.a", old.public_key) == new.public_key
+
+    def test_rotations_survive_reopening_the_store(self, tmp_path):
+        """Write, close, reopen — a fresh-DB test cannot see a destructive
+        _init_schema, which is exactly what a migration here would introduce."""
+        old, new = Identity.generate(), Identity.generate()
+        path = str(tmp_path / "users.db")
+
+        proj = UserProjection(path)
+        self._register(proj, old.public_key, username="erin")
+        proj.apply_user_key_rotate(self._rotate_rec(old, new))
+        proj.close()
+
+        reopened = UserProjection(path)
+        try:
+            assert reopened.get_key_successor("bbs.a", old.public_key) == new.public_key
+            assert reopened.get_user_by_pubkey("bbs.a", new.public_key)["username"] == "erin"
+        finally:
+            reopened.close()
+
+    def test_clear_origin_drops_rotations(self, user_proj):
+        """Otherwise a rebuild replays registrations while stale successors
+        keep retiring the keys it just recreated."""
+        old, new = Identity.generate(), Identity.generate()
+        self._register(user_proj, old.public_key)
+        user_proj.apply_user_key_rotate(self._rotate_rec(old, new))
+
+        user_proj.clear_origin("bbs.a")
+
+        assert user_proj.get_key_successor("bbs.a", old.public_key) is None
 
     def test_list_users_excludes_revoked(self, user_proj):
         for i in range(3):
