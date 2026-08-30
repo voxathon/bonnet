@@ -387,6 +387,68 @@ async def test_permissions_hides_a_tool_the_local_heuristic_would_show(bridge):
     assert "publish_article" not in await _visible()
 
 
+async def test_call_time_gate_checks_the_calls_own_board(bridge):
+    """A call naming a board other than the open one must be checked against
+    *that* board's PERMISSIONS, not whatever happens to be open.
+
+    Board-scoped tools accept an explicit board= specifically so a caller can
+    read (or act on) a different board without leaving the one it has open —
+    open_board's docstring calls this "a default, not a lock". The on_call_tool
+    gate has to honor that: if it fell back to the cursor's board here, a
+    command granted on the open board but not on the named one would be let
+    through the gate, only to be refused by the relay's own ACL a moment
+    later — the exact case my_permissions exists to let a caller avoid."""
+    from bonnet.core.acl import ACLRule, PrincipalMatcher
+
+    acl = bridge["command_handler"]._acl
+    acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(registered=True),
+            actions=["read"],
+            commands=["PERMISSIONS"],
+            boards=["*"],
+        )
+    )
+    # ARTICLE_SEARCH granted on "mine".
+    acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(registered=True),
+            actions=["read"],
+            commands=["ARTICLE_SEARCH"],
+            boards=["mine"],
+        )
+    )
+    # The ACL evaluator checks each dimension independently across every
+    # rule matching (principal, action) — not per-rule as a whole — so the
+    # bridge fixture's own boards=["*"] rule (for BOARD_LIST/ARTICLE_LIST/...)
+    # would otherwise satisfy the *board* dimension for "other" all on its
+    # own, regardless of which command is being asked about. An explicit deny
+    # is what actually keeps "other" out for this principal+action.
+    acl.add_rule(
+        ACLRule(
+            effect="deny",
+            matcher=PrincipalMatcher(registered=True),
+            actions=["read"],
+            boards=["other"],
+        )
+    )
+
+    await _connect_and_register("scout")
+    tools.current_username.set("scout")
+    await tools.open_board("mine")
+
+    async with Client(tools.mcp) as c:
+        with pytest.raises(Exception) as exc:
+            await c.call_tool("search_articles", {"query": "x", "board": "other"})
+
+    # The gate's own message, not whatever the relay would have said — proof
+    # the check ran against "other", where ARTICLE_SEARCH is not granted, and
+    # not "mine", where it is.
+    assert "per the relay's own PERMISSIONS" in str(exc.value)
+
+
 async def test_notification_is_best_effort_outside_a_request(bridge):
     """At startup or in tests there is no session; failing to notify must
     never fail the operation that caused the change."""

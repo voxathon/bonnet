@@ -236,7 +236,7 @@ def _needs_identity(tool: Tool) -> bool:
     return NEEDS_IDENTITY in (tool.tags or set())
 
 
-async def _missing_for(tool: Tool) -> str | None:
+async def _missing_for(tool: Tool, board: str | None = None) -> str | None:
     """What this caller lacks to call `tool` specifically, or None.
 
     Two layers, in order. The local heuristic (origin present? identity
@@ -250,6 +250,15 @@ async def _missing_for(tool: Tool) -> str | None:
     never reveal one the local heuristic hides. When PERMISSIONS itself is
     unavailable — denied, unsupported, unreachable — this stops at the local
     answer, which is the same answer gating gave before PERMISSIONS existed.
+
+    `board` is the board this specific call will actually target, when the
+    caller knows it (on_call_tool passes the call's own `board=` argument).
+    It defaults to the cursor's board — the only thing on_list_tools has, since
+    listing tools has no call arguments to read — which is also correct for a
+    call that omits `board=` itself: every board-scoped tool falls back to the
+    cursor the same way (see `cursor.resolve_board`). Without this, a call
+    passing an explicit `board=` other than the open one would be checked
+    against the wrong board's PERMISSIONS.
     """
     if _needs_origin(tool):
         reason = _origin_missing()
@@ -261,7 +270,8 @@ async def _missing_for(tool: Tool) -> str | None:
         if reason is not None:
             return reason
 
-    allowed = await needs_module.check(tool.name, cursor.current_board.get() or "")
+    effective_board = board or cursor.current_board.get() or ""
+    allowed = await needs_module.check(tool.name, effective_board)
     if allowed is False:
         return (
             f"{tool.name} is not permitted for this identity, per the relay's own "
@@ -296,7 +306,13 @@ class GatingMiddleware(Middleware):
         if tool is not None:
             reason = _anonymous_forbids(tool)
             if reason is None and gating_enabled():
-                reason = await _missing_for(tool)
+                # The call's own board=, not the cursor's — a call naming a
+                # different board must be checked against that board's
+                # PERMISSIONS, not whatever board happens to be open. Empty
+                # or absent falls through to the cursor inside _missing_for,
+                # same as cursor.resolve_board's own fallback.
+                arguments = context.message.arguments or {}
+                reason = await _missing_for(tool, arguments.get("board") or None)
             if reason is not None:
                 # Never a bare refusal: say what is missing and what fixes it,
                 # so a caller working from a stale tool list is redirected
