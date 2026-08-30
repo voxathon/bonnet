@@ -16,7 +16,8 @@ import threading
 import time
 
 from bonnet.core.kinds import PUNISHMENT_TYPE_BY_KIND  # noqa: F401 (re-exported)
-from bonnet.core.record import Record
+from bonnet.core.logging import log_msg
+from bonnet.core.record import Record, verify_key_rotation_proof
 
 # ---------------------------------------------------------------------------
 # Base class
@@ -311,6 +312,25 @@ class UserProjection(_BaseProjection):
             );
             CREATE INDEX IF NOT EXISTS idx_users_username
                 ON users(username, origin);
+
+            -- Actor key successions. A separate table rather than a column on
+            -- `users` on purpose: _init_schema runs on every open, so a new
+            -- table costs nothing, while altering `users` would mean a
+            -- migration, and every migration here is tempted to clear
+            -- applied_events/projection_checkpoint — which are shared by the
+            -- whole projection, so it would silently replay unrelated kinds.
+            --
+            -- Not a denormalization either. old_pubkey is the rotate record's
+            -- own actor_pubkey and new_pubkey its metadata field 1; event_id
+            -- points back at the signed artifact those came from.
+            CREATE TABLE IF NOT EXISTS user_key_rotations (
+                origin       TEXT NOT NULL,
+                old_pubkey   BLOB NOT NULL,
+                new_pubkey   BLOB NOT NULL,
+                rotated_seq  INTEGER NOT NULL,
+                event_id     BLOB NOT NULL,
+                PRIMARY KEY (origin, old_pubkey)
+            );
         """)
 
     def apply_user_register(self, rec: Record) -> None:
@@ -365,11 +385,94 @@ class UserProjection(_BaseProjection):
                 self._rollback()
                 raise
 
+    def apply_user_key_rotate(self, rec: Record) -> None:
+        """Succeed an actor's signing key, carrying its identity forward.
+
+        Defensive throughout, because this runs on federated records too and
+        `accept_remote_range` never invokes KindValidator — only a locally
+        published record has been schema-checked by the time it lands here. A
+        malformed or unprovable rotate is marked applied and dropped rather
+        than raised: `Dispatcher.dispatch_origin` stops at the first exception
+        and leaves the checkpoint behind, so raising would wedge every later
+        record from that origin on one bad input.
+        """
+        with self._lock:
+            if self.is_applied(rec.event_id):
+                return
+            self._begin()
+            try:
+                old_pubkey = rec.actor_pubkey
+                new_pubkey = rec.metadata.get_bytes(1)
+                proof = rec.metadata.get_bytes(2)
+
+                # Scoped by lookup rather than by a claimed field: rows are
+                # keyed (origin, user_pubkey) and written at rec.origin, so
+                # an origin can only ever rotate a key registered with it.
+                # A rotate for a key this origin never registered names no
+                # row here and is not ours to apply.
+                row = self._conn.execute(
+                    "SELECT username, flags, created_at FROM users "
+                    "WHERE origin=? AND user_pubkey=?",
+                    (rec.origin, old_pubkey),
+                ).fetchone()
+
+                if (
+                    new_pubkey is None
+                    or proof is None
+                    or row is None
+                    or new_pubkey == old_pubkey
+                    or not verify_key_rotation_proof(new_pubkey, rec.origin, old_pubkey, proof)
+                ):
+                    log_msg(
+                        f"USER_ROTATE: origin='{rec.origin}' "
+                        f"old={old_pubkey.hex()[:16]} rejected "
+                        f"(unregistered, malformed, or proof invalid)"
+                    )
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
+
+                username, flags, created_at = row[0], row[1], row[2]
+
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO user_key_rotations "
+                    "(origin, old_pubkey, new_pubkey, rotated_seq, event_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (rec.origin, old_pubkey, new_pubkey, rec.origin_seq, rec.event_id),
+                )
+
+                # The old row stays, so records signed by the retired key
+                # still resolve a username. Its successor is what retires it
+                # for authentication — see get_user_by_pubkey.
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO users "
+                    "(origin, user_pubkey, username, flags, reg_seq, created_at, revoked) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                    (rec.origin, new_pubkey, username, flags, rec.origin_seq, created_at),
+                )
+
+                log_msg(
+                    f"USER_ROTATE: origin='{rec.origin}' username='{username}' "
+                    f"old={old_pubkey.hex()[:16]} new={new_pubkey.hex()[:16]} "
+                    f"seq={rec.origin_seq}"
+                )
+                self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
+
     def get_user_by_pubkey(self, origin: str, pubkey: bytes) -> dict | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT origin, user_pubkey, username, flags, reg_seq, created_at, revoked, revoked_seq "
-                "FROM users WHERE origin=? AND user_pubkey=?",
+                "SELECT u.origin, u.user_pubkey, u.username, u.flags, u.reg_seq, "
+                "u.created_at, u.revoked, u.revoked_seq, r.new_pubkey "
+                "FROM users u "
+                "LEFT JOIN user_key_rotations r "
+                "  ON r.origin = u.origin AND r.old_pubkey = u.user_pubkey "
+                "WHERE u.origin=? AND u.user_pubkey=?",
                 (origin, pubkey),
             ).fetchone()
             if not row:
@@ -383,7 +486,20 @@ class UserProjection(_BaseProjection):
                 "created_at": row[5],
                 "revoked": bool(row[6]),
                 "revoked_seq": row[7],
+                # Set once this key has been succeeded. Kept distinct from
+                # `revoked` so a moderator revocation and a voluntary
+                # rotation stay tellable apart.
+                "superseded_by": bytes(row[8]) if row[8] is not None else None,
             }
+
+    def get_key_successor(self, origin: str, pubkey: bytes) -> bytes | None:
+        """The key that succeeded `pubkey`, or None if it is still current."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT new_pubkey FROM user_key_rotations WHERE origin=? AND old_pubkey=?",
+                (origin, pubkey),
+            ).fetchone()
+            return bytes(row[0]) if row else None
 
     def list_users(self, origin: str = None, include_revoked: bool = False) -> list[dict]:
         with self._lock:
@@ -430,6 +546,7 @@ class UserProjection(_BaseProjection):
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._conn.execute("DELETE FROM users")
+                self._conn.execute("DELETE FROM user_key_rotations")
                 self._conn.execute("DELETE FROM applied_events")
                 self._conn.execute("DELETE FROM projection_checkpoint")
                 self._conn.execute("COMMIT")
@@ -442,6 +559,7 @@ class UserProjection(_BaseProjection):
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._conn.execute("DELETE FROM users WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM user_key_rotations WHERE origin=?", (origin,))
                 self._conn.execute("DELETE FROM applied_events WHERE origin=?", (origin,))
                 self._conn.execute("DELETE FROM projection_checkpoint WHERE origin=?", (origin,))
                 self._conn.execute("COMMIT")

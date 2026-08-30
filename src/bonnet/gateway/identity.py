@@ -176,6 +176,70 @@ class IdentityStore:
 
         return private_key, public_key
 
+    def rotate_key(
+        self, origin: str, username: str, new_private_key: bytes, password: str | None = None
+    ) -> bytes:
+        """Replace the stored keypair for an existing identity, in place.
+
+        The row is keyed (origin, username), so a rotation keeps the same row
+        and swaps the key underneath it — the username is what the origin knows
+        this actor as, and rotating a key does not change it.
+
+        **Call this only once the rotation record has been accepted.** The
+        outgoing key is what signs that record, so replacing it first would
+        leave an identity that can neither publish the rotation nor prove it
+        ever held the old key.
+
+        Wrapping is preserved: a wrapped identity is re-wrapped under the same
+        password with a fresh key_salt (a new key deserves fresh KDF material),
+        while auth_salt and scrypt_hash are untouched because the password
+        itself has not changed. Returns the new public key.
+        """
+        if len(new_private_key) != 32:
+            raise ValueError("Private key must be exactly 32 bytes")
+
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT wrapped FROM identities WHERE origin = ? AND username = ?",
+            (origin, username),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"No local identity found for '{username}' on '{origin}'")
+
+        new_public_key = bytes(SigningKey(new_private_key).verify_key)
+
+        if not row["wrapped"]:
+            conn.execute(
+                "UPDATE identities SET encrypted_private_key = ?, public_key = ? "
+                "WHERE origin = ? AND username = ?",
+                (new_private_key, new_public_key, origin, username),
+            )
+            conn.commit()
+            return new_public_key
+
+        if not password:
+            raise ValueError(
+                f"Identity '{username}' is password-protected; supply its password to rotate"
+            )
+        if not self.verify_password(origin, username, password):
+            raise ValueError("Invalid password")
+
+        key_salt = os.urandom(16)
+        aes_key = self._derive_aes_key(password, key_salt)
+        aesgcm = AESGCM(aes_key)
+        nonce = os.urandom(12)
+        encrypted_private_key = nonce + aesgcm.encrypt(nonce, new_private_key, None)
+
+        conn.execute(
+            "UPDATE identities SET key_salt = ?, encrypted_private_key = ?, public_key = ? "
+            "WHERE origin = ? AND username = ?",
+            (key_salt, encrypted_private_key, new_public_key, origin, username),
+        )
+        conn.commit()
+        return new_public_key
+
     def is_wrapped(self, origin: str, username: str) -> bool:
         """True if this identity's key is password-wrapped at rest."""
         conn = self._get_conn()

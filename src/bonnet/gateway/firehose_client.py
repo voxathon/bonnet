@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from urllib.parse import urlparse
 
+from bonnet.core.crypto import Identity
 from bonnet.core.record import (
     ZERO_ID,
     Intent,
@@ -25,6 +26,7 @@ from bonnet.core.record import (
     metadata_text_list,
     metadata_u64,
     sign_intent,
+    sign_key_rotation_proof,
 )
 from bonnet.net.firehose_models import (
     ArticleView,
@@ -253,6 +255,47 @@ class FirehoseHTTPClient(FirehoseTransport):
             actor_username=self._username,
             actor_registrar=self._server_origin,
             metadata=m,
+        )
+        actor_sig = sign_intent(self._identity, encode_intent(intent))
+        cmd = build_publish_record(intent, actor_sig, b"")
+        resp = await self._send_command(cmd)
+        return parse_publish_response(resp)
+
+    async def publish_user_key_rotate(self, new_identity: Identity) -> PublishResult:
+        """Succeed this connection's actor key with `new_identity`.
+
+        Mutual consent, mirroring the origin scheme: the record is signed by
+        the outgoing key (it is the actor, and the server requires the actor to
+        be the authenticated caller), while the proof in field 2 is signed by
+        the incoming key attesting it accepts the succession. Neither key alone
+        moves the identity.
+
+        The connection keeps signing with the old key after this returns —
+        rotating the live transport is the caller's business, as is swapping
+        the stored key, which must happen only once this has succeeded.
+        """
+        if self._identity is None or self._server_origin is None:
+            raise FirehoseClientError("not connected")
+
+        proof = sign_key_rotation_proof(
+            new_identity,
+            self._server_origin,
+            self._identity.public_key,
+            new_identity.public_key,
+        )
+        intent = Intent(
+            event_id=os.urandom(32),
+            kind="bonnet.user.key.rotate",
+            origin=self._server_origin,
+            actor_pubkey=self._identity.public_key,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, new_identity.public_key),
+                    metadata_bytes(2, proof),
+                ]
+            ),
         )
         actor_sig = sign_intent(self._identity, encode_intent(intent))
         cmd = build_publish_record(intent, actor_sig, b"")

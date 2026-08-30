@@ -812,13 +812,14 @@ async def register(username: str, password: str | None = None, origin: str | Non
 
     Registering more than one identity per origin is supported and sometimes
     correct: holding a moderator identity separately from an everyday one
-    keeps privileged actions deliberate and legible in the log, per-task
-    identities limit what a single ban or key compromise takes down, and
-    since there is no user-level key rotation record, registering a fresh
-    identity and revoking the old one is how a user rotates at all. Calling
-    register again with a different username under the same origin just adds
-    a second identity and switches to it — use list_identities to see what
-    this client already holds here.
+    keeps privileged actions deliberate and legible in the log, and per-task
+    identities limit what a single ban or key compromise takes down. To
+    replace the key behind an existing username, use rotate_identity_key
+    rather than registering again — that keeps the username, flags and
+    authorship history, which a fresh registration does not. Calling register
+    again with a different username under the same origin just adds a second
+    identity and switches to it — use list_identities to see what this client
+    already holds here.
 
     If `username` is already registered on that origin by a different key,
     the server rejects the registration and this reports the failure — pick
@@ -1623,6 +1624,63 @@ async def publish_article(
         return f"Article #{result.article_num} published — event seq {result.origin_seq}"
     finally:
         await client.close()
+
+
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.user.key.rotate",))
+async def rotate_identity_key(auth: str | None = None) -> dict:
+    """Replace your signing key, keeping the same username and history.
+
+    Mints a new keypair, publishes a bonnet.user.key.rotate record signed by
+    your current key and countersigned by the new one, then swaps the stored
+    key locally. Both signatures are required, so neither a stolen old key nor
+    an attacker's new key can move the identity alone.
+
+    Use this after a suspected key compromise, or on any schedule your operator
+    asks for. It is not the same as registering again: your username, flags and
+    authorship history carry forward, and the origin knows the new key is you.
+
+    The old key stops authenticating as soon as the origin dispatches the
+    record. Anything still holding it — another gateway, a second session —
+    will start being treated as an unknown principal and must be updated.
+
+    Articles you already published stay valid and attributed: each record
+    carries the key that signed it, so history verifies under the old key
+    forever.
+
+    The local key is replaced only after the origin accepts the record. If
+    publishing fails, nothing changes and you can safely retry.
+    """
+    username, password = _resolve_auth(auth)
+    origin = _default_origin() or ""
+    store = _get_identity_store()
+
+    old_pubkey = store.get_pubkey(origin, username)
+    if old_pubkey is None:
+        raise ValueError(f"No local identity found for '{username}' on '{origin}'")
+
+    new_identity = Identity.generate()
+
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_user_key_rotate(new_identity)
+    finally:
+        await client.close()
+
+    # Only now is it safe to drop the old key: it was what signed the record
+    # above, and until that record is accepted it is the only key this
+    # identity can prove it holds.
+    store.rotate_key(origin, username, new_identity.private_key, password)
+
+    return {
+        "username": username,
+        "origin": origin,
+        "old_pubkey": old_pubkey.hex(),
+        "new_pubkey": new_identity.public_key.hex(),
+        "origin_seq": result.origin_seq,
+        "note": ("The old key no longer authenticates. Update any other client holding it."),
+    }
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})

@@ -37,6 +37,7 @@ from bonnet.core.kinds import (
     KIND_RULE_REVOKE,
     KIND_THREAD_CLOSE,
     KIND_THREAD_REOPEN,
+    KIND_USER_KEY_ROTATE,
     KIND_USER_REGISTER,
     KIND_USER_REVOKE,
     PUNISHMENT_ISSUE_KINDS,
@@ -91,6 +92,10 @@ class Dispatcher:
             KIND_BOARD_REOPEN: self._nav.apply_board_reopen,
             KIND_USER_REGISTER: self._users.apply_user_register,
             KIND_USER_REVOKE: self._users.apply_user_revoke,
+            # Unlike KIND_ORIGIN_KEY_ROTATE below, this one does real work
+            # here: an actor key is carried inside the records it signed, so
+            # nothing in the store needs to know about the succession.
+            KIND_USER_KEY_ROTATE: self._users.apply_user_key_rotate,
             KIND_RULE_PUBLISH: self._policy.apply_rule,
             KIND_RULE_REVOKE: self._policy.apply_rule_revoke,
             KIND_REPORT: self._policy.apply_report,

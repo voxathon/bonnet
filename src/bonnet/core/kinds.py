@@ -19,6 +19,12 @@ KIND_BOARD_CLOSE = "bonnet.board.close"
 KIND_BOARD_REOPEN = "bonnet.board.reopen"
 KIND_USER_REGISTER = "bonnet.user.register"
 KIND_USER_REVOKE = "bonnet.user.revoke"
+# An actor succeeding its own signing key. Distinct from
+# KIND_ORIGIN_KEY_ROTATE in where it is applied: an origin key verifies
+# records, so the substrate tracks it in key epochs; an actor key travels
+# inside the record it signed (Record.actor_pubkey), so history stays
+# verifiable across a rotation and only the projection needs to know.
+KIND_USER_KEY_ROTATE = "bonnet.user.key.rotate"
 KIND_RULE_PUBLISH = "bonnet.rule.publish"
 KIND_RULE_REVOKE = "bonnet.rule.revoke"
 KIND_REPORT = "bonnet.report"
@@ -95,6 +101,7 @@ USER_LIFECYCLE_KINDS = frozenset(
     {
         KIND_USER_REGISTER,
         KIND_USER_REVOKE,
+        KIND_USER_KEY_ROTATE,
     }
 )
 
@@ -126,6 +133,7 @@ ALL_KNOWN_KINDS = frozenset(
         KIND_BOARD_REOPEN,
         KIND_USER_REGISTER,
         KIND_USER_REVOKE,
+        KIND_USER_KEY_ROTATE,
         KIND_RULE_PUBLISH,
         KIND_RULE_REVOKE,
         KIND_REPORT,

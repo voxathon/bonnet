@@ -589,7 +589,8 @@ interval_seconds = 300
 #
 # Out of the box (the four active rules below): anyone can read every
 # board, anyone can self-register a username (bonnet.user.register), and
-# any registered user can publish articles and create boards. Note that
+# any registered user can publish articles, create boards, and succeed
+# their own signing key (bonnet.user.key.rotate). Note that
 # the matchers are mutually exclusive — a registered principal is not also
 # `anonymous`, so reads have to be granted to each class that needs them
 # rather than once to `anonymous`. Moderation
@@ -632,7 +633,7 @@ effect = "allow"
 match.registered = true
 actions = ["write"]
 commands = ["PUBLISH_RECORD"]
-kinds = ["bonnet.article", "bonnet.board.create", "bonnet.report"]
+kinds = ["bonnet.article", "bonnet.board.create", "bonnet.report", "bonnet.user.key.rotate"]
 boards = ["*"]
 
 # To grant a specific key full access (read/write, every command/kind/board):
