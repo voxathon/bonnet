@@ -14,7 +14,7 @@ pytest.importorskip("cryptography")
 pytest.importorskip("fastmcp")
 
 from bonnet.core.acl import ACLRule, PrincipalMatcher
-from bonnet.gateway import cursor, tools
+from bonnet.gateway import cursor, tenancy, tools
 from bonnet.gateway.firehose_client import FirehoseHTTPClient
 from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
 
@@ -28,9 +28,7 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
     monkeypatch.delenv("BONNET_IDENTITY", raising=False)
     monkeypatch.delenv("BONNET_URL", raising=False)
 
-    saved = (tools.identity_store, tools.origin_store)
-    tools.identity_store = None
-    tools.origin_store = None
+    tenancy.reset_store_cache()
     tools.current_origin_url.set(None)
     tools.current_origin_verify.set(None)
     tools.current_origin.set(None)
@@ -76,10 +74,7 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
 
     yield server_stack
 
-    for store in (tools.identity_store, tools.origin_store):
-        if store is not None:
-            store.close()
-    tools.identity_store, tools.origin_store = saved
+    tenancy.reset_store_cache()
     tools.current_origin_url.set(None)
     tools.current_origin_verify.set(None)
     tools.current_origin.set(None)

@@ -1,170 +1,118 @@
-"""Durable client-side state: where the bridge remembers things.
+"""Where the gateway keeps things, and which tenant's copy it means.
 
-Distinct from configuration. Configuration is what an operator or an agent
-host supplies (environment variables, command-line flags); this is what the
-client itself learns and must not forget between processes:
+Distinct from configuration. Configuration is what an operator supplies
+(a TOML file, environment variables, command-line flags); this resolves the
+paths of state the gateway itself learns and must not forget between
+processes — pinned origin keys, joined origins, identities.
 
-- **Pinned origin keys.** TOFU is meaningless without persistence — if the
-  pin dies with the process, every connection is a first contact and there is
-  nothing to detect a substituted key against. The trust store lives here.
-- **Origins that have been joined.** `connect` learns a URL and an origin;
-  `register` records which identity last spoke for it. Kept here, a
-  restarted bridge picks up where it left off instead of needing that handed
-  back to it; and more than one origin can be remembered, which a single
-  BONNET_URL cannot express.
+Layout::
 
-Everything here sits beside the identity store in the per-user data directory,
-for the reason IdentityStore.default_db_path already gives: the bridge is
-launched by an agent host that chooses its own working directory, so anything
-CWD-relative silently becomes a fresh empty store on the next launch.
+    <gateway dir>/                 BONNET_GATEWAY_DIR, else the per-user data dir
+      gateway.toml                 http mode only
+      registry.db                  tenants and their hashed API keys
+      tenants/
+        default/                   stdio's tenant, full capability
+          identities.db
+          origins.db
+          trust.db
+        anonymous/                 shared fallback for bad or missing auth
+        <tenant-id>/
 
-BONNET_GATEWAY_DIR relocates all of it. BONNET_IDENTITIES_DB still overrides
-the identity store's path on its own, since it predates this module.
+The per-user default (rather than anything CWD-relative) is deliberate and
+predates tenancy: the gateway is launched by an agent host that chooses its
+own working directory, so a relative path would silently become a fresh empty
+store — and orphan the agent's existing keys — on the next launch from
+somewhere else.
+
+`current_tenant` lives here, at the bottom of the import graph, because
+"which tenant" is exactly what turns a name into a path. `tenancy` re-exports
+it and is what most callers should use; putting it there instead would cycle,
+since `identity` and `origins` need it to resolve their own defaults.
 """
 
 from __future__ import annotations
 
+import contextvars
 import os
-import sqlite3
-import time
-from pathlib import Path
 
 import platformdirs
 
-_ACTIVE_ORIGIN = "active_origin"
+#: The tenant a stdio gateway is, and the one a single-tenant deployment uses.
+DEFAULT_TENANT = "default"
+
+#: The shared tenant a request falls back to when its credential is missing or
+#: not accepted. Read-only, holds no identities — see `tenancy.is_anonymous`.
+ANONYMOUS_TENANT = "anonymous"
+
+#: Names an operator may not register, because they already mean something.
+RESERVED_TENANTS = frozenset({DEFAULT_TENANT, ANONYMOUS_TENANT})
+
+#: Which tenant the current request belongs to. A ContextVar, not a global,
+#: for the same reason the identity and cursor state are: one http gateway
+#: serves many callers concurrently and must not let one see another's stores.
+current_tenant: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "tenant", default=DEFAULT_TENANT
+)
 
 
 def gateway_dir() -> str:
-    """Directory holding this client's durable state."""
+    """Directory holding all of this gateway's durable state."""
     return os.environ.get("BONNET_GATEWAY_DIR") or platformdirs.user_data_dir(
         "bonnet", appauthor=False
     )
 
 
-def trust_db_path() -> str:
-    """Where origin-key pins are persisted."""
-    return os.path.join(gateway_dir(), "trust.db")
+def registry_db_path() -> str:
+    """Where tenants and their hashed API keys live.
 
-
-def origins_db_path() -> str:
-    """Where joined origins are recorded."""
-    return os.path.join(gateway_dir(), "origins.db")
-
-
-class OriginStore:
-    """Origins this client has joined, and which one is currently active.
-
-    An origin here is the board server's identity (the codebase model is
-    origin -> boards -> articles) — not a board, the topic area inside one.
+    Gateway-level, not per-tenant: a credential has to be resolved *before*
+    it is known which tenant's directory to open, so this cannot live inside
+    one of them.
     """
+    return os.path.join(gateway_dir(), "registry.db")
 
-    def __init__(self, db_path: str | None = None):
-        self.db_path = Path(db_path or origins_db_path())
-        parent = self.db_path.parent
-        if str(parent) not in ("", "."):
-            parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._init_db()
 
-    def _init_db(self) -> None:
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS origins (
-                origin TEXT PRIMARY KEY,
-                url TEXT NOT NULL,
-                verify_tls INTEGER NOT NULL,
-                identity TEXT NOT NULL DEFAULT '',
-                joined_at INTEGER NOT NULL,
-                last_used INTEGER NOT NULL
-            )
-        """)
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS client_state (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-        """)
-        self._conn.commit()
+def config_path() -> str:
+    """The gateway's own TOML config. Read in http mode only."""
+    return os.path.join(gateway_dir(), "gateway.toml")
 
-    def remember(
-        self,
-        origin: str,
-        url: str,
-        verify_tls: bool,
-        identity: str,
-        make_active: bool = True,
-    ) -> None:
-        """Record a joined origin, keeping its original joined_at on re-join.
 
-        `identity` is the *last-active* local identity for this origin, not
-        "the" identity — an origin can hold several (see IdentityStore, keyed
-        by (origin, username)). It is only ever a default: what a tool call
-        omitting `auth` resolves to when nothing more specific was given.
-        """
-        now = int(time.time())
-        self._conn.execute(
-            """INSERT INTO origins (origin, url, verify_tls, identity, joined_at, last_used)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(origin) DO UPDATE SET
-                   url=excluded.url,
-                   verify_tls=excluded.verify_tls,
-                   identity=excluded.identity,
-                   last_used=excluded.last_used""",
-            (origin, url, int(verify_tls), identity, now, now),
-        )
-        if make_active:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO client_state (key, value) VALUES (?, ?)",
-                (_ACTIVE_ORIGIN, origin),
-            )
-        self._conn.commit()
+def tenant_dir(tenant: str | None = None) -> str:
+    """Directory holding one tenant's state. Defaults to the current tenant.
 
-    def get(self, origin: str) -> dict | None:
-        row = self._conn.execute("SELECT * FROM origins WHERE origin = ?", (origin,)).fetchone()
-        return self._row_to_dict(row) if row else None
+    A tenant is a directory rather than a row or a filename prefix so that
+    isolation is enforced by the filesystem: there is no query that can forget
+    its WHERE clause, deleting a tenant is removing a tree, and backing one up
+    is archiving a directory.
+    """
+    return os.path.join(gateway_dir(), "tenants", tenant or current_tenant.get())
 
-    def list_origins(self) -> list[dict]:
-        rows = self._conn.execute("SELECT * FROM origins ORDER BY last_used DESC").fetchall()
-        return [self._row_to_dict(r) for r in rows]
 
-    def active(self) -> dict | None:
-        """The origin tool calls default to, or None if none is selected.
+def identities_db_path(tenant: str | None = None) -> str:
+    """Where a tenant's signing identities live.
 
-        A dangling pointer — an active origin that was later forgotten —
-        reads as None rather than raising, so a half-cleaned store degrades
-        to "no origin selected" instead of breaking every call.
-        """
-        row = self._conn.execute(
-            "SELECT value FROM client_state WHERE key = ?", (_ACTIVE_ORIGIN,)
-        ).fetchone()
-        return self.get(row["value"]) if row else None
+    $BONNET_IDENTITIES_DB overrides this for the default tenant only. It
+    predates tenancy and names a single file; honouring it for every tenant
+    would point them all at one identity store, which is precisely the
+    isolation failure this module exists to prevent.
+    """
+    resolved = tenant or current_tenant.get()
+    if resolved == DEFAULT_TENANT:
+        override = os.environ.get("BONNET_IDENTITIES_DB")
+        if override:
+            return override
+    return os.path.join(tenant_dir(resolved), "identities.db")
 
-    def set_active(self, origin: str) -> None:
-        if self.get(origin) is None:
-            raise ValueError(f"No joined origin '{origin}'")
-        self._conn.execute(
-            "INSERT OR REPLACE INTO client_state (key, value) VALUES (?, ?)",
-            (_ACTIVE_ORIGIN, origin),
-        )
-        self._conn.commit()
 
-    def forget(self, origin: str) -> bool:
-        """Drop an origin. Its pinned key is left alone — forgetting an
-        origin is not a reason to stop recognising the key it presented."""
-        cur = self._conn.execute("DELETE FROM origins WHERE origin = ?", (origin,))
-        self._conn.commit()
-        return cur.rowcount > 0
+def origins_db_path(tenant: str | None = None) -> str:
+    """Where a tenant's joined origins are recorded."""
+    return os.path.join(tenant_dir(tenant), "origins.db")
 
-    @staticmethod
-    def _row_to_dict(row: sqlite3.Row) -> dict:
-        return {
-            "origin": row["origin"],
-            "url": row["url"],
-            "verify_tls": bool(row["verify_tls"]),
-            "identity": row["identity"],
-            "joined_at": row["joined_at"],
-            "last_used": row["last_used"],
-        }
 
-    def close(self) -> None:
-        self._conn.close()
+def trust_db_path(tenant: str | None = None) -> str:
+    """Where a tenant's pinned origin keys are persisted.
+
+    Per tenant, not shared: a pin is a trust decision, and one tenant
+    accepting a key must not silently commit another to it.
+    """
+    return os.path.join(tenant_dir(tenant), "trust.db")

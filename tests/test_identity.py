@@ -1,12 +1,10 @@
-from pathlib import Path
-
 import pytest
 
 pytest.importorskip("bcrypt")
 pytest.importorskip("cryptography")
 pytest.importorskip("fastmcp")
 
-from bonnet.gateway import tools
+from bonnet.gateway import tenancy, tools
 from bonnet.gateway.identity import IdentityStore
 
 pytestmark = pytest.mark.slow
@@ -57,28 +55,45 @@ def test_identity_store_env_var_path(tmp_path, monkeypatch):
     db_path = str(tmp_path / "custom" / "identities.db")
     monkeypatch.setenv("BONNET_IDENTITIES_DB", db_path)
 
-    original = tools.identity_store
-    tools.identity_store = None
+    tenancy.reset_store_cache()
     try:
         store = tools._get_identity_store()
         assert str(store.db_path) == db_path
     finally:
-        if tools.identity_store is not None:
-            tools.identity_store.close()
-        tools.identity_store = original
+        tenancy.reset_store_cache()
 
 
-def test_identity_store_default_path_when_unset(tmp_path, monkeypatch):
+def test_identity_store_defaults_into_the_tenant_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("BONNET_IDENTITIES_DB", raising=False)
-    fake_default = str(tmp_path / "default" / "identities.db")
-    monkeypatch.setattr(IdentityStore, "default_db_path", staticmethod(lambda: fake_default))
+    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "gw"))
 
-    original = tools.identity_store
-    tools.identity_store = None
+    tenancy.reset_store_cache()
     try:
         store = tools._get_identity_store()
-        assert str(store.db_path) == str(Path(IdentityStore.default_db_path()))
+        assert str(store.db_path) == str(
+            tmp_path / "gw" / "tenants" / tenancy.DEFAULT_TENANT / "identities.db"
+        )
     finally:
-        if tools.identity_store is not None:
-            tools.identity_store.close()
-        tools.identity_store = original
+        tenancy.reset_store_cache()
+
+
+def test_identities_db_override_is_ignored_for_other_tenants(tmp_path, monkeypatch):
+    """$BONNET_IDENTITIES_DB names one file and predates tenancy.
+
+    Honouring it for every tenant would point them all at a single identity
+    store, which is exactly the isolation failure the per-tenant layout
+    exists to prevent — so it applies to the default tenant only.
+    """
+    override = str(tmp_path / "legacy" / "identities.db")
+    monkeypatch.setenv("BONNET_IDENTITIES_DB", override)
+    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "gw"))
+
+    tenancy.reset_store_cache()
+    token = tenancy.current_tenant.set("alice")
+    try:
+        store = tools._get_identity_store()
+        assert str(store.db_path) != override
+        assert str(store.db_path) == str(tmp_path / "gw" / "tenants" / "alice" / "identities.db")
+    finally:
+        tenancy.current_tenant.reset(token)
+        tenancy.reset_store_cache()

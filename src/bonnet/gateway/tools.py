@@ -65,14 +65,15 @@ from fastmcp import FastMCP
 
 from bonnet.core.crypto import Identity
 from bonnet.core.record import ZERO_ID
-from bonnet.gateway import cursor
+from bonnet.gateway import cursor, tenancy
 from bonnet.gateway import needs as needs_module
 from bonnet.gateway.firehose_client import FirehoseHTTPClient, default_verify_tls
 from bonnet.gateway.gating import NEEDS_IDENTITY, NEEDS_ORIGIN, announce_tool_change
 from bonnet.gateway.identity import IdentityStore
 from bonnet.gateway.needs import invalidate as _invalidate_permissions_cache
 from bonnet.gateway.needs import needs
-from bonnet.gateway.paths import OriginStore, trust_db_path
+from bonnet.gateway.origins import OriginStore
+from bonnet.gateway.tenancy import tenant_trust_db_path
 from bonnet.net.firehose_models import (
     ArticleView,
     BanStatus,
@@ -146,25 +147,24 @@ _origin_loaded: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "origin_loaded", default=False
 )
 
-identity_store: IdentityStore | None = None
-origin_store: OriginStore | None = None
-
-auth_tokens: dict[str, dict] = {}
+#: Auth tokens minted by `login`, keyed by (tenant, token).
+#:
+#: The tenant is part of the key rather than trusted to be implied by the
+#: token's randomness: a token resolves to a (username, password) pair that is
+#: then looked up in *some* identity store, and without the tenant in the key
+#: a token minted under one account would resolve under another's.
+auth_tokens: dict[tuple[str, str], dict] = {}
 TOKEN_EXPIRY_SECONDS = 24 * 60 * 60
 
 
 def _get_identity_store() -> IdentityStore:
-    global identity_store
-    if identity_store is None:
-        identity_store = IdentityStore(os.environ.get("BONNET_IDENTITIES_DB") or None)
-    return identity_store
+    """This request's tenant's identity store."""
+    return tenancy.identity_store()
 
 
 def _get_origin_store() -> OriginStore:
-    global origin_store
-    if origin_store is None:
-        origin_store = OriginStore()
-    return origin_store
+    """This request's tenant's joined origins."""
+    return tenancy.origin_store()
 
 
 def _ensure_origin_loaded() -> None:
@@ -271,7 +271,7 @@ def _make_client(url: str | None = None, verify: bool | str | None = None) -> Fi
     return FirehoseHTTPClient(
         url if url is not None else _current_url(),
         verify=verify if verify is not None else _current_verify(),
-        trust_store_path=trust_db_path(),
+        trust_store_path=tenant_trust_db_path(),
     )
 
 
@@ -326,10 +326,11 @@ def _resolve_auth(auth: str | None) -> tuple[str, str]:
             )
         return username, password
 
-    if auth in auth_tokens:
-        token_data = auth_tokens[auth]
+    token_key = (tenancy.current_tenant.get(), auth)
+    if token_key in auth_tokens:
+        token_data = auth_tokens[token_key]
         if time.time() > token_data["expires_at"]:
-            del auth_tokens[auth]
+            del auth_tokens[token_key]
             raise ValueError("Auth token has expired")
         return token_data["username"], token_data["password"]
 
@@ -348,7 +349,19 @@ def _resolve_auth(auth: str | None) -> tuple[str, str]:
 
 
 async def _connect_authenticated(client: FirehoseHTTPClient, auth: str | None) -> None:
-    """Connect with authenticated identity from IdentityStore."""
+    """Connect with an authenticated identity from the tenant's IdentityStore.
+
+    The anonymous tenant never gets here on its own terms: it holds no
+    identities and must never sign as one, so this degrades to an anonymous
+    connection rather than refusing. Degrading rather than raising is what
+    makes the restriction structural — there is no argument a caller can pass
+    that reaches a signing path — and it costs nothing, because every tool
+    still visible to that tenant is one that already falls back to the
+    anonymous principal when `auth` is omitted.
+    """
+    if tenancy.is_anonymous():
+        await client.connect_anonymous()
+        return
     username, password = _resolve_auth(auth)
     store = _get_identity_store()
     private_key = store.get_private_key(_default_origin() or "", username, password)
@@ -413,7 +426,7 @@ async def login(username: str, password: str) -> str:
         raise ValueError(f"Authentication failed: invalid credentials for '{username}'")
 
     token = os.urandom(32).hex()
-    auth_tokens[token] = {
+    auth_tokens[(tenancy.current_tenant.get(), token)] = {
         "username": username,
         "password": password,
         "expires_at": time.time() + TOKEN_EXPIRY_SECONDS,
