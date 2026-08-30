@@ -1,4 +1,4 @@
-"""Durable client state: origin-key pins and remembered origins.
+"""Durable gateway state: origin-key pins and remembered origins.
 
 The pin tests are the load-bearing ones. TOFU only means something if the pin
 outlives the process that made it — otherwise every connection is a first
@@ -14,9 +14,10 @@ pytest.importorskip("fastmcp")
 
 from bonnet.core.crypto import Identity
 from bonnet.core.trust import TrustStore
-from bonnet.gateway import tools
+from bonnet.gateway import tenancy, tools
 from bonnet.gateway.firehose_client import FirehoseHTTPClient
-from bonnet.gateway.paths import OriginStore, trust_db_path
+from bonnet.gateway.origins import OriginStore
+from bonnet.gateway.paths import trust_db_path
 from bonnet.net.firehose_transport import FirehoseClientError
 from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
 
@@ -25,26 +26,26 @@ pytestmark = pytest.mark.slow
 
 @pytest.fixture
 def gateway_dir(tmp_path, monkeypatch):
+    """A per-test gateway directory, pointed at the default tenant.
+
+    Returns the *tenant's* directory rather than the gateway root, since that
+    is where the stores actually land — see paths.tenant_dir.
+    """
     monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("BONNET_IDENTITIES_DB", str(tmp_path / "state" / "identities.db"))
+    monkeypatch.delenv("BONNET_IDENTITIES_DB", raising=False)
     monkeypatch.delenv("BONNET_IDENTITY", raising=False)
     monkeypatch.delenv("BONNET_URL", raising=False)
     monkeypatch.delenv("BONNET_VERIFY_TLS", raising=False)
 
-    saved = (tools.identity_store, tools.origin_store)
-    tools.identity_store = None
-    tools.origin_store = None
+    tenancy.reset_store_cache()
     tools.current_origin_url.set(None)
     tools.current_origin_verify.set(None)
     tools.current_origin.set(None)
     tools._origin_loaded.set(False)
 
-    yield tmp_path / "state"
+    yield tmp_path / "state" / "tenants" / tenancy.DEFAULT_TENANT
 
-    for store in (tools.identity_store, tools.origin_store):
-        if store is not None:
-            store.close()
-    tools.identity_store, tools.origin_store = saved
+    tenancy.reset_store_cache()
     tools.current_origin_url.set(None)
     tools.current_origin_verify.set(None)
     tools.current_origin.set(None)

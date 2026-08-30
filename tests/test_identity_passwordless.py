@@ -11,7 +11,7 @@ pytest.importorskip("bcrypt")
 pytest.importorskip("cryptography")
 pytest.importorskip("fastmcp")
 
-from bonnet.gateway import tools
+from bonnet.gateway import tenancy, tools
 from bonnet.gateway.identity import IdentityStore
 
 pytestmark = pytest.mark.slow
@@ -32,14 +32,9 @@ def wired_store(tmp_path, monkeypatch):
     monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("BONNET_IDENTITIES_DB", str(tmp_path / "identities.db"))
     monkeypatch.delenv("BONNET_URL", raising=False)
-    saved = (tools.identity_store, tools.origin_store)
-    tools.identity_store = None
-    tools.origin_store = None
+    tenancy.reset_store_cache()
     yield tools._get_identity_store()
-    for store in (tools.identity_store, tools.origin_store):
-        if store is not None:
-            store.close()
-    tools.identity_store, tools.origin_store = saved
+    tenancy.reset_store_cache()
 
 
 # --- store-level ---------------------------------------------------------
@@ -131,7 +126,8 @@ def test_user_colon_password_still_resolves(wired_store):
 def test_auth_token_takes_precedence_over_a_bare_name(wired_store):
     """Tokens are looked up before names so a token is never mistaken for an
     unknown username and rejected."""
-    tools.auth_tokens["tok"] = {
+    key = (tenancy.current_tenant.get(), "tok")
+    tools.auth_tokens[key] = {
         "username": "alice",
         "password": "secretpassword",
         "expires_at": 2**40,
@@ -139,7 +135,26 @@ def test_auth_token_takes_precedence_over_a_bare_name(wired_store):
     try:
         assert tools._resolve_auth("tok") == ("alice", "secretpassword")
     finally:
-        del tools.auth_tokens["tok"]
+        del tools.auth_tokens[key]
+
+
+def test_an_auth_token_does_not_resolve_under_another_tenant(wired_store):
+    """A token resolves to a (username, password) that is then looked up in
+    whichever identity store the request is running against. Keyed on the
+    token alone, one tenant's token would resolve inside another's store."""
+    key = (tenancy.current_tenant.get(), "tok")
+    tools.auth_tokens[key] = {
+        "username": "alice",
+        "password": "secretpassword",
+        "expires_at": 2**40,
+    }
+    token = tenancy.current_tenant.set("someone-else")
+    try:
+        with pytest.raises(ValueError, match="No local identity named 'tok'"):
+            tools._resolve_auth("tok")
+    finally:
+        tenancy.current_tenant.reset(token)
+        del tools.auth_tokens[key]
 
 
 def test_omitted_auth_falls_back_to_bonnet_identity(wired_store, monkeypatch):
