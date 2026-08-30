@@ -1,4 +1,3 @@
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -12,58 +11,44 @@ from bonnet.client.identity import IdentityStore
 
 pytestmark = pytest.mark.slow
 
-
-def test_identity_store_migrates_legacy_yescrypt_hash_column(tmp_path):
-    """A DB created before the yescrypt_hash -> scrypt_hash rename must keep
-    working: the column gets renamed in place on open, not left stale."""
-    db_path = str(tmp_path / "legacy.db")
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE identities (
-            username TEXT PRIMARY KEY,
-            yescrypt_hash TEXT NOT NULL,
-            auth_salt BLOB NOT NULL,
-            key_salt BLOB NOT NULL,
-            encrypted_private_key BLOB NOT NULL,
-            public_key BLOB NOT NULL,
-            registered INTEGER DEFAULT 0
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-    store = IdentityStore(db_path)
-    try:
-        columns = {row[1] for row in store._get_conn().execute("PRAGMA table_info(identities)")}
-        assert "scrypt_hash" in columns
-        assert "yescrypt_hash" not in columns
-
-        priv, pub = store.register("alice", "secretpassword")
-        assert store.verify_password("alice", "secretpassword")
-        assert store.get_private_key("alice", "secretpassword") == priv
-    finally:
-        store.close()
+ORIGIN = "bbs.test"
 
 
 def test_identity_store(tmp_path):
     store = IdentityStore(str(tmp_path / "identities.db"))
     try:
         # Register User
-        priv, pub = store.register("alice", "secretpassword")
+        priv, pub = store.register(ORIGIN, "alice", "secretpassword")
         assert pub is not None
         assert priv is not None
 
         # Verify Password
-        assert store.verify_password("alice", "secretpassword")
-        assert not store.verify_password("alice", "wrongpassword")
+        assert store.verify_password(ORIGIN, "alice", "secretpassword")
+        assert not store.verify_password(ORIGIN, "alice", "wrongpassword")
 
         # Get Private Key
-        recovered_priv = store.get_private_key("alice", "secretpassword")
+        recovered_priv = store.get_private_key(ORIGIN, "alice", "secretpassword")
         assert priv == recovered_priv
 
         # Verify Wrong Password Failure
         with pytest.raises(ValueError, match="Invalid password"):
-            store.get_private_key("alice", "wrongpassword")
+            store.get_private_key(ORIGIN, "alice", "wrongpassword")
+    finally:
+        store.close()
+
+
+def test_same_username_on_two_origins_is_two_keypairs(tmp_path):
+    """Usernames only mean anything within the registrar that accepted them —
+    the same name on two origins must not share key material."""
+    store = IdentityStore(str(tmp_path / "identities.db"))
+    try:
+        priv_a, pub_a = store.register("origin-a", "alice")
+        priv_b, pub_b = store.register("origin-b", "alice")
+
+        assert priv_a != priv_b
+        assert pub_a != pub_b
+        assert store.get_pubkey("origin-a", "alice") == pub_a
+        assert store.get_pubkey("origin-b", "alice") == pub_b
     finally:
         store.close()
 

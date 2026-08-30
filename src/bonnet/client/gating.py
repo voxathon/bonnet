@@ -29,10 +29,11 @@ It also removes a class of ordering bug, since nothing global is mutated.
 
 **Hidden must not mean stuck.** A caller that cannot see a tool is told, on
 calling it anyway, exactly what is missing and which tool supplies it. The
-bootstrap tools — `join` and `register_user` — are never hidden, because they
-are how a caller acquires the very things being checked for. And
-BONNET_GATING=off pins everything visible, because "the tool isn't there" is a
-far worse thing to debug than "the tool returned an error".
+bootstrap tools — `connect`, `register`, and `disconnect` — are never hidden,
+because they are how a caller acquires (or steps back from) the very things
+being checked for. And BONNET_GATING=off pins everything visible, because
+"the tool isn't there" is a far worse thing to debug than "the tool returned
+an error".
 """
 
 from __future__ import annotations
@@ -86,8 +87,8 @@ def _origin_missing() -> str | None:
         return None
     return (
         "no origin: this client is not pointed at a Bonnet server. "
-        "Call join(url, username) to pin one and register, or set "
-        "$BONNET_URL. list_joined_origins shows origins already known."
+        "Call connect(url) to pin one, or set $BONNET_URL. "
+        "list_joined_origins shows origins already known."
     )
 
 
@@ -96,21 +97,25 @@ def _identity_missing() -> str | None:
     # Imported here, not at module scope: tools imports this module for the
     # NEEDS_ORIGIN/NEEDS_IDENTITY tags it decorates with, so a top-level
     # import would cycle.
-    from bonnet.client.tools import _default_identity, _get_identity_store, current_username
+    from bonnet.client.tools import (
+        _default_identity,
+        _default_origin,
+        _get_identity_store,
+        current_username,
+    )
 
     name = current_username.get() or _default_identity()
     if not name:
         return (
             "no identity selected: nothing says who to act as. Call "
-            "join(url, username) or register_user(username), set "
-            "$BONNET_IDENTITY, or pass auth=. list_identities shows what "
-            "this client holds."
+            "register(username) — after connect(url) — set $BONNET_IDENTITY, "
+            "or pass auth=. list_identities shows what this client holds."
         )
-    if _get_identity_store().get_pubkey(name) is None:
+    if _get_identity_store().get_pubkey(_default_origin() or "", name) is None:
         return (
-            f"identity '{name}' is not held by this client, so nothing can be "
-            f"signed as it. Call register_user('{name}') to create it, or "
-            f"list_identities to see what is available."
+            f"identity '{name}' is not held by this client for this origin, so "
+            f"nothing can be signed as it. Call register('{name}') to create "
+            f"it, or list_identities to see what is available."
         )
     return None
 
@@ -129,9 +134,17 @@ def missing_prerequisite() -> str | None:
 
 
 def _has_origin() -> bool:
-    from bonnet.client.tools import _get_origin_store
+    """Whether *this caller's context* currently has an active origin.
 
-    return _get_origin_store().active() is not None
+    Checked against the context's own state (after lazily adopting whatever
+    was remembered on disk), not disk state directly — disk still remembers
+    an origin after `disconnect()` (disconnect forgets nothing), but this
+    caller's context no longer has one active, and gating must see that.
+    """
+    from bonnet.client.tools import _ensure_origin_loaded, current_origin_url
+
+    _ensure_origin_loaded()
+    return current_origin_url.get() is not None
 
 
 def caller_is_ready() -> bool:

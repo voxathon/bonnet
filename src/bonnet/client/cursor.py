@@ -4,7 +4,7 @@ Four states, reached without a wizard:
 
 - **disconnected** — no origin. gating.py's NEEDS_ORIGIN check covers this;
   nothing here is reachable yet.
-- **on an origin** — origin set (join/switch_origin), no board selected.
+- **on an origin** — origin set (connect/switch_origin), no board selected.
   Board-scoped tools still work here if `board=` is passed explicitly; the
   cursor is a default, not a lock.
 - **in a board** — `open_board(name)` was called, or a board-scoped tool was
@@ -21,7 +21,7 @@ already uses in tools.py — an http bridge serving several callers must not
 let one caller's open board leak into another's request.
 
 Every state has an exit that is never hidden: `leave_board`, `back`,
-`switch_origin`, `join` are all plain `@mcp.tool` with no NEEDS_ORIGIN tag,
+`switch_origin`, `connect`, `disconnect` are all plain `@mcp.tool` with no NEEDS_ORIGIN tag,
 so a caller cannot be gated out of its own way back — including by a
 hostile relay whose PERMISSIONS answer narrows everything else to nothing.
 """

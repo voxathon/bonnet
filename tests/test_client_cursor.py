@@ -28,10 +28,13 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
     monkeypatch.delenv("BONNET_IDENTITY", raising=False)
     monkeypatch.delenv("BONNET_URL", raising=False)
 
-    saved = (tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify)
+    saved = (tools.identity_store, tools.origin_store)
     tools.identity_store = None
     tools.origin_store = None
-    tools._origin_loaded = False
+    tools.current_origin_url.set(None)
+    tools.current_origin_verify.set(None)
+    tools.current_origin.set(None)
+    tools._origin_loaded.set(False)
     cursor.clear_board()
 
     server_stack["command_handler"]._acl.add_rule(
@@ -56,13 +59,14 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
 
     app = server_stack["server"]
 
-    def make_client() -> FirehoseHTTPClient:
-        client = FirehoseHTTPClient(tools.bonnet_url, verify=False)
-        if tools.bonnet_url != "https://bbs.test":
-            raise httpx.ConnectError(f"no server at {tools.bonnet_url}")
+    def make_client(url: str | None = None, verify=None) -> FirehoseHTTPClient:
+        target = url if url is not None else tools._current_url()
+        client = FirehoseHTTPClient(target, verify=False)
+        if target != "https://bbs.test":
+            raise httpx.ConnectError(f"no server at {target}")
         client._http = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
-            base_url=tools.bonnet_url,
+            base_url=target,
             timeout=30.0,
             verify=False,
         )
@@ -75,14 +79,18 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
     for store in (tools.identity_store, tools.origin_store):
         if store is not None:
             store.close()
-    tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify = saved
-    tools._origin_loaded = False
+    tools.identity_store, tools.origin_store = saved
+    tools.current_origin_url.set(None)
+    tools.current_origin_verify.set(None)
+    tools.current_origin.set(None)
+    tools._origin_loaded.set(False)
     tools.current_username.set(None)
     cursor.clear_board()
 
 
-async def _join_and_create_board(name: str = "general") -> None:
-    await tools.join("https://bbs.test", "scout")
+async def _connect_register_and_create_board(name: str = "general") -> None:
+    await tools.connect("https://bbs.test")
+    await tools.register("scout")
     await tools.create_board(name)
 
 
@@ -90,14 +98,15 @@ async def _join_and_create_board(name: str = "general") -> None:
 
 
 async def test_board_scoped_call_without_board_or_cursor_raises(wired):
-    await tools.join("https://bbs.test", "scout")
+    await tools.connect("https://bbs.test")
+    await tools.register("scout")
 
     with pytest.raises(ValueError, match="no board given and none open"):
         await tools.list_articles()
 
 
 async def test_open_board_makes_it_the_default(wired):
-    await _join_and_create_board("general")
+    await _connect_register_and_create_board("general")
 
     result = await tools.open_board("general")
     assert result["board"] == "general"
@@ -111,7 +120,7 @@ async def test_open_board_makes_it_the_default(wired):
 
 
 async def test_explicit_board_overrides_the_open_one(wired):
-    await _join_and_create_board("general")
+    await _connect_register_and_create_board("general")
     await tools.create_board("other")
     await tools.open_board("general")
 
@@ -127,7 +136,7 @@ async def test_explicit_board_overrides_the_open_one(wired):
 
 
 async def test_leave_board_requires_board_again(wired):
-    await _join_and_create_board("general")
+    await _connect_register_and_create_board("general")
     await tools.open_board("general")
     await tools.leave_board()
 
@@ -138,11 +147,11 @@ async def test_leave_board_requires_board_again(wired):
 async def test_switching_origin_clears_the_board(wired):
     """A board open on the origin just left may not even exist on the next
     one — carrying it over would silently misroute the next call."""
-    await _join_and_create_board("general")
+    await _connect_register_and_create_board("general")
     await tools.open_board("general")
 
-    # join() already remembered this origin; switching back to it (the only
-    # origin this fixture serves) must not carry the board cursor along.
+    # connect() already remembered this origin; switching back to it (the
+    # only origin this fixture serves) must not carry the board cursor along.
     await tools.switch_origin(ORIGIN)
 
     with pytest.raises(ValueError, match="no board given and none open"):
@@ -153,7 +162,7 @@ async def test_switching_origin_clears_the_board(wired):
 
 
 async def test_reading_an_article_sets_the_cursor(wired):
-    await _join_and_create_board("general")
+    await _connect_register_and_create_board("general")
     await tools.open_board("general")
     await tools.publish_article("hello", "body")
 
@@ -165,7 +174,7 @@ async def test_reading_an_article_sets_the_cursor(wired):
 
 
 async def test_back_pops_article_then_board(wired):
-    await _join_and_create_board("general")
+    await _connect_register_and_create_board("general")
     await tools.open_board("general")
     await tools.publish_article("hello", "body")
     await tools.get_article(1)
@@ -187,7 +196,7 @@ async def test_back_pops_article_then_board(wired):
 
 
 async def test_target_article_id_defaults_from_the_open_article(wired):
-    await _join_and_create_board("general")
+    await _connect_register_and_create_board("general")
     await tools.open_board("general")
     await tools.publish_article("hello", "body")
     view = await tools.get_article(1)
@@ -201,7 +210,7 @@ async def test_target_article_id_defaults_from_the_open_article(wired):
 
 
 async def test_target_article_id_required_without_an_open_article(wired):
-    await _join_and_create_board("general")
+    await _connect_register_and_create_board("general")
     await tools.open_board("general")
 
     with pytest.raises(ValueError, match="no target_article_id given and no matching article open"):
@@ -211,7 +220,7 @@ async def test_target_article_id_required_without_an_open_article(wired):
 async def test_target_article_id_not_reused_across_boards(wired):
     """The cursor's article belongs to the board it was read on — acting on
     a different board must not silently reuse it."""
-    await _join_and_create_board("general")
+    await _connect_register_and_create_board("general")
     await tools.create_board("other")
     await tools.open_board("general")
     await tools.publish_article("hello", "body")
@@ -228,7 +237,8 @@ async def test_where_am_i_tracks_every_transition(wired):
     disconnected = await tools.where_am_i()
     assert disconnected["state"] == "disconnected"
 
-    await tools.join("https://bbs.test", "scout")
+    await tools.connect("https://bbs.test")
+    await tools.register("scout")
     on_origin = await tools.where_am_i()
     assert on_origin["state"] == "on_origin"
     assert on_origin["origin"] == ORIGIN
@@ -250,3 +260,8 @@ async def test_where_am_i_tracks_every_transition(wired):
     await tools.back()
     back_to_origin = await tools.where_am_i()
     assert back_to_origin["state"] == "on_origin"
+
+    await tools.disconnect()
+    back_to_disconnected = await tools.where_am_i()
+    assert back_to_disconnected["state"] == "disconnected"
+    assert back_to_disconnected["identity"] is None
