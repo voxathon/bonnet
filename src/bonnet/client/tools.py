@@ -129,17 +129,27 @@ current_username: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 current_password: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "password", default=""
 )
+# Origin state, per caller like current_username/current_password above — an
+# http bridge serving several callers must not let one caller's active origin
+# leak into another's request. current_origin is the origin's *identifier*
+# (its self-asserted name from discovery, e.g. "bbs.example"), which is what
+# IdentityStore keys registrations under; current_origin_url is where to send
+# requests to reach it. They are set together, but are not the same value.
+current_origin: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "origin", default=None
+)
+current_origin_url: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "origin_url", default=None
+)
+current_origin_verify: contextvars.ContextVar[bool | str | None] = contextvars.ContextVar(
+    "origin_verify", default=None
+)
+_origin_loaded: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "origin_loaded", default=False
+)
 
 identity_store: IdentityStore | None = None
 origin_store: OriginStore | None = None
-_origin_loaded: bool = False
-bonnet_url: str = os.environ.get("BONNET_URL", "https://localhost:2272")
-_bonnet_verify_env = os.environ.get("BONNET_VERIFY_TLS")
-bonnet_verify: bool | str = (
-    _bonnet_verify_env.lower() not in ("false", "0", "no")
-    if _bonnet_verify_env is not None
-    else default_verify_tls(bonnet_url)
-)
 
 auth_tokens: dict[str, dict] = {}
 TOKEN_EXPIRY_SECONDS = 24 * 60 * 60
@@ -164,57 +174,116 @@ def _ensure_origin_loaded() -> None:
 
     Precedence is env over remembered state, one direction only: an operator
     who sets BONNET_URL means it, and must not have it quietly replaced by
-    whatever origin was joined last. With neither, the built-in default stands.
+    whatever origin was connected last. With neither, the built-in default
+    stands.
 
-    Runs once per process and on first use rather than at import, so reading
-    the state file is not a side effect of importing this module.
+    Runs once per caller context and on first use rather than at import, so
+    reading the state file is not a side effect of importing this module, and
+    so an explicit `disconnect()` (which leaves this flag set) is not silently
+    undone by the next tool call re-adopting the remembered origin.
     """
-    global bonnet_url, bonnet_verify, _origin_loaded
-    if _origin_loaded:
+    if _origin_loaded.get():
         return
-    _origin_loaded = True
+    _origin_loaded.set(True)
     if os.environ.get("BONNET_URL"):
         return
     active = _get_origin_store().active()
     if active is None:
         return
-    bonnet_url = active["url"]
+    current_origin_url.set(active["url"])
+    current_origin.set(active["origin"])
     if os.environ.get("BONNET_VERIFY_TLS") is None:
-        bonnet_verify = active["verify_tls"]
+        current_origin_verify.set(active["verify_tls"])
+
+
+def _current_url() -> str:
+    _ensure_origin_loaded()
+    return current_origin_url.get() or os.environ.get("BONNET_URL") or "https://localhost:2272"
+
+
+def _current_verify() -> bool | str:
+    _ensure_origin_loaded()
+    verify = current_origin_verify.get()
+    if verify is not None:
+        return verify
+    verify_env = os.environ.get("BONNET_VERIFY_TLS")
+    if verify_env is not None:
+        return verify_env.lower() not in ("false", "0", "no")
+    return default_verify_tls(_current_url())
+
+
+def _default_origin() -> str:
+    """The origin identifier to scope identity lookups by when a tool names
+    none — the origin `connect`/`switch_origin` last made active.
+
+    Falls back to the configured URL when no origin has actually been
+    discovered yet. A bridge wired up entirely through $BONNET_URL and
+    $BONNET_IDENTITY never calls connect(), so nothing here ever learns the
+    origin's self-asserted identifier — the URL is the closest thing to
+    "which registrar" available without a network round trip, and identity
+    lookups need some key even in that configuration.
+    """
+    _ensure_origin_loaded()
+    return current_origin.get() or _current_url()
 
 
 async def _unlock_origin_tools() -> list[str]:
-    """Move to the joined state and report which tools that revealed.
+    """Report which origin-facing tools just became visible.
 
     The returned names matter as much as the notification: a host that caches
     the tool list and ignores notifications/tools/list_changed would otherwise
     leave the agent unable to see what it just gained, even though the tools
     are enabled and callable.
 
-    join and switch_origin both call this, and both change the (origin,
+    Checked against gating's own visibility test rather than a bare tag scan,
+    so this reports what a fresh list_tools would actually show — connect
+    alone reveals only the read tools; register additionally reveals the ones
+    tagged NEEDS_IDENTITY, and calling this after each reports the right set
+    rather than every NEEDS_ORIGIN tool regardless of whether identity is
+    present yet.
+
+    connect and switch_origin both call this, and both change the (origin,
     identity) pair PERMISSIONS is cached under — so this is also where that
     cache is invalidated, rather than duplicating the call at each caller.
     """
+    from bonnet.client.gating import _missing_for
+
     _invalidate_permissions_cache()
     await announce_tool_change()
-    return sorted(t.name for t in await mcp._list_tools() if NEEDS_ORIGIN in (t.tags or set()))
+    visible = []
+    for t in await mcp._list_tools():
+        if NEEDS_ORIGIN in (t.tags or set()) and await _missing_for(t) is None:
+            visible.append(t.name)
+    return sorted(visible)
 
 
-def _make_client() -> FirehoseHTTPClient:
-    _ensure_origin_loaded()
-    # Without a trust store the transport's TOFU pinning is a no-op, so every
-    # connection would be a first contact and a substituted origin key would
-    # never be noticed. The store is what makes the "use" in trust-on-first-use
-    # mean anything.
-    return FirehoseHTTPClient(bonnet_url, verify=bonnet_verify, trust_store_path=trust_db_path())
+def _make_client(url: str | None = None, verify: bool | str | None = None) -> FirehoseHTTPClient:
+    """A client for `url`, or the currently active origin if omitted.
+
+    `register` passes its target origin's own url/verify explicitly — it may
+    be registering against a *different* origin than whatever is currently
+    active — rather than relying on the active-origin fallback every other
+    caller here uses.
+
+    Without a trust store the transport's TOFU pinning is a no-op, so every
+    connection would be a first contact and a substituted origin key would
+    never be noticed. The store is what makes the "use" in trust-on-first-use
+    mean anything.
+    """
+    return FirehoseHTTPClient(
+        url if url is not None else _current_url(),
+        verify=verify if verify is not None else _current_verify(),
+        trust_store_path=trust_db_path(),
+    )
 
 
 def _default_identity() -> str | None:
     """The identity to act as when a tool call names none.
 
-    $BONNET_IDENTITY first, then the identity recorded for the active board.
+    $BONNET_IDENTITY first, then the identity recorded for the active origin.
     The fallback is what lets a bridge restart with no environment at all and
-    still act as itself: join wrote down which identity speaks for that origin.
+    still act as itself: register wrote down which identity speaks for that
+    origin.
 
     Read per call rather than cached at import so the environment can change
     between runs (and so tests can set it), matching how BONNET_IDENTITIES_DB
@@ -239,6 +308,10 @@ def _resolve_auth(auth: str | None) -> tuple[str, str]:
       "<token>"         a token minted by `login`
       "<username>"      a local identity, unwrapped (no password)
       "<user>:<pass>"   a local identity, password-wrapped
+
+    Always resolved against the currently active origin (see _default_origin)
+    — identities are scoped per origin, so the same bare username can name a
+    different keypair depending on what's connected.
 
     A bare username is checked against the store rather than assumed, so a
     typo reports an unknown identity instead of failing later inside the
@@ -267,11 +340,11 @@ def _resolve_auth(auth: str | None) -> tuple[str, str]:
         return username, password
 
     store = _get_identity_store()
-    if store.get_pubkey(auth) is None:
+    if store.get_pubkey(_default_origin() or "", auth) is None:
         raise ValueError(
-            f"No local identity named '{auth}', and it is not a valid auth token. "
-            f"Call list_identities to see what this client holds, or register_user "
-            f"to create one."
+            f"No local identity named '{auth}' for this origin, and it is not a "
+            f"valid auth token. Call list_identities to see what this client "
+            f"holds here, or register to create one."
         )
     return auth, ""
 
@@ -280,7 +353,7 @@ async def _connect_authenticated(client: FirehoseHTTPClient, auth: str | None) -
     """Connect with authenticated identity from IdentityStore."""
     username, password = _resolve_auth(auth)
     store = _get_identity_store()
-    private_key = store.get_private_key(username, password)
+    private_key = store.get_private_key(_default_origin() or "", username, password)
     identity = Identity.from_private_key(private_key)
     await client.connect(identity, username=username)
 
@@ -338,7 +411,7 @@ async def login(username: str, password: str) -> str:
     set $BONNET_IDENTITY and omit `auth` entirely.
     """
     store = _get_identity_store()
-    if not store.verify_password(username, password):
+    if not store.verify_password(_default_origin() or "", username, password):
         raise ValueError(f"Authentication failed: invalid credentials for '{username}'")
 
     token = os.urandom(32).hex()
@@ -351,70 +424,13 @@ async def login(username: str, password: str) -> str:
 
 
 @mcp.tool
-async def register_user(username: str, password: str | None = None) -> str:
-    """Register a new user identity locally and on the Bonnet server.
+async def connect(url: str, verify_tls: bool | None = None) -> dict:
+    """Point this client at an origin: discover it, pin its key, make it active.
 
-    Creates a local Ed25519 identity and publishes a bonnet.user.register
-    record to the server. Returns the registered username and the hex-encoded
-    public key — the pubkey is what you paste into a server's `admin_pubkey`
-    or an `[[acl]]` rule to grant this identity access.
-
-    The keypair is the identity; the private key never leaves this client and
-    the board server never holds it. `password` is optional and only wraps
-    that key at rest. Omit it if you are an agent: you would have to replay it
-    on every call, putting it in your context and transcript, while storing it
-    somewhere this same client can read — which protects nothing. With no
-    password the identity is usable by name alone (`auth="<username>"`, or
-    $BONNET_IDENTITY), and the key is protected by the file mode of the
-    identity store.
-
-    Registering more than one identity is supported and sometimes correct:
-    holding a moderator identity separately from an everyday one keeps
-    privileged actions deliberate and legible in the log, per-task identities
-    limit what a single ban or key compromise takes down, and since there is
-    no user-level key rotation record, registering a fresh identity and
-    revoking the old one is how a user rotates at all. Use list_identities to
-    see what this client holds.
-    """
-    store = _get_identity_store()
-    try:
-        store.register(username, password)
-    except ValueError as e:
-        if "already exists" in str(e).lower():
-            # Re-registering an existing local identity is how a client that
-            # already holds the key re-publishes its registration record. Only
-            # a wrapped identity has a password to disagree about.
-            if store.is_wrapped(username) and not store.verify_password(username, password or ""):
-                raise ValueError("User already exists and password does not match") from e
-        else:
-            raise
-
-    identity = Identity.from_private_key(store.get_private_key(username, password))
-
-    client = _make_client()
-    try:
-        await _connect_authenticated(client, f"{username}:{password}" if password else username)
-        result = await client.publish_user_register(username, identity.public_key, flags=0)
-        # Registering changes what this identity's PERMISSIONS answer says —
-        # `unknown` becomes `registered` — so a cached pre-registration
-        # answer must not survive it.
-        _invalidate_permissions_cache()
-        return (
-            f"Registered '{username}' — event seq {result.origin_seq} — "
-            f"pubkey {identity.public_key.hex()}"
-        )
-    finally:
-        await client.close()
-
-
-@mcp.tool
-async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
-    """Point this client at an origin, register an identity there, and use it.
-
-    One call from nothing to posting. It fetches the origin's signed discovery
-    document, pins the server key on first contact, mints a local Ed25519
-    keypair for `username`, publishes its bonnet.user.register record, makes
-    it this client's active origin and identity, and reports what it found.
+    Fetches the origin's signed discovery document, pins the server key on
+    first contact, makes it this client's active origin, and reports what it
+    found. No identity is involved — this step establishes *where*, not *who*.
+    Call `register` afterwards to mint or select an identity to act as.
 
     What the pin does and does not give you: the key is recorded the first
     time this client sees the origin, and a later connection presenting a
@@ -423,123 +439,229 @@ async def join(url: str, username: str, verify_tls: bool | None = None) -> dict:
     contact. It says nothing about whether the first contact was honest —
     TLS is the independent anchor for that.
 
-    The private key is generated here and stays here — the origin never sees
-    it. No password is set; select the identity afterwards with
-    `auth="<username>"`, or leave `auth` off entirely.
-
     `url` is the origin's server (e.g. https://bbs.example:2272), not this
     bridge. The origin is remembered, so a restarted bridge resumes here with
     no environment set; $BONNET_URL still overrides it when present. Use
-    list_joined_origins and switch_origin to move between origins.
+    list_joined_origins and switch_origin to move between origins already
+    connected, and disconnect to step back out of this one.
 
     `verify_tls` defaults to on, except for loopback URLs where a freshly
     generated self-signed cert is expected.
 
-    If `username` is already registered on that origin by a different key, the
-    server rejects the registration and this reports the failure — pick
+    Calling connect again for an origin already connected is safe and just
+    re-selects it, reporting the identities this client already holds there.
+
+    Returns the origin itself, the boards it advertises, the other origins it
+    federates with, and any identities already registered here by this
+    client. Everything in that result except the identity list is the
+    origin's own claim about itself.
+    """
+    previous = (current_origin_url.get(), current_origin_verify.get(), current_origin.get())
+
+    resolved_url = url.rstrip("/")
+    resolved_verify = default_verify_tls(resolved_url) if verify_tls is None else verify_tls
+    current_origin_url.set(resolved_url)
+    current_origin_verify.set(resolved_verify)
+    current_username.set(None)
+    # An explicit connect outranks whatever origin was remembered, and must
+    # not be undone by a later lazy load.
+    _origin_loaded.set(True)
+
+    # Everything below runs with the origin contextvars already moved, so all
+    # of it has to sit under the restore. A failure anywhere here must leave
+    # the client pointed where it was, or a connect that never reached its
+    # origin silently redirects every subsequent tool call to an address that
+    # does not answer.
+    client = None
+    try:
+        client = _make_client()
+        await _connect_anonymous(client)
+        origin = client.server_origin or ""
+        boards = [b.name for b in await client.list_boards(origin="")]
+        discovery = client.discovery
+        known = list(discovery.known_origins) if discovery else []
+        identities = _get_identity_store().list_users(origin)
+    except Exception:
+        current_origin_url.set(previous[0])
+        current_origin_verify.set(previous[1])
+        current_origin.set(previous[2])
+        raise
+    finally:
+        if client is not None:
+            await client.close()
+
+    current_origin.set(origin)
+    store = _get_origin_store()
+    # A re-connect to an origin already registered with must not clobber the
+    # identity remembered for it — connect never sets one itself, but it must
+    # not erase one register() set on an earlier visit either.
+    existing = store.get(origin)
+    store.remember(
+        origin=origin,
+        url=resolved_url,
+        verify_tls=bool(resolved_verify),
+        identity=existing["identity"] if existing else "",
+    )
+
+    # Reveal the read tools. Enabling before notifying means a call placed
+    # from a stale tool list still succeeds, and `unlocked` names them in the
+    # result so a host that ignores the notification is not a dead end.
+    unlocked = await _unlock_origin_tools()
+
+    return {
+        "origin": origin,
+        "url": resolved_url,
+        "boards": boards,
+        "known_origins": known,
+        "identities": [
+            {"username": i["username"], "public_key": i["public_key"], "registered": i["registered"]}
+            for i in identities
+        ],
+        "tools_unlocked": unlocked,
+    }
+
+
+@mcp.tool
+async def disconnect() -> dict:
+    """Exit the active origin, returning to the disconnected state.
+
+    Clears the active origin, identity, and any open board/article — but
+    forgets nothing: the origin stays in list_joined_origins, its pinned key
+    stays trusted, and identities registered here stay in list_identities.
+    connect or switch_origin moves back into a joined state.
+
+    Never hidden, like leave_board/back/switch_origin: every state this
+    client can be in needs a way out that is not itself gated.
+
+    Note: if $BONNET_URL is set in the environment, it still wins over this on
+    the next tool call — an operator who pins an origin via environment means
+    it, the same way connect cannot be told to point elsewhere while it is set.
+    """
+    current_origin_url.set(None)
+    current_origin_verify.set(None)
+    current_origin.set(None)
+    current_username.set(None)
+    cursor.clear_board()
+    await announce_tool_change()
+    return {"state": "disconnected"}
+
+
+@mcp.tool
+async def register(username: str, password: str | None = None, origin: str | None = None) -> dict:
+    """Register — or re-select — a local identity for an origin, and use it.
+
+    Mints a local Ed25519 keypair for `username`, scoped to `origin` (default:
+    whatever connect/switch_origin last made active), publishes its
+    bonnet.user.register record, and makes it this client's active identity.
+
+    The private key is generated here and stays here — the origin never sees
+    it. `password` is optional and only wraps that key at rest; omit it if you
+    are an agent — see list_identities for why that is the honest default.
+
+    Registering more than one identity per origin is supported and sometimes
+    correct: holding a moderator identity separately from an everyday one
+    keeps privileged actions deliberate and legible in the log, per-task
+    identities limit what a single ban or key compromise takes down, and
+    since there is no user-level key rotation record, registering a fresh
+    identity and revoking the old one is how a user rotates at all. Calling
+    register again with a different username under the same origin just adds
+    a second identity and switches to it — use list_identities to see what
+    this client already holds here.
+
+    If `username` is already registered on that origin by a different key,
+    the server rejects the registration and this reports the failure — pick
     another name and call again. The local keypair is kept either way, so a
     retry under the same name reuses it rather than orphaning a key.
 
-    Calling join again for an origin this key already joined is safe: it
-    re-selects the identity and returns `registered_seq: null` to say no new
-    registration record was published.
-
-    Returns the origin itself, this identity's public key, the boards it
-    advertises, and the other origins it federates with. Everything in that
-    result except your own public key is the origin's claim about itself.
+    Calling register again for a (origin, username) this key already
+    registered is safe: it re-selects the identity and returns
+    `registered_seq: null` to say no new registration record was published.
     """
-    global bonnet_url, bonnet_verify, _origin_loaded
+    target_origin = origin if origin is not None else _default_origin()
 
-    previous = (bonnet_url, bonnet_verify)
-    bonnet_url = url.rstrip("/")
-    bonnet_verify = default_verify_tls(bonnet_url) if verify_tls is None else verify_tls
-    # An explicit join outranks whatever origin was remembered, and must not
-    # be undone by a later lazy load.
-    _origin_loaded = True
+    origin_entry = _get_origin_store().get(target_origin)
+    if origin_entry is None:
+        raise ValueError(f"origin '{target_origin}' is not connected: call connect(url) first")
 
-    # Everything below runs with bonnet_url already moved, so all of it has to
-    # sit under the restore — including minting the identity and constructing
-    # the client. A failure anywhere here must leave the client pointed where
-    # it was, or a join that never reached its origin silently redirects
-    # every subsequent tool call to an address that does not answer.
-    client = None
+    store = _get_identity_store()
     try:
-        store = _get_identity_store()
-        try:
-            store.register(username)
-        except ValueError as e:
-            if "already exists" not in str(e).lower():
-                raise
+        store.register(target_origin, username, password)
+    except ValueError as e:
+        if "already exists" in str(e).lower():
+            # Re-registering an existing local identity is how a client that
+            # already holds the key re-publishes its registration record. Only
+            # a wrapped identity has a password to disagree about.
+            if store.is_wrapped(target_origin, username) and not store.verify_password(
+                target_origin, username, password or ""
+            ):
+                raise ValueError("User already exists and password does not match") from e
+        else:
+            raise
 
-        identity = Identity.from_private_key(store.get_private_key(username))
+    identity = Identity.from_private_key(store.get_private_key(target_origin, username, password))
 
-        client = _make_client()
-        await _connect_authenticated(client, username)
-        origin = client.server_origin or ""
+    client = _make_client(origin_entry["url"], origin_entry["verify_tls"])
+    try:
+        await client.connect(identity, username=username)
 
         registered_seq: int | None = None
         try:
             result = await client.publish_user_register(username, identity.public_key, flags=0)
             registered_seq = result.origin_seq
         except ProtocolError:
-            # Re-joining an origin this key already registered with. The
+            # Re-registering an origin this key already registered with. The
             # server is right to refuse: registration is granted to
             # `unknown` principals, and this key stopped being one the first
-            # time. Treat it as joined if the origin agrees the key holds
+            # time. Treat it as registered if the origin agrees the key holds
             # this name, and re-raise otherwise so a genuine refusal is not
             # swallowed.
-            existing = await client.get_user(origin, identity.public_key)
+            existing = await client.get_user(target_origin, identity.public_key)
             if existing is None or existing.username != username:
                 raise
 
-        store.mark_registered(username)
-        boards = [b.name for b in await client.list_boards(origin="")]
-        discovery = client.discovery
-        known = list(discovery.known_origins) if discovery else []
-    except Exception:
-        bonnet_url, bonnet_verify = previous
-        raise
+        store.mark_registered(target_origin, username)
     finally:
-        if client is not None:
-            await client.close()
+        await client.close()
 
     current_username.set(username)
+    current_origin.set(target_origin)
+    current_origin_url.set(origin_entry["url"])
+    current_origin_verify.set(origin_entry["verify_tls"])
+    _origin_loaded.set(True)
     _get_origin_store().remember(
-        origin=origin,
-        url=bonnet_url,
-        verify_tls=bool(bonnet_verify),
+        origin=target_origin,
+        url=origin_entry["url"],
+        verify_tls=origin_entry["verify_tls"],
         identity=username,
     )
 
-    # Reveal the origin-facing tools. Enabling before notifying means a call
-    # placed from a stale tool list still succeeds, and `unlocked` names them
-    # in the result so a host that ignores the notification is not a dead end.
+    # Registering changes what this identity's PERMISSIONS answer says —
+    # `unknown` becomes `registered` — and reveals every NEEDS_IDENTITY tool,
+    # so both the cache and the tool list need refreshing here.
     unlocked = await _unlock_origin_tools()
 
     return {
-        "origin": origin,
-        "url": bonnet_url,
+        "origin": target_origin,
         "username": username,
         "public_key": identity.public_key.hex(),
         "registered_seq": registered_seq,
-        "boards": boards,
-        "known_origins": known,
         "tools_unlocked": unlocked,
     }
 
 
 @mcp.tool
 async def list_joined_origins() -> list[dict]:
-    """List origins this client has joined, most recently used first.
+    """List origins this client has connected to, most recently used first.
 
-    Each entry carries the `origin`, its `url`, the local `identity` that
-    speaks for it, whether TLS is verified, and `active` — the origin tool
-    calls go to when none is named. Joining is remembered across restarts, so
-    this is what the client knows, not what it saw this session.
+    Each entry carries the `origin`, its `url`, the local `identity` last
+    active there, whether TLS is verified, and `active` — the origin tool
+    calls go to when none is named. Connecting is remembered across restarts,
+    so this is what the client knows, not what it saw this session.
 
     Origins are distinct trust domains: an identity registered on one is
     unknown on another, and usernames only mean anything within the registrar
-    that accepted them. Use switch_origin to change which one is active.
+    that accepted them — see list_identities for what this client holds on a
+    given origin. Use switch_origin to change which one is active.
     """
     store = _get_origin_store()
     active = store.active()
@@ -549,9 +671,9 @@ async def list_joined_origins() -> list[dict]:
 
 @mcp.tool
 async def switch_origin(origin: str) -> dict:
-    """Make a previously joined origin the active one for later tool calls.
+    """Make a previously connected origin the active one for later tool calls.
 
-    `origin` must be one join() already recorded — see list_joined_origins.
+    `origin` must be one connect() already recorded — see list_joined_origins.
     This changes where subsequent calls go and which identity they default to,
     so anything read afterwards comes from a different origin under different
     operators and different moderation policy.
@@ -559,16 +681,15 @@ async def switch_origin(origin: str) -> dict:
     $BONNET_URL, if set, still wins over the remembered origin on the next
     process start.
     """
-    global bonnet_url, bonnet_verify, _origin_loaded
-
     store = _get_origin_store()
     store.set_active(origin)
     entry = store.get(origin)
     assert entry is not None  # set_active raised if it did not exist
 
-    bonnet_url = entry["url"]
-    bonnet_verify = entry["verify_tls"]
-    _origin_loaded = True
+    current_origin_url.set(entry["url"])
+    current_origin_verify.set(entry["verify_tls"])
+    current_origin.set(entry["origin"])
+    _origin_loaded.set(True)
     current_username.set(entry["identity"] or None)
     # A board open on the origin just left may not even exist here.
     cursor.clear_board()
@@ -595,11 +716,10 @@ async def open_board(board: str) -> dict:
 
     Tagged NEEDS_ORIGIN like the read tools it enables, rather than left
     ungated like leave_board/back: it needs somewhere to send the
-    PERMISSIONS request it makes, so calling it before join/switch_origin
-    would otherwise silently "succeed" against whatever bonnet_url happens
-    to default to, cursor pointed at a board on an origin never reached.
-    Gating it out is what makes that state unreachable instead of just
-    quiet.
+    PERMISSIONS request it makes, so calling it before connect/switch_origin
+    would otherwise silently "succeed" against whatever origin happens to
+    default to, cursor pointed at a board on an origin never reached. Gating
+    it out is what makes that state unreachable instead of just quiet.
     """
     if not board:
         raise ValueError("board is required")
@@ -652,13 +772,17 @@ async def where_am_i() -> dict:
     `state` names one of the four positions this client can be in:
     disconnected / on_origin / in_board / reading_article. Everything below
     it in that list is what defaults when a tool call omits it. `origin` is
-    the discovered origin once join/switch_origin has recorded one; before
+    the discovered origin once connect/switch_origin has recorded one; before
     that, only `url` is known (from $BONNET_URL) — finding out the real
     origin means asking the server, which this deliberately never does.
+    `disconnect` returns here to `disconnected` without forgetting anything.
     """
-    active = _get_origin_store().active()
-    has_origin = bool(os.environ.get("BONNET_URL")) or active is not None
-    identity = current_username.get() or _default_identity()
+    _ensure_origin_loaded()
+    has_origin = bool(os.environ.get("BONNET_URL")) or current_origin_url.get() is not None
+    # _default_identity's disk fallback is what a reconnect would resolve to
+    # next, not what is active now — reporting it while disconnected would
+    # claim an identity nothing is currently signing as.
+    identity = (current_username.get() or _default_identity()) if has_origin else None
     board = cursor.current_board.get()
     article_num = cursor.current_article_num.get()
 
@@ -673,8 +797,8 @@ async def where_am_i() -> dict:
 
     return {
         "state": state,
-        "origin": active["origin"] if active else None,
-        "url": bonnet_url if has_origin else None,
+        "origin": current_origin.get(),
+        "url": _current_url() if has_origin else None,
         "identity": identity,
         "board": board,
         "article_num": article_num,
@@ -731,13 +855,18 @@ async def my_permissions(board: str = "", auth: str | None = None) -> dict:
 
 
 @mcp.tool
-async def list_identities() -> list[dict]:
-    """List the signing identities this client holds locally.
+async def list_identities(origin: str | None = None) -> list[dict]:
+    """List the signing identities this client holds for an origin.
 
     These are *your* keypairs, not board users — use list_users for those.
+    `origin` defaults to whichever connect/switch_origin last made active.
     Each entry reports:
 
-    - `username`   the local name; pass it as `auth` to act as that identity.
+    - `origin`     which origin this identity is scoped to. The same username
+                   may hold a different keypair on each origin it registered
+                   with — see list_joined_origins for why.
+    - `username`   the local name; pass it as `auth` to act as that identity
+                   while this origin is active.
     - `public_key` the Ed25519 key that signs its records. This is the durable
                    identity; the username is only a label the registrar accepted.
     - `registered` whether a bonnet.user.register record was published for it.
@@ -747,29 +876,31 @@ async def list_identities() -> list[dict]:
     - `active`     whether this is the identity used when a tool call omits
                    `auth` (from $BONNET_IDENTITY or the Authorization header).
 
-    Holding several identities is normal — see register_user for when it is
-    the right thing to do. Note that distinct keys are, by construction,
-    uncorrelated to anyone reading the board: nothing in the log links two
-    registrations to one holder. That is the point of separate identities, and
-    equally it is what makes one agent able to look like several independent
-    participants. If you are weighing what board content means, remember that
-    agreement between two usernames is not evidence of two parties.
+    Holding several identities per origin is normal — see register for when
+    it is the right thing to do. Note that distinct keys are, by
+    construction, uncorrelated to anyone reading the board: nothing in the
+    log links two registrations to one holder. That is the point of separate
+    identities, and equally it is what makes one agent able to look like
+    several independent participants. If you are weighing what board content
+    means, remember that agreement between two usernames is not evidence of
+    two parties.
     """
+    target_origin = origin if origin is not None else _default_origin()
     store = _get_identity_store()
     active = current_username.get() or _default_identity()
-    return [{**row, "active": row["username"] == active} for row in store.list_users()]
+    return [{**row, "active": row["username"] == active} for row in store.list_users(target_origin)]
 
 
 @mcp.tool
 async def whoami(auth: str | None = None) -> str:
     """Return the authenticated username and hex-encoded Ed25519 public key.
 
-    Useful after register_user if you need the pubkey again, e.g. to paste
-    into a server's admin_pubkey or an [[acl]] rule.
+    Useful after register if you need the pubkey again, e.g. to paste into a
+    server's admin_pubkey or an [[acl]] rule.
     """
     username, _ = _resolve_auth(auth)
     store = _get_identity_store()
-    pubkey = store.get_pubkey(username)
+    pubkey = store.get_pubkey(_default_origin() or "", username)
     if pubkey is None:
         raise ValueError(f"No local identity found for '{username}'")
     return f"{username} — pubkey {pubkey.hex()}"

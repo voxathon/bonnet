@@ -43,8 +43,9 @@ def _print_next_steps(config_path: str, tls_enabled: bool) -> None:
     print("     at bonnet-mcp; it speaks stdio, so there is no port to configure:")
     print("       uv sync --extra client")
     print('       {"mcpServers": {"bonnet": {"command": "bonnet-mcp"}}}')
-    print(f'     Then, from the agent: join("{scheme}://localhost:2272", "<name>")')
-    print("  4. To let that identity administer this server, put the pubkey join")
+    print(f'     Then, from the agent: connect("{scheme}://localhost:2272")')
+    print('     followed by: register("<name>")')
+    print("  4. To let that identity administer this server, put the pubkey register")
     print("     returns into admin_pubkey in config.toml and restart. See")
     print("     OPERATOR_GUIDE.md 'Becoming your own server's admin' for details.")
     if not tls_enabled:

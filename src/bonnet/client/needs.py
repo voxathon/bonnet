@@ -108,7 +108,7 @@ def invalidate() -> None:
     """Drop every cached answer.
 
     Called whenever the (origin, identity) a cache entry is keyed on could
-    have changed underneath it: join, switch_origin, register_user.
+    have changed underneath it: connect, switch_origin, register.
     """
     _cache.clear()
 
@@ -127,7 +127,7 @@ async def _permissions_for(board: str) -> Permissions | None:
     from bonnet.client import tools as _tools
 
     identity = _tools.current_username.get() or _tools._default_identity() or ""
-    key = (_tools.bonnet_url, identity, board)
+    key = (_tools._current_url(), identity, board)
     entry = _cache.get(key)
     now = time.monotonic()
     if entry is not None and now - entry.fetched_at < _TTL_SECONDS:
@@ -162,7 +162,7 @@ async def refresh(board: str = "") -> Permissions | None:
     from bonnet.client import tools as _tools
 
     identity = _tools.current_username.get() or _tools._default_identity() or ""
-    key = (_tools.bonnet_url, identity, board)
+    key = (_tools._current_url(), identity, board)
     _cache.pop(key, None)
     return await _permissions_for(board)
 

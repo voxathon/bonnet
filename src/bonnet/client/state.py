@@ -7,10 +7,11 @@ client itself learns and must not forget between processes:
 - **Pinned origin keys.** TOFU is meaningless without persistence — if the
   pin dies with the process, every connection is a first contact and there is
   nothing to detect a substituted key against. The trust store lives here.
-- **Origins that have been joined.** `join` learns a URL, an origin, and
-  which identity speaks for it. Kept here, a restarted bridge picks up where
-  it left off instead of needing that handed back to it; and more than one
-  origin can be remembered, which a single BONNET_URL cannot express.
+- **Origins that have been joined.** `connect` learns a URL and an origin;
+  `register` records which identity last spoke for it. Kept here, a
+  restarted bridge picks up where it left off instead of needing that handed
+  back to it; and more than one origin can be remembered, which a single
+  BONNET_URL cannot express.
 
 Everything here sits beside the identity store in the per-user data directory,
 for the reason IdentityStore.default_db_path already gives: the bridge is
@@ -93,7 +94,13 @@ class OriginStore:
         identity: str,
         make_active: bool = True,
     ) -> None:
-        """Record a joined origin, keeping its original joined_at on re-join."""
+        """Record a joined origin, keeping its original joined_at on re-join.
+
+        `identity` is the *last-active* local identity for this origin, not
+        "the" identity — an origin can hold several (see IdentityStore, keyed
+        by (origin, username)). It is only ever a default: what a tool call
+        omitting `auth` resolves to when nothing more specific was given.
+        """
         now = int(time.time())
         self._conn.execute(
             """INSERT INTO origins (origin, url, verify_tls, identity, joined_at, last_used)

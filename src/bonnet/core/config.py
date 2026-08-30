@@ -594,9 +594,9 @@ interval_seconds = 300
 # `anonymous`, so reads have to be granted to each class that needs them
 # rather than once to `anonymous`. Moderation
 # and admin access still need explicit rules. This lets the documented
-# first-run flow (install the client extra, run bonnet-mcp, call
-# register_user, then publish_article / create_board) work without any
-# editing; the server's own identity is always its own admin regardless of
+# first-run flow (install the client extra, run bonnet-mcp, call connect then
+# register, then publish_article / create_board) work without any editing;
+# the server's own identity is always its own admin regardless of
 # what's below (see OPERATOR_GUIDE.md "Becoming your own server's admin").
 # Tighten or remove any of these once you're ready to lock the server down.
 
