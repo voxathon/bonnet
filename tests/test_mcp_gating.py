@@ -410,7 +410,11 @@ async def test_call_time_gate_checks_the_calls_own_board(bridge):
             boards=["*"],
         )
     )
-    # ARTICLE_SEARCH granted on "mine".
+    # ARTICLE_SEARCH granted on "mine" only. ACLEvaluator requires a single
+    # rule to cover every dimension of a check together — so this rule's own
+    # boards=["mine"] is what keeps "other" out; it cannot be widened by the
+    # bridge fixture's unrelated boards=["*"] rule for BOARD_LIST/ARTICLE_LIST
+    # /etc, since that rule doesn't grant ARTICLE_SEARCH at all.
     acl.add_rule(
         ACLRule(
             effect="allow",
@@ -418,20 +422,6 @@ async def test_call_time_gate_checks_the_calls_own_board(bridge):
             actions=["read"],
             commands=["ARTICLE_SEARCH"],
             boards=["mine"],
-        )
-    )
-    # The ACL evaluator checks each dimension independently across every
-    # rule matching (principal, action) — not per-rule as a whole — so the
-    # bridge fixture's own boards=["*"] rule (for BOARD_LIST/ARTICLE_LIST/...)
-    # would otherwise satisfy the *board* dimension for "other" all on its
-    # own, regardless of which command is being asked about. An explicit deny
-    # is what actually keeps "other" out for this principal+action.
-    acl.add_rule(
-        ACLRule(
-            effect="deny",
-            matcher=PrincipalMatcher(registered=True),
-            actions=["read"],
-            boards=["other"],
         )
     )
 
