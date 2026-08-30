@@ -22,6 +22,7 @@ from bonnet.core.crypto import Identity
 from bonnet.core.firehose import (
     KIND_ORIGIN_KEY_ROTATE,
     AcceptResult,
+    ChainBreak,
     FirehoseStore,
 )
 from bonnet.core.logging import log_msg
@@ -387,6 +388,11 @@ class SyncManager:
             )
             return AcceptResult(accepted=False, reason="origin not in peer allowlist")
 
+        sync_status = self._firehose.get_sync_status(origin)
+        if sync_status["status"] == "diverged":
+            log_msg(f"SYNC_ONCE: origin='{origin}' halted (diverged): {sync_status['detail']}")
+            return AcceptResult(accepted=False, reason="origin diverged; sync halted")
+
         head, head_bytes = await client.fetch_head(origin)
 
         local_seq = self._firehose.get_highest_seq(origin)
@@ -443,19 +449,34 @@ class SyncManager:
             batch_records = [r for r, w in items]
             batch_witnesses = [w for r, w in items]
 
+            # A peer that answers a range request with the wrong starting
+            # sequence has not forked — it is buggy or hostile. Catching it
+            # here keeps it out of the ChainBreak path below, where it would
+            # otherwise be indistinguishable from a genuine divergence.
+            if batch_records[0].origin_seq != current_start:
+                log_msg(
+                    f"SYNC_ONCE: origin='{origin}' asked for seq {current_start} but got "
+                    f"{batch_records[0].origin_seq}; abandoning cycle"
+                )
+                last_result = AcceptResult(accepted=False, reason="peer served the wrong range")
+                break
+
             # Only the batch that reaches the advertised head carries it;
             # intermediate batches are anchored by chain continuity.
             last_seq_in_batch = current_start + len(batch_records) - 1
             is_final = last_seq_in_batch >= head.latest_origin_seq
 
-            result = self._firehose.accept_remote_range(
-                origin=origin,
-                records=batch_records,
-                head=head if is_final else None,
-                origin_pubkey=head.origin_pubkey,
-                source=self._hostname,
-                key_intervals=key_intervals,
-            )
+            try:
+                result = self._firehose.accept_remote_range(
+                    origin=origin,
+                    records=batch_records,
+                    head=head if is_final else None,
+                    origin_pubkey=head.origin_pubkey,
+                    source=self._hostname,
+                    key_intervals=key_intervals,
+                )
+            except ChainBreak as e:
+                return await self._diagnose_chain_break(origin, client, local_seq, e)
 
             log_msg(
                 f"SYNC_ONCE: origin='{origin}' batch seq {current_start}-{current_start + len(batch_records) - 1}: accepted={result.accepted} count={result.accepted_count} reason='{result.reason}'"
@@ -505,6 +526,78 @@ class SyncManager:
                 reason=last_result.reason,
             )
         return last_result
+
+    async def _diagnose_chain_break(
+        self, origin: str, client: SyncClient, local_seq: int, err: ChainBreak
+    ) -> AcceptResult:
+        """Decide whether a chain break is ours, theirs, or terminal.
+
+        A break means the incoming record's previous_event_hash disagreed with
+        our recorded tip. That has two very different causes and they were
+        previously treated the same — raised, rolled back, backed off, retried
+        forever.
+
+        If our own tip is inconsistent with the record we have stored at it,
+        the peer is fine and we were comparing against a wrong value; repair
+        and let the next cycle proceed.
+
+        Otherwise the peer's history genuinely differs from ours at the last
+        sequence we hold. Hashes chain forward, so that can never re-converge
+        by retrying: the fix has to happen at the origin. Store the
+        conflicting record as evidence and halt, rather than spending an
+        hourly request on something with no path to success. Halting is
+        chosen over depeering because it is reversible and keeps both the
+        accepted records and the proof — what to do about a forked peer stays
+        the operator's call.
+        """
+        consistent, recorded, actual = self._firehose.check_tip(origin)
+        if not consistent:
+            repaired = self._firehose.repair_tip(origin)
+            log_msg(
+                f"SYNC_ONCE: origin='{origin}' local tip was inconsistent "
+                f"(recorded={recorded.hex()[:16] if recorded else None} "
+                f"actual={actual.hex()[:16] if actual else None}); "
+                f"repaired={repaired}. Not blaming the peer."
+            )
+            return AcceptResult(accepted=False, reason="local tip repaired; retry next cycle")
+
+        detail = f"chain diverged at seq {local_seq}"
+        try:
+            snatched = await client.fetch_range(origin, local_seq, 1)
+        except Exception as e:
+            log_msg(f"SYNC_ONCE: origin='{origin}' could not fetch seq {local_seq}: {e}")
+            snatched = []
+
+        if len(snatched) == 1 and snatched[0][0].origin_seq == local_seq:
+            peer_rec = snatched[0][0]
+            encoded = encode_record(peer_rec)
+            peer_hash = compute_event_hash(encoded)
+            if peer_hash == recorded:
+                # Same record at our tip, yet the next one did not chain onto
+                # it. Not a fork — a malformed range from this peer.
+                log_msg(
+                    f"SYNC_ONCE: origin='{origin}' tip matches peer at seq {local_seq} "
+                    f"but the following record does not chain onto it: {err}"
+                )
+                return AcceptResult(accepted=False, reason="peer served a non-contiguous range")
+            self._firehose.record_conflict(
+                origin,
+                local_seq,
+                encoded,
+                self._hostname,
+                "divergence: peer holds a different record at our tip",
+            )
+            detail = (
+                f"seq {local_seq}: ours {recorded.hex()[:16] if recorded else None}, "
+                f"theirs {peer_hash.hex()[:16]}"
+            )
+
+        self._firehose.set_sync_status(origin, "diverged", detail)
+        log_msg(
+            f"SYNC_ONCE: origin='{origin}' DIVERGED — {detail}. Sync halted; "
+            f"an operator must resolve this (resume-origin, depeer, or reset)."
+        )
+        return AcceptResult(accepted=False, reason=f"origin diverged ({detail})")
 
     async def _verify_epoch_hints(
         self, origin: str, client: SyncClient, head: Head
