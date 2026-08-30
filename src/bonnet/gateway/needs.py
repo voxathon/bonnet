@@ -110,14 +110,19 @@ _cache: dict[tuple[str, str, str, str], _CacheEntry] = {}
 
 
 def invalidate() -> None:
-    """Drop every cached answer.
+    """Drop every cached answer for the current tenant.
 
     Called whenever the (origin, identity) a cache entry is keyed on could
-    have changed underneath it: connect, switch_origin, register. The tenant
-    component needs no such call — it changes only between requests, and a
-    request never sees another tenant's key.
+    have changed underneath it: connect, switch_origin, register. Scoped to
+    the calling tenant rather than clearing the whole dict — the cache is
+    already keyed by tenant so another tenant's entries are unaffected by
+    this one's connect, and a shared HTTP bridge with several tenants active
+    at once must not force them all back to a PERMISSIONS round trip because
+    one of them reconnected.
     """
-    _cache.clear()
+    tenant = tenancy.current_tenant.get()
+    for key in [k for k in _cache if k[0] == tenant]:
+        del _cache[key]
 
 
 def _cache_key(board: str) -> tuple[str, str, str, str]:
