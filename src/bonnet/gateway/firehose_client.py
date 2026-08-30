@@ -84,6 +84,17 @@ from bonnet.net.firehose_wire import (
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
+def is_loopback(url: str) -> bool:
+    """Whether `url` points at this machine.
+
+    One definition, two callers: TLS verification and pin confirmation both
+    relax on loopback, for the same underlying reason — there is no
+    independent anchor to check against and no attacker positioned between
+    a process and itself. Keeping it in one place stops the two drifting.
+    """
+    return (urlparse(url).hostname or "").lower() in _LOOPBACK_HOSTS
+
+
 def default_verify_tls(url: str) -> bool:
     """TLS verification default: on, except for loopback URLs.
 
@@ -94,8 +105,7 @@ def default_verify_tls(url: str) -> bool:
     TLS — this only relaxes the case where BONNET_URL points at the same
     machine.
     """
-    host = (urlparse(url).hostname or "").lower()
-    return host not in _LOOPBACK_HOSTS
+    return not is_loopback(url)
 
 
 class FirehoseHTTPClient(FirehoseTransport):
@@ -686,8 +696,11 @@ class FirehoseHTTPClient(FirehoseTransport):
                 verify=redirect.verify_tls,
                 # A redirect hop is a connection to a different origin, and
                 # therefore exactly a case worth pinning: pass the store down
-                # rather than letting cross-origin fetches skip TOFU.
+                # rather than letting cross-origin fetches skip TOFU. The pin
+                # mode goes with it, or declining one origin's key would not
+                # stop a redirect quietly adopting another's.
                 trust_store_path=self._trust_store_path,
+                pin_mode=self._pin_mode,
             )
             try:
                 await origin_client.connect_anonymous()
@@ -743,6 +756,7 @@ class FirehoseHTTPClient(FirehoseTransport):
                         current_base_url,
                         verify=self._verify,
                         trust_store_path=self._trust_store_path,
+                        pin_mode=self._pin_mode,
                     )
                     await sub_client.connect_anonymous()
                     try:
