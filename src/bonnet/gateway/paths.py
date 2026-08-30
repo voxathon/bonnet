@@ -41,7 +41,9 @@ import platformdirs
 DEFAULT_TENANT = "default"
 
 #: The shared tenant a request falls back to when its credential is missing or
-#: not accepted. Read-only, holds no identities — see `tenancy.is_anonymous`.
+#: not accepted. Read-only; its identity store is created like any other but
+#: stays empty, because nothing that could write to it is reachable from this
+#: tenant — see `tenancy.is_anonymous` and `gating.ANONYMOUS_FORBIDDEN`.
 ANONYMOUS_TENANT = "anonymous"
 
 #: Names an operator may not register, because they already mean something.
