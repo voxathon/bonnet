@@ -29,13 +29,13 @@ import bcrypt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from nacl.signing import SigningKey
 
-from bonnet.gateway.paths import gateway_dir
+from bonnet.gateway.paths import identities_db_path
 
 
 class IdentityStore:
     @staticmethod
     def default_db_path() -> str:
-        """Per-user data directory for the identity store.
+        """The current tenant's identity store.
 
         Not the current working directory: bonnet-gateway is typically launched
         by an agent host (IDE, orchestrator, systemd unit) that picks its own
@@ -45,11 +45,12 @@ class IdentityStore:
         per-user path means the same store is found regardless of launch
         directory.
 
-        Shares the client state directory with joined boards and pinned
-        origin keys, so BONNET_GATEWAY_DIR relocates all of a client's durable
-        state together. BONNET_IDENTITIES_DB still overrides this file alone.
+        Sits in the tenant's own directory beside its joined origins and
+        pinned keys, so BONNET_GATEWAY_DIR relocates all of a gateway's
+        durable state together. BONNET_IDENTITIES_DB still overrides this
+        file alone, for the default tenant only — see `paths`.
         """
-        return os.path.join(gateway_dir(), "identities.db")
+        return identities_db_path()
 
     def __init__(self, db_path: str | None = None):
         self.db_path = Path(db_path or self.default_db_path())

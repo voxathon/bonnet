@@ -19,7 +19,7 @@ pytest.importorskip("fastmcp")
 from fastmcp import Client
 
 from bonnet.core.acl import ACLRule, PrincipalMatcher
-from bonnet.gateway import cursor, gating, tools
+from bonnet.gateway import cursor, gating, tenancy, tools
 from bonnet.gateway.firehose_client import FirehoseHTTPClient
 from bonnet.gateway.gating import GatingMiddleware
 from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
@@ -68,9 +68,7 @@ def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
     for var in ("BONNET_IDENTITY", "BONNET_URL", "BONNET_GATING"):
         monkeypatch.delenv(var, raising=False)
 
-    saved = (tools.identity_store, tools.origin_store)
-    tools.identity_store = None
-    tools.origin_store = None
+    tenancy.reset_store_cache()
     tools.current_origin_url.set(None)
     tools.current_origin_verify.set(None)
     tools.current_origin.set(None)
@@ -119,10 +117,7 @@ def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
 
     yield server_stack
 
-    for store in (tools.identity_store, tools.origin_store):
-        if store is not None:
-            store.close()
-    tools.identity_store, tools.origin_store = saved
+    tenancy.reset_store_cache()
     tools.current_origin_url.set(None)
     tools.current_origin_verify.set(None)
     tools.current_origin.set(None)

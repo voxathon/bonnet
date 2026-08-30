@@ -37,6 +37,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TypeVar
 
+from bonnet.gateway import tenancy
 from bonnet.net.firehose_models import Permissions
 
 _F = TypeVar("_F", bound=Callable)
@@ -101,16 +102,38 @@ class _CacheEntry:
     fetched_at: float = field(default_factory=time.monotonic)
 
 
-_cache: dict[tuple[str, str, str], _CacheEntry] = {}
+#: Keyed by (tenant, url, identity, board). The tenant belongs in the key even
+#: though the identity is already there: identities are named per tenant, so
+#: two tenants can each hold a "scout" on the same origin, and without it one
+#: would be served the other's answer about what it may do.
+_cache: dict[tuple[str, str, str, str], _CacheEntry] = {}
 
 
 def invalidate() -> None:
     """Drop every cached answer.
 
     Called whenever the (origin, identity) a cache entry is keyed on could
-    have changed underneath it: connect, switch_origin, register.
+    have changed underneath it: connect, switch_origin, register. The tenant
+    component needs no such call — it changes only between requests, and a
+    request never sees another tenant's key.
     """
     _cache.clear()
+
+
+def _cache_key(board: str) -> tuple[str, str, str, str]:
+    """The cache key for the current tenant, origin, identity and board.
+
+    One function rather than the expression written out at each use, so the
+    two callers cannot drift apart — a `refresh` that computed a different
+    key than `_permissions_for` would silently stop invalidating anything.
+    """
+    # Imported here, not at module scope: tools imports this module for the
+    # needs()/NEEDS registry it decorates with, so a top-level import would
+    # cycle the same way gating.py's does.
+    from bonnet.gateway import tools as _tools
+
+    identity = _tools.current_username.get() or _tools._default_identity() or ""
+    return (tenancy.current_tenant.get(), _tools._current_url(), identity, board)
 
 
 async def _permissions_for(board: str) -> Permissions | None:
@@ -121,17 +144,17 @@ async def _permissions_for(board: str) -> Permissions | None:
     everything is denied. Callers fall back to a coarser heuristic in that
     case rather than reading None as "no permissions".
     """
-    # Imported here, not at module scope: tools imports this module for the
-    # needs()/NEEDS registry it decorates with, so a top-level import would
-    # cycle the same way gating.py's does.
     from bonnet.gateway import tools as _tools
 
-    identity = _tools.current_username.get() or _tools._default_identity() or ""
-    key = (_tools._current_url(), identity, board)
+    key = _cache_key(board)
     entry = _cache.get(key)
     now = time.monotonic()
     if entry is not None and now - entry.fetched_at < _TTL_SECONDS:
         return entry.perms
+
+    # Read back off the key rather than recomputed, so what is fetched is
+    # provably the identity the entry will be filed under.
+    identity = key[2]
 
     client = _tools._make_client()
     try:
@@ -159,11 +182,7 @@ async def refresh(board: str = "") -> Permissions | None:
     at all: open_board calls this on entry, rather than waiting for a stale
     cache entry to expire or for some other tool call to trigger a refetch.
     """
-    from bonnet.gateway import tools as _tools
-
-    identity = _tools.current_username.get() or _tools._default_identity() or ""
-    key = (_tools._current_url(), identity, board)
-    _cache.pop(key, None)
+    _cache.pop(_cache_key(board), None)
     return await _permissions_for(board)
 
 
