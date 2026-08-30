@@ -14,6 +14,7 @@ test below fails.
 """
 
 import asyncio
+import socket
 import threading
 
 import httpx
@@ -35,16 +36,36 @@ from tests.test_firehose_http_server import server_stack  # noqa: F401
 
 pytestmark = pytest.mark.slow
 
-PORT = 8947
-URL = f"http://127.0.0.1:{PORT}/mcp"
+#: Set by the http_gateway fixture, which picks the port at run time.
+URL = ""
+
+
+def _free_port() -> int:
+    """Ask the OS for an unused port rather than hoping a fixed one is free.
+
+    A hardcoded port collides under `pytest -n auto`: another worker, or a
+    server still shutting down from an earlier run, holds it; uvicorn then
+    calls sys.exit(1) inside its startup thread and every test in this module
+    fails as an unhandled thread exception that names nothing useful.
+
+    There is a small race between closing this socket and uvicorn binding it,
+    which is unavoidable without handing uvicorn the socket itself — but it is
+    a far smaller window than a port that is contended by construction.
+    """
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 @pytest.fixture(scope="module")
 def http_gateway():
     """The gateway on a real port. Module-scoped: uvicorn cannot rebind a
     port quickly, and each test opens its own MCP session anyway."""
+    global URL
+    port = _free_port()
+    URL = f"http://127.0.0.1:{port}/mcp"
     threading.Thread(
-        target=lambda: mcp.run(transport="http", host="127.0.0.1", port=PORT, show_banner=False),
+        target=lambda: mcp.run(transport="http", host="127.0.0.1", port=port, show_banner=False),
         daemon=True,
     ).start()
     yield URL
