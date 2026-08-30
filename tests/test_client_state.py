@@ -31,18 +31,24 @@ def client_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("BONNET_URL", raising=False)
     monkeypatch.delenv("BONNET_VERIFY_TLS", raising=False)
 
-    saved = (tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify)
+    saved = (tools.identity_store, tools.origin_store)
     tools.identity_store = None
     tools.origin_store = None
-    tools._origin_loaded = False
+    tools.current_origin_url.set(None)
+    tools.current_origin_verify.set(None)
+    tools.current_origin.set(None)
+    tools._origin_loaded.set(False)
 
     yield tmp_path / "state"
 
     for store in (tools.identity_store, tools.origin_store):
         if store is not None:
             store.close()
-    tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify = saved
-    tools._origin_loaded = False
+    tools.identity_store, tools.origin_store = saved
+    tools.current_origin_url.set(None)
+    tools.current_origin_verify.set(None)
+    tools.current_origin.set(None)
+    tools._origin_loaded.set(False)
     tools.current_username.set(None)
 
 
@@ -180,25 +186,24 @@ def test_remembered_origin_supplies_url_and_identity(client_dir):
     """The restart case: no environment at all, and the client still knows
     where it is and who it is."""
     tools._get_origin_store().remember("bbs.test", "https://bbs.test", False, "scout")
-    tools._origin_loaded = False
+    tools._origin_loaded.set(False)
 
     tools._ensure_origin_loaded()
 
-    assert tools.bonnet_url == "https://bbs.test"
+    assert tools._current_url() == "https://bbs.test"
     assert tools._default_identity() == "scout"
 
 
 def test_bonnet_url_overrides_the_remembered_origin(client_dir, monkeypatch):
-    """An operator who sets BONNET_URL means it; an origin joined later must not
-    silently redirect them."""
+    """An operator who sets BONNET_URL means it; an origin connected later
+    must not silently redirect them."""
     tools._get_origin_store().remember("bbs.test", "https://bbs.test", False, "scout")
     monkeypatch.setenv("BONNET_URL", "https://elsewhere.example")
-    tools.bonnet_url = "https://elsewhere.example"
-    tools._origin_loaded = False
+    tools._origin_loaded.set(False)
 
     tools._ensure_origin_loaded()
 
-    assert tools.bonnet_url == "https://elsewhere.example"
+    assert tools._current_url() == "https://elsewhere.example"
 
 
 def test_bonnet_identity_overrides_the_remembered_one(client_dir, monkeypatch):

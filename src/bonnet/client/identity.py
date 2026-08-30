@@ -83,28 +83,18 @@ class IdentityStore:
         conn = self._get_conn()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS identities (
-                username TEXT PRIMARY KEY,
+                origin TEXT NOT NULL,
+                username TEXT NOT NULL,
                 scrypt_hash TEXT NOT NULL,
                 auth_salt BLOB NOT NULL,
                 key_salt BLOB NOT NULL,
                 encrypted_private_key BLOB NOT NULL,
                 public_key BLOB NOT NULL,
-                registered INTEGER DEFAULT 0
+                registered INTEGER DEFAULT 0,
+                wrapped INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (origin, username)
             )
         """)
-        # Column used to be misnamed yescrypt_hash (yescrypt was the original
-        # intent, but it needs C bindings unavailable here, so this has always
-        # actually held a hashlib.scrypt digest). CREATE TABLE IF NOT EXISTS
-        # is a no-op against an existing DB, so an on-disk store from before
-        # this rename needs its column renamed in place.
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(identities)")}
-        if "yescrypt_hash" in columns and "scrypt_hash" not in columns:
-            conn.execute("ALTER TABLE identities RENAME COLUMN yescrypt_hash TO scrypt_hash")
-        # Added when passwordless identities were introduced. Every row that
-        # predates the column was written by the password-only code path, so
-        # DEFAULT 1 is the correct backfill and no data migration is needed.
-        if "wrapped" not in columns:
-            conn.execute("ALTER TABLE identities ADD COLUMN wrapped INTEGER NOT NULL DEFAULT 1")
         conn.commit()
 
     def _derive_aes_key(self, password: str, key_salt: bytes) -> bytes:
@@ -116,8 +106,14 @@ class IdentityStore:
                 password=password.encode("utf-8"), salt=key_salt, desired_key_bytes=24, rounds=100
             )
 
-    def register(self, username: str, password: str | None = None) -> tuple[bytes, bytes]:
+    def register(
+        self, origin: str, username: str, password: str | None = None
+    ) -> tuple[bytes, bytes]:
         """Mint an Ed25519 identity and store it, wrapped iff a password is given.
+
+        Scoped to `origin`: the same `username` may hold a distinct keypair on
+        each origin it registers with, matching that usernames only mean
+        anything within the registrar that accepted them.
 
         Omitting the password stores the private key as-is; see the module
         docstring for why that is the right default for an agent.
@@ -125,7 +121,10 @@ class IdentityStore:
         conn = self._get_conn()
         cur = conn.cursor()
 
-        cur.execute("SELECT username FROM identities WHERE username = ?", (username,))
+        cur.execute(
+            "SELECT username FROM identities WHERE origin = ? AND username = ?",
+            (origin, username),
+        )
         if cur.fetchone():
             raise ValueError("User already exists locally")
 
@@ -135,10 +134,10 @@ class IdentityStore:
             public_key = bytes(signing_key.verify_key)
             conn.execute(
                 """INSERT INTO identities
-                   (username, scrypt_hash, auth_salt, key_salt,
+                   (origin, username, scrypt_hash, auth_salt, key_salt,
                     encrypted_private_key, public_key, wrapped)
-                   VALUES (?, '', X'', X'', ?, ?, 0)""",
-                (username, private_key, public_key),
+                   VALUES (?, ?, '', X'', X'', ?, ?, 0)""",
+                (origin, username, private_key, public_key),
             )
             conn.commit()
             return private_key, public_key
@@ -167,31 +166,34 @@ class IdentityStore:
 
         conn.execute(
             """INSERT INTO identities
-               (username, scrypt_hash, auth_salt, key_salt, encrypted_private_key,
+               (origin, username, scrypt_hash, auth_salt, key_salt, encrypted_private_key,
                 public_key, wrapped)
-               VALUES (?, ?, ?, ?, ?, ?, 1)""",
-            (username, scrypt_hash, auth_salt, key_salt, encrypted_private_key, public_key),
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1)""",
+            (origin, username, scrypt_hash, auth_salt, key_salt, encrypted_private_key, public_key),
         )
         conn.commit()
 
         return private_key, public_key
 
-    def is_wrapped(self, username: str) -> bool:
+    def is_wrapped(self, origin: str, username: str) -> bool:
         """True if this identity's key is password-wrapped at rest."""
         conn = self._get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT wrapped FROM identities WHERE username = ?", (username,))
+        cur.execute(
+            "SELECT wrapped FROM identities WHERE origin = ? AND username = ?", (origin, username)
+        )
         row = cur.fetchone()
         if not row:
-            raise ValueError(f"No local identity found for '{username}'")
+            raise ValueError(f"No local identity found for '{username}' on '{origin}'")
         return bool(row["wrapped"])
 
-    def get_private_key(self, username: str, password: str | None = None) -> bytes:
+    def get_private_key(self, origin: str, username: str, password: str | None = None) -> bytes:
         conn = self._get_conn()
         cur = conn.cursor()
         cur.execute(
-            "SELECT key_salt, encrypted_private_key, wrapped FROM identities WHERE username = ?",
-            (username,),
+            "SELECT key_salt, encrypted_private_key, wrapped FROM identities "
+            "WHERE origin = ? AND username = ?",
+            (origin, username),
         )
         row = cur.fetchone()
         if not row:
@@ -207,7 +209,7 @@ class IdentityStore:
                 f"Identity '{username}' is password-protected; supply its password "
                 f"(auth='{username}:<password>')"
             )
-        if not self.verify_password(username, password):
+        if not self.verify_password(origin, username, password):
             raise ValueError("Invalid password")
 
         key_salt = bytes(row["key_salt"])
@@ -224,14 +226,17 @@ class IdentityStore:
         except Exception as e:
             raise ValueError("Failed to decrypt private key") from e
 
-    def get_pubkey(self, username: str) -> bytes | None:
+    def get_pubkey(self, origin: str, username: str) -> bytes | None:
         conn = self._get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT public_key FROM identities WHERE username = ?", (username,))
+        cur.execute(
+            "SELECT public_key FROM identities WHERE origin = ? AND username = ?",
+            (origin, username),
+        )
         row = cur.fetchone()
         return bytes(row["public_key"]) if row else None
 
-    def verify_password(self, username: str, password: str) -> bool:
+    def verify_password(self, origin: str, username: str, password: str) -> bool:
         """Check a password against a wrapped identity.
 
         An unwrapped identity has no password to check, so this reports True
@@ -242,7 +247,8 @@ class IdentityStore:
         conn = self._get_conn()
         cur = conn.cursor()
         cur.execute(
-            "SELECT scrypt_hash, auth_salt, wrapped FROM identities WHERE username = ?", (username,)
+            "SELECT scrypt_hash, auth_salt, wrapped FROM identities WHERE origin = ? AND username = ?",
+            (origin, username),
         )
         row = cur.fetchone()
         if not row:
@@ -261,24 +267,43 @@ class IdentityStore:
         except ValueError:
             return False
 
-    def mark_registered(self, username: str):
+    def mark_registered(self, origin: str, username: str):
         conn = self._get_conn()
-        conn.execute("UPDATE identities SET registered = 1 WHERE username = ?", (username,))
+        conn.execute(
+            "UPDATE identities SET registered = 1 WHERE origin = ? AND username = ?",
+            (origin, username),
+        )
         conn.commit()
 
-    def is_registered(self, username: str) -> bool:
+    def is_registered(self, origin: str, username: str) -> bool:
         conn = self._get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT registered FROM identities WHERE username = ?", (username,))
+        cur.execute(
+            "SELECT registered FROM identities WHERE origin = ? AND username = ?",
+            (origin, username),
+        )
         row = cur.fetchone()
         return bool(row and row["registered"])
 
-    def list_users(self) -> list[dict]:
+    def list_users(self, origin: str | None = None) -> list[dict]:
+        """Identities held by this client, optionally scoped to one origin.
+
+        `origin=None` lists everything this client holds, across every origin
+        it has ever registered with.
+        """
         conn = self._get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT username, public_key, registered, wrapped FROM identities")
+        if origin is None:
+            cur.execute("SELECT origin, username, public_key, registered, wrapped FROM identities")
+        else:
+            cur.execute(
+                "SELECT origin, username, public_key, registered, wrapped FROM identities "
+                "WHERE origin = ?",
+                (origin,),
+            )
         return [
             {
+                "origin": row["origin"],
                 "username": row["username"],
                 "public_key": bytes(row["public_key"]).hex(),
                 "registered": bool(row["registered"]),

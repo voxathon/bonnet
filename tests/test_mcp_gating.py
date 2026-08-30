@@ -28,8 +28,9 @@ pytestmark = pytest.mark.slow
 
 UNGATED = {
     "login",
-    "join",
-    "register_user",
+    "connect",
+    "disconnect",
+    "register",
     "list_joined_origins",
     "switch_origin",
     "list_identities",
@@ -67,10 +68,13 @@ def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
     for var in ("BONNET_IDENTITY", "BONNET_URL", "BONNET_GATING"):
         monkeypatch.delenv(var, raising=False)
 
-    saved = (tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify)
+    saved = (tools.identity_store, tools.origin_store)
     tools.identity_store = None
     tools.origin_store = None
-    tools._origin_loaded = False
+    tools.current_origin_url.set(None)
+    tools.current_origin_verify.set(None)
+    tools.current_origin.set(None)
+    tools._origin_loaded.set(False)
 
     if not any(isinstance(m, GatingMiddleware) for m in tools.mcp.middleware):
         tools.mcp.add_middleware(GatingMiddleware())
@@ -100,11 +104,12 @@ def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
 
     app = server_stack["server"]
 
-    def make_client() -> FirehoseHTTPClient:
-        client = FirehoseHTTPClient(tools.bonnet_url, verify=False)
+    def make_client(url: str | None = None, verify=None) -> FirehoseHTTPClient:
+        target = url if url is not None else tools._current_url()
+        client = FirehoseHTTPClient(target, verify=False)
         client._http = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
-            base_url=tools.bonnet_url,
+            base_url=target,
             timeout=30.0,
             verify=False,
         )
@@ -117,8 +122,11 @@ def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
     for store in (tools.identity_store, tools.origin_store):
         if store is not None:
             store.close()
-    tools.identity_store, tools.origin_store, tools.bonnet_url, tools.bonnet_verify = saved
-    tools._origin_loaded = False
+    tools.identity_store, tools.origin_store = saved
+    tools.current_origin_url.set(None)
+    tools.current_origin_verify.set(None)
+    tools.current_origin.set(None)
+    tools._origin_loaded.set(False)
     tools.current_username.set(None)
 
 
@@ -127,7 +135,12 @@ async def _visible() -> set[str]:
         return {t.name for t in await c.list_tools()}
 
 
-# --- the two states -------------------------------------------------------
+async def _connect_and_register(username: str = "scout") -> dict:
+    await tools.connect("https://bbs.test")
+    return await tools.register(username)
+
+
+# --- the three states ------------------------------------------------------
 
 
 async def test_unready_shows_only_what_can_work(bridge):
@@ -136,29 +149,50 @@ async def test_unready_shows_only_what_can_work(bridge):
     assert await _visible() == UNGATED
 
 
-async def test_joining_reveals_the_rest(bridge):
+async def test_connecting_reveals_the_read_tools(bridge):
+    """connect alone establishes an origin but no identity, so only the tools
+    that fall back to the anonymous principal appear."""
     before = await _visible()
 
-    await tools.join("https://bbs.test", "scout")
+    await tools.connect("https://bbs.test")
+
+    after = await _visible()
+    assert after == UNGATED | READ_ONLY
+    assert "publish_article" not in after
+    assert before < after
+
+
+async def test_connect_reports_what_it_unlocked(bridge):
+    result = await tools.connect("https://bbs.test")
+
+    assert set(result["tools_unlocked"]) == READ_ONLY
+
+
+async def test_registering_reveals_the_rest(bridge):
+    await tools.connect("https://bbs.test")
+    before = await _visible()
+
+    await tools.register("scout")
 
     after = await _visible()
     assert before < after
     assert {"publish_article", "list_articles", "get_article"} <= after
 
 
-async def test_join_reports_what_it_unlocked(bridge):
+async def test_register_reports_what_it_unlocked(bridge):
     """The guard against a host that ignores list_changed: the names arrive in
     the result, so a model that reads it can call them regardless."""
-    result = await tools.join("https://bbs.test", "scout")
+    await tools.connect("https://bbs.test")
+    result = await tools.register("scout")
 
     assert "publish_article" in result["tools_unlocked"]
-    assert len(result["tools_unlocked"]) == 31
+    assert READ_ONLY <= set(result["tools_unlocked"])
 
 
 async def test_a_restarted_bridge_starts_ready(bridge):
-    """Readiness comes from stored state, not from having called join this
+    """Readiness comes from stored state, not from having called register this
     session — a second process must not be sent back to the gate."""
-    await tools.join("https://bbs.test", "scout")
+    await _connect_and_register("scout")
     tools.current_username.set(None)
 
     assert "publish_article" in await _visible()
@@ -168,10 +202,15 @@ async def test_a_restarted_bridge_starts_ready(bridge):
 
 
 async def test_env_configured_bridge_is_not_gated(bridge, monkeypatch):
-    """The documented env-var flow: BONNET_URL plus an identity, never joined.
-    Gating on a remembered origin alone would strand it behind a join it does
-    not need."""
-    tools._get_identity_store().register("scout")
+    """The documented env-var flow: BONNET_URL plus an identity, never
+    connected. Gating on a remembered origin alone would strand it behind a
+    connect it does not need.
+
+    Identity lookups fall back to scoping by the configured URL itself here
+    (see _default_origin) — a bridge wired up entirely through environment
+    variables never calls connect(), so nothing ever learns the origin's own
+    discovered identifier to scope by instead."""
+    tools._get_identity_store().register("https://bbs.test", "scout")
     monkeypatch.setenv("BONNET_URL", "https://bbs.test")
     monkeypatch.setenv("BONNET_IDENTITY", "scout")
 
@@ -203,8 +242,8 @@ async def test_an_origin_alone_reveals_the_read_tools(bridge, monkeypatch):
 
 async def test_open_board_is_hidden_with_no_origin(bridge):
     """The bug that motivated tagging open_board NEEDS_ORIGIN: calling it
-    before join/switch_origin used to silently "succeed" against whatever
-    bonnet_url happened to default to, cursor left pointed at a board on an
+    before connect/switch_origin used to silently "succeed" against whatever
+    origin happened to default to, cursor left pointed at a board on an
     origin never actually reached. Gating it out makes that state
     unreachable instead of just quiet."""
     assert "open_board" not in await _visible()
@@ -216,12 +255,29 @@ async def test_open_board_is_hidden_with_no_origin(bridge):
     assert cursor.current_board.get() is None
 
 
-async def test_register_user_is_never_gated(bridge, monkeypatch):
+async def test_register_is_never_gated(bridge, monkeypatch):
     """It is how a caller acquires the identity the gate checks for, so
     hiding it would make the missing-identity state unrecoverable."""
     monkeypatch.setenv("BONNET_URL", "https://bbs.test")
 
-    assert "register_user" in await _visible()
+    assert "register" in await _visible()
+
+
+async def test_disconnect_is_never_gated(bridge):
+    """Every state needs a way out that is not itself gated."""
+    assert "disconnect" in await _visible()
+
+    await _connect_and_register("scout")
+    assert "disconnect" in await _visible()
+
+
+async def test_disconnect_re_gates_origin_facing_tools(bridge):
+    await _connect_and_register("scout")
+    assert "publish_article" in await _visible()
+
+    await tools.disconnect()
+
+    assert await _visible() == UNGATED
 
 
 # --- per-caller, which is what makes http work ----------------------------
@@ -230,7 +286,7 @@ async def test_register_user_is_never_gated(bridge, monkeypatch):
 async def test_two_callers_see_different_surfaces(bridge):
     """The point of deciding per request: one shared registry, one bridge,
     two callers, two answers."""
-    await tools.join("https://bbs.test", "scout")
+    await _connect_and_register("scout")
 
     tools.current_username.set("scout")
     ready = await _visible()
@@ -239,9 +295,9 @@ async def test_two_callers_see_different_surfaces(bridge):
 
     assert "publish_article" in ready
     assert "publish_article" not in unready
-    # "stranger" has an origin (joined by "scout") but no local identity of its
-    # own, so it gets the read tools and nothing that writes or answers for a
-    # specific caller.
+    # "stranger" has an origin (connected by "scout") but no local identity of
+    # its own, so it gets the read tools and nothing that writes or answers
+    # for a specific caller.
     assert unready == UNGATED | READ_ONLY
 
 
@@ -254,13 +310,13 @@ async def test_calling_a_hidden_tool_explains_the_fix(bridge):
         with pytest.raises(Exception) as exc:
             await c.call_tool("publish_article", {"board": "b", "subject": "s", "content": "c"})
 
-    assert "join" in str(exc.value)
+    assert "connect" in str(exc.value)
 
 
 async def test_a_stale_tool_list_still_works_once_ready(bridge):
     """Nothing is disabled server-side, so a call placed from a cached list
     succeeds the moment the caller is actually ready."""
-    await tools.join("https://bbs.test", "scout")
+    await _connect_and_register("scout")
 
     async with Client(tools.mcp) as c:
         assert await c.call_tool("list_boards", {"origin": ORIGIN}) is not None
@@ -326,7 +382,7 @@ async def test_permissions_hides_a_tool_the_local_heuristic_would_show(bridge):
         )
     )
 
-    await tools.join("https://bbs.test", "scout")
+    await _connect_and_register("scout")
     tools.current_username.set("scout")
 
     # scout holds an identity, so the local heuristic alone would show
