@@ -1,6 +1,6 @@
-"""MCP server entry point for the firehose protocol.
+"""Gateway entry point: transports, tenant auth, and the admin CLI.
 
-Two transports, because they serve different deployments:
+Two deployments, and the difference between them is tenancy:
 
 **stdio (default)** — the agent host launches this process and speaks MCP over
 its pipes. No port, no listener, nothing to supervise, and the whole install is
@@ -11,24 +11,34 @@ one entry in the host's MCP config:
      "env": {"BONNET_URL": "https://bbs.example:2272",
              "BONNET_IDENTITY": "scout"}}}}
 
-There is no HTTP request in this mode, so AuthMiddleware never runs and there
-is no Authorization header to carry an identity. Selection falls to
-$BONNET_IDENTITY or an explicit `auth` argument — see tools._resolve_auth.
-Nothing may be written to stdout here: stdout *is* the protocol stream.
+One caller, one tenant (`default`), full capability. There is no HTTP request
+here, so AuthMiddleware resolves nothing and there is nothing to authenticate:
+a process the host started over its own pipes has already established who it
+belongs to. Identity selection falls to $BONNET_IDENTITY or an explicit `auth`
+argument — see tools._resolve_auth. Nothing may be written to stdout in this
+mode: stdout *is* the protocol stream.
 
-**http** — one bridge process serving several callers, each identifying itself
-per request with an Authorization header. Binds loopback by default; widening
-it exposes a process holding private keys, so it takes a deliberate MCP_HOST.
+**http / sse** — one process serving several tenants, each presenting an API
+key per request as either `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+A key that names no usable tenant degrades to the read-only anonymous tenant
+rather than returning a non-200 (see AuthMiddleware). Binds loopback by
+default; widening it exposes a process holding every tenant's private keys, so
+it takes a deliberate MCP_HOST. `sse` is the legacy MCP transport, kept for
+clients that cannot speak Streamable HTTP; prefer `--http`.
+
+Tenants are administered from this same entry point — `bonnet-gateway tenant
+add`, `key revoke`, and so on — wrapping `gateway.tenants`, which is also the
+programmatic path for an external script. Deliberately not MCP tools: see that
+module for why.
 
 Environment variables (command-line flags win over all of them):
+    BONNET_GATEWAY_DIR — all durable state (default: OS per-user data dir)
     BONNET_URL         — server URL (default: https://localhost:2272)
     BONNET_VERIFY_TLS  — TLS verification (default: true, except loopback
                           BONNET_URL hosts, which default to false)
     BONNET_IDENTITY    — identity to act as when a tool call omits `auth`
-    BONNET_IDENTITIES_DB — local identity store path
-                            (default: OS per-user data dir, e.g.
-                            ~/.local/share/bonnet/identities.db)
-    MCP_TRANSPORT      — "stdio" (default) or "http"
+    BONNET_IDENTITIES_DB — identity store path, default tenant only
+    MCP_TRANSPORT      — "stdio" (default), "http" or "sse"
     MCP_HOST           — http bind address (default: 127.0.0.1)
     MCP_PORT           — http port (default: 8080)
     MCP_TLS_CERT       — TLS certificate path (http only, optional)
@@ -44,9 +54,14 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 
-from bonnet.gateway import resources  # noqa: F401 — registers @mcp.resource decorators
+from bonnet.gateway import (
+    resources,  # noqa: F401 — registers @mcp.resource decorators
+    tenancy,
+    tenants,
+)
 from bonnet.gateway.firehose_client import default_verify_tls
 from bonnet.gateway.gating import GatingMiddleware
+from bonnet.gateway.registry import TenantError
 from bonnet.gateway.tools import current_password, current_username, mcp
 
 
@@ -77,28 +92,55 @@ async def well_known_bonnet(request: Request):
         return PlainTextResponse("Failed to reach Bonnet server", status_code=502)
 
 
-def parse_auth_header(auth: str) -> tuple[str, str]:
-    """Parse Authorization header into (username, password)."""
+def presented_key(headers) -> str:
+    """The API key a request presents, from either header form.
+
+    Two spellings of the same thing because agent harnesses differ in which
+    they can set: some expose an arbitrary header, others only an
+    Authorization bearer token.
+    """
+    auth = headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:].strip()
-        if ":" in token:
-            user, pwd = token.split(":", 1)
-            user = user.strip()
-            return user if user else "anonymous", pwd
-        return token.strip() if token.strip() else "anonymous", ""
-    return "anonymous", ""
+        if token:
+            return token
+    return (headers.get("X-API-Key", "") or "").strip()
 
 
 class AuthMiddleware(Middleware):
+    """Resolve which tenant a request belongs to, before gating reads it.
+
+    A key that names no usable tenant — absent, unknown, revoked, or its
+    tenant disabled — lands on the anonymous tenant rather than a 401. A
+    non-200 on the MCP transport strands a lot of harnesses in ways neither
+    the agent nor its operator can diagnose; a session that works but is
+    visibly reduced is legible, and `gating` reports the reduction through
+    the tool list where the agent will actually read it.
+
+    In stdio there is no HTTP request at all, so nothing here runs and the
+    context keeps its default: the full-capability `default` tenant. Auth is
+    an http-mode concept — a process the agent host launched over its own
+    pipes has nothing to authenticate.
+    """
+
     def _set_auth_context(self, context: MiddlewareContext):
         try:
             request = get_http_request()
-            auth = request.headers.get("Authorization", "")
-            username, password = parse_auth_header(auth)
-            current_username.set(username)
-            current_password.set(password)
         except RuntimeError:
-            pass
+            return  # stdio: no request, no header, default tenant
+
+        key = presented_key(request.headers)
+        tenant = tenancy.resolve_key(key) if key else None
+        if tenant is not None:
+            tenancy.current_tenant.set(tenant)
+            tenancy.current_auth_status.set(tenancy.AUTH_OK)
+        else:
+            tenancy.current_tenant.set(tenancy.ANONYMOUS_TENANT)
+            tenancy.current_auth_status.set(tenancy.AUTH_REJECTED if key else tenancy.AUTH_ABSENT)
+            # An anonymous session signs as nobody, so it must not inherit a
+            # username from whatever ran in this context before it.
+            current_username.set(None)
+            current_password.set("")
 
     async def on_request(self, context: MiddlewareContext, call_next):
         self._set_auth_context(context)
@@ -114,21 +156,48 @@ class AuthMiddleware(Middleware):
 
 
 mcp.add_middleware(AuthMiddleware())
-# After AuthMiddleware: gating reads the identity that one establishes
-# from the Authorization header, so it must see a populated context.
+# After AuthMiddleware: gating reads the tenant that one resolves from the
+# request's API key, so it must see a populated context.
 mcp.add_middleware(GatingMiddleware())
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="bonnet-gateway", description="MCP bridge to a Bonnet board server"
+        prog="bonnet-gateway",
+        description="MCP gateway to Bonnet board servers",
     )
     parser.add_argument(
         "--transport",
-        choices=("stdio", "http"),
+        choices=("stdio", "http", "sse"),
         default=os.environ.get("MCP_TRANSPORT", "stdio"),
-        help="stdio (default) for an agent host that launches this process; http to serve several callers over a port",
+        help="stdio (default) for an agent host that launches this process; http to serve several callers over a port; sse is legacy",
     )
+    # Sugar for --transport, because `bonnet-gateway --http` is what an
+    # operator reaches for. Mutually exclusive so `--stdio --http` is an
+    # error rather than a silent last-one-wins.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--stdio",
+        dest="mode",
+        action="store_const",
+        const="stdio",
+        help="shorthand for --transport stdio",
+    )
+    mode.add_argument(
+        "--http",
+        dest="mode",
+        action="store_const",
+        const="http",
+        help="shorthand for --transport http (Streamable HTTP)",
+    )
+    mode.add_argument(
+        "--sse",
+        dest="mode",
+        action="store_const",
+        const="sse",
+        help="shorthand for --transport sse; legacy, prefer --http",
+    )
+    parser.set_defaults(mode=None)
     parser.add_argument(
         "--host",
         default=None,
@@ -148,16 +217,108 @@ def build_parser() -> argparse.ArgumentParser:
             "tools stay hidden until a board is joined (also BONNET_GATING=off)"
         ),
     )
+
+    # Tenant administration. Deliberately here and not as MCP tools: every
+    # tool is hidden until a caller has what it needs, and an account-creation
+    # tool would have to be visible to callers who have nothing — an open
+    # registration endpoint reachable by anything that speaks MCP.
+    subs = parser.add_subparsers(dest="command")
+
+    tenant = subs.add_parser("tenant", help="manage gateway tenants").add_subparsers(
+        dest="action", required=True
+    )
+    add = tenant.add_parser("add", help="create a tenant and print its first API key")
+    add.add_argument("tenant_id")
+    add.add_argument("--note", default="", help="free-text note stored with the tenant")
+    tenant.add_parser("list", help="list tenants")
+    for name, helptext in (("enable", "re-enable a tenant"), ("disable", "disable a tenant")):
+        sub = tenant.add_parser(name, help=helptext)
+        sub.add_argument("tenant_id")
+    remove = tenant.add_parser("remove", help="delete a tenant, its keys and its state")
+    remove.add_argument("tenant_id")
+    remove.add_argument(
+        "--yes",
+        action="store_true",
+        help="required: this destroys the tenant's signing keys, which nothing else holds",
+    )
+
+    key = subs.add_parser("key", help="manage a tenant's API keys").add_subparsers(
+        dest="action", required=True
+    )
+    key_add = key.add_parser("add", help="mint an additional key for a tenant")
+    key_add.add_argument("tenant_id")
+    key_add.add_argument("--label", default="", help="what this key is for")
+    key_list = key.add_parser("list", help="list keys")
+    key_list.add_argument("tenant_id", nargs="?", default=None)
+    key_revoke = key.add_parser("revoke", help="revoke one key by id")
+    key_revoke.add_argument("key_id")
+
     return parser
+
+
+def _run_admin(args) -> int:
+    """Handle a `tenant`/`key` subcommand. Returns a process exit code."""
+    try:
+        if args.command == "tenant":
+            if args.action == "add":
+                api_key = tenants.add_tenant(args.tenant_id, args.note)
+                print(f"tenant {args.tenant_id} created")
+                print(f"api key: {api_key}")
+                print("This is shown once and is not recoverable. Store it now.")
+            elif args.action == "list":
+                rows = tenants.list_tenants()
+                if not rows:
+                    print("no tenants")
+                for row in rows:
+                    state = "enabled" if row["enabled"] else "disabled"
+                    note = f"  {row['note']}" if row["note"] else ""
+                    print(f"{row['tenant_id']}\t{state}{note}")
+            elif args.action in ("enable", "disable"):
+                tenants.set_enabled(args.tenant_id, args.action == "enable")
+                print(f"tenant {args.tenant_id} {args.action}d")
+            elif args.action == "remove":
+                if not args.yes:
+                    print(
+                        f"refusing to remove {args.tenant_id} without --yes: this deletes "
+                        f"its signing keys, and nothing else holds a copy",
+                        file=sys.stderr,
+                    )
+                    return 1
+                tenants.remove_tenant(args.tenant_id)
+                print(f"tenant {args.tenant_id} removed")
+        elif args.command == "key":
+            if args.action == "add":
+                api_key = tenants.add_key(args.tenant_id, args.label)
+                print(f"api key: {api_key}")
+                print("This is shown once and is not recoverable. Store it now.")
+            elif args.action == "list":
+                rows = tenants.list_keys(args.tenant_id)
+                if not rows:
+                    print("no keys")
+                for row in rows:
+                    state = "revoked" if row["revoked_at"] else "live"
+                    label = f"  {row['label']}" if row["label"] else ""
+                    print(f"{row['key_id']}\t{row['tenant_id']}\t{state}{label}")
+            elif args.action == "revoke":
+                tenants.revoke_key(args.key_id)
+                print(f"key {args.key_id} revoked")
+    except TenantError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def run(argv: list[str] | None = None):
     args = build_parser().parse_args(argv)
 
+    if getattr(args, "command", None):
+        raise SystemExit(_run_admin(args))
+
     if args.no_gating:
         os.environ["BONNET_GATING"] = "off"
 
-    if args.transport == "stdio":
+    transport = args.mode or args.transport
+    if transport == "stdio":
         # stdout carries the MCP framing; the banner would corrupt it.
         mcp.run(transport="stdio", show_banner=False)
         return
@@ -179,17 +340,29 @@ def run(argv: list[str] | None = None):
         )
 
     if host not in ("127.0.0.1", "::1", "localhost"):
-        # This process holds unwrapped signing keys and accepts an identity
-        # from a request header, so a non-loopback bind is worth saying out
-        # loud rather than leaving as a silent default (it used to be one).
+        # This process holds unwrapped signing keys for every tenant it
+        # serves, so a non-loopback bind is worth saying out loud rather than
+        # leaving as a silent default (it used to be one).
         print(
-            f"WARNING: binding {host} exposes this bridge, and the identities it "
-            f"holds, beyond this machine. Ensure MCP_TLS_CERT/KEY are set and "
-            f"access is restricted.",
+            f"WARNING: binding {host} exposes this gateway, and the identities it "
+            f"holds for every tenant, beyond this machine. Ensure MCP_TLS_CERT/KEY "
+            f"are set and access is restricted.",
             file=sys.stderr,
         )
 
-    mcp.run(transport="http", host=host, port=port, uvicorn_config=uvicorn_config or None)
+    if not tenants.list_tenants():
+        # Not fatal: a gateway with no tenants still serves anonymous reads,
+        # which is a legitimate way to run one. But it is almost always a
+        # forgotten setup step, and the failure it produces otherwise — every
+        # session silently anonymous — is unpleasant to diagnose from the
+        # agent's side.
+        print(
+            "WARNING: no tenants are registered, so every request will fall back to "
+            "the anonymous tenant (read-only). Run: bonnet-gateway tenant add <id>",
+            file=sys.stderr,
+        )
+
+    mcp.run(transport=transport, host=host, port=port, uvicorn_config=uvicorn_config or None)
 
 
 if __name__ == "__main__":
