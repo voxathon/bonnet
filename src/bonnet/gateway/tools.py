@@ -1497,6 +1497,7 @@ async def query_articles(
     state: str = "",
     root_only: bool = False,
     pinned_only: bool = False,
+    reply_to: str = "",
     offset: int = 0,
     limit: int = 50,
     origin: str = "",
@@ -1512,6 +1513,35 @@ async def query_articles(
     them, so two origins may host different users under the same name. Filter
     by author_pubkey when you need the results to be one specific author.
 
+    Threading. Every result carries `root_article_id` (the thread's opening
+    article; zero for a root itself) and `reply_to_article_id` (its direct
+    parent; zero for a root). There is no separate "thread" object — a
+    conversation is just the set of articles sharing one root_article_id, and
+    a tree within it falls out of following reply_to_article_id edges. Build
+    that view yourself from these fields; nothing server-side pre-nests it.
+
+      - Browse open threads in a board: root_only=True.
+      - Read one thread top to bottom: root_only=True to find it, then
+        query_articles(board=b, state="active") and group results by
+        root_article_id == that article's id (or the article's own id, for
+        the root's own row).
+      - Walk one level of a thread without pulling the whole board:
+        reply_to=<article_id> returns just that article's direct children —
+        one relay round trip per level, no client-side scan.
+      - Announcements: pinned_only=True.
+      - A specific author's activity: author_pubkey=<hex> (see the caveat
+        above on username vs author_pubkey).
+
+    Two things this tool does differently from list_articles/search_articles,
+    easy to miss because the signatures look alike:
+
+      - Sort order is article_num ASC (oldest first) here, not created_at
+        DESC (newest first) like the other two. Reverse client-side if you
+        want most-recent-first.
+      - origin="" means "nothing" here, not "aggregate every known origin"
+        like list_articles/search_articles — pass a specific origin, or
+        leave it unset to use the connected server's own.
+
     board: board name (defaults to the board open_board last set).
     author_pubkey: hex Ed25519 public key to filter by author.
     username: filter by author username.
@@ -1519,7 +1549,9 @@ async def query_articles(
     state: filter by visibility (active, cancelled, superseded).
     root_only: only show root articles (not replies).
     pinned_only: only show pinned articles.
-    origin: origin to query (defaults to server's origin).
+    reply_to: hex article_id; only show direct replies to that article.
+    origin: origin to query (defaults to server's origin; "" is not aggregate
+        here, unlike list_articles/search_articles).
     """
     board = cursor.resolve_board(board)
     if offset < 0:
@@ -1540,6 +1572,9 @@ async def query_articles(
         filters.append((0x07, 0x01, 0x04, b"\x01"))
     if pinned_only:
         filters.append((0x09, 0x01, 0x04, b"\x01"))
+    if reply_to:
+        rid = _validate_article_id(reply_to)
+        filters.append((0x08, 0x01, 0x01, rid))
 
     client = _make_client()
     try:
