@@ -43,8 +43,10 @@ from bonnet.gateway.paths import (
     current_tenant,
     identities_db_path,
     origins_db_path,
+    registry_db_path,
     trust_db_path,
 )
+from bonnet.gateway.registry import Registry
 
 __all__ = [
     "ANONYMOUS_TENANT",
@@ -59,7 +61,9 @@ __all__ = [
     "identity_store",
     "origin_store",
     "tenant_trust_db_path",
+    "resolve_key",
     "reset_store_cache",
+    "reset_registry_cache",
 ]
 
 #: A credential was presented and accepted (or none was needed, in stdio).
@@ -114,16 +118,67 @@ def tenant_trust_db_path() -> str:
 
 
 def reset_store_cache() -> None:
-    """Drop every cached store, closing what can be closed.
+    """Drop every cached store, closing each one first.
 
-    For tests and for tenant removal — a store held open on a directory that
-    is about to be deleted keeps a file handle on Windows and makes the
-    removal fail.
+    For tests and for tenant removal. Closing is not tidiness: a store left
+    open on a directory that is about to be deleted holds a file handle, and
+    on Windows that makes the removal fail outright rather than merely
+    leaking.
+
+    `IdentityStore` keeps its connection in a `threading.local`, so this
+    closes the calling thread's handle and not any opened by others. That is
+    enough for the CLI and the test suite, which are the callers that go on
+    to delete the directory; a threaded server removing a tenant it has
+    recently served may still need a restart before the files go away.
     """
-    for store in _origin_stores.values():
+    stores: list[IdentityStore | OriginStore] = [
+        *_identity_stores.values(),
+        *_origin_stores.values(),
+    ]
+    for store in stores:
         try:
             store.close()
         except Exception:
             pass
     _identity_stores.clear()
     _origin_stores.clear()
+
+
+# --- credential resolution -------------------------------------------------
+#
+# The registry connection is kept for the life of the process, unlike the
+# per-call opens in `tenants`: this runs on every request. Holding it is safe
+# because SQLite reads see other processes' committed writes immediately, so a
+# key revoked by the CLI stops resolving here without the server restarting.
+
+_registries: dict[str, Registry] = {}
+
+
+def _registry() -> Registry:
+    path = registry_db_path()
+    registry = _registries.get(path)
+    if registry is None:
+        registry = Registry(path)
+        _registries[path] = registry
+    return registry
+
+
+def resolve_key(presented: str) -> str | None:
+    """The tenant a presented API key names, or None if it names no usable one.
+
+    None covers unknown, revoked, and belonging-to-a-disabled-tenant alike.
+    Callers do not distinguish them: all three degrade to the anonymous
+    tenant, and telling an unauthenticated caller which one it was would only
+    help someone probing for valid key ids.
+    """
+    return _registry().resolve(presented)
+
+
+def reset_registry_cache() -> None:
+    """Drop the cached registry connection. For tests and tenant removal."""
+    for registry in _registries.values():
+        try:
+            registry.close()
+        except Exception:
+            pass
+    _registries.clear()

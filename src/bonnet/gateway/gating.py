@@ -34,6 +34,16 @@ because they are how a caller acquires (or steps back from) the very things
 being checked for. And BONNET_GATING=off pins everything visible, because
 "the tool isn't there" is a far worse thing to debug than "the tool returned
 an error".
+
+**The one exception, and why it is not one.** An anonymous tenant (see
+`tenancy`) never sees `register` or `login`. That looks like a violation of
+the rule above, and is its logical end: the rule exists so a caller is never
+stranded from a transition it *could* make, and for that tenant `register` is
+not a transition — no sequence of calls makes it succeed. Showing it would
+advertise a dead end, which is the failure this module exists to prevent.
+That session is also told so directly: `_auth_warning` prefixes every
+description with what happened and whether the operator needs to hear about
+it. Reduced capability is reported, never merely enacted.
 """
 
 from __future__ import annotations
@@ -45,7 +55,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools import Tool
 
-from bonnet.gateway import cursor
+from bonnet.gateway import cursor, tenancy
 from bonnet.gateway import needs as needs_module
 
 #: Tag marking a tool that cannot function without somewhere to send a
@@ -66,6 +76,33 @@ NEEDS_ORIGIN = "needs_origin"
 NEEDS_IDENTITY = "needs_identity"
 
 
+#: Tools an anonymous tenant can never use, however the rest of its state
+#: looks. They mint or unlock a local identity, and that tenant holds none and
+#: may not acquire one.
+#:
+#: `connect`, `disconnect`, `switch_origin` and the navigation tools are
+#: deliberately *not* here: they still work, and hiding them would strand a
+#: caller with no way to move.
+ANONYMOUS_FORBIDDEN = frozenset({"register", "login"})
+
+_WARNING_ABSENT = """\
+[!] This session is ANONYMOUS: read-only, no identity, nothing can be
+published. No API key was presented. If you expected an account here, say so
+to your operator rather than retrying — nothing you can do from this session
+will change it.
+
+"""
+
+_WARNING_REJECTED = """\
+[!] This session is ANONYMOUS: read-only, no identity, nothing can be
+published. An API key WAS presented and was not accepted — it is unknown,
+revoked, or its tenant is disabled. **Alert your operator.** This is a
+configuration problem on their side; retrying will not fix it, and no
+credential you can construct will either.
+
+"""
+
+
 def gating_enabled() -> bool:
     """Whether to gate at all. BONNET_GATING=off pins every tool visible."""
     return (os.environ.get("BONNET_GATING") or "").strip().lower() not in (
@@ -74,6 +111,45 @@ def gating_enabled() -> bool:
         "false",
         "no",
     )
+
+
+def _anonymous_forbids(tool: Tool) -> str | None:
+    """Why the anonymous tenant may not use `tool`, or None.
+
+    Checked independently of `gating_enabled`, unlike everything else here.
+    BONNET_GATING=off is a debugging aid for *visibility*; it must not hand a
+    caller who presented no valid credential the ability to mint identities
+    inside the shared anonymous tenant.
+    """
+    if tool.name in ANONYMOUS_FORBIDDEN and tenancy.is_anonymous():
+        return (
+            "this session is anonymous, and an anonymous session holds no "
+            "identity and cannot create one. Reads work; publishing does not. "
+            "If you expected an account, your operator needs to give this "
+            "gateway a valid API key."
+        )
+    return None
+
+
+def _auth_warning() -> str | None:
+    """The banner to prefix onto every tool description, or None.
+
+    The tool list is the only part of an agent's context re-sent whole on
+    every turn, which is what a *persistent* condition needs: a one-shot error
+    scrolls away, and SERVER_INSTRUCTIONS is delivered once at initialize —
+    before a credential has necessarily been presented, let alone rejected.
+    """
+    if not tenancy.is_anonymous():
+        return None
+    if tenancy.current_auth_status.get() == tenancy.AUTH_REJECTED:
+        return _WARNING_REJECTED
+    return _WARNING_ABSENT
+
+
+def _with_warning(tool: Tool, warning: str) -> Tool:
+    """A copy of `tool` carrying `warning`. Never mutates the registry object,
+    which is shared with every other tenant's list."""
+    return tool.model_copy(update={"description": warning + (tool.description or "")})
 
 
 def _origin_missing() -> str | None:
@@ -204,17 +280,23 @@ class GatingMiddleware(Middleware):
 
     async def on_list_tools(self, context: MiddlewareContext, call_next) -> Sequence[Tool]:
         tools = await call_next(context)
-        if not gating_enabled():
-            return tools
-        return [t for t in tools if await _missing_for(t) is None]
+        if gating_enabled():
+            tools = [
+                t for t in tools if _anonymous_forbids(t) is None and await _missing_for(t) is None
+            ]
+        # Outside the gating check on purpose: BONNET_GATING=off suppresses
+        # filtering, not the report that this session is degraded.
+        warning = _auth_warning()
+        if warning is not None:
+            tools = [_with_warning(t, warning) for t in tools]
+        return tools
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
-        if not gating_enabled():
-            return await call_next(context)
-
         tool = await _lookup(context)
         if tool is not None:
-            reason = await _missing_for(tool)
+            reason = _anonymous_forbids(tool)
+            if reason is None and gating_enabled():
+                reason = await _missing_for(tool)
             if reason is not None:
                 # Never a bare refusal: say what is missing and what fixes it,
                 # so a caller working from a stale tool list is redirected
