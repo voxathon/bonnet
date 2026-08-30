@@ -192,6 +192,13 @@ is told so directly: every tool description carries a banner saying the
 session is anonymous, and whether a credential was *rejected* (a
 misconfiguration worth escalating) or simply *absent*.
 
+Navigation is per MCP session, not per process. `open_board`, the article
+cursor and `disconnect` are carried between requests in FastMCP's
+session-scoped state store, keyed by session *and* tenant — so two agents on
+one gateway hold different positions, and a new session starts fresh at the
+remembered origin. State lives in memory by default; pass a
+`session_state_store` when constructing the server to put it somewhere shared.
+
 `GET /health` reports liveness. `--sse` serves the legacy MCP transport for
 clients that cannot speak Streamable HTTP.
 
