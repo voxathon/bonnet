@@ -954,6 +954,99 @@ class TestProjectionReads:
         count = struct.unpack(">H", resp[1:3])[0]
         assert count == 1
 
+    def test_board_scoped_grant_is_not_widened_by_an_unrelated_wildcard_rule(self, stack):
+        """End-to-end proof that `_board_read_allowed` (the real per-board
+        enforcement gate, not just `ACLEvaluator` in isolation) honors a
+        command's own board scoping, even when some other rule for the same
+        principal+action grants a *different* command on every board. This
+        is exactly the shape `_board_read_allowed`'s own docstring warns
+        about: "an ACL rule scoped to boards=[...] becomes a no-op" if the
+        evaluator ever lets one rule's wildcard leak into another's grant."""
+        self._publish_and_dispatch(stack)
+        # Matching content on the excluded board too -- otherwise a wrongly
+        # granted search and a correctly denied one both come back empty
+        # (nothing there either way), and the test would prove nothing.
+        fh = stack["firehose"]
+        bs = stack["body_store"]
+        body2 = b"hello elsewhere"
+        intent2 = Intent(
+            event_id=_rid(4),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="some-other-board",
+            article_id=_rid(5),
+            metadata=MetadataMap(
+                [metadata_text(1, "Test Article Too"), metadata_text(4, "text/plain")]
+            ),
+            body_hash=compute_body_hash(body2),
+            body_size=len(body2),
+        )
+        bs.stage_article_body(
+            "bbs.test",
+            "some-other-board",
+            intent2.event_id,
+            body2,
+            intent2.body_hash,
+            intent2.body_size,
+        )
+        fh.append_record(ORIGIN, intent2, sign_intent(ACTOR, encode_intent(intent2)), body2)
+        stack["dispatcher"].dispatch_origin("bbs.test")
+
+        h = stack["handler"]
+        scout_pub = _rid(200)  # registered, but not the ACTOR_PUB admin key
+        ctx = FirehoseContext(peer_pubkey=scout_pub, is_registered=True, origin="bbs.test")
+
+        # `stack["acl"]` carries the fixture's own wildcard-principal,
+        # wildcard-everything read rule, which would grant scout access to
+        # everything regardless of what this test adds -- swapped for a
+        # dedicated evaluator so the test actually exercises board scoping.
+        acl = ACLEvaluator(default_rules_for_admin(ACTOR_PUB.hex()))
+        h._acl = acl
+        # Unrelated command, wildcard board -- present precisely because a
+        # real deployment always has *some* such rule (the shipped default
+        # bundles most read commands this way); it must not leak into
+        # ARTICLE_SEARCH's own, narrower grant below.
+        acl.add_rule(
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(registered=True),
+                actions=["read"],
+                commands=["ARTICLE_GET"],
+                boards=["*"],
+            )
+        )
+        acl.add_rule(
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(registered=True),
+                actions=["read"],
+                commands=["ARTICLE_SEARCH"],
+                boards=["general"],
+            )
+        )
+
+        def _search(board):
+            req = struct.pack(">B", OP_ARTICLE_SEARCH)
+            req += _enc_text16("bbs.test")
+            req += _enc_text16(board)
+            req += _enc_text16("Test")
+            req += _enc_text16("")
+            req += struct.pack(">I", 0)
+            req += struct.pack(">H", 10)
+            req += struct.pack(">B", 0)
+            return h.handle(req, ctx)
+
+        allowed = _search("general")
+        assert allowed[0] == 0
+        assert struct.unpack(">H", allowed[1:3])[0] == 1
+
+        # _cmd_article_search denies by returning an empty result set, not
+        # an error response -- see `_board_read_allowed`'s call site.
+        denied = _search("some-other-board")
+        assert denied[0] == 0
+        assert struct.unpack(">H", denied[1:3])[0] == 0
+
     def test_ban_status_no_ban(self, stack):
         h = stack["handler"]
 

@@ -242,6 +242,150 @@ class TestACLEvaluator:
             ctx, "write", command="PUBLISH_RECORD", kind="bonnet.article", board="secret"
         )
 
+    def test_bare_deny_blocks_regardless_of_kind(self):
+        """The board-only deny above covers the board dimension; this is the
+        same idiom for kind — a deny naming no `kinds` blocks every kind on
+        the boards/commands it does name, not just the one an allow granted."""
+        rules = [
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(wildcard=True),
+                actions=["write"],
+                commands=["PUBLISH_RECORD"],
+                kinds=["bonnet.article"],
+                boards=["*"],
+            ),
+            ACLRule(
+                effect="deny",
+                matcher=PrincipalMatcher(wildcard=True),
+                actions=["write"],
+                commands=["PUBLISH_RECORD"],
+                boards=["secret"],
+            ),
+        ]
+        acl = ACLEvaluator(rules)
+        ctx = self._user_ctx()
+        assert acl.check(
+            ctx, "write", command="PUBLISH_RECORD", kind="bonnet.article", board="general"
+        )
+        assert not acl.check(
+            ctx, "write", command="PUBLISH_RECORD", kind="bonnet.article", board="secret"
+        )
+
+    def test_command_scoped_allow_does_not_leak_board_wide(self):
+        """A rule cannot borrow another rule's board scope for a command that
+        rule never granted. The bundle rule's `boards=["*"]` used to satisfy
+        the board dimension for ANY command sharing (principal, action),
+        including ARTICLE_SEARCH, which it never lists — so ARTICLE_SEARCH,
+        scoped to "special" by its own rule, was reachable on every board."""
+        rules = [
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(registered=True),
+                actions=["read"],
+                commands=["BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST"],
+                boards=["*"],
+            ),
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(registered=True),
+                actions=["read"],
+                commands=["ARTICLE_SEARCH"],
+                boards=["special"],
+            ),
+        ]
+        acl = ACLEvaluator(rules)
+        ctx = self._user_ctx()
+        assert acl.check(ctx, "read", command="ARTICLE_SEARCH", board="special")
+        assert not acl.check(ctx, "read", command="ARTICLE_SEARCH", board="totally-unrelated-board")
+        # The bundle's own commands are unaffected on boards it does grant.
+        assert acl.check(ctx, "read", command="BOARD_LIST", board="totally-unrelated-board")
+
+    def test_board_only_deny_is_inert_at_the_board_agnostic_gate(self):
+        """A deny that restricts only `boards` must not fire against a check
+        that never asks about board at all — the coarse, pre-board-known
+        gate `handle()` runs before dispatching (see
+        `_board_read_allowed`'s docstring on that two-stage design). If it
+        fired here, a bare board-scoped deny would silently veto the command
+        outright, rather than only on the board it actually names."""
+        rules = [
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(registered=True),
+                actions=["read"],
+                commands=["PERMISSIONS"],
+                boards=["*"],
+            ),
+            ACLRule(
+                effect="deny",
+                matcher=PrincipalMatcher(registered=True),
+                actions=["read"],
+                boards=["other"],
+            ),
+        ]
+        acl = ACLEvaluator(rules)
+        ctx = self._user_ctx()
+        # No board asked at all -- the coarse gate's shape.
+        assert acl.check(ctx, "read", command="PERMISSIONS")
+        # Board asked, and it's the one the deny actually names -- fires.
+        assert not acl.check(ctx, "read", command="PERMISSIONS", board="other")
+        # Board asked, and it isn't the excluded one -- allowed.
+        assert acl.check(ctx, "read", command="PERMISSIONS", board="general")
+
+    def test_command_scoped_deny_does_not_leak_across_boards(self):
+        """Mirror image: a deny that DOES name a command must only block that
+        command on the boards it names, not every board — a deny naming a
+        command should not be able to borrow board scope from elsewhere any
+        more than an allow can."""
+        rules = [
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(registered=True),
+                actions=["read"],
+                commands=["ARTICLE_SEARCH"],
+                boards=["*"],
+            ),
+            ACLRule(
+                effect="deny",
+                matcher=PrincipalMatcher(registered=True),
+                actions=["read"],
+                commands=["ARTICLE_SEARCH"],
+                boards=["excluded"],
+            ),
+        ]
+        acl = ACLEvaluator(rules)
+        ctx = self._user_ctx()
+        assert not acl.check(ctx, "read", command="ARTICLE_SEARCH", board="excluded")
+        assert acl.check(ctx, "read", command="ARTICLE_SEARCH", board="general")
+
+    def test_allow_omitting_applicable_dimension_grants_nothing(self):
+        """An allow rule silent on `boards` must not satisfy a board-scoped
+        check, even with another rule fully granting the same command
+        elsewhere — the omission cannot be widened by a sibling rule. Pins
+        the allow/deny asymmetry: if this ever became symmetric with deny's
+        "omitted = unrestricted", the original leak would reopen from the
+        allow side instead."""
+        rules = [
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(registered=True),
+                actions=["read"],
+                commands=["ARTICLE_SEARCH"],
+                # boards omitted entirely
+            ),
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(registered=True),
+                actions=["read"],
+                commands=["BOARD_LIST"],
+                boards=["*"],
+            ),
+        ]
+        acl = ACLEvaluator(rules)
+        ctx = self._user_ctx()
+        assert not acl.check(ctx, "read", command="ARTICLE_SEARCH", board="general")
+        assert acl.check(ctx, "read", command="ARTICLE_SEARCH")  # no board asked: still fine
+
     def test_from_toml(self):
         data = {
             "acl": [

@@ -36,6 +36,7 @@ Two properties worth keeping in mind:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
@@ -124,6 +125,40 @@ async def save(ctx) -> None:
         return
 
 
+#: One lock per (session, tenant), guarding the load -> run tool -> save span
+#: below. FastMCP's state store is a bare get/put with no compare-and-swap
+#: (the default MemoryStore is an unguarded dict), and that span holds a
+#: loaded snapshot across the whole tool body, including any await out to an
+#: origin server. Two tool calls dispatched concurrently in the same session
+#: would each load the same starting snapshot and the slower one to save
+#: would silently overwrite the faster one's cursor movement. Never
+#: cleaned up, same tolerance as `tools.auth_tokens` and `needs._cache` —
+#: one lock per live session is cheap next to a 24h session TTL.
+_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+def _lock_for(ctx) -> asyncio.Lock | None:
+    """The lock serializing load/save for this session and tenant, or None.
+
+    None when there is no session to serialize against — ctx is unset (no
+    request context), or `session_id` cannot be read (raises outside a
+    request). Matches load/save's own best-effort degrade: nothing here can
+    race if there is no session-scoped state in play.
+    """
+    if ctx is None:
+        return None
+    try:
+        session_id = ctx.session_id
+    except Exception:
+        return None
+    key = (session_id, tenancy.current_tenant.get())
+    lock = _locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _locks[key] = lock
+    return lock
+
+
 class SessionStateMiddleware(Middleware):
     """Carry navigation state across requests within one MCP session.
 
@@ -138,6 +173,13 @@ class SessionStateMiddleware(Middleware):
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         ctx = context.fastmcp_context
+        lock = _lock_for(ctx)
+        if lock is None:
+            return await self._call(ctx, context, call_next)
+        async with lock:
+            return await self._call(ctx, context, call_next)
+
+    async def _call(self, ctx, context: MiddlewareContext, call_next):
         await load(ctx)
         try:
             return await call_next(context)

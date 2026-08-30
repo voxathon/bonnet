@@ -233,6 +233,69 @@ async def test_an_anonymous_session_still_gets_a_cursor(gw):
         assert (await _where(c))["board"] == "general"
 
 
+# --- concurrent calls in one session ----------------------------------------
+
+
+async def test_concurrent_calls_in_one_session_are_serialized():
+    """FastMCP's state store is a bare get/put with no compare-and-swap (the
+    default MemoryStore backing it is an unguarded dict) — two tool calls
+    dispatched concurrently in the same session would each load the same
+    starting snapshot, and whichever finished and saved last would silently
+    discard the other's cursor movement. SessionStateMiddleware's per-
+    (session, tenant) lock closes that by serializing the whole
+    load -> run tool -> save span.
+
+    Proven directly rather than by inference: call A starts, opens the race
+    window (a_running), then sleeps before saving — the classic lost-update
+    gap. Call B is released into that gap. Without the lock, B's entire
+    load -> run -> save fits inside it and finishes before A's save, so A's
+    stale, already-loaded snapshot overwrites what B just committed. With the
+    lock, B cannot even begin its load until A's save has completed, so the
+    six events land in exactly one order with no interleaving possible."""
+    from bonnet.gateway.session import SessionStateMiddleware
+
+    events: list[str] = []
+    gate = asyncio.Event()
+    store: dict = {}
+
+    class FakeCtx:
+        session_id = "race-session"
+
+        async def get_state(self, key):
+            events.append("load")
+            return store.get(key)
+
+        async def set_state(self, key, value):
+            events.append("save")
+            store[key] = value
+
+    class FakeContext:
+        fastmcp_context = FakeCtx()
+
+    async def slow_next(_context):
+        events.append("a_running")
+        gate.set()
+        await asyncio.sleep(0.05)
+        return "a"
+
+    async def fast_next(_context):
+        events.append("b_running")
+        return "b"
+
+    middleware = SessionStateMiddleware()
+
+    async def run_a():
+        await middleware.on_call_tool(FakeContext(), slow_next)
+
+    async def run_b():
+        await gate.wait()
+        await middleware.on_call_tool(FakeContext(), fast_next)
+
+    await asyncio.gather(run_a(), run_b())
+
+    assert events == ["load", "a_running", "save", "load", "b_running", "save"]
+
+
 # --- the snapshot itself ---------------------------------------------------
 
 

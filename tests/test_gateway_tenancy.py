@@ -24,10 +24,10 @@ def gw(tmp_path, monkeypatch):
     for var in ("BONNET_IDENTITIES_DB", "BONNET_IDENTITY", "BONNET_URL", "BONNET_VERIFY_TLS"):
         monkeypatch.delenv(var, raising=False)
     tenancy.reset_store_cache()
-    needs_module.invalidate()
+    needs_module._cache.clear()
     yield tmp_path / "gw"
     tenancy.reset_store_cache()
-    needs_module.invalidate()
+    needs_module._cache.clear()
 
 
 def _as_tenant(name: str):
