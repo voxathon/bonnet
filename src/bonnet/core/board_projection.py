@@ -11,6 +11,7 @@ Normal article queries use only this bounded database.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import threading
@@ -160,6 +161,33 @@ class BoardProjection:
         with self._lock:
             self._conn.close()
 
+    @contextlib.contextmanager
+    def _transaction(self):
+        """BEGIN IMMEDIATE ... COMMIT, rolling back and re-raising on failure.
+
+        `isolation_level=None` turns off sqlite3's implicit transactions, so
+        every write here brackets itself explicitly. The connection is shared
+        across threads (`net/firehose_http_server.py` dispatches through
+        `asyncio.to_thread`), which is why the bracket is IMMEDIATE and why
+        every caller holds `self._lock` around it.
+
+        An early `return` inside the block is a normal exit and therefore
+        commits — the cross-origin short-circuits in the apply_* methods
+        below rely on that.
+
+        Catches BaseException, not Exception: a cancellation or KeyboardInterrupt
+        arriving mid-write would otherwise leave the transaction open on a
+        connection every other caller shares.
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        else:
+            self._conn.execute("COMMIT")
+
     def _init_schema(self) -> None:
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS articles (
@@ -275,8 +303,7 @@ class BoardProjection:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 subject = rec.metadata.get_text(1) or ""
                 tags_list = rec.metadata.get_text_list(2) or []
                 options_list = rec.metadata.get_text_list(3) or []
@@ -335,21 +362,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_cancel(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -364,21 +385,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_restore(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -393,21 +408,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_purge(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -421,21 +430,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_pin(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 priority = rec.metadata.get_i64(1) or 0
@@ -454,21 +457,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_unpin(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -482,21 +479,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_thread_close(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -510,21 +501,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_thread_reopen(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -538,24 +523,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_unknown(self, rec: Record) -> None:
         """Record an unknown kind as applied (no projection effect)."""
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     # ------------------------------------------------------------------
     # Pending controls
@@ -1094,16 +1070,11 @@ class BoardProjection:
     def clear(self) -> None:
         """Delete all projection data for a full rebuild."""
         with self._lock:
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 self._conn.execute("DELETE FROM articles")
                 self._conn.execute("DELETE FROM pending_controls")
                 self._conn.execute("DELETE FROM applied_events")
                 self._conn.execute("DELETE FROM projection_checkpoint")
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def update_body_state(self, origin: str, board: str, article_num: int, state: str) -> None:
         """Update body availability state for an article."""
