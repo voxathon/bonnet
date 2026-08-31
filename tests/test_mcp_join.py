@@ -21,7 +21,7 @@ from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
 @pytest.fixture
 def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
     """Route tools._make_client at the in-process server, on a temp store."""
-    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("BONNET_IDENTITIES_DB", str(tmp_path / "identities.db"))
     monkeypatch.delenv("BONNET_IDENTITY", raising=False)
     monkeypatch.delenv("BONNET_URL", raising=False)

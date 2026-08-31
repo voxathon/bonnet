@@ -37,8 +37,7 @@ dev = [
 ]
 
 [project.scripts]
-bonnet-server = "bonnet.app.main:main"
-bonnet-gateway = "bonnet.gateway.server:run"
+bonnet = "bonnet.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bonnet"]

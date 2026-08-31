@@ -542,13 +542,13 @@ host = "127.0.0.1"
 
 
 # ---------------------------------------------------------------------------
-# BONNET_HOME storage-path fallback
+# BONNET_SERVER_HOME storage-path fallback
 # ---------------------------------------------------------------------------
 
 
-def test_bonnet_home_used_when_storage_paths_unset(tmp_path, monkeypatch):
+def test_bonnet_server_home_used_when_storage_paths_unset(tmp_path, monkeypatch):
     home = str(tmp_path / "home")
-    monkeypatch.setenv("BONNET_HOME", home)
+    monkeypatch.setenv("BONNET_SERVER_HOME", home)
     path = _write_config(tmp_path, '[server]\norigin = "bbs.test"\n')
     c = FirehoseConfig.load(path)
     assert c.data_dir == os.path.join(home, "data")
@@ -556,9 +556,9 @@ def test_bonnet_home_used_when_storage_paths_unset(tmp_path, monkeypatch):
     assert c.events_bodies_dir == os.path.join(home, "event_bodies")
 
 
-def test_explicit_config_storage_paths_win_over_bonnet_home(tmp_path, monkeypatch):
+def test_explicit_config_storage_paths_win_over_bonnet_server_home(tmp_path, monkeypatch):
     home = str(tmp_path / "home")
-    monkeypatch.setenv("BONNET_HOME", home)
+    monkeypatch.setenv("BONNET_SERVER_HOME", home)
     explicit_data_dir = str(tmp_path / "custom_data")
     path = _write_config(
         tmp_path,
@@ -570,19 +570,28 @@ data_dir = "{explicit_data_dir.replace(os.sep, "/")}"
     )
     c = FirehoseConfig.load(path)
     assert c.data_dir == explicit_data_dir.replace(os.sep, "/")
-    # boards_dir/events_bodies_dir were left unset, so BONNET_HOME still
-    # applies to those independently of the explicit data_dir override.
+    # boards_dir/events_bodies_dir were left unset, so BONNET_SERVER_HOME
+    # still applies to those independently of the explicit data_dir override.
     assert c.boards_dir == os.path.join(home, "boards")
     assert c.events_bodies_dir == os.path.join(home, "event_bodies")
 
 
-def test_storage_paths_default_without_bonnet_home(tmp_path, monkeypatch):
-    monkeypatch.delenv("BONNET_HOME", raising=False)
+def test_storage_paths_default_to_the_per_user_dir_without_bonnet_server_home(
+    tmp_path, monkeypatch
+):
+    """No more CWD-relative fallback — the per-user directory (core.home) is
+    always the default now, matching the gateway's existing model."""
+    monkeypatch.delenv("BONNET_SERVER_HOME", raising=False)
+    monkeypatch.setattr("platformdirs.user_config_dir", lambda *a, **k: str(tmp_path / "cfg"))
+    monkeypatch.setattr("platformdirs.user_data_dir", lambda *a, **k: str(tmp_path / "data-root"))
     path = _write_config(tmp_path, '[server]\norigin = "bbs.test"\n')
+
     c = FirehoseConfig.load(path)
-    assert c.data_dir == "./data"
-    assert c.boards_dir == "./boards"
-    assert c.events_bodies_dir == "./event_bodies"
+
+    expected_home = str(tmp_path / "data-root" / "server")
+    assert c.data_dir == os.path.join(expected_home, "data")
+    assert c.boards_dir == os.path.join(expected_home, "boards")
+    assert c.events_bodies_dir == os.path.join(expected_home, "event_bodies")
 
 
 # ---------------------------------------------------------------------------

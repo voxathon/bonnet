@@ -64,7 +64,7 @@ def _route_at(app, monkeypatch, base_url: str = REMOTE):
 
 @pytest.fixture
 def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
-    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "gw"))
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(tmp_path / "gw"))
     for var in ("BONNET_IDENTITIES_DB", "BONNET_IDENTITY", "BONNET_URL", "BONNET_GATING"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.delenv("BONNET_PIN_PROMPT", raising=False)

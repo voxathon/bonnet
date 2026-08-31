@@ -77,7 +77,7 @@ def gw(http_gateway, server_stack, tmp_path, monkeypatch):  # noqa: F811
     tools._make_client reaches it — the requests are real HTTP, the origin
     behind them is the real ASGI stack.
     """
-    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "gw"))
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(tmp_path / "gw"))
     for var in ("BONNET_IDENTITIES_DB", "BONNET_IDENTITY", "BONNET_URL", "BONNET_GATING"):
         monkeypatch.delenv(var, raising=False)
     tenancy.reset_store_cache()

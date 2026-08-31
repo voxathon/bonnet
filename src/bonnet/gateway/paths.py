@@ -7,7 +7,7 @@ processes — pinned origin keys, joined origins, identities.
 
 Layout::
 
-    <gateway dir>/                 BONNET_GATEWAY_DIR, else the per-user data dir
+    <gateway dir>/                 BONNET_GATEWAY_HOME, else the per-user data dir
       gateway.toml                 http mode only
       registry.db                  tenants and their hashed API keys
       tenants/
@@ -35,7 +35,7 @@ from __future__ import annotations
 import contextvars
 import os
 
-import platformdirs
+from bonnet.core.home import resolve_home
 
 #: The tenant a stdio gateway is, and the one a single-tenant deployment uses.
 DEFAULT_TENANT = "default"
@@ -59,9 +59,7 @@ current_tenant: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 def gateway_dir() -> str:
     """Directory holding all of this gateway's durable state."""
-    return os.environ.get("BONNET_GATEWAY_DIR") or platformdirs.user_data_dir(
-        "bonnet", appauthor=False
-    )
+    return resolve_home("gateway", "BONNET_GATEWAY_HOME")
 
 
 def registry_db_path() -> str:

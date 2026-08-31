@@ -8,10 +8,10 @@ import subprocess
 import sys
 import tomllib
 
-from bonnet import __version__
 from bonnet.app.server import BonnetServer
 from bonnet.core.acl import ACLError
 from bonnet.core.config import FirehoseConfig
+from bonnet.core.home import resolve_home, set_home
 from bonnet.core.logging import init_logging
 from bonnet.core.tlsutil import OpenSSLNotFoundError, generate_self_signed_cert
 
@@ -35,13 +35,13 @@ def _print_next_steps(config_path: str, tls_enabled: bool) -> None:
     print()
     print("Next steps:")
     print("  1. Start the server:")
-    print(f"       uv run bonnet-server --config {config_path}")
+    print(f"       uv run bonnet server --config {config_path}")
     print(f"     It will listen on {scheme}://127.0.0.1:2272 and print its own public key.")
     print("  2. The server's REPL (the 'bonnet>' prompt after startup) is already an")
     print("     administrator - no key setup needed for local use.")
-    print("  3. To connect an agent, point an MCP host at bonnet-gateway;")
+    print("  3. To connect an agent, point an MCP host at `bonnet gateway`;")
     print("     it speaks stdio, so there is no port to configure:")
-    print('       {"mcpServers": {"bonnet": {"command": "bonnet-gateway"}}}')
+    print('       {"mcpServers": {"bonnet": {"command": "bonnet", "args": ["gateway"]}}}')
     print(f'     Then, from the agent: connect("{scheme}://localhost:2272")')
     print('     followed by: register("<name>")')
     print("  4. To let that identity administer this server, put the pubkey register")
@@ -65,7 +65,7 @@ def _load_and_validate_config(args) -> FirehoseConfig:
         config = FirehoseConfig.load(args.config)
     except FileNotFoundError:
         print(f"error: config file not found: {args.config}", file=sys.stderr)
-        print("run 'bonnet-server --create-config' to generate a sample", file=sys.stderr)
+        print("run 'bonnet server --create-config' to generate a sample", file=sys.stderr)
         raise SystemExit(1)
     except tomllib.TOMLDecodeError as exc:
         print(f"error: could not parse {args.config}: {exc}", file=sys.stderr)
@@ -90,9 +90,18 @@ def _load_and_validate_config(args) -> FirehoseConfig:
 
 
 def main(argv: list[str] | None = None):
-    parser = argparse.ArgumentParser(description="Bonnet server")
-    parser.add_argument("--version", action="version", version=f"bonnet-server {__version__}")
-    parser.add_argument("--config", default="config.toml", help="Path to config file")
+    parser = argparse.ArgumentParser(prog="bonnet server", description="Bonnet server")
+    parser.add_argument(
+        "--dir",
+        default=None,
+        help=(
+            "This server's home directory (config.toml, and data/boards/event_bodies "
+            "defaults). Remembered for future runs — see BONNET_SERVER_HOME below."
+        ),
+    )
+    parser.add_argument(
+        "--config", default=None, help="Path to config file (default: <home>/config.toml)"
+    )
     parser.add_argument("--port", type=int, default=None, help="Override listen port")
     parser.add_argument("--host", default=None, help="Override bind host")
     parser.add_argument("--cert", default=None, help="TLS certificate path")
@@ -128,6 +137,12 @@ def main(argv: list[str] | None = None):
         help="Validate the config file (including ACL rules and peers) and exit, without starting the server",
     )
     args = parser.parse_args(argv)
+
+    if args.dir:
+        set_home("server", args.dir)
+    server_home = resolve_home("server", "BONNET_SERVER_HOME")
+    if args.config is None:
+        args.config = os.path.join(server_home, "config.toml")
 
     if args.init:
         tls_paths = None
@@ -199,8 +214,7 @@ def main(argv: list[str] | None = None):
             print(f"  {len(config.unknown_keys)} unrecognized key(s) ignored (see warnings above)")
         return
 
-    bonnet_home = os.environ.get("BONNET_HOME")
-    log_dir = os.path.join(bonnet_home, "logs") if bonnet_home else None
+    log_dir = os.path.join(server_home, "logs")
     try:
         init_logging(log_dir)
     except OSError as exc:
@@ -208,7 +222,7 @@ def main(argv: list[str] | None = None):
         # instead of either crashing or silently running with no logs.
         print(
             f"warning: could not initialize file logging at "
-            f"'{log_dir or './logs'}': {exc}. Continuing without file logs.",
+            f"'{log_dir}': {exc}. Continuing without file logs.",
             file=sys.stderr,
         )
 

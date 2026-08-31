@@ -27,7 +27,7 @@ class FakeRequest:
 @pytest.fixture
 def gw(tmp_path, monkeypatch):
     """An http-mode gateway with one enabled tenant, "alice"."""
-    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "gw"))
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(tmp_path / "gw"))
     for var in ("BONNET_IDENTITIES_DB", "BONNET_IDENTITY", "BONNET_URL", "BONNET_GATING"):
         monkeypatch.delenv(var, raising=False)
     tenancy.reset_store_cache()

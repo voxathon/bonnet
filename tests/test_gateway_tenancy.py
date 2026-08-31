@@ -20,7 +20,7 @@ from bonnet.net.firehose_models import Permissions
 @pytest.fixture
 def gw(tmp_path, monkeypatch):
     """An empty gateway directory, with the environment neutralised."""
-    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "gw"))
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(tmp_path / "gw"))
     for var in ("BONNET_IDENTITIES_DB", "BONNET_IDENTITY", "BONNET_URL", "BONNET_VERIFY_TLS"):
         monkeypatch.delenv(var, raising=False)
     tenancy.reset_store_cache()

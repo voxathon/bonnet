@@ -15,7 +15,7 @@ from bonnet.gateway.server import run as gateway_run
 
 @pytest.fixture
 def gw(tmp_path, monkeypatch):
-    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "gw"))
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(tmp_path / "gw"))
     tenancy.reset_store_cache()
     tenancy.reset_registry_cache()
     yield tmp_path / "gw"
@@ -250,3 +250,32 @@ def test_cli_key_revoke_round_trip(gw, capsys):
     _, out, _ = _cli(capsys, "key", "list", "alice")
     assert "revoked" in out
     assert out.count("live") == 1
+
+
+# --- --dir --------------------------------------------------------------
+
+
+def test_dir_flag_relocates_state_and_persists(tmp_path, capsys, monkeypatch):
+    """--dir sets this run's directory *and* remembers it — a later call with
+    neither --dir nor $BONNET_GATEWAY_HOME must resolve to the same place."""
+    monkeypatch.delenv("BONNET_GATEWAY_HOME", raising=False)
+    monkeypatch.setattr("platformdirs.user_config_dir", lambda *a, **k: str(tmp_path / "cfg"))
+    monkeypatch.setattr("platformdirs.user_data_dir", lambda *a, **k: str(tmp_path / "data"))
+    chosen = tmp_path / "chosen-gw"
+    tenancy.reset_registry_cache()
+    tenancy.reset_store_cache()
+
+    code, out, _ = _cli(capsys, "--dir", str(chosen), "tenant", "add", "alice")
+    assert code == 0
+    assert (chosen / "registry.db").exists()
+
+    tenancy.reset_registry_cache()
+    tenancy.reset_store_cache()
+
+    # No --dir this time: resolves via the pointer file the first call wrote.
+    code, out, _ = _cli(capsys, "tenant", "list")
+    assert code == 0
+    assert "alice" in out
+
+    tenancy.reset_registry_cache()
+    tenancy.reset_store_cache()

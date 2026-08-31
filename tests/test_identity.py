@@ -63,7 +63,7 @@ def test_identity_store_env_var_path(tmp_path, monkeypatch):
 
 def test_identity_store_defaults_into_the_tenant_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("BONNET_IDENTITIES_DB", raising=False)
-    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "gw"))
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(tmp_path / "gw"))
 
     tenancy.reset_store_cache()
     try:
@@ -84,7 +84,7 @@ def test_identities_db_override_is_ignored_for_other_tenants(tmp_path, monkeypat
     """
     override = str(tmp_path / "legacy" / "identities.db")
     monkeypatch.setenv("BONNET_IDENTITIES_DB", override)
-    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "gw"))
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(tmp_path / "gw"))
 
     tenancy.reset_store_cache()
     token = tenancy.current_tenant.set("alice")

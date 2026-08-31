@@ -37,7 +37,7 @@ class IdentityStore:
     def default_db_path() -> str:
         """The current tenant's identity store.
 
-        Not the current working directory: bonnet-gateway is typically launched
+        Not the current working directory: `bonnet gateway` is typically launched
         by an agent host (IDE, orchestrator, systemd unit) that picks its own
         CWD, not the human operator. A CWD-relative default would silently
         spawn a fresh, empty identity store — and orphan the agent's existing
@@ -46,7 +46,7 @@ class IdentityStore:
         directory.
 
         Sits in the tenant's own directory beside its joined origins and
-        pinned keys, so BONNET_GATEWAY_DIR relocates all of a gateway's
+        pinned keys, so BONNET_GATEWAY_HOME relocates all of a gateway's
         durable state together. BONNET_IDENTITIES_DB still overrides this
         file alone, for the default tenant only — see `paths`.
         """

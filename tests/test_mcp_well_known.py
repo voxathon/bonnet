@@ -1,4 +1,4 @@
-"""Tests for the bonnet-gateway discovery proxy endpoint sanitization."""
+"""Tests for the `bonnet gateway` discovery proxy endpoint sanitization."""
 
 import json
 

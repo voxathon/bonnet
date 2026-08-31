@@ -65,7 +65,7 @@ READ_ONLY = {
 @pytest.fixture
 def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
     """A tools module wired to the in-process origin, with state isolated."""
-    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(tmp_path / "state"))
     for var in ("BONNET_IDENTITY", "BONNET_URL", "BONNET_GATING"):
         monkeypatch.delenv(var, raising=False)
 
