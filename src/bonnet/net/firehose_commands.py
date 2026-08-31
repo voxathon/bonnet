@@ -687,8 +687,8 @@ class FirehoseCommandHandler:
         """
         offset = 0
         key_len, offset = _read_u8(data, offset)
-        culprit, offset = _read_bytes(data, offset, key_len, "culprit pubkey")
-        culprit = culprit or None
+        culprit_raw, offset = _read_bytes(data, offset, key_len, "culprit pubkey")
+        culprit = culprit_raw or None
         limit, offset = _read_u16(data, offset)
         page_offset, offset = _read_u16(data, offset)
 

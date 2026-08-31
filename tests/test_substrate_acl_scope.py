@@ -13,8 +13,6 @@ be board-filtered.
 
 import struct
 
-import pytest
-
 from bonnet.core.acl import ACLRule, PrincipalMatcher
 from bonnet.core.record import (
     Intent,
@@ -51,7 +49,7 @@ BODY = b"board-scoped body bytes"
 REPORT_REASON = b"why this article is bad"
 
 
-def _deny_reads_on_secret(stack):
+def _deny_reads_on_secret(stack):  # noqa: F811
     """Everything else stays granted; only the board dimension is withdrawn."""
     stack["acl"].add_rule(
         ACLRule(
@@ -63,7 +61,7 @@ def _deny_reads_on_secret(stack):
     )
 
 
-def _publish_article(stack):
+def _publish_article(stack):  # noqa: F811
     intent = Intent(
         event_id=_rid(1),
         kind="bonnet.article",
@@ -80,7 +78,7 @@ def _publish_article(stack):
     return intent
 
 
-def _publish_report(stack):
+def _publish_report(stack):  # noqa: F811
     """A non-article kind carrying a board. Its body lands in the event store."""
     intent = Intent(
         event_id=_rid(3),
@@ -106,7 +104,7 @@ def _publish_report(stack):
 # ---------------------------------------------------------------------------
 
 
-def test_article_get_is_refused_on_a_barred_board(stack):
+def test_article_get_is_refused_on_a_barred_board(stack):  # noqa: F811
     _publish_article(stack)
     _deny_reads_on_secret(stack)
 
@@ -116,7 +114,7 @@ def test_article_get_is_refused_on_a_barred_board(stack):
     assert resp[0] == 0x01
 
 
-def test_article_body_is_refused_on_a_barred_board(stack):
+def test_article_body_is_refused_on_a_barred_board(stack):  # noqa: F811
     _publish_article(stack)
     _deny_reads_on_secret(stack)
 
@@ -131,7 +129,7 @@ def test_article_body_is_refused_on_a_barred_board(stack):
 # ---------------------------------------------------------------------------
 
 
-def test_event_get_returns_the_barred_boards_record_metadata(stack):
+def test_event_get_returns_the_barred_boards_record_metadata(stack):  # noqa: F811
     """Everything about the article except its body bytes."""
     intent = _publish_article(stack)
     _deny_reads_on_secret(stack)
@@ -149,7 +147,7 @@ def test_event_get_returns_the_barred_boards_record_metadata(stack):
     assert rec.body_size == len(BODY)
 
 
-def test_event_range_walks_the_barred_board(stack):
+def test_event_range_walks_the_barred_board(stack):  # noqa: F811
     _publish_article(stack)
     _deny_reads_on_secret(stack)
 
@@ -166,7 +164,7 @@ def test_event_range_walks_the_barred_board(stack):
     assert rec.metadata.get_text(1) == SUBJECT
 
 
-def test_event_body_returns_non_article_bodies_on_a_barred_board(stack):
+def test_event_body_returns_non_article_bodies_on_a_barred_board(stack):  # noqa: F811
     """Report and punishment reasons are event bodies, and are reachable."""
     _publish_article(stack)
     report = _publish_report(stack)
@@ -179,7 +177,7 @@ def test_event_body_returns_non_article_bodies_on_a_barred_board(stack):
     assert resp[5 : 5 + body_len] == REPORT_REASON
 
 
-def test_event_body_does_not_reach_article_bodies(stack):
+def test_event_body_does_not_reach_article_bodies(stack):  # noqa: F811
     """The one thing the substrate cannot reach.
 
     Article bodies are staged into the per-board store by
@@ -202,7 +200,7 @@ def test_event_body_does_not_reach_article_bodies(stack):
 # ---------------------------------------------------------------------------
 
 
-def _permissions(stack, board):
+def _permissions(stack, board):  # noqa: F811
     resp = stack["handler"].handle(
         bytes([OP_PERMISSIONS]) + _enc_text16(board), _user_ctx(ACTOR)
     )
@@ -219,7 +217,7 @@ def _permissions(stack, board):
     return names
 
 
-def test_permissions_matches_enforcement_for_both_opcode_classes(stack):
+def test_permissions_matches_enforcement_for_both_opcode_classes(stack):  # noqa: F811
     """The introspection answer and the enforced answer must agree.
 
     PERMISSIONS used to scope *every* command check to the requested board,
@@ -246,7 +244,7 @@ def test_permissions_matches_enforcement_for_both_opcode_classes(stack):
     assert stack["handler"].handle(req, _user_ctx(ACTOR))[0] == 0x00
 
 
-def test_permissions_still_scopes_the_board_dimension_where_it_applies(stack):
+def test_permissions_still_scopes_the_board_dimension_where_it_applies(stack):  # noqa: F811
     """The unscoped substrate must not leak into the board-scoped answers."""
     _publish_article(stack)
     _deny_reads_on_secret(stack)
