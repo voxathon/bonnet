@@ -1,6 +1,7 @@
 """Tests for the logging module lifecycle (init, close, idempotency)."""
 
 import os
+import time
 
 from bonnet.core.logging import (
     close_logging,
@@ -8,6 +9,26 @@ from bonnet.core.logging import (
     init_logging,
     log_msg,
 )
+
+
+def _read_text_with_retry(path: str, attempts: int = 20, delay: float = 0.05) -> str:
+    """Read a just-closed file, tolerating Windows CI's momentary AV/indexer lock.
+
+    A file handle closed on the previous line can still be briefly invisible
+    to a fresh open() on GitHub's windows-latest runners (Defender/Search
+    Indexer holding it for a beat) even though nothing in this process still
+    has it open. Retry instead of asserting on a race we don't control.
+    """
+    last_error: OSError | None = None
+    for _ in range(attempts):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError as e:
+            last_error = e
+            time.sleep(delay)
+    assert last_error is not None
+    raise last_error
 
 
 def test_init_creates_log_file_and_close_closes_it(tmp_path):
@@ -22,8 +43,7 @@ def test_init_creates_log_file_and_close_closes_it(tmp_path):
         close_logging()
 
     assert get_log_path() is None
-    with open(os.path.join(str(log_dir), os.path.basename(path)), encoding="utf-8") as f:
-        content = f.read()
+    content = _read_text_with_retry(os.path.join(str(log_dir), os.path.basename(path)))
     assert "shutdown-marker-12345" in content
 
 

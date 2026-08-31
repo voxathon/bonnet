@@ -92,9 +92,7 @@ def _publish_report(stack):  # noqa: F811
         body_hash=compute_body_hash(REPORT_REASON),
         body_size=len(REPORT_REASON),
     )
-    resp = stack["handler"].handle(
-        _publish_request(intent, ACTOR, REPORT_REASON), _user_ctx(ACTOR)
-    )
+    resp = stack["handler"].handle(_publish_request(intent, ACTOR, REPORT_REASON), _user_ctx(ACTOR))
     assert resp[0] == 0x00, resp
     return intent
 
@@ -201,9 +199,7 @@ def test_event_body_does_not_reach_article_bodies(stack):  # noqa: F811
 
 
 def _permissions(stack, board):  # noqa: F811
-    resp = stack["handler"].handle(
-        bytes([OP_PERMISSIONS]) + _enc_text16(board), _user_ctx(ACTOR)
-    )
+    resp = stack["handler"].handle(bytes([OP_PERMISSIONS]) + _enc_text16(board), _user_ctx(ACTOR))
     assert resp[0] == 0x00
     payload = resp[1:]
     offset = 0
