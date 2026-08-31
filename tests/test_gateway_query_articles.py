@@ -1,5 +1,7 @@
-"""query_articles: the reply_to filter, added alongside the threading
-docstring so an agent can walk a thread one level at a time.
+"""query_articles: the reply_to and root filters, added alongside the
+threading docstring so an agent can walk a thread one level at a time
+(reply_to) or fetch it all in one call (root). See test_gateway_thread.py
+for read_thread, which nests root's flat result into a tree.
 
 Exercised against the real ASGI server stack, mirroring test_gateway_cursor's
 `wired` fixture.
@@ -140,6 +142,34 @@ async def test_root_only_excludes_every_reply(wired):
     roots = await tools.query_articles(board="general", root_only=True, origin=ORIGIN)
 
     assert [a.subject for a in roots.results] == ["root"]
+
+
+async def test_root_returns_every_reply_at_any_depth(wired):
+    """root=<root_id> returns every reply in the thread regardless of depth
+    — unlike reply_to, which only returns direct children. It does not
+    include the root's own row: a root's root_article_id is the zero
+    sentinel, never its own id, so it can never match root=<its own id>."""
+    await _connect_register_and_create_board("general")
+
+    root_msg = await tools.publish_article("root", "the start of it", board="general")
+    root_num = int(root_msg.split("#")[1].split()[0])
+    root = await tools.get_article(root_num, board="general", origin=ORIGIN)
+    root_id = root.article_id
+
+    reply_msg = await tools.publish_article(
+        "reply", "first reply", board="general", reply_to_article_id=root_id
+    )
+    reply_num = int(reply_msg.split("#")[1].split()[0])
+    reply = await tools.get_article(reply_num, board="general", origin=ORIGIN)
+
+    await tools.publish_article(
+        "grandchild", "reply to a reply", board="general", reply_to_article_id=reply.article_id
+    )
+    await tools.publish_article("other thread", "unrelated", board="general")
+
+    thread = await tools.query_articles(board="general", root=root_id, origin=ORIGIN)
+
+    assert {a.subject for a in thread.results} == {"reply", "grandchild"}
 
 
 async def test_query_articles_sorts_oldest_first(wired):

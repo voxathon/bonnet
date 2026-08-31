@@ -932,7 +932,7 @@ class BoardProjection:
             field_id: 0x01=author_pubkey, 0x02=author_username,
                       0x03=author_registrar, 0x04=tags, 0x05=created_at,
                       0x06=visibility, 0x07=thread_root, 0x08=reply_to,
-                      0x09=pin_state
+                      0x09=pin_state, 0x0A=root_article_id
             operator: 0x01=EQ, 0x02=NE, 0x03=GT, 0x04=LT, 0x05=LIKE, 0x06=IN
             value: bytes, str, int, or bool depending on field
 
@@ -1031,6 +1031,11 @@ class BoardProjection:
                         where_parts.append(f"{col} != 'unpinned'")
                     else:
                         where_parts.append(f"{col} = 'unpinned'")
+            elif field_id == 0x0A:
+                col = "root_article_id"
+                if op == 0x01:
+                    where_parts.append(f"{col}=?")
+                    params.append(value)
 
         if not has_visibility_filter:
             where_parts.append("visibility = 'active'")
