@@ -3,8 +3,10 @@
 Reference material for review agents working on this codebase.
 Written 2026-08-31, verified against `staging` at `e340d1d`.
 
-Line numbers drift. Re-verify any citation below against the current tree
-before acting on it — including the ones in this file.
+Line numbers drift, and several in earlier revisions of this file had
+already gone stale. Citations below name the code by grep-able text wherever
+one exists. Re-verify any citation against the current tree before acting on
+it — including the ones in this file.
 
 ---
 
@@ -24,15 +26,20 @@ already got wrong. Do not spend a finding on any of these.
    publishing it is honesty, not leakage.
 
    Related: do **not** propose collapsing this to "one uniform code path."
-   Signature *verification* is uniform; *policy* branches, and there are four
-   real `is_anonymous` branches at `firehose_http_server.py:300-333`. A
-   reviewer who claims otherwise gets grepped and disbelieved.
+   Signature *verification* is uniform; *policy* branches: replay-ledger
+   admission, rate-limit keying, and principal resolution each branch on
+   `is_anonymous` in `firehose_http_server.py`. Confirm with
+   `grep -n is_anonymous src/bonnet/net/firehose_http_server.py` rather than
+   from a line number here. A reviewer who claims otherwise gets grepped and
+   disbelieved.
 
 3. **Skipping replay checks for anonymous requests is safe.** It is safe
-   because of the idempotency check at `core/firehose.py:291` — a replayed
-   request is byte-identical by definition and lands there as a no-op — not
-   because anonymous is read-only. Anonymous *writes* are a legitimate
-   operator choice.
+   because of the idempotency check in `core/firehose.py` — the
+   `SELECT encoded_record FROM events WHERE origin=? AND event_id=?` whose
+   hit re-encodes the stored intent and returns the existing record when the
+   bytes match. A replayed request is byte-identical by definition and lands
+   there as a no-op. It is *not* safe because anonymous is read-only:
+   anonymous writes are a legitimate operator choice.
 
 4. **Mechanism, not policy.** The relay is a neutral transport. It does not
    adjudicate content and does not restrict operator choices. Do not propose
@@ -44,6 +51,11 @@ already got wrong. Do not spend a finding on any of these.
    has drifted: its line numbers are stale and at least two of its eight
    findings are already fixed. Re-verify anything you cite from it against
    current source first.
+
+   Note that `internal/` is gitignored (`.gitignore:33`). It is present in a
+   local working tree and absent from any clone or cloud checkout. If you
+   cannot see it, that is expected — work from the source and the tests, and
+   do not report the directory as missing.
 
 **If you get `--fix`:** every behavioral fix needs a regression test, and you
 must show the test failing without the fix. Do not combine a correctness fix
@@ -164,19 +176,25 @@ Mechanical. 14 of 45 `@mcp.tool` functions in `gateway/tools.py` are never
 named in `tests/`:
 
 ```
-purge_article    cancel_article   restore_article  supersede_article
+purge_article    restore_article  supersede_article
 pin_article      unpin_article    rotate_identity_key
 report           punish_warn      punish_ban       punish_permaban
 punish_revoke    acknowledge_punishment            my_punishments
 ```
 
-That is every destructive tool and every moderation tool.
+That is 13 of 45, and it is every moderation tool plus every destructive
+tool except `cancel_article`.
 
-Tests invoke tools by string name through `call_tool`, so this is a real
-coverage hole and not a naming artifact — verify that yourself before
-reporting it. Given the threat model in notebook §14 (agent-authored content
-arriving over federation), the moderation surface being the untested one is
-the wrong way round.
+`cancel_article` is *not* in the list: `tests/test_gateway_cursor.py` drives
+it three times, including a full publish → cancel → assert-cancelled
+round-trip. That matters beyond the one name, because it shows how tests
+reach these tools — **by attribute access on the tools module, not by string
+name through `call_tool`**. Grep for the bare identifier, both ways, before
+you believe any entry above is uncovered.
+
+Given the threat model in notebook §14 (agent-authored content arriving over
+federation), the moderation surface being the untested one is the wrong way
+round.
 
 **What to do:** confirm the list, then write the missing end-to-end tests,
 highest-consequence first: `purge_article`, `punish_permaban`,
@@ -205,9 +223,12 @@ statements inside one implicit transaction on the shared gateway connection.
 Answer with a test if the answer is yes.
 
 Cleanup while you are in there: the `BEGIN IMMEDIATE` / `try` / `ROLLBACK;
-raise` block is copy-pasted verbatim nine times in `core/board_projection.py`
-(lines 339, 368, 397, 425, 458, 486, 514, 542, 556) and again in
-`core/global_projections.py`. One context manager replaces all of it.
+raise` block is copy-pasted verbatim ten times in `core/board_projection.py`,
+nine more in `core/firehose.py`, and again in `core/global_projections.py`.
+One context manager replaces all of it. Enumerate the sites with
+`grep -rn "BEGIN IMMEDIATE" src/` — do not work from a line list, and do not
+stop at the run of adjacent ones: `board_projection.py` has an outlier near
+the top of the file and another past line 1000.
 
 ---
 
