@@ -12,6 +12,7 @@ import tomllib
 from dataclasses import dataclass
 
 from bonnet.core.acl import ACLEvaluator
+from bonnet.core.home import resolve_home
 
 
 @dataclass
@@ -397,22 +398,21 @@ class FirehoseConfig:
         tls = data.get("tls", {})
         sync = data.get("sync", {})
 
-        # BONNET_HOME only supplies a *default* for storage paths left unset
-        # in config.toml — an explicit config.toml value always wins, so a
-        # stray environment variable can't silently relocate a deliberately
-        # configured server's data.
-        bonnet_home = os.environ.get("BONNET_HOME")
+        # BONNET_SERVER_HOME (or the per-user default, see core.home) only
+        # supplies a *default* for storage paths left unset in config.toml —
+        # an explicit config.toml value always wins, so a stray environment
+        # variable can't silently relocate a deliberately configured server's
+        # data.
+        server_home = resolve_home("server", "BONNET_SERVER_HOME")
 
-        def _storage_default(subdir: str, fallback: str) -> str:
-            return os.path.join(bonnet_home, subdir) if bonnet_home else fallback
+        def _storage_default(subdir: str) -> str:
+            return os.path.join(server_home, subdir)
 
         origin = server.get("origin", "localhost")
         hostname = server.get("hostname", "")
-        data_dir = server.get("data_dir") or _storage_default("data", "./data")
-        boards_dir = server.get("boards_dir") or _storage_default("boards", "./boards")
-        events_bodies_dir = server.get("events_bodies_dir") or _storage_default(
-            "event_bodies", "./event_bodies"
-        )
+        data_dir = server.get("data_dir") or _storage_default("data")
+        boards_dir = server.get("boards_dir") or _storage_default("boards")
+        events_bodies_dir = server.get("events_bodies_dir") or _storage_default("event_bodies")
         port = server.get("port", 2272)
         admin_pubkey_hex = _resolve_admin_pubkey(server)
 
@@ -530,11 +530,9 @@ enabled = false
 [server]
 origin = "localhost"
 hostname = ""
-# Storage paths. Default to ./data, ./boards, ./event_bodies (relative to
-# the server's working directory) unless BONNET_HOME is set, in which case
-# they default to $BONNET_HOME/data, $BONNET_HOME/boards,
-# $BONNET_HOME/event_bodies. Uncomment to pin an explicit path regardless
-# of BONNET_HOME or working directory.
+# Storage paths. Default to data, boards, event_bodies under this server's
+# home directory ($BONNET_SERVER_HOME if set, else the OS per-user data dir —
+# see `bonnet server -h`). Uncomment to pin an explicit path regardless.
 # data_dir = "./data"
 # boards_dir = "./boards"
 # events_bodies_dir = "./event_bodies"
@@ -595,7 +593,7 @@ interval_seconds = 300
 # `anonymous`, so reads have to be granted to each class that needs them
 # rather than once to `anonymous`. Moderation
 # and admin access still need explicit rules. This lets the documented
-# first-run flow (run bonnet-gateway, call connect then
+# first-run flow (run bonnet gateway, call connect then
 # register, then publish_article / create_board) work without any editing;
 # the server's own identity is always its own admin regardless of
 # what's below (see OPERATOR_GUIDE.md "Becoming your own server's admin").

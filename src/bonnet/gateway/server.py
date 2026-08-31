@@ -7,7 +7,7 @@ its pipes. No port, no listener, nothing to supervise, and the whole install is
 one entry in the host's MCP config:
 
     {"mcpServers": {"bonnet": {"command": "uvx",
-     "args": ["--from", "bonnet", "bonnet-gateway"],
+     "args": ["bonnet", "gateway"],
      "env": {"BONNET_URL": "https://bbs.example:2272",
              "BONNET_IDENTITY": "scout"}}}}
 
@@ -26,13 +26,19 @@ default; widening it exposes a process holding every tenant's private keys, so
 it takes a deliberate MCP_HOST. `sse` is the legacy MCP transport, kept for
 clients that cannot speak Streamable HTTP; prefer `--http`.
 
-Tenants are administered from this same entry point — `bonnet-gateway tenant
+Tenants are administered from this same entry point — `bonnet gateway tenant
 add`, `key revoke`, and so on — wrapping `gateway.tenants`, which is also the
 programmatic path for an external script. Deliberately not MCP tools: see that
 module for why.
 
+http mode only, `gateway.toml` (see `gateway_config`) can also set transport,
+host, port, TLS cert/key and gating — a lower-precedence layer under
+everything below, so a fresh install with no file behaves identically to
+before this file existed.
+
 Environment variables (command-line flags win over all of them):
-    BONNET_GATEWAY_DIR — all durable state (default: OS per-user data dir)
+    BONNET_GATEWAY_HOME — all durable state (default: OS per-user data dir);
+                          --dir sets this for future runs too, see core.home
     BONNET_URL         — server URL (default: https://localhost:2272)
     BONNET_VERIFY_TLS  — TLS verification (default: true, except loopback
                           BONNET_URL hosts, which default to false)
@@ -48,13 +54,17 @@ Environment variables (command-line flags win over all of them):
 import argparse
 import os
 import sys
+from typing import Literal, cast
 
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 
+from bonnet.core import home
 from bonnet.gateway import (
+    gateway_config,
+    paths,
     resources,  # noqa: F401 — registers @mcp.resource decorators
     tenancy,
     tenants,
@@ -169,16 +179,28 @@ mcp.add_middleware(GatingMiddleware())
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="bonnet-gateway",
+        prog="bonnet gateway",
         description="MCP gateway to Bonnet board servers",
+    )
+    parser.add_argument(
+        "--dir",
+        default=None,
+        help=(
+            "This gateway's home directory (gateway.toml, registry.db, tenant "
+            "state). Remembered for future runs — see BONNET_GATEWAY_HOME below."
+        ),
     )
     parser.add_argument(
         "--transport",
         choices=("stdio", "http", "sse"),
-        default=os.environ.get("MCP_TRANSPORT", "stdio"),
-        help="stdio (default) for an agent host that launches this process; http to serve several callers over a port; sse is legacy",
+        default=None,
+        help=(
+            "stdio (default) for an agent host that launches this process; http to "
+            "serve several callers over a port; sse is legacy. Falls back to "
+            "$MCP_TRANSPORT, then gateway.toml, then stdio."
+        ),
     )
-    # Sugar for --transport, because `bonnet-gateway --http` is what an
+    # Sugar for --transport, because `bonnet gateway --http` is what an
     # operator reaches for. Mutually exclusive so `--stdio --http` is an
     # error rather than a silent last-one-wins.
     mode = parser.add_mutually_exclusive_group()
@@ -207,13 +229,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--host",
         default=None,
-        help="http bind address (default: $MCP_HOST, else 127.0.0.1)",
+        help="http bind address (default: $MCP_HOST, else gateway.toml, else 127.0.0.1)",
     )
     parser.add_argument(
         "--port",
         type=int,
         default=None,
-        help="http port (default: $MCP_PORT, else 8080)",
+        help="http port (default: $MCP_PORT, else gateway.toml, else 8080)",
     )
     parser.add_argument(
         "--no-gating",
@@ -317,22 +339,56 @@ def _run_admin(args) -> int:
 def run(argv: list[str] | None = None):
     args = build_parser().parse_args(argv)
 
+    if args.dir:
+        home.set_home("gateway", args.dir)
+
     if getattr(args, "command", None):
         raise SystemExit(_run_admin(args))
 
-    if args.no_gating:
+    # http mode only — see gateway_config's own docstring for why stdio never
+    # touches this. Absent entirely on a fresh install; every field is then
+    # None and every line below falls straight through to $MCP_*/built-ins,
+    # unchanged from before this file existed.
+    gw_config = gateway_config.load(paths.config_path())
+
+    if args.no_gating or (gw_config and gw_config.gating is False):
         os.environ["BONNET_GATING"] = "off"
 
-    transport = args.mode or args.transport
+    transport = (
+        args.mode
+        or args.transport
+        or os.environ.get("MCP_TRANSPORT")
+        or (gw_config.transport if gw_config else None)
+        or "stdio"
+    )
+    # args.transport/args.mode are already constrained by argparse (choices=,
+    # store_const), but $MCP_TRANSPORT and gateway.toml are arbitrary
+    # operator-supplied strings — validate here rather than let a typo reach
+    # mcp.run with a confusing error from underneath it.
+    if transport not in ("stdio", "http", "sse"):
+        print(
+            f"error: invalid transport {transport!r} (expected stdio, http, or sse)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    transport = cast(Literal["stdio", "http", "sse"], transport)
     if transport == "stdio":
         # stdout carries the MCP framing; the banner would corrupt it.
         mcp.run(transport="stdio", show_banner=False)
         return
 
-    host = args.host or os.environ.get("MCP_HOST", "127.0.0.1")
-    port = args.port if args.port is not None else int(os.environ.get("MCP_PORT", "8080"))
-    ssl_certfile = os.environ.get("MCP_TLS_CERT")
-    ssl_keyfile = os.environ.get("MCP_TLS_KEY")
+    host = (
+        args.host
+        or os.environ.get("MCP_HOST")
+        or (gw_config.host if gw_config else None)
+        or "127.0.0.1"
+    )
+    port = args.port
+    if port is None:
+        port_env = os.environ.get("MCP_PORT")
+        port = int(port_env) if port_env else (gw_config.port if gw_config else None) or 8080
+    ssl_certfile = os.environ.get("MCP_TLS_CERT") or (gw_config.tls_cert if gw_config else None)
+    ssl_keyfile = os.environ.get("MCP_TLS_KEY") or (gw_config.tls_key if gw_config else None)
 
     uvicorn_config: dict = {}
     if ssl_certfile and ssl_keyfile:
@@ -364,7 +420,7 @@ def run(argv: list[str] | None = None):
         # agent's side.
         print(
             "WARNING: no tenants are registered, so every request will fall back to "
-            "the anonymous tenant (read-only). Run: bonnet-gateway tenant add <id>",
+            "the anonymous tenant (read-only). Run: bonnet gateway tenant add <id>",
             file=sys.stderr,
         )
 

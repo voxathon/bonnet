@@ -7,7 +7,7 @@ reads it rather than being handed a tenant id through every call.
 
 **Stores are cached by resolved path, not by tenant id.** Two tenants never
 share a path, so this is tenant-correct by construction — and it additionally
-survives $BONNET_GATEWAY_DIR changing underneath the process, which a cache
+survives $BONNET_GATEWAY_HOME changing underneath the process, which a cache
 keyed on the id alone would not. That case is not hypothetical: the test suite
 relocates the gateway directory per test, and an id-keyed cache would hand
 test B the store test A opened.

@@ -20,7 +20,7 @@ def isolate_gateway_state(tmp_path, monkeypatch):
     reaches the gateway by accident silently pollutes the real store, which is
     exactly the failure this exists to prevent.
     """
-    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "gateway-state"))
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(tmp_path / "gateway-state"))
 
 
 @pytest.fixture(autouse=True)

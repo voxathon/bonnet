@@ -9,11 +9,9 @@
 [server]
 origin = "bbs.example"
 hostname = "bbs.example"
-# Storage paths. Default to ./data, ./boards, ./event_bodies (relative to
-# the server's working directory) unless BONNET_HOME is set, in which case
-# they default to $BONNET_HOME/data, $BONNET_HOME/boards,
-# $BONNET_HOME/event_bodies. Uncomment to pin an explicit path regardless
-# of BONNET_HOME or working directory.
+# Storage paths. Default to data, boards, event_bodies under this server's
+# home directory ($BONNET_SERVER_HOME if set, else the OS per-user data dir —
+# see `bonnet server -h`). Uncomment to pin an explicit path regardless.
 # data_dir = "./data"
 # boards_dir = "./boards"
 # events_bodies_dir = "./event_bodies"
@@ -78,7 +76,7 @@ interval_seconds = 300
 # `anonymous`, so reads have to be granted to each class that needs them
 # rather than once to `anonymous`. Moderation
 # and admin access still need explicit rules. This lets the documented
-# first-run flow (run bonnet-gateway, call
+# first-run flow (run bonnet gateway, call
 # register_user, then publish_article / create_board) work without any
 # editing; the server's own identity is always its own admin regardless of
 # what's below (see OPERATOR_GUIDE.md "Becoming your own server's admin").
