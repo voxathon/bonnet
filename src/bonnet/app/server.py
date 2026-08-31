@@ -326,6 +326,28 @@ class BonnetServer:
                     f"event {event_id.hex()[:16]}... (no matching record, age={int(age)}s)"
                 )
 
+    async def _sweep_staged_bodies_periodically(self, interval_seconds: int = 3600) -> None:
+        """Re-run the startup sweep for the life of the process.
+
+        Startup alone only covers crashes. A process that stays up accrues
+        orphans from every publish that failed after stage_article_body and
+        before the transaction resolved — the same window the startup sweep
+        exists for, just without the restart that used to be the only thing
+        clearing it.
+
+        Off the loop thread: the sweep walks the staging tree and queries the
+        firehose synchronously, the same reason firehose_http_server hands
+        command dispatch to asyncio.to_thread.
+        """
+        while True:
+            await asyncio.sleep(interval_seconds)
+            try:
+                await asyncio.to_thread(self._sweep_orphaned_staged_bodies)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log_msg(f"SWEEP: staged-body sweep failed: {type(e).__name__}: {e}")
+
     def _ensure_root_registered(self) -> None:
         """Publish a bonnet.user.register record for the server identity if not already present."""
         try:
@@ -513,6 +535,7 @@ class BonnetServer:
         self._uvicorn_server = server
 
         repl_task = asyncio.create_task(OperatorConsole(self).repl_loop())
+        sweep_task = asyncio.create_task(self._sweep_staged_bodies_periodically())
 
         for peer in self.config.peers:
             base_url = f"https://{peer.hostname}:{peer.port}"
@@ -523,11 +546,12 @@ class BonnetServer:
         try:
             await server.serve()
         finally:
-            repl_task.cancel()
-            try:
-                await repl_task
-            except asyncio.CancelledError:
-                pass
+            for task in (repl_task, sweep_task):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             await self.sync_manager.stop_all()
 
     def close(self) -> None:
