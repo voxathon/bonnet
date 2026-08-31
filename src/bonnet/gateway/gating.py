@@ -196,19 +196,6 @@ def _identity_missing() -> str | None:
     return None
 
 
-def missing_prerequisite() -> str | None:
-    """What this caller lacks to use every origin-facing tool, or None.
-
-    The combined answer — both an origin and an identity. Individual tools
-    need less: a read tool tagged NEEDS_ORIGIN alone works from
-    _origin_missing alone, since it can fall back to the anonymous
-    principal. Gating checks each tool's actual tags via _missing_for; this
-    stays as the aggregate "is this caller fully set up" answer other code
-    can ask for.
-    """
-    return _origin_missing() or _identity_missing()
-
-
 def _has_origin() -> bool:
     """Whether *this caller's context* currently has an active origin.
 
@@ -221,11 +208,6 @@ def _has_origin() -> bool:
 
     _ensure_origin_loaded()
     return current_origin_url.get() is not None
-
-
-def caller_is_ready() -> bool:
-    """True if the current caller can use every origin-facing tool."""
-    return missing_prerequisite() is None
 
 
 def _needs_origin(tool: Tool) -> bool:
