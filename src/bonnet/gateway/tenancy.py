@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextvars
 
+from bonnet.core.logging import log_msg
 from bonnet.gateway.identity import IdentityStore
 from bonnet.gateway.origins import OriginStore
 from bonnet.gateway.paths import (
@@ -138,8 +139,13 @@ def reset_store_cache() -> None:
     for store in stores:
         try:
             store.close()
-        except Exception:
-            pass
+        except Exception as e:
+            # Best-effort, but never silent. A cross-thread close raises
+            # ProgrammingError when check_same_thread is on, and swallowing
+            # that leaves the handle open on a directory the caller is about
+            # to delete — the exact failure this function exists to prevent,
+            # with nothing to show for it.
+            log_msg(f"TENANCY: closing {type(store).__name__} failed: {type(e).__name__}: {e}")
     _identity_stores.clear()
     _origin_stores.clear()
 
@@ -179,6 +185,6 @@ def reset_registry_cache() -> None:
     for registry in _registries.values():
         try:
             registry.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log_msg(f"TENANCY: closing Registry failed: {type(e).__name__}: {e}")
     _registries.clear()
