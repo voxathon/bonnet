@@ -24,6 +24,12 @@ from bonnet.core.record import (
     metadata_u64,
     sign_intent,
 )
+from bonnet.net.firehose_wire import (
+    ProtocolError,
+    _enc_text16,
+    _read_text16,
+    parse_response,
+)
 
 ROLE_FLAGS = {
     "admin": 0x01,
@@ -251,11 +257,12 @@ class OperatorConsole:
         return self.command_handler.handle(body, self.local_conn.to_context())
 
     def _parse_response_error(self, resp: bytes) -> str:
-        if resp[0] == 0x01:
-            code = struct.unpack(">H", resp[1:3])[0]
-            msg_len = struct.unpack(">H", resp[3:5])[0]
-            msg = resp[5 : 5 + msg_len].decode("utf-8", errors="replace")
-            return f"Error 0x{code:04x}: {msg}"
+        try:
+            parse_response(resp)
+        except ProtocolError as e:
+            if e.code is None:
+                return f"Malformed response: {e}"
+            return f"Error 0x{e.code:04x}: {e.detail}"
         return "Unknown error"
 
     def _sign_and_publish(
@@ -528,15 +535,6 @@ class OperatorConsole:
             return f"Revoked punishment {parts[1]}."
         return self._parse_response_error(resp)
 
-    def _enc_text16(self, s: str) -> bytes:
-        encoded = s.encode("utf-8")
-        return struct.pack(">H", len(encoded)) + encoded
-
-    def _read_text16(self, data: bytes, offset: int) -> tuple[str, int]:
-        n = struct.unpack(">H", data[offset : offset + 2])[0]
-        offset += 2
-        return data[offset : offset + n].decode("utf-8"), offset + n
-
     # ------------------------------------------------------------------
     # create-board (interactive)
     # ------------------------------------------------------------------
@@ -797,7 +795,7 @@ class OperatorConsole:
 
         from bonnet.net.firehose_commands import OP_BOARD_LIST
 
-        req = struct.pack(">B", OP_BOARD_LIST) + self._enc_text16(origin)
+        req = struct.pack(">B", OP_BOARD_LIST) + _enc_text16(origin)
         resp = self._local_handle(req)
 
         if resp[0] != 0x00:
@@ -808,13 +806,13 @@ class OperatorConsole:
         lines = []
         for _ in range(count):
             if aggregate:
-                board_origin, offset = self._read_text16(resp, offset)
-            name, offset = self._read_text16(resp, offset)
+                board_origin, offset = _read_text16(resp, offset)
+            name, offset = _read_text16(resp, offset)
             closed = resp[offset]
             offset += 1
             owner_len = resp[offset]
             offset += 1 + owner_len
-            display, offset = self._read_text16(resp, offset)
+            display, offset = _read_text16(resp, offset)
             status = " [closed]" if closed else ""
             if aggregate:
                 lines.append(f"  {board_origin}/{name}{status}  {display}")
@@ -859,8 +857,8 @@ class OperatorConsole:
         from bonnet.net.firehose_commands import OP_ARTICLE_GET
 
         req = struct.pack(">B", OP_ARTICLE_GET)
-        req += self._enc_text16(origin)
-        req += self._enc_text16(board)
+        req += _enc_text16(origin)
+        req += _enc_text16(board)
         req += struct.pack(">B", 0x01)  # by article_num
         req += struct.pack(">Q", article_num)
         req += struct.pack(">B", 1)  # include body
@@ -898,11 +896,11 @@ class OperatorConsole:
         offset += 1
         author_pubkey = data[offset : offset + ap_len].hex()
         offset += ap_len
-        author_username, offset = self._read_text16(data, offset)
-        author_registrar, offset = self._read_text16(data, offset)
-        subject, offset = self._read_text16(data, offset)
-        tags, offset = self._read_text16(data, offset)
-        content_type, offset = self._read_text16(data, offset)
+        author_username, offset = _read_text16(data, offset)
+        author_registrar, offset = _read_text16(data, offset)
+        subject, offset = _read_text16(data, offset)
+        tags, offset = _read_text16(data, offset)
+        content_type, offset = _read_text16(data, offset)
 
         root_len = data[offset]
         offset += 1
@@ -919,8 +917,8 @@ class OperatorConsole:
         replacement_id = data[offset : offset + 32].hex() if has_replacement else ""
         offset += 32 if has_replacement else 0
 
-        pin_state, offset = self._read_text16(data, offset)
-        thread_state, offset = self._read_text16(data, offset)
+        pin_state, offset = _read_text16(data, offset)
+        thread_state, offset = _read_text16(data, offset)
 
         body_len = struct.unpack(">I", data[offset : offset + 4])[0]
         offset += 4
@@ -1009,8 +1007,8 @@ class OperatorConsole:
         from bonnet.net.firehose_commands import OP_ARTICLE_LIST
 
         req = struct.pack(">B", OP_ARTICLE_LIST)
-        req += self._enc_text16(origin)
-        req += self._enc_text16(board)
+        req += _enc_text16(origin)
+        req += _enc_text16(board)
         req += struct.pack(">I", offset)
         req += struct.pack(">H", limit)
         req += struct.pack(">B", 0)
@@ -1024,7 +1022,7 @@ class OperatorConsole:
         lines = []
         for _ in range(count):
             if aggregate:
-                art_origin, offset = self._read_text16(resp, offset)
+                art_origin, offset = _read_text16(resp, offset)
             article_num = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             aid_len = resp[offset]
@@ -1043,11 +1041,11 @@ class OperatorConsole:
             offset += 8
             ap_len = resp[offset]
             offset += 1 + ap_len
-            author_username, offset = self._read_text16(resp, offset)
-            author_registrar, offset = self._read_text16(resp, offset)
-            subject, offset = self._read_text16(resp, offset)
-            tags, offset = self._read_text16(resp, offset)
-            content_type, offset = self._read_text16(resp, offset)
+            author_username, offset = _read_text16(resp, offset)
+            author_registrar, offset = _read_text16(resp, offset)
+            subject, offset = _read_text16(resp, offset)
+            tags, offset = _read_text16(resp, offset)
+            content_type, offset = _read_text16(resp, offset)
 
             root_id_len = resp[offset]
             offset += 1 + root_id_len
@@ -1057,8 +1055,8 @@ class OperatorConsole:
             offset += 1
             if has_replacement:
                 offset += 32
-            pin_state, offset = self._read_text16(resp, offset)
-            thread_state, offset = self._read_text16(resp, offset)
+            pin_state, offset = _read_text16(resp, offset)
+            thread_state, offset = _read_text16(resp, offset)
             body_len = struct.unpack(">I", resp[offset : offset + 4])[0]
             offset += 4 + body_len
 
@@ -1105,10 +1103,10 @@ class OperatorConsole:
         from bonnet.net.firehose_commands import OP_ARTICLE_SEARCH
 
         req = struct.pack(">B", OP_ARTICLE_SEARCH)
-        req += self._enc_text16(origin)
-        req += self._enc_text16(board)
-        req += self._enc_text16(query)
-        req += self._enc_text16("")  # no body search
+        req += _enc_text16(origin)
+        req += _enc_text16(board)
+        req += _enc_text16(query)
+        req += _enc_text16("")  # no body search
         req += struct.pack(">I", 0)
         req += struct.pack(">H", 50)
         req += struct.pack(">B", 0)
@@ -1124,7 +1122,7 @@ class OperatorConsole:
         lines = []
         for _ in range(count):
             if aggregate:
-                result_origin, offset = self._read_text16(resp, offset)
+                result_origin, offset = _read_text16(resp, offset)
             article_num = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             aid_len = resp[offset]
@@ -1139,7 +1137,7 @@ class OperatorConsole:
             offset += 8
             _body_avail = resp[offset]
             offset += 1
-            excerpt, offset = self._read_text16(resp, offset)
+            excerpt, offset = _read_text16(resp, offset)
 
             from datetime import datetime
 
@@ -1237,8 +1235,8 @@ class OperatorConsole:
                 return f"Unknown flag: {p}"
 
         req = struct.pack(">B", OP_ARTICLE_QUERY)
-        req += self._enc_text16(self.config.origin)
-        req += self._enc_text16(board)
+        req += _enc_text16(self.config.origin)
+        req += _enc_text16(board)
         req += struct.pack(">B", len(filters))
         for field_id, operator, value_type, value in filters:
             if isinstance(value, str):
@@ -1278,19 +1276,19 @@ class OperatorConsole:
             offset += 1
             author_pubkey = resp[offset : offset + ap_len]
             offset += ap_len
-            author_username, offset = self._read_text16(resp, offset)
-            author_registrar, offset = self._read_text16(resp, offset)
-            subject, offset = self._read_text16(resp, offset)
-            tags, offset = self._read_text16(resp, offset)
-            content_type, offset = self._read_text16(resp, offset)
+            author_username, offset = _read_text16(resp, offset)
+            author_registrar, offset = _read_text16(resp, offset)
+            subject, offset = _read_text16(resp, offset)
+            tags, offset = _read_text16(resp, offset)
+            content_type, offset = _read_text16(resp, offset)
             root_len = resp[offset]
             offset += 1 + root_len
             reply_len = resp[offset]
             offset += 1 + reply_len
             has_replacement = resp[offset]
             offset += 1 + (32 if has_replacement else 0)
-            pin_state, offset = self._read_text16(resp, offset)
-            thread_state, offset = self._read_text16(resp, offset)
+            pin_state, offset = _read_text16(resp, offset)
+            thread_state, offset = _read_text16(resp, offset)
 
             from datetime import datetime
 
@@ -1326,7 +1324,7 @@ class OperatorConsole:
 
         from bonnet.net.firehose_commands import OP_USER_LIST
 
-        req = struct.pack(">B", OP_USER_LIST) + self._enc_text16(origin) + struct.pack(">B", 0)
+        req = struct.pack(">B", OP_USER_LIST) + _enc_text16(origin) + struct.pack(">B", 0)
 
         resp = self._local_handle(req)
         if resp[0] != 0x00:
@@ -1336,12 +1334,12 @@ class OperatorConsole:
         offset = 3
         lines = []
         for _ in range(count):
-            _origin, offset = self._read_text16(resp, offset)
+            _origin, offset = _read_text16(resp, offset)
             pk_len = resp[offset]
             offset += 1
             pubkey = resp[offset : offset + pk_len].hex()
             offset += pk_len
-            username, offset = self._read_text16(resp, offset)
+            username, offset = _read_text16(resp, offset)
             flags = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             _reg_seq = struct.unpack(">Q", resp[offset : offset + 8])[0]
@@ -1404,7 +1402,7 @@ class OperatorConsole:
             offset += 32
             event_id = resp[offset : offset + 32].hex()
             offset += 32
-            origin, offset = self._read_text16(resp, offset)
+            origin, offset = _read_text16(resp, offset)
 
             ptype = type_names.get(type_code, f"unknown({type_code})")
             if expires_at > 0:
@@ -1498,7 +1496,7 @@ class OperatorConsole:
 
         from bonnet.net.firehose_commands import OP_EVENT_HEAD
 
-        req = struct.pack(">B", OP_EVENT_HEAD) + self._enc_text16(origin)
+        req = struct.pack(">B", OP_EVENT_HEAD) + _enc_text16(origin)
 
         resp = self._local_handle(req)
         if resp[0] != 0x00:
@@ -1546,7 +1544,7 @@ class OperatorConsole:
         from bonnet.net.firehose_commands import OP_EVENT_RANGE
 
         req = struct.pack(">B", OP_EVENT_RANGE)
-        req += self._enc_text16(origin)
+        req += _enc_text16(origin)
         req += struct.pack(">Q", start)
         req += struct.pack(">H", count)
         req += struct.pack(">I", 0)
@@ -1593,7 +1591,7 @@ class OperatorConsole:
 
         from bonnet.net.firehose_commands import OP_EVENT_GET
 
-        req = struct.pack(">B", OP_EVENT_GET) + self._enc_text16(origin) + event_id
+        req = struct.pack(">B", OP_EVENT_GET) + _enc_text16(origin) + event_id
 
         resp = self._local_handle(req)
         if resp[0] != 0x00:
