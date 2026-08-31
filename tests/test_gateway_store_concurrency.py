@@ -36,7 +36,6 @@ best-effort; it now logs rather than vanishing.
 """
 
 import ast
-import inspect
 import pathlib
 
 import pytest

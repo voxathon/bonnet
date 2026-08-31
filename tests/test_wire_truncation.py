@@ -12,8 +12,6 @@ import struct
 
 import pytest
 
-from tests.test_commands_and_sync import _anon_ctx, firehose, stack  # noqa: F401
-
 from bonnet.net.firehose_wire import (
     OP_ARTICLE_QUERY,
     OP_BAN_STATUS,
@@ -33,6 +31,7 @@ from bonnet.net.firehose_wire import (
     parse_response,
     parse_user_list_response,
 )
+from tests.test_commands_and_sync import _anon_ctx, firehose, stack  # noqa: F401
 
 
 def _ok(payload: bytes) -> bytes:
@@ -156,12 +155,12 @@ def _error_code(resp: bytes) -> int:
         bytes([OP_EVENT_HEAD]) + struct.pack(">H", 64) + b"bbs",
     ],
 )
-def test_truncated_request_is_a_protocol_error_frame(stack, req):
+def test_truncated_request_is_a_protocol_error_frame(stack, req):  # noqa: F811
     resp = stack["handler"].handle(req, _anon_ctx())
     assert _error_code(resp) == 0x0006
 
 
-def test_article_query_short_filter_value_is_a_protocol_error(stack):
+def test_article_query_short_filter_value_is_a_protocol_error(stack):  # noqa: F811
     """A u16 filter value_len longer than the frame.
 
     value_type 0x03 unpacked `>q` straight off the short slice, so this
