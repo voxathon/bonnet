@@ -163,9 +163,6 @@ class VerifyResult:
 
 
 class KeyResolver:
-    def resolve_private_key(self, key_id: str) -> bytes:
-        raise NotImplementedError
-
     def resolve_public_key(self, key_id: str) -> bytes:
         raise NotImplementedError
 

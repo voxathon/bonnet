@@ -77,7 +77,6 @@ from bonnet.net.firehose_wire import (
     parse_event_range_response,
     parse_permissions_response,
     parse_publish_response,
-    parse_publish_response_raw,
     parse_report_list_response,
     parse_user_get_response,
     parse_user_list_response,
@@ -188,17 +187,6 @@ class FirehoseHTTPClient(FirehoseTransport):
             event_id=event_id,
             supersedes_article_id=supersedes_article_id,
         )
-
-    async def publish_record(
-        self,
-        intent: Intent,
-        actor_sig: bytes,
-        body: bytes = b"",
-    ) -> tuple:
-        """Publish an arbitrary signed record. Returns (Record, Witness)."""
-        cmd = build_publish_record(intent, actor_sig, body)
-        resp = await self._send_command(cmd)
-        return parse_publish_response_raw(resp)
 
     async def publish_board_create(
         self,

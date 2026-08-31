@@ -397,25 +397,6 @@ class BodyStore:
     # Cleanup
     # ------------------------------------------------------------------
 
-    def cleanup_staging(self, origin: str, board: str) -> int:
-        """Remove orphaned staging files for a board. Returns count deleted."""
-        origin_hex = _safe_path_component(origin)
-        board_hex = _safe_path_component(board)
-        staging_dir = os.path.join(self._boards_dir, origin_hex, board_hex, "bodies", "staging")
-        count = 0
-        with self._lock:
-            if not os.path.isdir(staging_dir):
-                return 0
-            for name in os.listdir(staging_dir):
-                path = os.path.join(staging_dir, name)
-                try:
-                    if os.path.isfile(path):
-                        os.remove(path)
-                        count += 1
-                except OSError:
-                    pass
-        return count
-
     # ------------------------------------------------------------------
     # Origin-scoped deletion (depeer/purge)
     # ------------------------------------------------------------------

@@ -1045,15 +1045,6 @@ class FirehoseStore:
             ).fetchone()
             return row[0] if row else 0
 
-    def get_next_article_num(self, origin: str, board: str) -> int:
-        """Return the next article number that will be allocated for this board."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT next_article_num FROM board_counters WHERE origin=? AND board=?",
-                (origin, board),
-            ).fetchone()
-            return row[0] if row else 1
-
     # -----------------------------------------------------------------------
     # Witness storage
     # -----------------------------------------------------------------------

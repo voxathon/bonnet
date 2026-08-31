@@ -79,8 +79,3 @@ def close_logging() -> None:
 def get_log_path() -> str | None:
     """Return current log file path, or None if logging is not initialized."""
     return _log_file_path
-
-
-def is_initialized() -> bool:
-    """Return True if logging initialized."""
-    return _initialized
