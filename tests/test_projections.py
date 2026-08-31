@@ -581,6 +581,85 @@ class TestQueryArticlesVisibilityFilter:
         assert [r.article_num for r in results] == [1]
 
 
+class TestQueryArticlesRootFilter:
+    """field_id 0x0A: every reply in a thread, at any depth, in one query —
+    added alongside the gateway's query_articles(root=...) and read_thread."""
+
+    def _record(self, seq, aid, root_id=None, reply_id=None):
+        eid = _rid(seq)
+        body = b"article body"
+        metadata = [metadata_text(1, f"article {seq}"), metadata_text(4, "text/plain")]
+        if root_id is not None:
+            metadata.append(metadata_bytes(5, root_id))
+        if reply_id is not None:
+            metadata.append(metadata_bytes(6, reply_id))
+        intent = Intent(
+            event_id=eid,
+            kind="bonnet.article",
+            origin="bbs.a",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=aid,
+            metadata=MetadataMap(metadata),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
+        )
+        actor_sig = sign_intent(ACTOR, encode_intent(intent))
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=seq,
+            previous_event_hash=ZERO_HASH,
+            event_id=eid,
+            kind="bonnet.article",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=aid,
+            article_num=seq,
+            metadata=intent.metadata,
+            body_hash=intent.body_hash,
+            body_size=intent.body_size,
+            actor_signature=actor_sig,
+        )
+        rec.origin_signature = sign_record(ORIGIN_A, encode_unsigned_record(rec))
+        return rec
+
+    def _seed(self, board_proj):
+        """root (seq 1) <- reply (seq 2, root_id=root) <- grandchild (seq 3,
+        root_id=root, reply_id=reply). other_root (seq 4) is unrelated."""
+        root = self._record(1, _rid(11))
+        board_proj.apply_article(root)
+        reply = self._record(2, _rid(12), root_id=root.article_id, reply_id=root.article_id)
+        board_proj.apply_article(reply)
+        grandchild = self._record(3, _rid(13), root_id=root.article_id, reply_id=reply.article_id)
+        board_proj.apply_article(grandchild)
+        other_root = self._record(4, _rid(14))
+        board_proj.apply_article(other_root)
+        return root, reply, grandchild, other_root
+
+    def test_root_filter_returns_every_reply_at_any_depth(self, board_proj):
+        root, reply, grandchild, other_root = self._seed(board_proj)
+
+        results = board_proj.query_articles("bbs.a", "general", [(0x0A, 0x01, root.article_id)])
+
+        assert {r.article_num for r in results} == {reply.article_num, grandchild.article_num}
+
+    def test_root_filter_excludes_the_root_itself(self, board_proj):
+        """A root's own root_article_id is the zero sentinel, never its own
+        id, so root=<its own id> can never match its own row."""
+        root, reply, grandchild, other_root = self._seed(board_proj)
+
+        results = board_proj.query_articles("bbs.a", "general", [(0x0A, 0x01, root.article_id)])
+
+        assert root.article_num not in {r.article_num for r in results}
+
+    def test_root_filter_excludes_unrelated_threads(self, board_proj):
+        root, reply, grandchild, other_root = self._seed(board_proj)
+
+        results = board_proj.query_articles("bbs.a", "general", [(0x0A, 0x01, root.article_id)])
+
+        assert other_root.article_num not in {r.article_num for r in results}
+
+
 # ---------------------------------------------------------------------------
 # Nav projection tests
 # ---------------------------------------------------------------------------
