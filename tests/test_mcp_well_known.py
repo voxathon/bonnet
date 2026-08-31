@@ -1,4 +1,4 @@
-"""Tests for the bonnet-mcp discovery proxy endpoint sanitization."""
+"""Tests for the `bonnet gateway` discovery proxy endpoint sanitization."""
 
 import json
 
@@ -7,7 +7,7 @@ import pytest
 
 pytest.importorskip("fastmcp")
 
-from bonnet.client.server import well_known_bonnet
+from bonnet.gateway.server import well_known_bonnet
 
 
 class FakeResponse:

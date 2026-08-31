@@ -1,6 +1,6 @@
 """Tests for src/bonnet/net/replay.py — persistent replay-prevention ledger.
 
-Exit gate (§13 Phase 3):
+Covers:
   - Replays and stale/future requests fail before dispatch
   - Duplicate (pubkey, nonce) insertion fails with constraint violation
   - Expired rows are cleaned up in bounded batches
@@ -103,6 +103,55 @@ class TestExpiryCleanup:
         conn.close()
         assert count <= 5  # only the fresh one + any not yet batched
 
+        rl.close()
+
+    def test_still_valid_row_survives_cleanup_with_nonzero_skew(self, tmp_path):
+        """A row within clock_skew of its own expiry — still temporally
+        valid, since _check_temporal (http_auth.py) tolerates a request up
+        to clock_skew past its nominal expiry — must not be cleaned up
+        early. The cutoff is now - clock_skew, not now + clock_skew: a row
+        survives until expires_at + clock_skew has passed (module
+        docstring), so cleanup must never delete a row while `now` is still
+        within clock_skew of its expires_at, let alone before expires_at.
+
+        Regression for a sign error where cleanup used `now + clock_skew`:
+        with the default 30s skew, that deleted a fresh row's nonce
+        immediately (any expires_at less than roughly `now + 30` — true of
+        almost every real request) on the very next successful insert,
+        after which the exact same signed request could be replayed
+        successfully."""
+        db_path = str(tmp_path / "replay.db")
+        rl = ReplayLedger(db_path, clock_skew_seconds=30)
+        pubkey = os.urandom(32)
+        nonce = _make_nonce()
+        expires = int(time.time()) + 10  # comfortably valid, near-term
+
+        assert rl.check_and_insert(pubkey, nonce, expires) is True
+        rl._cleanup_batch()
+
+        assert rl.is_replay(pubkey, nonce) is True, (
+            "row was cleaned up too early — a replay of this still-valid request would now succeed"
+        )
+        assert rl.check_and_insert(pubkey, nonce, expires) is False, (
+            "replay protection bypassed: the same nonce was accepted twice"
+        )
+
+        rl.close()
+
+    def test_row_past_expiry_plus_skew_is_cleaned_up(self, tmp_path):
+        """Sanity check for the same fix in the other direction: a row
+        genuinely past its expires_at + clock_skew window must still be
+        removed, not retained forever."""
+        db_path = str(tmp_path / "replay.db")
+        rl = ReplayLedger(db_path, clock_skew_seconds=30)
+        pubkey = os.urandom(32)
+        nonce = _make_nonce()
+        expires = int(time.time()) - 1000  # long past expires_at + skew
+
+        rl.check_and_insert(pubkey, nonce, expires)
+        rl._cleanup_batch()
+
+        assert rl.is_replay(pubkey, nonce) is False
         rl.close()
 
     def test_startup_cleanup(self, tmp_path):

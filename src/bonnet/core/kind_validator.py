@@ -1,4 +1,4 @@
-"""Kind-specific validation for the Bonnet Firehose Protocol (PROTOCOL.md §12).
+"""Kind-specific validation for the firehose protocol.
 
 Enforces schema rules: required metadata fields, target tuple completeness,
 same-origin restrictions, board/user lifecycle constraints, and report/punishment
@@ -7,133 +7,29 @@ target rules. Called before origin acceptance of a publication request.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from bonnet.core.kinds import (
+    ALL_KNOWN_KINDS,
+    ARTICLE_LIFECYCLE_KINDS,
+    BOARD_LIFECYCLE_KINDS,
+    KIND_ARTICLE,
+    KIND_ARTICLE_PIN,
+    KIND_BOARD_CREATE,
+    KIND_ORIGIN_KEY_ROTATE,
+    KIND_PUNISHMENT_ACK,
+    KIND_PUNISHMENT_BAN,
+    KIND_PUNISHMENT_REVOKE,
+    KIND_REPORT,
+    KIND_RULE_PUBLISH,
+    KIND_RULE_REVOKE,
+    KIND_USER_KEY_ROTATE,
+    KIND_USER_REGISTER,
+    KIND_USER_REVOKE,
+    PIN_THREAD_CONTROL_KINDS,
+    PUNISHMENT_ISSUE_KINDS,
+)
 from bonnet.core.record import ZERO_ID, Intent
-
-# ---------------------------------------------------------------------------
-# Kind constants
-# ---------------------------------------------------------------------------
-
-KIND_ARTICLE = "bonnet.article"
-KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
-KIND_ARTICLE_RESTORE = "bonnet.article.restore"
-KIND_ARTICLE_PURGE = "bonnet.article.purge"
-KIND_ARTICLE_PIN = "bonnet.article.pin"
-KIND_ARTICLE_UNPIN = "bonnet.article.unpin"
-KIND_THREAD_CLOSE = "bonnet.thread.close"
-KIND_THREAD_REOPEN = "bonnet.thread.reopen"
-KIND_BOARD_CREATE = "bonnet.board.create"
-KIND_BOARD_CLOSE = "bonnet.board.close"
-KIND_BOARD_REOPEN = "bonnet.board.reopen"
-KIND_USER_REGISTER = "bonnet.user.register"
-KIND_USER_REVOKE = "bonnet.user.revoke"
-KIND_RULE_PUBLISH = "bonnet.rule.publish"
-KIND_RULE_REVOKE = "bonnet.rule.revoke"
-KIND_REPORT = "bonnet.report"
-KIND_PUNISHMENT_WARN = "bonnet.punishment.warn"
-KIND_PUNISHMENT_BAN = "bonnet.punishment.ban"
-KIND_PUNISHMENT_PERMABAN = "bonnet.punishment.permaban"
-KIND_PUNISHMENT_REVOKE = "bonnet.punishment.revoke"
-KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
-KIND_ORIGIN_KEY_ROTATE = "bonnet.origin.key.rotate"
-
-PUNISHMENT_ISSUE_KINDS = frozenset(
-    {
-        KIND_PUNISHMENT_WARN,
-        KIND_PUNISHMENT_BAN,
-        KIND_PUNISHMENT_PERMABAN,
-    }
-)
-
-# Maps each issuing kind to its PolicyProjection type name (Gate D).
-PUNISHMENT_TYPE_BY_KIND = {
-    KIND_PUNISHMENT_WARN: "warning",
-    KIND_PUNISHMENT_BAN: "ban",
-    KIND_PUNISHMENT_PERMABAN: "permaban",
-}
-
-ALL_KNOWN_KINDS = frozenset(
-    {
-        KIND_ARTICLE,
-        KIND_ARTICLE_CANCEL,
-        KIND_ARTICLE_RESTORE,
-        KIND_ARTICLE_PURGE,
-        KIND_ARTICLE_PIN,
-        KIND_ARTICLE_UNPIN,
-        KIND_THREAD_CLOSE,
-        KIND_THREAD_REOPEN,
-        KIND_BOARD_CREATE,
-        KIND_BOARD_CLOSE,
-        KIND_BOARD_REOPEN,
-        KIND_USER_REGISTER,
-        KIND_USER_REVOKE,
-        KIND_RULE_PUBLISH,
-        KIND_RULE_REVOKE,
-        KIND_REPORT,
-        KIND_PUNISHMENT_WARN,
-        KIND_PUNISHMENT_BAN,
-        KIND_PUNISHMENT_PERMABAN,
-        KIND_PUNISHMENT_REVOKE,
-        KIND_PUNISHMENT_ACK,
-        KIND_ORIGIN_KEY_ROTATE,
-    }
-)
-
-ARTICLE_LIFECYCLE_KINDS = frozenset(
-    {
-        KIND_ARTICLE_CANCEL,
-        KIND_ARTICLE_RESTORE,
-        KIND_ARTICLE_PURGE,
-    }
-)
-
-ARTICLE_TARGET_KINDS = frozenset(
-    {
-        KIND_ARTICLE_CANCEL,
-        KIND_ARTICLE_RESTORE,
-        KIND_ARTICLE_PURGE,
-        KIND_ARTICLE_PIN,
-        KIND_ARTICLE_UNPIN,
-        KIND_THREAD_CLOSE,
-        KIND_THREAD_REOPEN,
-    }
-)
-
-EVENT_TARGET_KINDS = frozenset(
-    {
-        KIND_USER_REVOKE,
-        KIND_RULE_REVOKE,
-        KIND_PUNISHMENT_REVOKE,
-    }
-)
-
-BOARD_LIFECYCLE_KINDS = frozenset(
-    {
-        KIND_BOARD_CREATE,
-        KIND_BOARD_CLOSE,
-        KIND_BOARD_REOPEN,
-    }
-)
-
-USER_LIFECYCLE_KINDS = frozenset(
-    {
-        KIND_USER_REGISTER,
-        KIND_USER_REVOKE,
-    }
-)
-
-MODERATION_KINDS = frozenset(
-    {
-        KIND_RULE_PUBLISH,
-        KIND_RULE_REVOKE,
-        KIND_REPORT,
-        KIND_PUNISHMENT_WARN,
-        KIND_PUNISHMENT_BAN,
-        KIND_PUNISHMENT_PERMABAN,
-        KIND_PUNISHMENT_REVOKE,
-        KIND_PUNISHMENT_ACK,
-    }
-)
-
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -150,7 +46,35 @@ class ValidationError(Exception):
 
 
 class KindValidator:
-    """Validates an Intent against its kind schema (§12)."""
+    """Validates an Intent against its kind schema.
+
+    Dispatch is a registry (kind -> validator method) built once at
+    construction, rather than an inline elif chain, so a new kind is added
+    in one place: a KIND_* constant in kinds.py, a `_validate_*` method
+    below, and one line registering the two.
+    """
+
+    def __init__(self) -> None:
+        self._validators: dict[str, Callable[[Intent], None]] = {
+            KIND_ARTICLE: self._validate_article,
+            KIND_USER_REGISTER: self._validate_user_register,
+            KIND_USER_REVOKE: self._validate_user_revoke,
+            KIND_USER_KEY_ROTATE: self._validate_user_key_rotate,
+            KIND_RULE_PUBLISH: self._validate_rule_publish,
+            KIND_RULE_REVOKE: self._validate_event_target,
+            KIND_REPORT: self._validate_report,
+            KIND_PUNISHMENT_REVOKE: self._validate_event_target,
+            KIND_PUNISHMENT_ACK: self._validate_punishment_ack,
+            KIND_ORIGIN_KEY_ROTATE: self._validate_key_rotation,
+        }
+        for kind in ARTICLE_LIFECYCLE_KINDS:
+            self._validators[kind] = self._validate_lifecycle_control
+        for kind in PIN_THREAD_CONTROL_KINDS:
+            self._validators[kind] = self._validate_pin_thread_control
+        for kind in BOARD_LIFECYCLE_KINDS:
+            self._validators[kind] = self._validate_board_lifecycle
+        for kind in PUNISHMENT_ISSUE_KINDS:
+            self._validators[kind] = self._validate_punishment_issue
 
     def validate(self, intent: Intent) -> None:
         kind = intent.kind
@@ -160,32 +84,9 @@ class KindValidator:
         if kind not in ALL_KNOWN_KINDS:
             return
 
-        if kind == KIND_ARTICLE:
-            self._validate_article(intent)
-        elif kind in ARTICLE_LIFECYCLE_KINDS:
-            self._validate_lifecycle_control(intent)
-        elif kind in (KIND_ARTICLE_PIN, KIND_ARTICLE_UNPIN, KIND_THREAD_CLOSE, KIND_THREAD_REOPEN):
-            self._validate_pin_thread_control(intent)
-        elif kind in BOARD_LIFECYCLE_KINDS:
-            self._validate_board_lifecycle(intent)
-        elif kind == KIND_USER_REGISTER:
-            self._validate_user_register(intent)
-        elif kind == KIND_USER_REVOKE:
-            self._validate_user_revoke(intent)
-        elif kind == KIND_RULE_PUBLISH:
-            self._validate_rule_publish(intent)
-        elif kind == KIND_RULE_REVOKE:
-            self._validate_event_target(intent)
-        elif kind == KIND_REPORT:
-            self._validate_report(intent)
-        elif kind in PUNISHMENT_ISSUE_KINDS:
-            self._validate_punishment_issue(intent)
-        elif kind == KIND_PUNISHMENT_REVOKE:
-            self._validate_event_target(intent)
-        elif kind == KIND_PUNISHMENT_ACK:
-            self._validate_punishment_ack(intent)
-        elif kind == KIND_ORIGIN_KEY_ROTATE:
-            self._validate_key_rotation(intent)
+        validator = self._validators.get(kind)
+        if validator is not None:
+            validator(intent)
 
     # ------------------------------------------------------------------
     # Article
@@ -270,6 +171,36 @@ class KindValidator:
         if intent.metadata.get_bytes(1) is None:
             raise ValidationError(
                 "bonnet.user.revoke requires metadata field 1 (revoked user public key)"
+            )
+
+    def _validate_user_key_rotate(self, intent: Intent) -> None:
+        """An actor succeeding its own signing key.
+
+        The subject is always the actor itself — `firehose_commands` already
+        requires `intent.actor_pubkey == ctx.peer_pubkey`, so the old key is
+        necessarily the authenticated caller and there is no target tuple to
+        carry a third party. Mutual consent comes from the pair of signatures:
+        the record is signed by the outgoing key, and field 2 is a rotation
+        proof signed by the incoming one (verified at apply time, since only
+        the projection knows the origin string to bind it to).
+        """
+        self._require_empty_board(intent)
+        self._require_empty_article_targets(intent)
+        self._require_empty_targets(intent)
+
+        m = intent.metadata
+        new_pubkey = m.get_bytes(1)
+        if new_pubkey is None:
+            raise ValidationError(
+                "bonnet.user.key.rotate requires metadata field 1 (new actor public key)"
+            )
+        if m.get_bytes(2) is None:
+            raise ValidationError(
+                "bonnet.user.key.rotate requires metadata field 2 (new-key proof signature)"
+            )
+        if new_pubkey == intent.actor_pubkey:
+            raise ValidationError(
+                "bonnet.user.key.rotate must name a different key than the actor's own"
             )
 
     # ------------------------------------------------------------------

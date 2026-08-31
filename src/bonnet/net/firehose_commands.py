@@ -1,4 +1,4 @@
-"""Firehose command handler for the Bonnet Firehose Protocol (PROTOCOL.md §19).
+"""Command handler for the firehose protocol.
 
 Handles PUBLISH_RECORD, EVENT_HEAD, EVENT_RANGE, EVENT_GET, and projection
 read commands (BOARD_LIST, ARTICLE_GET/LIST/SEARCH/BODY, USER_GET/LIST,
@@ -25,6 +25,7 @@ from bonnet.core.firehose import (
 )
 from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
 from bonnet.core.kind_validator import KindValidator, ValidationError
+from bonnet.core.kinds import ALL_KNOWN_KINDS
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     SIG_SIZE,
@@ -38,6 +39,25 @@ from bonnet.core.record import (
     make_origin_witness,
 )
 from bonnet.core.search import SearchService
+from bonnet.net.firehose_wire import (
+    OP_ARTICLE_BODY,
+    OP_ARTICLE_GET,
+    OP_ARTICLE_LIST,
+    OP_ARTICLE_QUERY,
+    OP_ARTICLE_SEARCH,
+    OP_BAN_STATUS,
+    OP_BOARD_LIST,
+    OP_EVENT_BODY,
+    OP_EVENT_GET,
+    OP_EVENT_HEAD,
+    OP_EVENT_RANGE,
+    OP_KEY_EPOCHS,
+    OP_PERMISSIONS,
+    OP_PUBLISH_RECORD,
+    OP_REPORT_LIST,
+    OP_USER_GET,
+    OP_USER_LIST,
+)
 
 KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
 KIND_ARTICLE_RESTORE = "bonnet.article.restore"
@@ -48,29 +68,13 @@ KIND_THREAD_CLOSE = "bonnet.thread.close"
 KIND_THREAD_REOPEN = "bonnet.thread.reopen"
 KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
 
-# Gate D punishment type codes used by the BAN_STATUS response.
+# Punishment type codes used by the BAN_STATUS response.
 PUNISHMENT_TYPE_CODES = {"warning": 1, "ban": 2, "permaban": 3}
 
 
 # ---------------------------------------------------------------------------
-# Opcodes (§19)
+# Opcodes — defined once in firehose_wire.py, imported above.
 # ---------------------------------------------------------------------------
-
-OP_PUBLISH_RECORD = 0x01
-OP_EVENT_HEAD = 0x02
-OP_EVENT_RANGE = 0x03
-OP_EVENT_GET = 0x04
-OP_KEY_EPOCHS = 0x05
-OP_BOARD_LIST = 0x10
-OP_ARTICLE_GET = 0x11
-OP_ARTICLE_LIST = 0x12
-OP_ARTICLE_SEARCH = 0x13
-OP_ARTICLE_QUERY = 0x15
-OP_ARTICLE_BODY = 0x14
-OP_USER_GET = 0x20
-OP_USER_LIST = 0x21
-OP_BAN_STATUS = 0x22
-OP_EVENT_BODY = 0x30
 
 CMD_NAMES = {
     OP_PUBLISH_RECORD: "PUBLISH_RECORD",
@@ -78,6 +82,7 @@ CMD_NAMES = {
     OP_EVENT_RANGE: "EVENT_RANGE",
     OP_EVENT_GET: "EVENT_GET",
     OP_KEY_EPOCHS: "KEY_EPOCHS",
+    OP_PERMISSIONS: "PERMISSIONS",
     OP_BOARD_LIST: "BOARD_LIST",
     OP_ARTICLE_GET: "ARTICLE_GET",
     OP_ARTICLE_LIST: "ARTICLE_LIST",
@@ -87,6 +92,7 @@ CMD_NAMES = {
     OP_USER_GET: "USER_GET",
     OP_USER_LIST: "USER_LIST",
     OP_BAN_STATUS: "BAN_STATUS",
+    OP_REPORT_LIST: "REPORT_LIST",
     OP_EVENT_BODY: "EVENT_BODY",
 }
 
@@ -95,6 +101,8 @@ READ_OPS = frozenset(
     {
         OP_EVENT_HEAD,
         OP_EVENT_RANGE,
+        OP_PERMISSIONS,
+        OP_REPORT_LIST,
         OP_EVENT_GET,
         OP_KEY_EPOCHS,
         OP_BOARD_LIST,
@@ -123,6 +131,17 @@ def _success(payload: bytes = b"") -> bytes:
 def _error(code: int, message: str) -> bytes:
     msg_bytes = message.encode("utf-8")
     return b"\x01" + struct.pack(">H", code) + struct.pack(">H", len(msg_bytes)) + msg_bytes
+
+
+def _pad32(value: bytes) -> bytes:
+    """Exactly 32 bytes: truncated, or zero-padded if short.
+
+    The wire format is fixed-width, and a key read back off a record can be
+    absent if the record has since been purged from this origin. Built without
+    a NUL escape on purpose — heredoc-written escapes have twice put literal
+    NUL bytes into source files in this repo.
+    """
+    return (value + bytes(32))[:32]
 
 
 def _enc_text16(s: str) -> bytes:
@@ -214,7 +233,7 @@ class FirehoseContext:
 
 
 class FirehoseCommandHandler:
-    """Dispatches firehose protocol commands (§19)."""
+    """Dispatches firehose protocol commands."""
 
     def __init__(
         self,
@@ -262,6 +281,15 @@ class FirehoseCommandHandler:
                 bp.close()
             self._board_projections.clear()
 
+    def set_server_identity(self, identity: Identity) -> None:
+        """Hot-swap the identity used to sign future local publishes and
+        witness lookups (see core.record.Record vs Event: the origin
+        signature over any record appended after this call must come from
+        whichever key the key-epoch table now considers current). Used by
+        BonnetServer.apply_key_rotation — every call site here reads
+        self._identity fresh, so this is the only update this class needs."""
+        self._identity = identity
+
     def _get_board_projection(self, origin: str, board: str) -> BoardProjection:
         key = (origin, board)
         with self._boards_lock:
@@ -278,8 +306,21 @@ class FirehoseCommandHandler:
         if self._sync_manager is not None:
             self._sync_manager.queue_sync_threadsafe(origin)
 
+    def _board_read_allowed(self, ctx: FirehoseContext, cmd_name: str, board: str) -> bool:
+        """Enforce the ACL 'board' dimension for a board-scoped read.
+
+        The top-level dispatch in `handle()` only checks the 'command'
+        dimension before board is known. Every handler that reads a
+        specific board (including each board named in an aggregate,
+        cross-origin listing) must call this before touching that board's
+        data, or an ACL rule scoped to `boards = [...]` becomes a no-op and
+        a caller can reach boards on peered origins through the local
+        aggregate index regardless of what they were actually granted.
+        """
+        return self._acl.check(ctx.to_auth_context(), "read", command=cmd_name, board=board)
+
     # ------------------------------------------------------------------
-    # Punishment write gate (Gate D)
+    # Punishment write gate
     # ------------------------------------------------------------------
 
     def _policy_current(self) -> bool:
@@ -293,7 +334,7 @@ class FirehoseCommandHandler:
         return True
 
     def _punishment_gate_response(self, actor_pubkey: bytes) -> bytes | None:
-        """Return an error response if this user's writes are gated (Gate D).
+        """Return an error response if this user's writes are gated.
 
         Fails open when the policy projection is unavailable or behind the
         firehose — an outage must not block all publication.
@@ -344,6 +385,10 @@ class FirehoseCommandHandler:
                 return self._cmd_event_range(data, ctx)
             elif opcode == OP_EVENT_GET:
                 return self._cmd_event_get(data, ctx)
+            elif opcode == OP_REPORT_LIST:
+                return self._cmd_report_list(data, ctx)
+            elif opcode == OP_PERMISSIONS:
+                return self._cmd_permissions(data, ctx)
             elif opcode == OP_KEY_EPOCHS:
                 return self._cmd_key_epochs(data, ctx)
             elif opcode == OP_BOARD_LIST:
@@ -377,7 +422,7 @@ class FirehoseCommandHandler:
             return _error(0x0000, "Internal error")
 
     # ------------------------------------------------------------------
-    # PUBLISH_RECORD (§19.1)
+    # PUBLISH_RECORD
     # ------------------------------------------------------------------
 
     def _cmd_publish(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -420,7 +465,7 @@ class FirehoseCommandHandler:
         ):
             return _error(0x0004, "Not permitted")
 
-        # Gate D write gate: administrators bypass; ack must pass so a
+        # Write gate: administrators bypass; ack must pass so a
         # punished user can acknowledge their warning.
         if kind != KIND_PUNISHMENT_ACK and ctx.role != "administrator":
             gate_error = self._punishment_gate_response(intent.actor_pubkey)
@@ -580,7 +625,7 @@ class FirehoseCommandHandler:
         )
 
     # ------------------------------------------------------------------
-    # EVENT_HEAD (§19.2)
+    # EVENT_HEAD
     # ------------------------------------------------------------------
 
     def _cmd_event_head(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -596,7 +641,7 @@ class FirehoseCommandHandler:
         return _success(struct.pack(">H", len(encoded)) + encoded)
 
     # ------------------------------------------------------------------
-    # KEY_EPOCHS (§19.21)
+    # KEY_EPOCHS
     # ------------------------------------------------------------------
 
     def _cmd_key_epochs(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -616,7 +661,140 @@ class FirehoseCommandHandler:
         return _success(payload)
 
     # ------------------------------------------------------------------
-    # EVENT_RANGE (§19.3)
+    # REPORT_LIST
+    # ------------------------------------------------------------------
+
+    def _cmd_report_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
+        """The moderation queue, filtered where the ACL can reach it.
+
+        Reports name people and point at boards, which is exactly why this is
+        a command and not something a client assembles for itself. Two
+        enforcement points exist here and neither is available to a client
+        scanning the event log:
+
+        The reporter is read back off each record rather than stored again in
+        the projection. Projections are derived views over records and keep
+        (origin, event_id) precisely so the record can be consulted; the
+        signed field there is the authoritative one.
+
+        1. `REPORT_LIST` is its own ACL command, so an operator can grant the
+           queue to moderators and to nobody else.
+        2. A report carrying an article target is filtered through
+           `_board_read_allowed` for *that* board. Without it, an ACL rule
+           scoped to `boards = [...]` would be a no-op here — a caller barred
+           from a board could still enumerate every accusation made in it,
+           which is the failure `_board_read_allowed` exists to prevent.
+
+        Reports with an event target or no target carry no board to check and
+        are governed by the command grant alone.
+        """
+        offset = 0
+        key_len, offset = _read_u8(data, offset)
+        culprit = data[offset : offset + key_len] if key_len else None
+        offset += key_len
+        limit, offset = _read_u16(data, offset)
+        page_offset, offset = _read_u16(data, offset)
+
+        rows = self._policy.list_reports(
+            culprit_pubkey=culprit, limit=limit or 100, offset=page_offset
+        )
+
+        visible = [
+            r
+            for r in rows
+            if not r["target_board"]
+            or self._board_read_allowed(ctx, "REPORT_LIST", r["target_board"])
+        ]
+
+        payload = struct.pack(">H", len(visible))
+        for r in visible:
+            # Who filed it comes from the record, not from this projection.
+            # The record is the authoritative artifact: actor_pubkey there is
+            # covered by the actor signature, the origin countersignature and
+            # the hash chain. A copy denormalized into a projection column
+            # would be unsigned derived state saying the same thing less
+            # credibly — and the row already carries the (origin, event_id)
+            # needed to go ask.
+            rec = self._firehose.get_event_by_id(r["origin"], r["event_id"])
+            reporter = rec.actor_pubkey if rec else b""
+            reporter_name = rec.actor_username if rec else ""
+
+            payload += r["event_id"]
+            payload += _enc_text16(r["origin"])
+            payload += struct.pack(">Q", r["origin_seq"])
+            payload += _pad32(reporter)
+            payload += _enc_text16(reporter_name)
+            payload += r["culprit_pubkey"]
+            payload += _enc_text16(r["target_origin"])
+            payload += _enc_text16(r["target_board"])
+            payload += r["target_article_id"]
+            payload += r["target_event_id"]
+            payload += r["body_hash"]
+            payload += struct.pack(">I", r["body_size"])
+            payload += struct.pack(">Q", max(0, r["created_at"]))
+        return _success(payload)
+
+    # ------------------------------------------------------------------
+    # PERMISSIONS
+    # ------------------------------------------------------------------
+
+    def _cmd_permissions(self, data: bytes, ctx: FirehoseContext) -> bytes:
+        """Report what this principal may do, as the ACL evaluates it now.
+
+        Enumerates rather than guesses: every command name and every known
+        kind is put through the same ACLEvaluator the enforcing paths use, so
+        the answer cannot drift from what a real request would get. That is
+        the whole point — a client that infers permissions from anything else
+        is maintaining a second, divergent copy of this policy.
+
+        Scoped to the board in the request when one is given. ACL rules carry
+        a board dimension, so the same principal may publish to one board and
+        not another, and a board-independent answer cannot express that.
+
+        This is deliberately an ordinary ACL-gated read: an operator who does
+        not want policy shape enumerated can deny it like anything else, and
+        the shipped default grants it to every principal class so the answer
+        is available exactly when a caller most needs it — before it knows
+        what else it can do.
+        """
+        board, _ = _read_text16(data, 0)
+        auth = ctx.to_auth_context()
+        scope = board or None
+
+        principal = "registered" if ctx.is_registered else "unknown"
+        if ctx.is_anonymous:
+            principal = "anonymous"
+
+        commands = [
+            name
+            for opcode, name in sorted(CMD_NAMES.items())
+            if self._acl.check(
+                auth,
+                "write" if opcode in WRITE_OPS else "read",
+                command=name,
+                board=scope,
+            )
+        ]
+
+        kinds = []
+        if "PUBLISH_RECORD" in commands:
+            kinds = [
+                kind
+                for kind in sorted(ALL_KNOWN_KINDS)
+                if self._acl.check(auth, "write", command="PUBLISH_RECORD", kind=kind, board=scope)
+            ]
+
+        payload = _enc_text16(principal) + _enc_text16(ctx.role or "") + _enc_text16(board)
+        payload += struct.pack(">H", len(commands))
+        for name in commands:
+            payload += _enc_text16(name)
+        payload += struct.pack(">H", len(kinds))
+        for kind in kinds:
+            payload += _enc_text16(kind)
+        return _success(payload)
+
+    # ------------------------------------------------------------------
+    # EVENT_RANGE
     # ------------------------------------------------------------------
 
     def _cmd_event_range(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -657,7 +835,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # EVENT_GET (§19.4)
+    # EVENT_GET
     # ------------------------------------------------------------------
 
     def _cmd_event_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -694,7 +872,7 @@ class FirehoseCommandHandler:
         )
 
     # ------------------------------------------------------------------
-    # BOARD_LIST (§19.5)
+    # BOARD_LIST
     # ------------------------------------------------------------------
 
     def _cmd_board_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -705,6 +883,7 @@ class FirehoseCommandHandler:
             boards = self._nav.list_boards()
             if self._allowed_origins:
                 boards = [b for b in boards if b["origin"] in self._allowed_origins]
+            boards = [b for b in boards if self._board_read_allowed(ctx, "BOARD_LIST", b["board"])]
             out = struct.pack(">H", len(boards))
             for b in boards:
                 out += _enc_text16(b["origin"])
@@ -721,6 +900,7 @@ class FirehoseCommandHandler:
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _success(struct.pack(">H", 0))
         boards = self._nav.list_boards(origin)
+        boards = [b for b in boards if self._board_read_allowed(ctx, "BOARD_LIST", b["board"])]
         out = struct.pack(">H", len(boards))
         for b in boards:
             name_bytes = b["board"].encode("utf-8")
@@ -733,7 +913,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # ARTICLE_GET (§19.5)
+    # ARTICLE_GET
     # ------------------------------------------------------------------
 
     def _cmd_article_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -745,6 +925,8 @@ class FirehoseCommandHandler:
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _error(0x0003, "Article not found")
         board, offset = _read_text16(data, offset)
+        if not self._board_read_allowed(ctx, "ARTICLE_GET", board):
+            return _error(0x0003, "Article not found")
         selector_type, offset = _read_u8(data, offset)
 
         if selector_type == 0x01:
@@ -762,6 +944,7 @@ class FirehoseCommandHandler:
         if article_num is not None:
             art = bp.get_article_by_num(origin, board, article_num)
         else:
+            assert article_id is not None  # the only other selector_type branch sets it
             art = bp.get_article_by_id(origin, board, article_id)
 
         if art is None:
@@ -841,13 +1024,15 @@ class FirehoseCommandHandler:
         return out
 
     # ------------------------------------------------------------------
-    # ARTICLE_LIST (§19.5)
+    # ARTICLE_LIST
     # ------------------------------------------------------------------
 
     def _cmd_article_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
         board, offset = _read_text16(data, offset)
+        if not self._board_read_allowed(ctx, "ARTICLE_LIST", board):
+            return _success(struct.pack(">H", 0))
         list_offset, offset = _read_u32(data, offset)
         limit, offset = _read_u16(data, offset)
         flags, offset = _read_u8(data, offset)
@@ -875,6 +1060,7 @@ class FirehoseCommandHandler:
                     limit=list_offset + limit,
                     include_cancelled=include_cancelled,
                     include_superseded=include_superseded,
+                    include_purged=include_purged,
                 )
                 for art in articles:
                     all_articles.append((art, orig))
@@ -899,6 +1085,7 @@ class FirehoseCommandHandler:
             limit=limit,
             include_cancelled=include_cancelled,
             include_superseded=include_superseded,
+            include_purged=include_purged,
         )
 
         out = struct.pack(">H", len(articles))
@@ -907,13 +1094,16 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # ARTICLE_SEARCH (§19.5)
+    # ARTICLE_SEARCH
     # ------------------------------------------------------------------
 
     def _cmd_article_search(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
         board, offset = _read_text16(data, offset)
+        if not self._board_read_allowed(ctx, "ARTICLE_SEARCH", board):
+            out = struct.pack(">H", 0) + struct.pack(">I", 0) + struct.pack(">B", 0)
+            return _success(out)
         meta_query, offset = _read_text16(data, offset)
         body_query, offset = _read_text16(data, offset)
         list_offset, offset = _read_u32(data, offset)
@@ -1029,7 +1219,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # ARTICLE_QUERY (§19.5)
+    # ARTICLE_QUERY
     # ------------------------------------------------------------------
 
     def _cmd_article_query(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -1041,6 +1231,8 @@ class FirehoseCommandHandler:
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _success(struct.pack(">H", 0))
         board, offset = _read_text16(data, offset)
+        if not self._board_read_allowed(ctx, "ARTICLE_QUERY", board):
+            return _success(struct.pack(">H", 0))
         filter_count, offset = _read_u8(data, offset)
 
         filters = []
@@ -1052,6 +1244,7 @@ class FirehoseCommandHandler:
             raw_value = data[offset : offset + value_len]
             offset += value_len
 
+            value: bytes | str | int | bool
             if value_type == 0x01:
                 value = raw_value
             elif value_type == 0x02:
@@ -1083,7 +1276,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # ARTICLE_BODY (§19.5)
+    # ARTICLE_BODY
     # ------------------------------------------------------------------
 
     def _cmd_article_body(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -1095,6 +1288,8 @@ class FirehoseCommandHandler:
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _error(0x0003, "Article body unavailable")
         board, offset = _read_text16(data, offset)
+        if not self._board_read_allowed(ctx, "ARTICLE_BODY", board):
+            return _error(0x0003, "Article body unavailable")
         article_num, offset = _read_u64(data, offset)
 
         bp = self._get_board_projection(origin, board)
@@ -1129,7 +1324,7 @@ class FirehoseCommandHandler:
         return _success(struct.pack(">I", len(body)) + body)
 
     # ------------------------------------------------------------------
-    # USER_GET (§19.5)
+    # USER_GET
     # ------------------------------------------------------------------
 
     def _cmd_user_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -1160,7 +1355,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # USER_LIST (§19.5)
+    # USER_LIST
     # ------------------------------------------------------------------
 
     def _cmd_user_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -1190,7 +1385,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # BAN_STATUS (§19.5)
+    # BAN_STATUS
     # ------------------------------------------------------------------
 
     def _cmd_ban_status(self, data: bytes, ctx: FirehoseContext) -> bytes:
@@ -1222,7 +1417,7 @@ class FirehoseCommandHandler:
         return _success(out)
 
     # ------------------------------------------------------------------
-    # EVENT_BODY (§19.5)
+    # EVENT_BODY
     # ------------------------------------------------------------------
 
     def _cmd_event_body(self, data: bytes, ctx: FirehoseContext) -> bytes:

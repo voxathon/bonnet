@@ -27,7 +27,10 @@ env/
 htmlcov/
 coverage.xml
 .hypothesis/
-docs/archive/*
+
+# Internal-only docs (planning, bug tracking, superseded drafts) — not part
+# of the public release
+internal/
 
 # SQLite databases and sidecar files
 *.db

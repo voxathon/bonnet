@@ -1,11 +1,11 @@
 name: Release
 
-# Triggered by pushing a tag like v0.1.1. Verifies the tag matches the
+# Triggered by pushing a tag. Verifies the tag matches the
 # package version, reruns the full test matrix, builds, publishes to PyPI
 # via trusted publishing (OIDC — no stored API token), and cuts a GitHub
 # Release with the built wheel/sdist attached.
 #
-# One-time manual setup required (see RELEASING.md):
+# One-time manual setup required:
 #   1. Register a trusted publisher on PyPI for this repo/workflow/environment.
 #   2. Create a "pypi" environment in this repo's GitHub settings.
 
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv sync
-      - run: uv run pytest tests/ -n auto -m "not slow" --tb=short
+      - run: uv run pytest tests/ -n auto --tb=short
 
   build:
     needs: test

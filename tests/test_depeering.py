@@ -98,7 +98,7 @@ def server(tmp_path):
     os.makedirs(tmp_path / "boards", exist_ok=True)
     os.makedirs(tmp_path / "event_bodies", exist_ok=True)
 
-    from bonnet.app.server import BonnetFirehoseServer
+    from bonnet.app.server import BonnetServer
 
     config = FirehoseConfig(
         origin="bbs.test",
@@ -109,7 +109,7 @@ def server(tmp_path):
         port=2272,
         tls_enabled=False,
     )
-    s = BonnetFirehoseServer(config)
+    s = BonnetServer(config)
     yield s
     try:
         s.close()
@@ -301,7 +301,7 @@ def test_purge_origin_removes_data(server, tmp_path):
 
 def test_purge_origin_preserves_local(server):
     console = OperatorConsole(server)
-    result = console._cmd_purge_origin(["purge-origin", "empty.test"])
+    _result = console._cmd_purge_origin(["purge-origin", "empty.test"])
     assert "bbs.test" in server.firehose.list_origins()
 
 
@@ -343,3 +343,183 @@ def test_reset_key_clears_pinning(server):
     assert server.firehose.get_key_for_seq("peer.test", 1) is None
     events = server.firehose.get_events_range("peer.test", 1, 10)
     assert len(events) == 2
+
+
+# ---------------------------------------------------------------------------
+# rotate-key REPL command
+# ---------------------------------------------------------------------------
+
+
+def test_rotate_key_publishes_record_and_closes_old_epoch(server):
+    console = OperatorConsole(server)
+    old_pubkey = server.server_identity.public_key
+
+    result = console._cmd_rotate_key([])
+
+    assert "Rotated origin" in result
+    assert "no restart needed" in result
+    assert old_pubkey.hex() in result
+
+    epochs = server.firehose.get_key_epochs("bbs.test")
+    assert len(epochs) == 2
+    start1, end1, pk1 = epochs[0]
+    start2, end2, pk2 = epochs[1]
+    assert pk1 == old_pubkey
+    assert end1 is not None
+    assert pk2 != old_pubkey
+    assert end2 is None
+    assert start2 == end1 + 1
+
+
+def test_rotate_key_record_is_a_valid_rotation(server):
+    """The published record must be exactly what firehose.py's own rotation
+    verification (_apply_rotation_locked) accepts — it already ran that
+    check live when appending the record, but assert the record's shape
+    directly so a regression here is legible without re-deriving it."""
+    from bonnet.core.kinds import KIND_ORIGIN_KEY_ROTATE
+    from bonnet.core.record import verify_key_rotation_proof, verify_record_signature
+
+    console = OperatorConsole(server)
+    old_pubkey = server.server_identity.public_key
+
+    console._cmd_rotate_key([])
+
+    events = server.firehose.get_events_range("bbs.test", 1, 10)
+    rotate_records = [r for r in events if r.kind == KIND_ORIGIN_KEY_ROTATE]
+    assert len(rotate_records) == 1
+    rec = rotate_records[0]
+
+    assert rec.actor_pubkey == old_pubkey
+    new_pubkey = rec.metadata.get_bytes(1)
+    proof = rec.metadata.get_bytes(2)
+    assert new_pubkey is not None and proof is not None
+
+    from bonnet.core.record import encode_unsigned_record
+
+    assert verify_record_signature(old_pubkey, encode_unsigned_record(rec), rec.origin_signature)
+    assert verify_key_rotation_proof(new_pubkey, "bbs.test", old_pubkey, proof)
+
+
+def test_rotate_key_writes_new_identity_file_and_backs_up_old(server, tmp_path):
+    console = OperatorConsole(server)
+    old_key_bytes = server.server_identity.private_key
+
+    result = console._cmd_rotate_key([])
+
+    identity_path = server.config.identity_path
+    with open(identity_path, "rb") as f:
+        new_key_bytes = f.read()
+    assert new_key_bytes != old_key_bytes
+
+    backups = [
+        f
+        for f in os.listdir(os.path.dirname(identity_path))
+        if f.startswith("identity.pre-rotate-")
+    ]
+    assert len(backups) == 1
+    with open(os.path.join(os.path.dirname(identity_path), backups[0]), "rb") as f:
+        assert f.read() == old_key_bytes
+
+    assert "Old identity backed up" in result
+
+
+def test_rotate_key_hot_swaps_every_component(server):
+    """Every component that captured the old Identity object at bootstrap
+    must be signing/matching against the new one immediately — this is the
+    whole point of not requiring a restart."""
+    console = OperatorConsole(server)
+    old_pubkey = server.server_identity.public_key
+
+    console._cmd_rotate_key([])
+
+    new_pubkey = server.server_identity.public_key
+    assert new_pubkey != old_pubkey
+
+    assert server.command_handler._identity.public_key == new_pubkey
+    assert server.http_server._server_identity.public_key == new_pubkey
+    assert server.sync_manager._identity.public_key == new_pubkey
+    assert server.local_conn.server_pubkey == new_pubkey
+
+
+def test_rotate_key_http_server_signs_with_new_key(server):
+    """The HTTP server's signer is rebuilt, not just repointed — a stale
+    BonnetSigner would keep signing with the old private key even though the
+    discovery document (built fresh from server_identity) started claiming
+    the new public key, an internally inconsistent response no client could
+    verify."""
+    console = OperatorConsole(server)
+    console._cmd_rotate_key([])
+
+    new_identity = server.server_identity
+    assert server.http_server._signer._private_key == new_identity.private_key
+    assert server.http_server._signer._key_id == f"ed25519:{new_identity.public_key.hex()}"
+
+
+def test_rotate_key_console_still_has_admin_access_after(server):
+    """The console must not lock itself out: after rotation, a subsequent
+    admin-only command issued through the same console must still succeed.
+    This is the regression the ACL-rule and local_conn updates exist for —
+    without them, the console's peer_pubkey and/or the ACL's admin rule
+    would still reference the old key and every later command would be
+    denied."""
+    console = OperatorConsole(server)
+    console._cmd_rotate_key([])
+
+    target_pubkey = Identity.generate().public_key.hex()
+    result = console._cmd_grant_role(
+        ["grant-role", target_pubkey, "moderator", "after-rotation-user"]
+    )
+    assert "Registered" in result
+
+    registered = server.users.get_user_by_pubkey("bbs.test", bytes.fromhex(target_pubkey))
+    assert registered is not None
+    assert registered["username"] == "after-rotation-user"
+
+
+def test_rotate_key_updates_live_acl_admin_rule(server):
+    """The fallback admin rule server.py adds when nothing else grants
+    admin must track the rotation, since it's synthesized state the server
+    owns — not operator config it would be wrong to silently diverge from."""
+    console = OperatorConsole(server)
+    old_pubkey = server.server_identity.public_key
+
+    assert server._acl_admin_rule is not None
+    assert server._acl_admin_rule.matcher.pubkey == old_pubkey
+
+    console._cmd_rotate_key([])
+
+    new_pubkey = server.server_identity.public_key
+    assert server._acl_admin_rule.matcher.pubkey == new_pubkey
+
+
+# ---------------------------------------------------------------------------
+# list-users REPL command
+# ---------------------------------------------------------------------------
+
+
+def test_list_users_parses_multi_user_response(server):
+    """USER_LIST rows are always origin-prefixed on the wire (see
+    _cmd_user_list in firehose_commands.py), even when a specific origin was
+    requested. The console parser must account for that leading origin field
+    plus reg_seq/created_at, or every field after the first user's pubkey is
+    read from the wrong offset."""
+    console = OperatorConsole(server)
+
+    alice_pubkey = Identity.generate().public_key
+    bob_pubkey = Identity.generate().public_key
+
+    result = console._cmd_grant_role(["grant-role", alice_pubkey.hex(), "admin", "alice"])
+    assert "Registered" in result
+    result = console._cmd_grant_role(["grant-role", bob_pubkey.hex(), "moderator", "bob"])
+    assert "Registered" in result
+
+    result = console._cmd_list_users(["list-users"])
+
+    assert "alice" in result
+    assert "bob" in result
+    assert alice_pubkey.hex() in result
+    assert bob_pubkey.hex() in result
+    alice_line = next(line for line in result.splitlines() if "alice" in line)
+    bob_line = next(line for line in result.splitlines() if "bob" in line)
+    assert "[admin]" in alice_line
+    assert "[mod]" in bob_line

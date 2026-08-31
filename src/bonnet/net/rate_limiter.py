@@ -1,15 +1,12 @@
 """Shared rate limiter for command dispatch.
 
-Replaces the per-connection _request_timestamps deque in CommandHandler.
-The old approach stored timestamps on the Connection object, but since each
-v1 connection handles exactly one request, the limit never accumulated.
+Shared across all connections rather than stored per-connection: a
+connection handles exactly one request, so a per-connection counter could
+never accumulate a rate to limit.
 
-This limiter is keyed by identity (for authenticated users) or address
-(for anonymous users), and is shared across all connections/requests.
-
-PROTOCOL_RENOVATION_PLAN §10:
-  Authenticated keys use:  identity:<ed25519-public-key-hex>
-  Anonymous clients use:   address:<normalized-remote-address>
+Bucket keys:
+  authenticated:  identity:<ed25519-public-key-hex>
+  anonymous:      address:<normalized-remote-address>
 """
 
 from __future__ import annotations

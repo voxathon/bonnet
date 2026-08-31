@@ -10,8 +10,8 @@ import pytest
 from nacl.signing import SigningKey
 
 from bonnet.net.http_auth import (
-    BONNET_TAG,
     ED25519_ALG,
+    UNTP_TAG,
     BonnetSigner,
     BonnetVerifier,
     DigestMismatch,
@@ -23,6 +23,7 @@ from bonnet.net.http_auth import (
     KeyResolver,
     MalformedSignature,
     MissingComponent,
+    SignatureError,
     VerifyResult,
     _validate_keyid,
     _validate_nonce,
@@ -76,8 +77,8 @@ def request_msg(valid_nonce):
         headers={
             "Content-Type": "application/vnd.bonnet.command",
             "Content-Digest": compute_content_digest(body),
-            "Bonnet-Protocol": "bonnet-firehose-1",
-            "Bonnet-Nonce": valid_nonce,
+            "Untp-Version": "1",
+            "Untp-Nonce": valid_nonce,
         },
         body=body,
     )
@@ -92,8 +93,8 @@ def response_msg(valid_nonce):
         headers={
             "Content-Type": "application/vnd.bonnet.command",
             "Content-Digest": compute_content_digest(body),
-            "Bonnet-Protocol": "bonnet-firehose-1",
-            "Bonnet-Origin": "bonnet.example.com",
+            "Untp-Version": "1",
+            "Untp-Origin": "bonnet.example.com",
         },
         status_code=200,
         body=body,
@@ -143,22 +144,22 @@ class TestContentDigest:
 class TestSignatureInput:
     def test_parse_roundtrip(self):
         header = (
-            'bonnet=("@method" "@authority" "content-digest" "bonnet-protocol" "bonnet-nonce");'
-            'created=1234;keyid="ed25519:abc";alg="ed25519";tag="bonnet-firehose-1";nonce="xyz"'
+            'untp=("@method" "@authority" "content-digest" "untp-version" "untp-nonce");'
+            'created=1234;keyid="ed25519:abc";alg="ed25519";tag="untp-1";nonce="xyz"'
         )
         parsed = parse_signature_input(header)
-        assert parsed.label == "bonnet"
+        assert parsed.label == "untp"
         assert parsed.components == [
             "@method",
             "@authority",
             "content-digest",
-            "bonnet-protocol",
-            "bonnet-nonce",
+            "untp-version",
+            "untp-nonce",
         ]
         assert parsed.params["created"] == 1234
         assert parsed.params["keyid"] == "ed25519:abc"
         assert parsed.params["alg"] == "ed25519"
-        assert parsed.params["tag"] == "bonnet-firehose-1"
+        assert parsed.params["tag"] == "untp-1"
         assert parsed.params["nonce"] == "xyz"
 
     def test_serialize_roundtrip(self):
@@ -167,11 +168,11 @@ class TestSignatureInput:
             "created": 1234,
             "keyid": "ed25519:abc",
             "alg": "ed25519",
-            "tag": "bonnet-firehose-1",
+            "tag": "untp-1",
         }
-        header = serialize_signature_input("bonnet", components, params)
+        header = serialize_signature_input("untp", components, params)
         parsed = parse_signature_input(header)
-        assert parsed.label == "bonnet"
+        assert parsed.label == "untp"
         assert parsed.components == components
         assert parsed.params["created"] == 1234
 
@@ -298,13 +299,13 @@ class TestSignVerifyRoundtrip:
 
         verifier = BonnetVerifier(key_resolver=key_resolver)
         result = await verifier.verify_request(request_msg)
-        assert result.label == "bonnet"
+        assert result.label == "untp"
         assert result.keyid == "ed25519:" + pub.hex()
         assert result.nonce == valid_nonce
-        assert result.parameters["tag"] == BONNET_TAG
+        assert result.parameters["tag"] == UNTP_TAG
         assert result.parameters["alg"] == ED25519_ALG
         assert "@method" in result.covered_components
-        assert "bonnet-nonce" in result.covered_components
+        assert "untp-nonce" in result.covered_components
 
     @pytest.mark.asyncio
     async def test_response_roundtrip(self, keypair, key_resolver, response_msg, valid_nonce):
@@ -319,22 +320,67 @@ class TestSignVerifyRoundtrip:
             expected_request_nonce=valid_nonce,
         )
         assert "@status" in result.covered_components
-        assert "bonnet-origin" in result.covered_components
-        assert "bonnet-request-nonce" in result.covered_components
+        assert "untp-origin" in result.covered_components
+        assert "untp-request-nonce" in result.covered_components
+
+    # A response whose signature does not cover Untp-Request-Nonce is not bound
+    # to any particular request. Verification used to skip the check in that case,
+    # so such a response could be replayed against a different request.
+    UNBOUND_RESPONSE_COMPONENTS = [
+        "@status",
+        "content-type",
+        "content-digest",
+        "untp-version",
+        "untp-origin",
+    ]
+
+    async def _sign_unbound_response(self, priv, response_msg, nonce):
+        signer = BonnetSigner(
+            private_key=priv,
+            key_id="origin:bonnet.example.com",
+            response_components=list(self.UNBOUND_RESPONSE_COMPONENTS),
+        )
+        await signer.sign_response(response_msg, request_nonce=nonce)
+        return response_msg
 
     @pytest.mark.asyncio
-    async def test_request_with_username(self, keypair, key_resolver, request_msg, valid_nonce):
-        priv, pub = keypair
-        request_msg.set_header("Bonnet-Username", "alice")
-        signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        now = int(time.time())
-        await signer.sign_request(
-            request_msg, nonce=valid_nonce, created=now, expires=now + 60, include_username=True
-        )
+    async def test_unbound_response_is_otherwise_valid(
+        self, keypair, key_resolver, response_msg, valid_nonce
+    ):
+        """Control: the signature itself is fine. Only the binding is missing."""
+        priv, _ = keypair
+        await self._sign_unbound_response(priv, response_msg, valid_nonce)
 
         verifier = BonnetVerifier(key_resolver=key_resolver)
-        result = await verifier.verify_request(request_msg)
-        assert "bonnet-username" in result.covered_components
+        result = await verifier.verify_response(response_msg, expected_origin="bonnet.example.com")
+        assert "untp-request-nonce" not in result.covered_components
+
+    @pytest.mark.asyncio
+    async def test_response_missing_request_nonce_is_rejected(
+        self, keypair, key_resolver, response_msg, valid_nonce
+    ):
+        priv, _ = keypair
+        await self._sign_unbound_response(priv, response_msg, valid_nonce)
+        response_msg.headers.pop("Untp-Request-Nonce", None)
+        assert not response_msg.has_header("untp-request-nonce")
+
+        verifier = BonnetVerifier(key_resolver=key_resolver)
+        with pytest.raises(SignatureError, match="missing Untp-Request-Nonce"):
+            await verifier.verify_response(response_msg, expected_request_nonce=valid_nonce)
+
+    @pytest.mark.asyncio
+    async def test_response_uncovered_request_nonce_is_rejected(
+        self, keypair, key_resolver, response_msg, valid_nonce
+    ):
+        """An unsigned header is attacker-controlled, so matching it proves nothing."""
+        priv, _ = keypair
+        await self._sign_unbound_response(priv, response_msg, valid_nonce)
+        # Present, and holding exactly the value the caller expects — but unsigned.
+        response_msg.set_header("Untp-Request-Nonce", valid_nonce)
+
+        verifier = BonnetVerifier(key_resolver=key_resolver)
+        with pytest.raises(SignatureError, match="does not cover Untp-Request-Nonce"):
+            await verifier.verify_response(response_msg, expected_request_nonce=valid_nonce)
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +438,7 @@ class TestRejections:
         components = [
             "@method",
             "@authority",
-        ]  # missing content-digest, bonnet-protocol, bonnet-nonce
+        ]  # missing content-digest, untp-version, untp-nonce
         now = int(time.time())
         params = {
             "created": now,
@@ -400,7 +446,7 @@ class TestRejections:
             "keyid": "ed25519:" + pub.hex(),
             "alg": ED25519_ALG,
             "nonce": valid_nonce,
-            "tag": BONNET_TAG,
+            "tag": UNTP_TAG,
         }
         sig_base = build_signature_base(components, params, request_msg)
         sig = (
@@ -458,7 +504,7 @@ class TestRejections:
         different_nonce = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
         now = int(time.time())
         await signer.sign_request(request_msg, nonce=different_nonce, created=now, expires=now + 60)
-        # The Bonnet-Nonce header still has the old nonce
+        # The Untp-Nonce header still has the old nonce
         verifier = BonnetVerifier(key_resolver=key_resolver)
         with pytest.raises(InvalidParameter, match="nonce param"):
             await verifier.verify_request(request_msg)
@@ -621,7 +667,7 @@ class TestFormatCompatibility:
 
         si = request_msg.header("Signature-Input")
         # Must start with label=
-        assert si.startswith("bonnet=(")
+        assert si.startswith("untp=(")
         # Must contain quoted component IDs
         assert '"@method"' in si
         assert '"@authority"' in si
@@ -630,7 +676,7 @@ class TestFormatCompatibility:
         assert "created=" in si
         assert 'keyid="ed25519:' in si
         assert 'alg="ed25519"' in si
-        assert f'tag="{BONNET_TAG}"' in si
+        assert f'tag="{UNTP_TAG}"' in si
 
     def test_signature_format(self, keypair, request_msg, valid_nonce):
         priv, pub = keypair
@@ -641,9 +687,9 @@ class TestFormatCompatibility:
         )
 
         sig = request_msg.header("Signature")
-        assert sig.startswith("bonnet=:")
+        assert sig.startswith("untp=:")
         assert sig.endswith(":")
         # The base64 part should decode to 64 bytes (Ed25519 signature)
-        b64_part = sig[len("bonnet=:") : -1]
+        b64_part = sig[len("untp=:") : -1]
         raw = base64.b64decode(b64_part)
         assert len(raw) == 64

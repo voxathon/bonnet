@@ -1,17 +1,18 @@
-"""Firehose protocol configuration loader (PROTOCOL.md §16, §18).
+"""Firehose protocol configuration loader.
 
 Parses TOML config into a FirehoseConfig object with ACL rules, origin
-settings, data paths, and operational parameters. Replaces the old v3
-Config class entirely.
+settings, data paths, and operational parameters.
 """
 
 from __future__ import annotations
 
+import glob
 import os
 import tomllib
 from dataclasses import dataclass
 
 from bonnet.core.acl import ACLEvaluator
+from bonnet.core.home import resolve_home
 
 
 @dataclass
@@ -19,17 +20,19 @@ class PeerConfig:
     """Configuration for a firehose federation peer.
 
     The import_* flags control which punishment types are applied locally
-    when they arrive from this peer (Gate D). Records are always stored and
-    relayed regardless; the flags only govern enforcement.
+    when they arrive from this peer. Records are always stored and
+    relayed regardless; the flags only govern enforcement. Default is
+    opt-in: a peer confers no moderation authority until each type is
+    explicitly turned on.
     """
 
     origin: str
     hostname: str
     port: int = 2272
     verify_tls: bool = False
-    import_warnings: bool = True
-    import_temp_bans: bool = True
-    import_permabans: bool = True
+    import_warnings: bool = False
+    import_temp_bans: bool = False
+    import_permabans: bool = False
 
     def imported_punishment_types(self) -> set[str]:
         """Return the locally enforced punishment type names for this peer."""
@@ -56,7 +59,9 @@ def _as_bool(table: dict, key: str, section: str, default: bool) -> bool:
     return value
 
 
-_TOP_LEVEL_KEYS = {"server", "limits", "search", "tls", "sync", "acl"}
+_TOP_LEVEL_KEYS = {"server", "limits", "search", "tls", "sync", "acl", "include"}
+
+_INCLUDE_ALLOWED_TOP_KEYS = {"acl", "sync"}
 
 _SECTION_KEYS = {
     "server": {
@@ -67,6 +72,7 @@ _SECTION_KEYS = {
         "events_bodies_dir",
         "port",
         "admin_pubkey",
+        "admin_pubkey_file",
         "signature_lifetime_seconds",
         "clock_skew_seconds",
         "host",
@@ -128,8 +134,103 @@ def _find_unknown_keys(data: dict) -> list[str]:
     return unknown
 
 
+def _resolve_admin_pubkey(server: dict) -> str:
+    """Resolve server.admin_pubkey, inline or via admin_pubkey_file.
+
+    admin_pubkey_file lets the key live outside the config file itself - a
+    secrets-mounted file, a path injected by an orchestrator - rather than
+    committed inline. Exactly one of the two may be set.
+    """
+    inline = server.get("admin_pubkey", "")
+    file_path = server.get("admin_pubkey_file", "")
+
+    if inline and file_path:
+        raise ValueError(
+            "config: server.admin_pubkey and server.admin_pubkey_file are "
+            "mutually exclusive — set only one"
+        )
+    if not file_path:
+        return inline
+
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            pubkey_hex = f.read().strip()
+    except OSError as exc:
+        raise ValueError(
+            f"config: could not read server.admin_pubkey_file '{file_path}': {exc}"
+        ) from exc
+
+    if not pubkey_hex:
+        raise ValueError(f"config: server.admin_pubkey_file '{file_path}' is empty")
+
+    return pubkey_hex
+
+
+def _load_include_file(inc_path: str) -> dict:
+    """Load one conf.d-style include file.
+
+    Include files may only contribute [[acl]] rules and [sync] peers —
+    anything else raises rather than being silently dropped, and a nested
+    'include' key raises rather than being silently ignored.
+    """
+    if not os.path.exists(inc_path):
+        raise FileNotFoundError(f"config: included file not found: {inc_path}")
+
+    with open(inc_path, "rb") as f:
+        inc_data = tomllib.load(f)
+
+    if "include" in inc_data:
+        raise ValueError(f"config: included file '{inc_path}' must not itself use 'include'")
+
+    for key in inc_data:
+        if key not in _INCLUDE_ALLOWED_TOP_KEYS:
+            raise ValueError(
+                f"config: included file '{inc_path}' has unsupported top-level key "
+                f"'{key}' — include files may only contain [[acl]] and [sync] (peers only)"
+            )
+
+    sync_table = inc_data.get("sync")
+    if sync_table is not None and (
+        not isinstance(sync_table, dict) or set(sync_table.keys()) - {"peers"}
+    ):
+        raise ValueError(f"config: included file '{inc_path}' [sync] may only contain 'peers'")
+
+    return inc_data
+
+
+def _resolve_includes(data: dict, base_dir: str) -> tuple[list, list, list]:
+    """Expand top-level 'include' glob patterns into merged acl/peer tables.
+
+    Returns (acl_tables, peer_tables, included) with the main file's own
+    [[acl]] / [[sync.peers]] entries first, followed by each matched include
+    file's entries in sorted-path order. `included` is a list of
+    (path, parsed_toml) pairs, kept around so callers don't have to
+    re-parse each include file for unknown-key reporting.
+    """
+    acl_tables = list(data.get("acl", []))
+    peer_tables = list(data.get("sync", {}).get("peers", []))
+    included: list[tuple[str, dict]] = []
+
+    patterns = data.get("include", [])
+    if not isinstance(patterns, list):
+        raise ValueError("config: 'include' must be a list of glob patterns")
+
+    for pattern in patterns:
+        full_pattern = pattern if os.path.isabs(pattern) else os.path.join(base_dir, pattern)
+        matches = sorted(glob.glob(full_pattern))
+        if not matches:
+            raise ValueError(f"config: include pattern '{pattern}' matched no files")
+        for inc_path in matches:
+            inc_data = _load_include_file(inc_path)
+            acl_tables.extend(inc_data.get("acl", []))
+            peer_tables.extend(inc_data.get("sync", {}).get("peers", []))
+            included.append((inc_path, inc_data))
+
+    return acl_tables, peer_tables, included
+
+
 class FirehoseConfig:
-    """Configuration for a Bonnet firehose server."""
+    """Configuration for a Bonnet server."""
 
     def __init__(
         self,
@@ -283,7 +384,13 @@ class FirehoseConfig:
         with open(path, "rb") as f:
             data = tomllib.load(f)
 
+        base_dir = os.path.dirname(os.path.abspath(path))
+        acl_tables, peer_tables, included = _resolve_includes(data, base_dir)
+
         unknown_keys = _find_unknown_keys(data)
+        for inc_path, inc_data in included:
+            rel = os.path.relpath(inc_path, base_dir)
+            unknown_keys.extend(f"{rel}:{k}" for k in _find_unknown_keys(inc_data))
 
         server = data.get("server", {})
         limits = data.get("limits", {})
@@ -291,31 +398,42 @@ class FirehoseConfig:
         tls = data.get("tls", {})
         sync = data.get("sync", {})
 
-        # BONNET_HOME only supplies a *default* for storage paths left unset
-        # in config.toml — an explicit config.toml value always wins, so a
-        # stray environment variable can't silently relocate a deliberately
-        # configured server's data.
-        bonnet_home = os.environ.get("BONNET_HOME")
+        # BONNET_SERVER_HOME (or the per-user default, see core.home) only
+        # supplies a *default* for storage paths left unset in config.toml —
+        # an explicit config.toml value always wins, so a stray environment
+        # variable can't silently relocate a deliberately configured server's
+        # data.
+        server_home = resolve_home("server", "BONNET_SERVER_HOME")
 
-        def _storage_default(subdir: str, fallback: str) -> str:
-            return os.path.join(bonnet_home, subdir) if bonnet_home else fallback
+        def _storage_default(subdir: str) -> str:
+            return os.path.join(server_home, subdir)
 
         origin = server.get("origin", "localhost")
         hostname = server.get("hostname", "")
-        data_dir = server.get("data_dir") or _storage_default("data", "./data")
-        boards_dir = server.get("boards_dir") or _storage_default("boards", "./boards")
-        events_bodies_dir = server.get("events_bodies_dir") or _storage_default(
-            "event_bodies", "./event_bodies"
-        )
+        data_dir = server.get("data_dir") or _storage_default("data")
+        boards_dir = server.get("boards_dir") or _storage_default("boards")
+        events_bodies_dir = server.get("events_bodies_dir") or _storage_default("event_bodies")
         port = server.get("port", 2272)
-        admin_pubkey_hex = server.get("admin_pubkey", "")
+        admin_pubkey_hex = _resolve_admin_pubkey(server)
 
-        acl = ACLEvaluator.from_toml(data)
+        acl = ACLEvaluator.from_toml({"acl": acl_tables})
 
-        if not acl._rules and admin_pubkey_hex:
+        if admin_pubkey_hex:
+            # Ensure admin_pubkey_hex actually grants admin, regardless of
+            # whether other [[acl]] rules are already configured — it used
+            # to only take effect when the [[acl]] table was completely
+            # empty, so the moment an operator kept even one of the sample
+            # config's default rules (the documented first-run flow: keep
+            # the three defaults, uncomment admin_pubkey), the configured
+            # key silently got nothing, with no error anywhere.
             from bonnet.core.acl import default_rules_for_admin
 
-            acl = ACLEvaluator(default_rules_for_admin(admin_pubkey_hex))
+            admin_pubkey_bytes = bytes.fromhex(admin_pubkey_hex)
+            has_configured_admin = any(
+                r.matcher.pubkey == admin_pubkey_bytes and r.effect == "allow" for r in acl._rules
+            )
+            if not has_configured_admin:
+                acl.add_rule(default_rules_for_admin(admin_pubkey_hex)[0])
 
         return FirehoseConfig(
             origin=origin,
@@ -345,11 +463,11 @@ class FirehoseConfig:
                     hostname=p.get("hostname", ""),
                     port=p.get("port", 2272),
                     verify_tls=p.get("verify_tls", False),
-                    import_warnings=_as_bool(p, "import_warnings", "sync.peers", True),
-                    import_temp_bans=_as_bool(p, "import_temp_bans", "sync.peers", True),
-                    import_permabans=_as_bool(p, "import_permabans", "sync.peers", True),
+                    import_warnings=_as_bool(p, "import_warnings", "sync.peers", False),
+                    import_temp_bans=_as_bool(p, "import_temp_bans", "sync.peers", False),
+                    import_permabans=_as_bool(p, "import_permabans", "sync.peers", False),
                 )
-                for p in sync.get("peers", [])
+                for p in peer_tables
             ],
             acl=acl,
             admin_pubkey_hex=admin_pubkey_hex,
@@ -400,16 +518,21 @@ enabled = false
 
         default_content = f"""# Bonnet server configuration sample.
 # Operator documentation: OPERATOR_GUIDE.md
-# Protocol specification: PROTOCOL.md
+
+# Split a growing [[acl]] or [[sync.peers]] list into separate files with
+# conf.d-style includes. Glob patterns are resolved relative to this file;
+# each match may only contain [[acl]] and/or [sync] (peers only) — nothing
+# else, and no further 'include' of its own. Must appear before any [table]
+# header (a TOML requirement, not a Bonnet one) — this comment block is the
+# only place in this file it's legal to add it.
+# include = ["acl.d/*.toml", "peers.d/*.toml"]
 
 [server]
 origin = "localhost"
 hostname = ""
-# Storage paths. Default to ./data, ./boards, ./event_bodies (relative to
-# the server's working directory) unless BONNET_HOME is set, in which case
-# they default to $BONNET_HOME/data, $BONNET_HOME/boards,
-# $BONNET_HOME/event_bodies. Uncomment to pin an explicit path regardless
-# of BONNET_HOME or working directory.
+# Storage paths. Default to data, boards, event_bodies under this server's
+# home directory ($BONNET_SERVER_HOME if set, else the OS per-user data dir —
+# see `bonnet server -h`). Uncomment to pin an explicit path regardless.
 # data_dir = "./data"
 # boards_dir = "./boards"
 # events_bodies_dir = "./event_bodies"
@@ -419,6 +542,9 @@ port = 2272
 host = "127.0.0.1"
 # admin_pubkey = "<hex-encoded Ed25519 public key for full access>"
 # See OPERATOR_GUIDE.md "Becoming your own server's admin" for how to get one.
+# Or point at a file instead of inlining the key (a secrets mount, a path an
+# orchestrator injects) — set exactly one of the two:
+# admin_pubkey_file = "/run/secrets/bonnet_admin_pubkey"
 
 [limits]
 max_request_size = 10485760
@@ -442,7 +568,9 @@ interval_seconds = 300
 # The origin is the peer's Bonnet origin string; hostname/port is the dial address.
 # verify_tls should be false for self-signed certs (common on LAN).
 # import_warnings, import_temp_bans, and import_permabans control which
-# punishment types are accepted from each peer (default: all true).
+# punishment types this peer's moderation actions are enforced with locally.
+# Records are always stored and relayed regardless; these flags only govern
+# whether you trust the peer's authority. Default is opt-in (all false).
 #
 # [[sync.peers]]
 # origin = "10.0.0.15"
@@ -453,9 +581,60 @@ interval_seconds = 300
 # import_temp_bans = true
 # import_permabans = false
 
-# ACL rules (§16): explicit deny-wins, conjunctive dimensions.
-# Supported matchers: pubkey, role, origin, anonymous, unknown, wildcard.
+# ACL rules: explicit deny-wins, conjunctive dimensions.
+# Supported matchers: pubkey, role, origin, anonymous, unknown, registered, wildcard.
 # Selector lists: commands, kinds, boards, objects. Omit = not granted. "*" = all.
+#
+# Out of the box (the four active rules below): anyone can read every
+# board, anyone can self-register a username (bonnet.user.register), and
+# any registered user can publish articles, create boards, and succeed
+# their own signing key (bonnet.user.key.rotate). Note that
+# the matchers are mutually exclusive — a registered principal is not also
+# `anonymous`, so reads have to be granted to each class that needs them
+# rather than once to `anonymous`. Moderation
+# and admin access still need explicit rules. This lets the documented
+# first-run flow (run bonnet gateway, call connect then
+# register, then publish_article / create_board) work without any editing;
+# the server's own identity is always its own admin regardless of
+# what's below (see OPERATOR_GUIDE.md "Becoming your own server's admin").
+# Tighten or remove any of these once you're ready to lock the server down.
+
+[[acl]]
+effect = "allow"
+match.anonymous = true
+actions = ["read"]
+commands = ["PERMISSIONS", "EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
+boards = ["*"]
+
+[[acl]]
+effect = "allow"
+match.unknown = true
+actions = ["read"]
+commands = ["PERMISSIONS"]
+
+[[acl]]
+effect = "allow"
+match.unknown = true
+actions = ["write"]
+commands = ["PUBLISH_RECORD"]
+kinds = ["bonnet.user.register"]
+
+[[acl]]
+effect = "allow"
+match.registered = true
+actions = ["read"]
+commands = ["PERMISSIONS", "EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
+boards = ["*"]
+
+[[acl]]
+effect = "allow"
+match.registered = true
+actions = ["write"]
+commands = ["PUBLISH_RECORD"]
+kinds = ["bonnet.article", "bonnet.board.create", "bonnet.report", "bonnet.user.key.rotate"]
+boards = ["*"]
+
+# To grant a specific key full access (read/write, every command/kind/board):
 #
 # [[acl]]
 # effect = "allow"
@@ -465,20 +644,6 @@ interval_seconds = 300
 # kinds = ["*"]
 # boards = ["*"]
 # objects = ["*"]
-#
-# [[acl]]
-# effect = "allow"
-# match.anonymous = true
-# actions = ["read"]
-# commands = ["EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
-# boards = ["*"]
-#
-# [[acl]]
-# effect = "allow"
-# match.unknown = true
-# actions = ["write"]
-# commands = ["PUBLISH_RECORD"]
-# kinds = ["bonnet.user.register"]
 """
         config_dir = os.path.dirname(path)
         if config_dir:

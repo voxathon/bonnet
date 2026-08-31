@@ -1,9 +1,9 @@
-"""Canonical record codec for the Bonnet Firehose Protocol (PROTOCOL.md).
+"""Canonical record codec for the firehose protocol.
 
-Phase 0: standalone encoder/decoder with no SQLite or networking dependencies.
-Implements §4 (crypto domains), §5 (primitive encodings), §6 (metadata map),
-§7 (actor intent), §8 (origin record), §9 (origin head), §10 (relay witness),
-and §12.9 (origin key rotation proof).
+Standalone encoder/decoder with no SQLite or networking dependencies. Covers
+crypto domain separation, primitive encodings, the metadata map, actor
+intents, origin records, origin heads, relay witnesses, and origin key
+rotation proofs.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from bonnet.core.crypto import Identity
 
 # ---------------------------------------------------------------------------
-# Constants (§4, §5)
+# Constants
 # ---------------------------------------------------------------------------
 
 INTENT_FORMAT = 1
@@ -39,16 +39,24 @@ MAX_METADATA_FIELDS = 256
 MAX_TEXT_FIELD = 4096
 MAX_RANGE_RESPONSE = 1 << 24
 
-DOMAIN_BODY = b"bonnet-body-1\x00"
-DOMAIN_INTENT_SIG = b"bonnet-intent-signature-1\x00"
-DOMAIN_ORIGIN_SIG = b"bonnet-origin-signature-1\x00"
-DOMAIN_EVENT_HASH = b"bonnet-event-hash-1\x00"
-DOMAIN_HEAD_SIG = b"bonnet-head-signature-1\x00"
-DOMAIN_HEAD_HASH = b"bonnet-head-hash-1\x00"
-DOMAIN_WITNESS_SIG = b"bonnet-relay-witness-signature-1\x00"
-DOMAIN_KEY_ROTATION_PROOF = b"bonnet-new-origin-key-proof-1\x00"
+# Domain separation tags. These namespace every hash and signature the ledger
+# produces, so a signature over one structure can never verify against another.
+# The `untp.` prefix is the substrate's namespace, distinct from the `bonnet.`
+# application record kinds in core.kinds. Form is <object>.<operation>.v1, kept
+# uniform even where an object has a single operation, so adding one later never
+# forces a rename. The trailing NUL keeps no tag a prefix of another.
+#
+# Changing any of these invalidates every signature and hash ever produced.
+DOMAIN_BODY = b"untp.body.hash.v1\x00"
+DOMAIN_INTENT_SIG = b"untp.intent.signature.v1\x00"
+DOMAIN_RECORD_SIG = b"untp.record.signature.v1\x00"
+DOMAIN_EVENT_HASH = b"untp.event.hash.v1\x00"
+DOMAIN_HEAD_SIG = b"untp.head.signature.v1\x00"
+DOMAIN_HEAD_HASH = b"untp.head.hash.v1\x00"
+DOMAIN_WITNESS_SIG = b"untp.witness.signature.v1\x00"
+DOMAIN_KEY_ROTATION_PROOF = b"untp.key.rotation.proof.v1\x00"
 
-# Metadata value types (§6)
+# Metadata value types
 VT_BYTES = 0x01
 VT_TEXT = 0x02
 VT_U64 = 0x03
@@ -100,7 +108,7 @@ class InvalidValue(CodecError):
 
 
 # ---------------------------------------------------------------------------
-# Primitive encoders (§5)
+# Primitive encoders
 # ---------------------------------------------------------------------------
 
 
@@ -167,7 +175,7 @@ def enc_blob32(v: bytes, max_len: int = 0xFFFFFFFF) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Primitive decoders (§5)
+# Primitive decoders
 # ---------------------------------------------------------------------------
 
 
@@ -256,7 +264,7 @@ def _normalize_text(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Metadata map (§6)
+# Metadata map
 # ---------------------------------------------------------------------------
 
 
@@ -424,7 +432,7 @@ def decode_metadata(data: bytes) -> MetadataMap:
 def _validate_value(vtype: int, v: bytes) -> None:
     if vtype == VT_TEXT:
         try:
-            s = v.decode("utf-8")
+            v.decode("utf-8")
         except UnicodeDecodeError:
             raise NonCanonical("TEXT value is not valid UTF-8")
         if not _is_nfc(v):
@@ -475,7 +483,7 @@ def _validate_value(vtype: int, v: bytes) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Hash and signature domain functions (§4)
+# Hash and signature domain functions
 # ---------------------------------------------------------------------------
 
 
@@ -500,13 +508,13 @@ def verify_intent_signature(actor_pubkey: bytes, encoded_intent: bytes, signatur
 
 
 def sign_record(identity: Identity, encoded_unsigned_record: bytes) -> bytes:
-    return identity.sign(DOMAIN_ORIGIN_SIG + encoded_unsigned_record)
+    return identity.sign(DOMAIN_RECORD_SIG + encoded_unsigned_record)
 
 
 def verify_record_signature(
     origin_pubkey: bytes, encoded_unsigned_record: bytes, signature: bytes
 ) -> bool:
-    return Identity.verify(origin_pubkey, DOMAIN_ORIGIN_SIG + encoded_unsigned_record, signature)
+    return Identity.verify(origin_pubkey, DOMAIN_RECORD_SIG + encoded_unsigned_record, signature)
 
 
 def sign_head(identity: Identity, encoded_unsigned_head: bytes) -> bytes:
@@ -548,7 +556,7 @@ def verify_key_rotation_proof(
 
 
 # ---------------------------------------------------------------------------
-# Actor Intent (§7)
+# Actor Intent
 # ---------------------------------------------------------------------------
 
 
@@ -627,7 +635,7 @@ def decode_intent(data: bytes) -> Intent:
 
 
 # ---------------------------------------------------------------------------
-# Origin Record (§8)
+# Origin Record
 # ---------------------------------------------------------------------------
 
 
@@ -761,7 +769,7 @@ def decode_unsigned_record(data: bytes) -> tuple[Record, bytes]:
 
 
 def reconstruct_intent_from_record(rec: Record) -> Intent:
-    """Reconstruct the actor intent from a record for signature verification (§8)."""
+    """Reconstruct the actor intent from a record for signature verification."""
     return Intent(
         intent_format=INTENT_FORMAT,
         event_id=rec.event_id,
@@ -784,7 +792,7 @@ def reconstruct_intent_from_record(rec: Record) -> Intent:
 
 
 # ---------------------------------------------------------------------------
-# Origin Head (§9)
+# Origin Head
 # ---------------------------------------------------------------------------
 
 
@@ -857,7 +865,7 @@ def decode_unsigned_head(data: bytes) -> tuple[Head, bytes]:
 
 
 # ---------------------------------------------------------------------------
-# Relay Witness (§10)
+# Relay Witness
 # ---------------------------------------------------------------------------
 
 
@@ -938,7 +946,7 @@ def decode_unsigned_witness(data: bytes) -> tuple[Witness, bytes]:
 
 
 def is_origin_witness(w: Witness) -> bool:
-    """An origin witness has an all-zero upstream key and empty hostname (§10.1)."""
+    """An origin witness has an all-zero upstream key and empty hostname."""
     return w.received_from_pubkey == b"\x00" * KEY_SIZE and w.received_from_hostname == ""
 
 
