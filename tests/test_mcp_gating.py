@@ -51,6 +51,7 @@ READ_ONLY = {
     "list_articles",
     "search_articles",
     "query_articles",
+    "read_thread",
     "ban_status",
     "event_head",
     "event_range",
