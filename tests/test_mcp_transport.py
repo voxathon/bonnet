@@ -1,4 +1,4 @@
-"""Transport selection for the bonnet-gateway bridge.
+"""Transport selection for the `bonnet gateway` bridge.
 
 stdio is the default because an agent host launching this process over pipes
 needs no port, no listener and no supervision. http remains available for one

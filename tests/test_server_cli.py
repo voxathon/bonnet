@@ -1,4 +1,6 @@
-"""CLI behavior tests for the server entry point (bonnet.app.main)."""
+"""CLI behavior tests for `bonnet.app.main.main`, the delegate `bonnet server`
+dispatches to (see `bonnet.cli`). `--version` lives on the dispatcher now, not
+here — see tests/test_cli.py."""
 
 import os
 
@@ -7,14 +9,24 @@ import pytest
 from bonnet.app.main import main
 
 
-def test_version_flag_prints_version_and_exits(capsys):
-    with pytest.raises(SystemExit) as exc:
-        main(["--version"])
+@pytest.fixture(autouse=True)
+def _isolated_server_home(tmp_path, monkeypatch):
+    """Every test here calls `main()`, which resolves a server home (for
+    logs, and for --config's default) even when an explicit --config makes
+    the config path itself irrelevant to that home. Without this, a test
+    that reaches that resolution with no isolation writes into the real
+    per-user directory instead of tmp_path.
 
-    assert exc.value.code == 0
-    out = capsys.readouterr().out
-    assert out.startswith("bonnet-server ")
-    assert len(out.split()) == 2
+    Both layers are isolated, not just the env var: `--dir` writes its
+    pointer file under `platformdirs.user_config_dir` regardless of any env
+    var, so a test exercising `--dir` without mocking that too leaves a real,
+    persistent pointer on the machine running the tests — silently redirecting
+    a later real `bonnet server` invocation at a deleted tmp_path. Tests that
+    specifically exercise home resolution override these with their own
+    monkeypatch calls."""
+    monkeypatch.setenv("BONNET_SERVER_HOME", str(tmp_path / "srvhome"))
+    monkeypatch.setattr("platformdirs.user_config_dir", lambda *a, **k: str(tmp_path / "cfg"))
+    monkeypatch.setattr("platformdirs.user_data_dir", lambda *a, **k: str(tmp_path / "data"))
 
 
 def test_missing_config_prints_friendly_error(tmp_path, capsys, monkeypatch):
@@ -173,3 +185,43 @@ def test_check_config_reports_unrecognized_keys(tmp_path, capsys, monkeypatch):
     captured = capsys.readouterr()
     assert "unrecognized config key 'server.typo_field'" in captured.err
     assert "unrecognized key(s) ignored" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# --dir / home directory resolution
+# ---------------------------------------------------------------------------
+
+
+def test_dir_flag_sets_config_default(tmp_path, capsys, monkeypatch):
+    """With no --config, --dir <path> makes <path>/config.toml the target —
+    in the same invocation that set it, not just future ones."""
+    monkeypatch.delenv("BONNET_SERVER_HOME", raising=False)
+    home_dir = tmp_path / "srvhome"
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--dir", str(home_dir)])
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert f"config file not found: {os.path.join(str(home_dir), 'config.toml')}" in err
+
+
+def test_dir_flag_persists_for_a_later_call_with_no_dir(tmp_path, capsys, monkeypatch):
+    """--dir X --create-config, then a later call with neither --dir nor
+    --config resolves to X/config.toml via the pointer file --dir wrote —
+    the whole point of --dir over a one-shot env var."""
+    monkeypatch.delenv("BONNET_SERVER_HOME", raising=False)
+    monkeypatch.setattr("platformdirs.user_config_dir", lambda *a, **k: str(tmp_path / "cfg"))
+    monkeypatch.setattr("platformdirs.user_data_dir", lambda *a, **k: str(tmp_path / "data"))
+    home_dir = tmp_path / "srvhome"
+
+    main(["--dir", str(home_dir), "--create-config"])
+    capsys.readouterr()
+
+    # --check-config exits cleanly either way and never starts the server,
+    # so a resolution failure shows up as a friendly "not found" on stderr
+    # rather than the process trying to bind a port.
+    main(["--check-config"])
+
+    out = capsys.readouterr().out
+    assert f"OK: {os.path.join(str(home_dir), 'config.toml')} is valid." in out

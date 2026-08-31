@@ -27,7 +27,7 @@ def store(tmp_path):
 @pytest.fixture
 def wired_store(tmp_path, monkeypatch):
     """Point the module-level singleton at a temp store for _resolve_auth."""
-    monkeypatch.setenv("BONNET_GATEWAY_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("BONNET_IDENTITIES_DB", str(tmp_path / "identities.db"))
     monkeypatch.delenv("BONNET_URL", raising=False)
     tenancy.reset_store_cache()
