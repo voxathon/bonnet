@@ -45,11 +45,18 @@ def test_window_expiry_allows_after_window():
 
 
 def test_window_boundary():
+    # Sleeps past the window, not exactly to it. The limiter reads
+    # time.monotonic(), whose resolution is 15.6ms on Windows — a
+    # sleep(0.1) can measure as 0.093 there, and asserting expiry at
+    # exactly one window would be asserting sub-tick precision no
+    # platform clock offers. Expiry lagging by up to one tick is the
+    # safe direction for a rate limiter anyway: never more through
+    # than intended.
     rl = RateLimiter(max_requests=2, window_seconds=0.1)
     assert rl.check("key1") is True
     assert rl.check("key1") is True
     assert rl.check("key1") is False
-    time.sleep(0.1)
+    time.sleep(0.15)
     assert rl.check("key1") is True
 
 

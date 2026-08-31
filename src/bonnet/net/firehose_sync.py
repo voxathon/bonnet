@@ -323,23 +323,31 @@ class SyncManager:
         while True:
             try:
                 origin = await self._sync_queue.get()
-                client = self._clients.get(origin)
-                if client is None:
-                    continue
-                backoff = self._peer_backoff.get(origin, 0)
-                if backoff > 0:
-                    last_fail = self._peer_last_failure.get(origin, 0)
-                    if time.time() - last_fail < backoff:
-                        log_msg(
-                            f"SYNC_WORKER: origin='{origin}' in backoff ({backoff}s), skipping on-demand sync"
-                        )
-                        continue
+                # Every exit below this point must release _inflight, not
+                # just the ones that ran a sync: queue_sync refuses an origin
+                # already in the set, so an entry left behind by a skip is
+                # not a stalled sync but a permanently dead on-read trigger
+                # for that peer. The skips used to `continue` past the
+                # release, which is why this try covers all of them.
                 try:
-                    await self._sync_once(origin, client)
-                    self._record_peer_success(origin)
-                except Exception as e:
-                    log_msg(f"SYNC_WORKER: error syncing origin '{origin}': {e}")
-                    self._record_peer_failure(origin)
+                    client = self._clients.get(origin)
+                    if client is None:
+                        continue
+                    backoff = self._peer_backoff.get(origin, 0)
+                    if backoff > 0:
+                        last_fail = self._peer_last_failure.get(origin, 0)
+                        if time.time() - last_fail < backoff:
+                            log_msg(
+                                f"SYNC_WORKER: origin='{origin}' in backoff ({backoff}s), "
+                                "skipping on-demand sync"
+                            )
+                            continue
+                    try:
+                        await self._sync_once(origin, client)
+                        self._record_peer_success(origin)
+                    except Exception as e:
+                        log_msg(f"SYNC_WORKER: error syncing origin '{origin}': {e}")
+                        self._record_peer_failure(origin)
                 finally:
                     self._inflight.discard(origin)
                     self._sync_queue.task_done()
