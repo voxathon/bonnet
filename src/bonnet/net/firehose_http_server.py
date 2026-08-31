@@ -566,9 +566,5 @@ class FirehoseHTTPServer:
         return f"Signature error: {e}"
 
     @property
-    def anonymous_public_key(self) -> bytes:
-        return self._anonymous_public_key
-
-    @property
     def anonymous_private_key(self) -> bytes:
         return self._anonymous_identity.private_key

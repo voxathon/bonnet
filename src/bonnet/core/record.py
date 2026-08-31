@@ -241,9 +241,6 @@ class _Reader:
             raise LengthExceeded(f"blob32 length {n} exceeds {max_len}")
         return self.read(n)
 
-    def at_end(self) -> bool:
-        return self.offset >= len(self.data)
-
     def expect_end(self) -> None:
         if self.offset < len(self.data):
             raise TrailingInput(
@@ -330,10 +327,6 @@ class MetadataMap:
         r = _Reader(f.value)
         count = r.u16()
         return [r.text16() for _ in range(count)]
-
-
-def metadata_field_bytes(field_id: int, value_type: int, value: bytes) -> MetadataField:
-    return MetadataField(field_id=field_id, value_type=value_type, value=value)
 
 
 def metadata_text(field_id: int, text: str) -> MetadataField:
@@ -844,26 +837,6 @@ def decode_head(data: bytes) -> Head:
     return h
 
 
-def decode_unsigned_head(data: bytes) -> tuple[Head, bytes]:
-    r = _Reader(data)
-    fmt = r.u8()
-    if fmt != HEAD_FORMAT:
-        raise InvalidValue(f"head_format must be {HEAD_FORMAT}, got {fmt}")
-    h = Head(
-        head_format=fmt,
-        origin=r.text16(MAX_ORIGIN_HOSTNAME),
-        latest_origin_seq=r.u64(),
-        latest_event_hash=r.id32(),
-        event_count=r.u64(),
-        generated_at=r.i64(),
-        origin_pubkey=r.key32(),
-    )
-    sig = r.sig64()
-    r.expect_end()
-    h.origin_signature = sig
-    return h, sig
-
-
 # ---------------------------------------------------------------------------
 # Relay Witness
 # ---------------------------------------------------------------------------
@@ -921,28 +894,6 @@ def decode_witness(data: bytes) -> Witness:
     )
     r.expect_end()
     return w
-
-
-def decode_unsigned_witness(data: bytes) -> tuple[Witness, bytes]:
-    r = _Reader(data)
-    fmt = r.u8()
-    if fmt != WITNESS_FORMAT:
-        raise InvalidValue(f"witness_format must be {WITNESS_FORMAT}, got {fmt}")
-    w = Witness(
-        witness_format=fmt,
-        event_origin=r.text16(MAX_ORIGIN_HOSTNAME),
-        event_id=r.id32(),
-        event_hash=r.id32(),
-        relay_pubkey=r.key32(),
-        relay_hostname=r.text16(MAX_ORIGIN_HOSTNAME),
-        received_from_pubkey=r.key32(),
-        received_from_hostname=r.text16(MAX_ORIGIN_HOSTNAME),
-        seen_at=r.i64(),
-    )
-    sig = r.sig64()
-    r.expect_end()
-    w.relay_signature = sig
-    return w, sig
 
 
 def is_origin_witness(w: Witness) -> bool:

@@ -66,11 +66,3 @@ def resolve_rg():
     if found:
         _rg_path = found
     return _rg_path
-
-
-def reset_resolve_cache():
-    """Clear the cached binary resolution (used by tests)."""
-    global _rg_path, _rg_checked, _rg_explicit
-    _rg_path = None
-    _rg_checked = False
-    _rg_explicit = None
