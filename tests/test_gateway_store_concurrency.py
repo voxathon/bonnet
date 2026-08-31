@@ -21,6 +21,18 @@ That rests on three properties, none of which the code enforces:
 `check_same_thread=False` disables the one runtime check that would catch a
 violation of (1) or (3), so a regression would corrupt quietly rather than
 raise. These tests are the replacement for that check.
+
+**Do not "fix" this by removing check_same_thread=False.** It looks
+gratuitous on a single-threaded gateway and is not. Measured over the whole
+suite with per-connection thread tracking: 27 cross-thread events, every one
+of them a `close`, none a statement — so the flag is not protecting reads or
+writes, it is protecting teardown. `tenancy.reset_store_cache` runs from
+whichever thread is tearing down, which is not always the thread that lazily
+created the store during a request. With the flag off, that close raises
+ProgrammingError, the handle stays open, and the directory the caller is
+about to delete stays locked on Windows — precisely what reset_store_cache
+exists to prevent. The suite stays green either way, because the close is
+best-effort; it now logs rather than vanishing.
 """
 
 import ast
