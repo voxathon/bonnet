@@ -131,6 +131,36 @@ READ_OPS = frozenset(
     }
 )
 
+# Opcodes whose handler consults the ACL 'board' dimension: PUBLISH_RECORD
+# via the board on the intent, the rest via `_board_read_allowed`.
+#
+# Everything not listed here is board-agnostic *by construction*, not by
+# omission. The substrate reads — EVENT_HEAD, EVENT_RANGE, EVENT_GET,
+# EVENT_BODY, KEY_EPOCHS — are how a peer replicates this origin's log, and
+# the log is a hash chain: each record commits to its predecessor's hash, and
+# ingest raises ChainBreak on the first gap (`core/firehose.py`, the
+# `previous_event_hash != expected_prev` check). Filtering records out of a
+# range by board would hand every peer a broken chain. So these opcodes
+# cannot be board-scoped, and granting one is granting the whole log:
+# every record's board, author, metadata (an article's subject and tags
+# included), body hash and size, plus the body bytes of every non-article
+# kind. Article bodies are the exception — they live in the per-board store,
+# so ARTICLE_BODY's check is the only door to those.
+#
+# Grant the substrate opcodes to a principal you would grant `boards = ["*"]`.
+BOARD_SCOPED_OPS = frozenset(
+    {
+        OP_PUBLISH_RECORD,
+        OP_REPORT_LIST,
+        OP_BOARD_LIST,
+        OP_ARTICLE_GET,
+        OP_ARTICLE_LIST,
+        OP_ARTICLE_SEARCH,
+        OP_ARTICLE_QUERY,
+        OP_ARTICLE_BODY,
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Response builder helpers
@@ -714,9 +744,19 @@ class FirehoseCommandHandler:
         the whole point — a client that infers permissions from anything else
         is maintaining a second, divergent copy of this policy.
 
-        Scoped to the board in the request when one is given. ACL rules carry
-        a board dimension, so the same principal may publish to one board and
-        not another, and a board-independent answer cannot express that.
+        Scoped to the board in the request when one is given — but only for
+        the opcodes that actually consult the board dimension (see
+        BOARD_SCOPED_OPS). ACL rules carry a board dimension, so the same
+        principal may publish to one board and not another, and a
+        board-independent answer cannot express that.
+
+        Scoping the board-agnostic opcodes too would break the promise above.
+        A board-scoped deny would drop EVENT_GET from this list while a real
+        EVENT_GET still succeeded, because `handle()` gates it without a
+        board and no handler re-checks. Reporting them unscoped is the
+        honest answer: the substrate reads are not board-restrictable, and a
+        caller reading this list needs to see that rather than a denial the
+        relay will not enforce.
 
         This is deliberately an ordinary ACL-gated read: an operator who does
         not want policy shape enumerated can deny it like anything else, and
@@ -739,7 +779,7 @@ class FirehoseCommandHandler:
                 auth,
                 "write" if opcode in WRITE_OPS else "read",
                 command=name,
-                board=scope,
+                board=scope if opcode in BOARD_SCOPED_OPS else None,
             )
         ]
 
