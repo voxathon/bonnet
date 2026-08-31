@@ -57,6 +57,14 @@ from bonnet.net.firehose_wire import (
     OP_REPORT_LIST,
     OP_USER_GET,
     OP_USER_LIST,
+    _enc_text16,
+    _read_bytes,
+    _read_id32,
+    _read_text16,
+    _read_u8,
+    _read_u16,
+    _read_u32,
+    _read_u64,
 )
 
 KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
@@ -73,7 +81,12 @@ PUNISHMENT_TYPE_CODES = {"warning": 1, "ban": 2, "permaban": 3}
 
 
 # ---------------------------------------------------------------------------
-# Opcodes — defined once in firehose_wire.py, imported above.
+# Opcodes and the wire codec — defined once in firehose_wire.py, imported above.
+#
+# The request decoders are the same functions the client uses on responses:
+# one bounds-checked copy for both directions. ProtocolError subclasses
+# ValueError, so a malformed request still lands in handle()'s `except
+# ValueError` and comes back as a 0x0006 error frame.
 # ---------------------------------------------------------------------------
 
 CMD_NAMES = {
@@ -142,52 +155,6 @@ def _pad32(value: bytes) -> bytes:
     NUL bytes into source files in this repo.
     """
     return (value + bytes(32))[:32]
-
-
-def _enc_text16(s: str) -> bytes:
-    encoded = s.encode("utf-8")
-    return struct.pack(">H", len(encoded)) + encoded
-
-
-def _read_text16(data: bytes, offset: int) -> tuple[str, int]:
-    if offset + 2 > len(data):
-        raise ValueError("truncated text16")
-    n = struct.unpack(">H", data[offset : offset + 2])[0]
-    offset += 2
-    if offset + n > len(data):
-        raise ValueError("truncated text16 content")
-    s = data[offset : offset + n].decode("utf-8")
-    return s, offset + n
-
-
-def _read_u64(data: bytes, offset: int) -> tuple[int, int]:
-    if offset + 8 > len(data):
-        raise ValueError("truncated u64")
-    return struct.unpack(">Q", data[offset : offset + 8])[0], offset + 8
-
-
-def _read_u16(data: bytes, offset: int) -> tuple[int, int]:
-    if offset + 2 > len(data):
-        raise ValueError("truncated u16")
-    return struct.unpack(">H", data[offset : offset + 2])[0], offset + 2
-
-
-def _read_u32(data: bytes, offset: int) -> tuple[int, int]:
-    if offset + 4 > len(data):
-        raise ValueError("truncated u32")
-    return struct.unpack(">I", data[offset : offset + 4])[0], offset + 4
-
-
-def _read_u8(data: bytes, offset: int) -> tuple[int, int]:
-    if offset + 1 > len(data):
-        raise ValueError("truncated u8")
-    return data[offset], offset + 1
-
-
-def _read_id32(data: bytes, offset: int) -> tuple[bytes, int]:
-    if offset + 32 > len(data):
-        raise ValueError("truncated id32")
-    return data[offset : offset + 32], offset + 32
 
 
 # ---------------------------------------------------------------------------
@@ -690,8 +657,8 @@ class FirehoseCommandHandler:
         """
         offset = 0
         key_len, offset = _read_u8(data, offset)
-        culprit = data[offset : offset + key_len] if key_len else None
-        offset += key_len
+        culprit, offset = _read_bytes(data, offset, key_len, "culprit pubkey")
+        culprit = culprit or None
         limit, offset = _read_u16(data, offset)
         page_offset, offset = _read_u16(data, offset)
 
@@ -1241,8 +1208,7 @@ class FirehoseCommandHandler:
             operator, offset = _read_u8(data, offset)
             value_type, offset = _read_u8(data, offset)
             value_len, offset = _read_u16(data, offset)
-            raw_value = data[offset : offset + value_len]
-            offset += value_len
+            raw_value, offset = _read_bytes(data, offset, value_len, "filter value")
 
             value: bytes | str | int | bool
             if value_type == 0x01:
@@ -1336,8 +1302,7 @@ class FirehoseCommandHandler:
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _error(0x0001, "User not found")
         pubkey_len, offset = _read_u8(data, offset)
-        pubkey = data[offset : offset + pubkey_len]
-        offset += pubkey_len
+        pubkey, offset = _read_bytes(data, offset, pubkey_len, "pubkey")
 
         user = self._users.get_user_by_pubkey(origin, pubkey)
         if user is None:
@@ -1391,9 +1356,7 @@ class FirehoseCommandHandler:
     def _cmd_ban_status(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         pubkey_len, offset = _read_u8(data, offset)
-        if offset + pubkey_len > len(data):
-            return _error(0x0006, "Truncated pubkey")
-        pubkey = data[offset : offset + pubkey_len]
+        pubkey, offset = _read_bytes(data, offset, pubkey_len, "pubkey")
 
         try:
             punishments = self._policy.list_pending_for_pubkey(
