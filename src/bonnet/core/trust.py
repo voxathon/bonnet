@@ -1,35 +1,42 @@
-"""Shared origin-key pinning and rotation verification.
+"""Origin-key pinning and rotation verification.
 
-PROTOCOL_RENOVATION_PLAN §12.2:
-  The client identity database needs a separate trust table:
-    CREATE TABLE origin_keys (
-        origin TEXT PRIMARY KEY,
-        publickey BLOB NOT NULL,
-        first_seen INTEGER NOT NULL,
-        last_rotated INTEGER NOT NULL,
-        trust_mode TEXT NOT NULL
-    );
+Used by the gateway, to pin the origins it talks to. Federation sync does
+*not* use this — `net.firehose_sync` builds its transport without a trust
+store, and the server's own peer-key trust lives in the firehose's
+`origin_key_epochs` table under a separate rotation-proof scheme. (This
+docstring previously claimed the server pinned its peers here. It does not.)
 
-  trust_mode initially supports 'tofu' and 'configured'.
+Pins live in a SQLite `origin_keys` table, where `trust_mode` is either 'tofu'
+(adopted on first contact) or 'configured' (supplied by the operator and never
+auto-adopted). A second table, `pending_keys`, holds a key that has been
+*presented but not adopted*, for the confirm/decline gate in
+`gateway.tools.trust_origin_key`. It is a separate table rather than another
+`trust_mode` value because `origin_keys` is keyed by origin, and a candidate
+for an origin that is already pinned has to coexist with the live pin rather
+than replace it.
 
-  TOFU insertion and comparison must be one atomic database operation.
-  The shared trust implementation must replace the current read-then-insert
-  behavior and include a concurrent first-contact test.
+TOFU pinning is a single atomic INSERT OR IGNORE + SELECT, so concurrent
+first contact with the same origin converges on one pin instead of racing.
 
-This module replaces the racy SyncDB.set_peer_pubkey_tofu (read-then-insert)
-with an atomic INSERT OR IGNORE + SELECT pattern. Both client origin pins
-and server peer-key pins use this implementation.
+A single-hop rotation is accepted only when the origin is currently pinned
+to the old key and the proof verifies against the new key, using the same
+domain-separated construction as the rest of the protocol
+(record.sign_key_rotation_proof / verify_key_rotation_proof — the new key
+attests it consents to succeed the old one; record.py separately requires
+the rotate record itself to carry a valid origin signature under the old
+key, so acceptance is mutual-consent between old and new).
 
-Rotation verification mirrors SyncDB.rotate_peer_pubkey:
-  payload = struct.pack('B', len(origin_bytes)) + origin_bytes + old_pubkey + new_pubkey
-  verified with Identity.verify(old_pubkey, payload, signature)
+A multi-hop rotation (the origin rotated more than once since this pin was
+last refreshed) is not resolved by verify_rotation alone — the caller
+(net.firehose_transport) walks the intermediate hops itself, verifying each
+one with record.verify_key_rotation_proof, and only calls accept_rotation()
+once to commit the final, fully-verified endpoint.
 """
 
 from __future__ import annotations
 
 import os
 import sqlite3
-import struct
 import threading
 import time
 
@@ -62,6 +69,25 @@ class TrustStore:
                 first_seen INTEGER NOT NULL,
                 last_rotated INTEGER NOT NULL,
                 trust_mode TEXT NOT NULL
+            )
+        """)
+        # A key presented and awaiting a decision. Never consulted when
+        # deciding whether a connection is trusted — only origin_keys is —
+        # so a stale row here can delay nothing and authorise nothing.
+        # `url` and `verify_tls` are how the key was presented. Kept because
+        # on first contact nothing else has recorded them yet — the origin is
+        # in no joined list — so without them, accepting would have nowhere to
+        # reconnect to, and would silently reconnect under different TLS
+        # settings than the connection that raised the question.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_keys (
+                origin TEXT PRIMARY KEY,
+                publickey BLOB NOT NULL,
+                kind TEXT NOT NULL,
+                evidence TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL DEFAULT '',
+                verify_tls TEXT NOT NULL DEFAULT 'true',
+                seen_at INTEGER NOT NULL
             )
         """)
         self._conn.commit()
@@ -138,42 +164,134 @@ class TrustStore:
             self._conn.commit()
 
     def verify_rotation(
-        self, origin: str, old_publickey: bytes, new_publickey: bytes, signature: bytes
+        self, origin: str, old_publickey: bytes, new_publickey: bytes, proof: bytes
     ) -> bool:
-        """Verify a key rotation signed by the old pinned key.
+        """Verify a single-hop key rotation proof and, if valid, commit it.
 
-        The canonical rotation payload is:
-          struct.pack('B', len(origin_bytes)) + origin_bytes + old_pubkey + new_pubkey
+        Uses record.verify_key_rotation_proof — the same domain-separated
+        construction the server verifies when applying a
+        bonnet.origin.key.rotate record, so a proof pulled straight off the
+        wire (record.metadata field 2) verifies here unmodified.
 
         Returns True if:
           - origin is currently pinned with old_publickey, AND
-          - the signature verifies against old_publickey over the payload
+          - the proof verifies against new_publickey over (origin, old, new)
         Returns False otherwise.
 
         On success, updates the pin to new_publickey and sets last_rotated.
         """
-        from bonnet.core.crypto import Identity
+        from bonnet.core.record import verify_key_rotation_proof
 
         existing = self.get_pin(origin)
         if existing is None or existing != old_publickey:
             return False
 
-        origin_bytes = origin.encode("utf-8")
-        payload = struct.pack("B", len(origin_bytes)) + origin_bytes + old_publickey + new_publickey
-
-        if not Identity.verify(old_publickey, payload, signature):
+        if not verify_key_rotation_proof(new_publickey, origin, old_publickey, proof):
             return False
 
+        return self.accept_rotation(origin, old_publickey, new_publickey)
+
+    def accept_rotation(
+        self, origin: str, expected_old_publickey: bytes, new_publickey: bytes
+    ) -> bool:
+        """Commit a pin update for a rotation already verified by the caller.
+
+        No cryptographic check happens here — this is the low-level CAS
+        primitive verify_rotation uses for the single-hop case, and that
+        net.firehose_transport's multi-hop chain walk calls directly once it
+        has independently verified every intermediate hop (a single proof
+        cannot attest a multi-hop jump, so verify_rotation's own check does
+        not apply there).
+
+        Returns True if the origin was still pinned to expected_old_publickey
+        and the update was applied; False otherwise (pin already moved, e.g.
+        a concurrent rotation).
+        """
         now = int(time.time())
         with self._lock:
             cursor = self._conn.execute(
                 "UPDATE origin_keys SET publickey=?, last_rotated=? WHERE origin=? AND publickey=?",
-                (new_publickey, now, origin, old_publickey),
+                (new_publickey, now, origin, expected_old_publickey),
             )
             if cursor.rowcount == 0:
                 return False
             self._conn.commit()
         return True
+
+    # ------------------------------------------------------------------
+    # Pending candidates: presented, not adopted
+    # ------------------------------------------------------------------
+
+    def record_pending(
+        self,
+        origin: str,
+        publickey: bytes,
+        kind: str,
+        evidence: str = "",
+        url: str = "",
+        verify_tls: str = "true",
+    ) -> None:
+        """Remember a key awaiting a decision, replacing any earlier candidate.
+
+        Replacing rather than accumulating: only the most recently presented
+        key can be the one a caller is being asked about, and keeping older
+        candidates around would let a decision be confirmed against a key that
+        is no longer on offer.
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO pending_keys "
+                "(origin, publickey, kind, evidence, url, verify_tls, seen_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (origin, publickey, kind, evidence, url, verify_tls, int(time.time())),
+            )
+            self._conn.commit()
+
+    def get_pending(self, origin: str) -> dict | None:
+        """The key awaiting a decision for `origin`, or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT publickey, kind, evidence, url, verify_tls, seen_at"
+                " FROM pending_keys WHERE origin=?",
+                (origin,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "publickey": bytes(row[0]),
+            "kind": row[1],
+            "evidence": row[2],
+            "url": row[3],
+            "verify_tls": row[4],
+            "seen_at": row[5],
+        }
+
+    def list_pending(self) -> list[dict]:
+        """Every origin with a decision outstanding, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT origin, publickey, kind, evidence, url, verify_tls, seen_at"
+                " FROM pending_keys ORDER BY seen_at"
+            ).fetchall()
+        return [
+            {
+                "origin": r[0],
+                "publickey": bytes(r[1]),
+                "kind": r[2],
+                "evidence": r[3],
+                "url": r[4],
+                "verify_tls": r[5],
+                "seen_at": r[6],
+            }
+            for r in rows
+        ]
+
+    def clear_pending(self, origin: str) -> bool:
+        """Drop a pending candidate. True if one was there."""
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM pending_keys WHERE origin=?", (origin,))
+            self._conn.commit()
+        return cursor.rowcount > 0
 
     def reset_pin(self, origin: str) -> bool:
         """Remove a pin (operator-initiated reset). Returns True if a pin was removed."""

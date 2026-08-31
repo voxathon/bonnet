@@ -122,8 +122,10 @@ def stack(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_checkpoint_stays_before_failed_record(stack):
-    """When a projection raises, the checkpoint must not advance past it."""
+def test_checkpoint_advances_past_failed_record(stack):
+    """A projection failure is skipped, not halted on: the checkpoint must
+    advance past the failing record so the origin isn't stuck retrying it
+    forever."""
     d, firehose, nav, users, policy, bs = stack
 
     for i in range(3):
@@ -147,16 +149,17 @@ def test_checkpoint_stays_before_failed_record(stack):
 
     BoardProjection.apply_article = failing_apply
     try:
-        d.dispatch_origin("bbs.a")
+        count = d.dispatch_origin("bbs.a")
     finally:
         BoardProjection.apply_article = original_apply
 
     checkpoint = firehose.get_checkpoint("bbs.a")
-    assert checkpoint == 1, f"checkpoint should be 1 (before failed record 2), got {checkpoint}"
+    assert checkpoint == 3, f"checkpoint should advance past the failed record, got {checkpoint}"
+    assert count == 3
 
 
-def test_later_records_not_dispatched_after_failure(stack):
-    """Records after a failed projection must not be dispatched."""
+def test_later_records_still_dispatched_after_failure(stack):
+    """A failure on one record must not block the records after it."""
     d, firehose, nav, users, policy, bs = stack
 
     for i in range(3):
@@ -184,13 +187,18 @@ def test_later_records_not_dispatched_after_failure(stack):
     finally:
         BoardProjection.apply_article = original_apply
 
-    assert call_count[0] == 2, (
-        f"should have processed only 2 records (1 success + 1 fail), got {call_count[0]}"
+    assert call_count[0] == 3, f"all 3 records should be attempted, got {call_count[0]}"
+
+    bp = d._get_board_projection("bbs.a", "general")
+    assert bp.article_count("bbs.a", "general") == 2, (
+        "the 2 successful records should be applied; the 1 failed one is skipped, not retried"
     )
 
 
-def test_retry_after_fault_removed(stack):
-    """After the fault is cleared, retrying dispatch should apply the failed record."""
+def test_retry_does_not_redispatch_skipped_record(stack):
+    """A later dispatch call must not re-attempt a record already skipped
+    past — the checkpoint moved on, so it stays skipped until an explicit
+    rebuild."""
     d, firehose, nav, users, policy, bs = stack
 
     for i in range(3):
@@ -220,10 +228,11 @@ def test_retry_after_fault_removed(stack):
 
     call_count[0] = 0
     count = d.dispatch_origin("bbs.a")
-    assert count >= 2, f"retry should dispatch remaining records, got {count}"
+    assert count == 0, "nothing left to dispatch — the checkpoint already passed all 3 records"
+    assert call_count[0] == 0
 
     bp = d._get_board_projection("bbs.a", "general")
-    assert bp.article_count("bbs.a", "general") == 3
+    assert bp.article_count("bbs.a", "general") == 2
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +453,7 @@ def test_rebuild_clears_uncached_board_projections(stack, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Punishment import filtering (Gate D)
+# Punishment import filtering
 # ---------------------------------------------------------------------------
 
 

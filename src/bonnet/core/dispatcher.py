@@ -1,4 +1,4 @@
-"""Dispatcher for the Bonnet Firehose Protocol (PROTOCOL.md §13).
+"""Dispatcher for the firehose protocol.
 
 Processes accepted firehose records in origin sequence order and routes
 them to the appropriate projections. Implements idempotent applied-event
@@ -8,53 +8,43 @@ tracking, pending controls, cross-dispatcher serialization, and crash replay.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 
 from bonnet.core.board_projection import BoardProjection, board_db_path, delete_board_dbs
 from bonnet.core.bodies import BodyStore
 from bonnet.core.firehose import FirehoseStore
 from bonnet.core.global_projections import (
-    PUNISHMENT_TYPE_BY_KIND,
     NavProjection,
     PolicyProjection,
     UserProjection,
 )
+from bonnet.core.kinds import (
+    ARTICLE_CONTROL_KINDS,
+    KIND_ARTICLE,
+    KIND_ARTICLE_CANCEL,
+    KIND_ARTICLE_PIN,
+    KIND_ARTICLE_PURGE,
+    KIND_ARTICLE_RESTORE,
+    KIND_ARTICLE_UNPIN,
+    KIND_BOARD_CLOSE,
+    KIND_BOARD_CREATE,
+    KIND_BOARD_REOPEN,
+    KIND_ORIGIN_KEY_ROTATE,
+    KIND_PUNISHMENT_ACK,
+    KIND_PUNISHMENT_REVOKE,
+    KIND_REPORT,
+    KIND_RULE_PUBLISH,
+    KIND_RULE_REVOKE,
+    KIND_THREAD_CLOSE,
+    KIND_THREAD_REOPEN,
+    KIND_USER_KEY_ROTATE,
+    KIND_USER_REGISTER,
+    KIND_USER_REVOKE,
+    PUNISHMENT_ISSUE_KINDS,
+    PUNISHMENT_TYPE_BY_KIND,
+)
 from bonnet.core.logging import log_msg
 from bonnet.core.record import ZERO_ID, Record
-
-# ---------------------------------------------------------------------------
-# Kind constants (mirror of record/firehose kinds)
-# ---------------------------------------------------------------------------
-
-KIND_ARTICLE = "bonnet.article"
-KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
-KIND_ARTICLE_RESTORE = "bonnet.article.restore"
-KIND_ARTICLE_PURGE = "bonnet.article.purge"
-KIND_ARTICLE_PIN = "bonnet.article.pin"
-KIND_ARTICLE_UNPIN = "bonnet.article.unpin"
-KIND_THREAD_CLOSE = "bonnet.thread.close"
-KIND_THREAD_REOPEN = "bonnet.thread.reopen"
-KIND_BOARD_CREATE = "bonnet.board.create"
-KIND_BOARD_CLOSE = "bonnet.board.close"
-KIND_BOARD_REOPEN = "bonnet.board.reopen"
-KIND_USER_REGISTER = "bonnet.user.register"
-KIND_USER_REVOKE = "bonnet.user.revoke"
-KIND_RULE_PUBLISH = "bonnet.rule.publish"
-KIND_RULE_REVOKE = "bonnet.rule.revoke"
-KIND_REPORT = "bonnet.report"
-KIND_PUNISHMENT_WARN = "bonnet.punishment.warn"
-KIND_PUNISHMENT_BAN = "bonnet.punishment.ban"
-KIND_PUNISHMENT_PERMABAN = "bonnet.punishment.permaban"
-KIND_PUNISHMENT_REVOKE = "bonnet.punishment.revoke"
-KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
-KIND_ORIGIN_KEY_ROTATE = "bonnet.origin.key.rotate"
-
-PUNISHMENT_ISSUE_KINDS = frozenset(
-    {
-        KIND_PUNISHMENT_WARN,
-        KIND_PUNISHMENT_BAN,
-        KIND_PUNISHMENT_PERMABAN,
-    }
-)
 
 
 class Dispatcher:
@@ -85,12 +75,38 @@ class Dispatcher:
         self._body_store = body_store
         self._allowed_origins = allowed_origins or set()
         self._local_origin = local_origin
-        # origin -> set of imported punishment type names (Gate D). Types from
+        # origin -> set of imported punishment type names. Types from
         # origins not present in the map are never applied locally.
         self._punishment_import_policy = punishment_import_policy or {}
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
         self._boards_lock = threading.RLock()
         self._dispatch_lock = threading.RLock()
+
+        # Registry (kind -> handler) built once here rather than an inline
+        # elif chain, so a new kind is added in one place: a KIND_* constant
+        # in kinds.py and one line registering its handler.
+        self._dispatch_table: dict[str, Callable[[Record], None]] = {
+            KIND_ARTICLE: self._dispatch_article,
+            KIND_BOARD_CREATE: self._nav.apply_board_create,
+            KIND_BOARD_CLOSE: self._nav.apply_board_close,
+            KIND_BOARD_REOPEN: self._nav.apply_board_reopen,
+            KIND_USER_REGISTER: self._users.apply_user_register,
+            KIND_USER_REVOKE: self._users.apply_user_revoke,
+            # Unlike KIND_ORIGIN_KEY_ROTATE below, this one does real work
+            # here: an actor key is carried inside the records it signed, so
+            # nothing in the store needs to know about the succession.
+            KIND_USER_KEY_ROTATE: self._users.apply_user_key_rotate,
+            KIND_RULE_PUBLISH: self._policy.apply_rule,
+            KIND_RULE_REVOKE: self._policy.apply_rule_revoke,
+            KIND_REPORT: self._policy.apply_report,
+            KIND_PUNISHMENT_REVOKE: self._policy.apply_punishment_revoke,
+            KIND_PUNISHMENT_ACK: self._policy.apply_punishment_ack,
+            KIND_ORIGIN_KEY_ROTATE: lambda rec: None,  # handled by firehose store
+        }
+        for kind in ARTICLE_CONTROL_KINDS:
+            self._dispatch_table[kind] = self._dispatch_article_control
+        for kind in PUNISHMENT_ISSUE_KINDS:
+            self._dispatch_table[kind] = self._dispatch_punishment_issue
 
     def close(self) -> None:
         with self._boards_lock:
@@ -135,12 +151,16 @@ class Dispatcher:
                 try:
                     self._dispatch_record(rec)
                 except Exception as e:
+                    # Skip and log rather than halt: one bad record must not
+                    # block every later record for this origin forever. The
+                    # checkpoint still advances past it, same as a successful
+                    # dispatch, so the origin doesn't get stuck retrying it.
                     log_msg(
-                        f"DISPATCH: origin='{origin}' seq={rec.origin_seq} kind='{rec.kind}' FAILED: {e}"
+                        f"DISPATCH: origin='{origin}' seq={rec.origin_seq} kind='{rec.kind}' "
+                        f"FAILED, skipping: {e}"
                     )
-                    break
                 self._firehose.set_checkpoint(origin, rec.origin_seq)
-                # Gate D relies on the policy checkpoint tracking overall
+                # Punishment import relies on the policy checkpoint tracking overall
                 # dispatch progress, not just policy-kind records, so that
                 # _policy_current() can't be fooled by intervening
                 # non-policy records into believing the projection is stale.
@@ -150,50 +170,18 @@ class Dispatcher:
 
     def _dispatch_record(self, rec: Record) -> None:
         """Route a single record to the appropriate projection(s)."""
-        kind = rec.kind
-
-        if kind == KIND_ARTICLE:
-            self._dispatch_article(rec)
-        elif kind in (
-            KIND_ARTICLE_CANCEL,
-            KIND_ARTICLE_RESTORE,
-            KIND_ARTICLE_PURGE,
-            KIND_ARTICLE_PIN,
-            KIND_ARTICLE_UNPIN,
-            KIND_THREAD_CLOSE,
-            KIND_THREAD_REOPEN,
-        ):
-            self._dispatch_article_control(rec)
-        elif kind == KIND_BOARD_CREATE:
-            self._nav.apply_board_create(rec)
-        elif kind == KIND_BOARD_CLOSE:
-            self._nav.apply_board_close(rec)
-        elif kind == KIND_BOARD_REOPEN:
-            self._nav.apply_board_reopen(rec)
-        elif kind == KIND_USER_REGISTER:
-            self._users.apply_user_register(rec)
-        elif kind == KIND_USER_REVOKE:
-            self._users.apply_user_revoke(rec)
-        elif kind == KIND_RULE_PUBLISH:
-            self._policy.apply_rule(rec)
-        elif kind == KIND_RULE_REVOKE:
-            self._policy.apply_rule_revoke(rec)
-        elif kind == KIND_REPORT:
-            self._policy.apply_report(rec)
-        elif kind in PUNISHMENT_ISSUE_KINDS:
-            if self._punishment_import_allowed(rec):
-                self._policy.apply_punishment(rec)
-        elif kind == KIND_PUNISHMENT_REVOKE:
-            self._policy.apply_punishment_revoke(rec)
-        elif kind == KIND_PUNISHMENT_ACK:
-            self._policy.apply_punishment_ack(rec)
-        elif kind == KIND_ORIGIN_KEY_ROTATE:
-            pass  # handled by firehose store
-        else:
+        handler = self._dispatch_table.get(rec.kind)
+        if handler is None:
             self._dispatch_unknown(rec)
+        else:
+            handler(rec)
+
+    def _dispatch_punishment_issue(self, rec: Record) -> None:
+        if self._punishment_import_allowed(rec):
+            self._policy.apply_punishment(rec)
 
     def _punishment_import_allowed(self, rec: Record) -> bool:
-        """Gate D: per-type, per-origin punishment import filtering.
+        """Per-type, per-origin punishment import filtering.
 
         Local punishments always apply. Federated ones apply only when the
         origin is configured with that type imported. Rejected records stay

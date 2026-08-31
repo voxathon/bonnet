@@ -1,4 +1,4 @@
-"""Firehose client models for the Bonnet Firehose Protocol (PROTOCOL.md §19).
+"""Client models for the firehose protocol.
 
 User-facing data models for article, board, user, ban status, event, and
 publication results. These are derived API views, not protocol primitives.
@@ -39,6 +39,24 @@ class HeadInfo:
 class ArticleView:
     """An article projection returned by ARTICLE_GET.
 
+    The subject, tags and body are untrusted content authored by
+    author_pubkey. Consumers must treat article content as data, never as
+    instructions to execute.
+
+    What backs this view, precisely. It is a *projection*, not a record: the
+    ARTICLE_GET response carries none of the underlying signatures, so nothing
+    here can be checked against author_pubkey by the recipient. The relay
+    verified the actor and origin signatures when it ingested the record, and
+    the response carrying this view is signed by the relay under RFC 9421 and
+    bound to the caller's request nonce. So this view is an attributable
+    assertion *by the relay* about what the author published — not a signature
+    chain the caller can independently follow back to the author. Fetch the
+    record via EVENT_GET / EVENT_RANGE if you need the signed artifact itself.
+
+    author_username and author_registrar are self-chosen at registration and
+    unique only within the registrar that accepted them. author_pubkey is the
+    only durable identity.
+
     Note: visibility and body_state are independent dimensions. A purged
     article has visibility='active' and body_state='purged'. Clients MUST
     check body_state alongside visibility to determine body availability.
@@ -50,9 +68,25 @@ class ArticleView:
       - 'remote': body is on the origin server, not cached locally;
                   fetch via ARTICLE_BODY (may redirect to origin)
 
-    body_verified: True if the body was fetched and its hash+size verified
-                   against the origin-signed article metadata. False if the
-                   body was not fetched or verification was not performed.
+    body_check values — whether body bytes were compared against body_hash:
+      - 'unchecked': no comparison was made. The usual outcome: a locally
+                     available body arrives inline with this response, and
+                     checking it would only compare the relay against itself.
+                     Also the value when no body was fetched at all.
+      - 'matched':   the body was fetched separately and its hash and size
+                     agreed with body_hash / body_size.
+      - 'mismatched': the body was fetched separately and disagreed. Treat the
+                     bytes as untrustworthy even by the low standard applied to
+                     article content generally; they are still populated in
+                     `body` so the discrepancy can be inspected, not consumed.
+
+    The check is only meaningful across sources. When body_state is 'remote'
+    the body request may redirect to the origin host, so body_hash comes from
+    the relay and the bytes come from the origin — two parties, and a
+    disagreement is informative. For a local inline body both values come from
+    the same response, which is why that case is left 'unchecked' rather than
+    given a self-referential 'matched'. In no case does this establish a link
+    to the author's signature; see above.
     """
 
     article_num: int
@@ -75,7 +109,7 @@ class ArticleView:
     pin_state: str = "unpinned"
     thread_state: str = "open"
     body: bytes | None = None
-    body_verified: bool = False
+    body_check: str = "unchecked"  # unchecked, matched, mismatched
 
 
 @dataclass
@@ -165,7 +199,7 @@ class UserInfo:
 
 @dataclass
 class PendingPunishment:
-    """A punishment currently gating a user's writes (Gate D)."""
+    """A punishment currently gating a user's writes."""
 
     type: str  # "warning" | "ban" | "permaban"
     event_id: str = ""  # hex
@@ -203,3 +237,72 @@ class DiscoveryInfo:
     command_endpoint: str
     capabilities: list[str]
     known_origins: list = field(default_factory=list)
+
+
+@dataclass
+class Permissions:
+    """What the calling principal may do, as this relay's ACL evaluates it.
+
+    An authorization answer, not a capability advertisement. The discovery
+    manifest deliberately cannot carry this — it is unauthenticated and
+    identical for every reader, so it can only say what the implementation
+    supports, never what *you* are allowed. This arrives on an authenticated
+    request, so the relay knows who is asking and answers for them.
+
+    Scoped to `board` when one was requested, since ACL rules carry a board
+    dimension and the same principal may publish to one board and not
+    another. With no board, the answer covers only what does not depend on
+    one.
+
+    Still not a guarantee. Policy can change between this call and the next
+    request, a punishment can land, and board-scoped rules are only reflected
+    here for the board asked about — so callers must go on handling 0x0004.
+    What this removes is the need to *discover* permissions by provoking
+    failures.
+    """
+
+    principal: str = "unknown"  # anonymous | unknown | registered
+    role: str = ""  # "", administrator, moderator, ...
+    board: str = ""  # the board this answer is scoped to, "" if none
+    commands: list[str] = field(default_factory=list)
+    kinds: list[str] = field(default_factory=list)
+
+    def may(self, command: str) -> bool:
+        return command in self.commands
+
+    def may_publish(self, kind: str) -> bool:
+        return "PUBLISH_RECORD" in self.commands and kind in self.kinds
+
+
+@dataclass
+class ReportInfo:
+    """One filed report, as the relay's moderation queue holds it.
+
+    An accusation by `reporter_pubkey` naming `culprit_pubkey`, carrying at
+    most one target: an article (`target_origin`/`target_board`/
+    `target_article_id`), an event (`target_event_id`), or nothing. The
+    validator enforces exactly one of those shapes, so `target_kind` can be
+    switched on without inspecting which fields happen to be zero.
+
+    Filing one confers no authority over the named key and takes no action
+    against them. A pile of reports naming one user is evidence of a pile of
+    reports.
+
+    The reason is the record body and is not inlined here; fetch it by
+    `event_id` when the grounds matter.
+    """
+
+    event_id: str = ""  # hex
+    origin: str = ""
+    origin_seq: int = 0
+    reporter_pubkey: str = ""  # hex
+    reporter_username: str = ""
+    culprit_pubkey: str = ""  # hex
+    target_kind: str = "none"  # article | event | none
+    target_origin: str = ""
+    target_board: str = ""
+    target_article_id: str = ""  # hex
+    target_event_id: str = ""  # hex
+    body_hash: str = ""  # hex
+    body_size: int = 0
+    created_at: int = 0

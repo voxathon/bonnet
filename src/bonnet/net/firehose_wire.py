@@ -1,4 +1,4 @@
-"""Firehose wire protocol for the Bonnet Firehose Protocol (PROTOCOL.md §19).
+"""Command and response wire codec for the firehose protocol.
 
 Binary builders and parsers for all 13 command requests and responses.
 Shared by the server's federation sync and the client library.
@@ -27,8 +27,10 @@ from bonnet.net.firehose_models import (
     BoardInfo,
     HeadInfo,
     PendingPunishment,
+    Permissions,
     PublishResult,
     QueryResponse,
+    ReportInfo,
     SearchResponse,
     SearchResult,
     UserInfo,
@@ -43,6 +45,11 @@ OP_EVENT_HEAD = 0x02
 OP_EVENT_RANGE = 0x03
 OP_EVENT_GET = 0x04
 OP_KEY_EPOCHS = 0x05
+# Authorization introspection: what may *this* principal do. Substrate
+# range because it describes the caller's relationship to the relay, not
+# bulletin-board semantics, and must be able to report on substrate
+# opcodes as well as application ones.
+OP_PERMISSIONS = 0x06
 OP_BOARD_LIST = 0x10
 OP_ARTICLE_GET = 0x11
 OP_ARTICLE_LIST = 0x12
@@ -52,6 +59,11 @@ OP_ARTICLE_BODY = 0x14
 OP_USER_GET = 0x20
 OP_USER_LIST = 0x21
 OP_BAN_STATUS = 0x22
+# The moderation queue. Its own opcode rather than a client-side filter
+# over EVENT_RANGE, because a selector is where the ACL runs: reports name
+# people and point at boards, so both the command and each report's target
+# board have to be checkable. A client-side scan is enforceable nowhere.
+OP_REPORT_LIST = 0x23
 OP_EVENT_BODY = 0x30
 
 
@@ -236,7 +248,7 @@ def build_event_range(
 
 
 def build_key_epochs(origin: str) -> bytes:
-    """Build a KEY_EPOCHS request (§19.20): origin only."""
+    """Build a KEY_EPOCHS request: origin only."""
     out = struct.pack(">B", OP_KEY_EPOCHS)
     out += _enc_text16(origin)
     return out
@@ -256,6 +268,101 @@ def parse_key_epochs_response(resp: bytes) -> list[tuple[int, int | None, bytes]
         offset += 32
         epochs.append((start, None if end_raw == 0 else end_raw, pubkey))
     return epochs
+
+
+def build_report_list(culprit_pubkey: bytes = b"", limit: int = 100, offset: int = 0) -> bytes:
+    """Build a REPORT_LIST request. Empty culprit means every report."""
+    out = struct.pack(">B", OP_REPORT_LIST)
+    out += struct.pack(">B", len(culprit_pubkey)) + culprit_pubkey
+    out += struct.pack(">H", limit) + struct.pack(">H", offset)
+    return out
+
+
+def parse_report_list_response(resp: bytes) -> list[ReportInfo]:
+    """Parse a REPORT_LIST response."""
+    status, payload = parse_response(resp)
+    if status != 0x00:
+        raise ProtocolError("report list response not a success frame")
+    count, offset = _read_u16(payload, 0)
+    reports = []
+    for _ in range(count):
+        event_id = payload[offset : offset + 32]
+        offset += 32
+        origin, offset = _read_text16(payload, offset)
+        origin_seq, offset = _read_u64(payload, offset)
+        reporter = payload[offset : offset + 32]
+        offset += 32
+        reporter_username, offset = _read_text16(payload, offset)
+        culprit = payload[offset : offset + 32]
+        offset += 32
+        target_origin, offset = _read_text16(payload, offset)
+        target_board, offset = _read_text16(payload, offset)
+        target_article_id = payload[offset : offset + 32]
+        offset += 32
+        target_event_id = payload[offset : offset + 32]
+        offset += 32
+        body_hash = payload[offset : offset + 32]
+        offset += 32
+        body_size, offset = _read_u32(payload, offset)
+        created_at, offset = _read_u64(payload, offset)
+
+        if target_article_id != ZERO_ID:
+            target_kind = "article"
+        elif target_event_id != ZERO_ID:
+            target_kind = "event"
+        else:
+            target_kind = "none"
+
+        reports.append(
+            ReportInfo(
+                event_id=event_id.hex(),
+                origin=origin,
+                origin_seq=origin_seq,
+                reporter_pubkey=reporter.hex(),
+                reporter_username=reporter_username,
+                culprit_pubkey=culprit.hex(),
+                target_kind=target_kind,
+                target_origin=target_origin,
+                target_board=target_board,
+                target_article_id=target_article_id.hex(),
+                target_event_id=target_event_id.hex(),
+                body_hash=body_hash.hex(),
+                body_size=body_size,
+                created_at=created_at,
+            )
+        )
+    return reports
+
+
+def build_permissions(board: str = "") -> bytes:
+    """Build a PERMISSIONS request, optionally scoped to one board.
+
+    An empty board asks only about what does not depend on one; ACL rules
+    carry a board dimension, so a principal may publish to `general` and not
+    to `staff`, and a board-independent answer cannot express that.
+    """
+    return struct.pack(">B", OP_PERMISSIONS) + _enc_text16(board)
+
+
+def parse_permissions_response(resp: bytes) -> Permissions:
+    """Parse a PERMISSIONS response."""
+    status, payload = parse_response(resp)
+    if status != 0x00:
+        raise ProtocolError("permissions response not a success frame")
+    principal, offset = _read_text16(payload, 0)
+    role, offset = _read_text16(payload, offset)
+    board, offset = _read_text16(payload, offset)
+    count, offset = _read_u16(payload, offset)
+    commands = []
+    for _ in range(count):
+        name, offset = _read_text16(payload, offset)
+        commands.append(name)
+    count, offset = _read_u16(payload, offset)
+    kinds = []
+    for _ in range(count):
+        name, offset = _read_text16(payload, offset)
+        kinds.append(name)
+    return Permissions(principal=principal, role=role, board=board, commands=commands, kinds=kinds)
 
 
 def parse_event_range_response(resp: bytes) -> list[tuple[Record, Witness]]:
@@ -349,6 +456,8 @@ def build_article_get(
     if selector_type == SELECTOR_BY_NUM:
         out += struct.pack(">Q", selector)
     elif selector_type == SELECTOR_BY_ID:
+        if not isinstance(selector, bytes):
+            raise ProtocolError("by-ID selector must be bytes")
         out += selector
     else:
         raise ProtocolError(f"invalid selector type {selector_type}")
@@ -446,12 +555,15 @@ def build_article_list(
     limit: int = 100,
     include_cancelled: bool = False,
     include_superseded: bool = False,
+    include_purged: bool = False,
 ) -> bytes:
     flags = 0
     if include_cancelled:
         flags |= 0x01
     if include_superseded:
         flags |= 0x02
+    if include_purged:
+        flags |= 0x04
     limit = max(1, min(limit, 65535))
     out = struct.pack(">B", OP_ARTICLE_LIST)
     out += _enc_text16(origin)

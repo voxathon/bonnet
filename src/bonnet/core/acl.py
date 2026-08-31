@@ -1,14 +1,30 @@
-"""Compositional ACL evaluator for the Bonnet Firehose Protocol (PROTOCOL.md §16).
+"""Compositional ACL evaluator for the firehose protocol.
 
 Authorization is explicit, compositional, and default-deny. There are no
 implicit administrator, moderator, owner, origin, or root bypasses.
 
-Applicable dimensions: command, kind, board, object.
-For each dimension: any matching deny wins; otherwise at least one matching
-allow is required; no match means deny.
+Applicable dimensions: command, kind, board, object. A rule is a candidate
+for a check only if it, BY ITSELF, satisfies every dimension the caller
+supplied — a rule granting a command says nothing about a board unless that
+same rule also grants the board. Among the candidates: any deny wins;
+otherwise at least one matching allow is required; no candidates means deny.
 
-Every applicable dimension MUST pass. Business invariants and effective-ban
-checks are additional conjunctive gates.
+Omitting a dimension field on a rule (leaving it `None`) is not neutral, and
+means something different depending on the rule's effect:
+  - on an `allow` rule, it means the rule grants NOTHING on that axis — an
+    allow that doesn't mention `boards` can never satisfy a check that asks
+    about a board, however that board is spelled. This is what keeps a
+    narrowly-scoped grant narrow: it cannot be widened by some *other* rule
+    that happens to carry `boards=["*"]` for a different command.
+  - on a `deny` rule, it means the rule is UNRESTRICTED on that axis — a
+    deny with no `commands` field blocks every command, on whatever boards
+    it does name. This is what makes "nothing may write to board X, no
+    matter what" expressible as one line, and it is deliberately the
+    opposite convention from allow: a deny is presumed broad until narrowed,
+    an allow is presumed narrow until widened.
+
+Business invariants and effective-ban checks are additional conjunctive
+gates on top of this.
 """
 
 from __future__ import annotations
@@ -37,6 +53,7 @@ class PrincipalMatcher:
     origin: str | None = None
     anonymous: bool = False
     unknown: bool = False
+    registered: bool = False
     wildcard: bool = False
 
     def matches(self, ctx: AuthContext) -> bool:
@@ -44,6 +61,8 @@ class PrincipalMatcher:
             return ctx.is_anonymous
         if self.unknown:
             return ctx.is_unknown
+        if self.registered:
+            return ctx.is_registered
         if self.wildcard:
             return True
         matched_any = False
@@ -77,6 +96,8 @@ class PrincipalMatcher:
             m.anonymous = True
         if data.get("unknown"):
             m.unknown = True
+        if data.get("registered"):
+            m.registered = True
         if data.get("wildcard"):
             m.wildcard = True
         return m
@@ -119,6 +140,56 @@ class ACLRule:
         if self.objects is None:
             return False
         return _list_matches(self.objects, object_name)
+
+    def covers(
+        self,
+        action: str,
+        command: str | None = None,
+        kind: str | None = None,
+        board: str | None = None,
+        object_name: str | None = None,
+    ) -> bool:
+        """Whether this rule, alone, grants/denies every dimension supplied.
+
+        The per-field `*_matches` methods above answer one dimension at a
+        time and are still what `covers` calls into; this is what stops a
+        caller from checking each dimension against a *different* rule and
+        concluding a single grant exists where none does. See the module
+        docstring for why an omitted field means opposite things on allow
+        vs. deny rules.
+
+        A deny also needs at least one dimension where it makes an actual,
+        tested claim — a queried dimension whose field it specifies, and
+        that field matches. Otherwise a deny that restricts only `boards`
+        would "match" a check that never asks about board at all (nothing
+        to test its one real restriction against), purely because its other,
+        merely-omitted fields count as unrestricted. That would make a
+        board-scoped deny fire against the coarse, board-agnostic check that
+        `handle()` runs before a board is even known — see
+        `_board_read_allowed`'s docstring on that two-stage design. An allow
+        can't have this problem: it already returns False the moment any
+        queried dimension has no field to grant it, so by the time one
+        reaches the end of this loop at least one field genuinely matched.
+        """
+        if not self.action_matches(action):
+            return False
+        matched_any = False
+        for selector, dim_field, matches in (
+            (command, self.commands, self.command_matches),
+            (kind, self.kinds, self.kind_matches),
+            (board, self.boards, self.board_matches),
+            (object_name, self.objects, self.object_matches),
+        ):
+            if selector is None:
+                continue
+            if dim_field is None:
+                if self.effect == "deny":
+                    continue
+                return False
+            if not matches(selector):
+                return False
+            matched_any = True
+        return matched_any
 
     @staticmethod
     def from_dict(data: dict) -> ACLRule:
@@ -180,13 +251,12 @@ class AuthContext:
 
 
 class ACLEvaluator:
-    """Compositional ACL evaluator (§16).
+    """Compositional ACL evaluator.
 
-    Every applicable dimension MUST pass. Within each dimension:
-    1. collect rules matching the principal and action;
-    2. if any matching deny covers the selector, deny;
-    3. otherwise require at least one matching allow;
-    4. no match means deny.
+    A rule is a candidate only if it, by itself, covers every dimension
+    supplied to `check()` — see `ACLRule.covers` and the module docstring.
+    Among the candidates: any deny wins; otherwise at least one matching
+    allow is required; no candidates means deny.
     """
 
     def __init__(self, rules: list[ACLRule] = None):
@@ -204,62 +274,19 @@ class ACLEvaluator:
         board: str = None,
         object_name: str = None,
     ) -> bool:
-        applicable = []
-        if command is not None:
-            applicable.append(("command", command))
-        if kind is not None:
-            applicable.append(("kind", kind))
-        if board is not None:
-            applicable.append(("board", board))
-        if object_name is not None:
-            applicable.append(("object", object_name))
-
-        if not applicable:
+        if command is None and kind is None and board is None and object_name is None:
             return False
 
-        for dim_name, selector in applicable:
-            if not self._check_dimension(ctx, action, dim_name, selector):
-                return False
-
-        return True
-
-    def _check_dimension(
-        self,
-        ctx: AuthContext,
-        action: str,
-        dim: str,
-        selector: str,
-    ) -> bool:
-        matching_rules = []
-        for rule in self._rules:
-            if not rule.matcher.matches(ctx):
-                continue
-            if not rule.action_matches(action):
-                continue
-
-            if dim == "command":
-                dim_matches = rule.command_matches(selector)
-            elif dim == "kind":
-                dim_matches = rule.kind_matches(selector)
-            elif dim == "board":
-                dim_matches = rule.board_matches(selector)
-            elif dim == "object":
-                dim_matches = rule.object_matches(selector)
-            else:
-                continue
-
-            if dim_matches:
-                matching_rules.append(rule)
-
-        if not matching_rules:
+        candidates = [
+            rule
+            for rule in self._rules
+            if rule.matcher.matches(ctx) and rule.covers(action, command, kind, board, object_name)
+        ]
+        if not candidates:
             return False
-
-        for rule in matching_rules:
-            if rule.effect == "deny":
-                return False
-
-        has_allow = any(rule.effect == "allow" for rule in matching_rules)
-        return has_allow
+        if any(rule.effect == "deny" for rule in candidates):
+            return False
+        return any(rule.effect == "allow" for rule in candidates)
 
     @staticmethod
     def from_toml(data: dict) -> ACLEvaluator:

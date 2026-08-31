@@ -1,26 +1,24 @@
-"""Persistent replay-prevention ledger for protocol v2.
+"""Persistent replay-prevention ledger.
 
-PROTOCOL_RENOVATION_PLAN §7.5:
-  Before dispatching an authenticated command, the server atomically records:
-    (client_public_key, nonce, expires_at)
-  A duplicate record fails with 409 and is never dispatched.
+Before dispatching an authenticated command the server atomically records
+(client_public_key, nonce, expires_at); a duplicate is rejected with 409 and
+never dispatched.
 
-  The initial implementation uses a small SQLite replay ledger under data_dir
-  so process restarts do not reopen the validity window. Expired rows are
-  removed in bounded batches after successful insertions and during startup.
-  Rows remain until expires_at + clock_skew_seconds has passed.
+The ledger is SQLite under data_dir, so a process restart does not reopen the
+validity window. Rows survive until expires_at + clock_skew_seconds has
+passed, and expired rows are removed in bounded batches after successful
+insertions and at startup.
 
-Schema per §12.1:
-  CREATE TABLE request_nonces (
-      publickey BLOB NOT NULL,
-      nonce BLOB NOT NULL,
-      expires_at INTEGER NOT NULL,
-      PRIMARY KEY (publickey, nonce)
-  );
-  CREATE INDEX request_nonces_expiry ON request_nonces (expires_at);
+    CREATE TABLE request_nonces (
+        publickey BLOB NOT NULL,
+        nonce BLOB NOT NULL,
+        expires_at INTEGER NOT NULL,
+        PRIMARY KEY (publickey, nonce)
+    );
+    CREATE INDEX request_nonces_expiry ON request_nonces (expires_at);
 
-The atomic check-and-insert uses INSERT OR IGNORE + checking rows-affected.
-If rows-affected == 0, the (publickey, nonce) pair already exists → replay.
+The check-and-insert is INSERT OR IGNORE plus a rows-affected check: zero
+rows affected means the (publickey, nonce) pair already exists, i.e. a replay.
 """
 
 from __future__ import annotations
@@ -113,8 +111,19 @@ class ReplayLedger:
             return cursor.fetchone() is not None
 
     def _cleanup_batch(self, batch_size: int = 100) -> int:
-        """Remove expired rows in bounded batches. Returns count deleted."""
-        cutoff = int(time.time()) + self._clock_skew
+        """Remove expired rows in bounded batches. Returns count deleted.
+
+        A row must survive until expires_at + clock_skew has passed (see
+        module docstring) — the same tolerance _check_temporal grants an
+        incoming request past its nominal expiry. The cutoff is therefore
+        now - clock_skew, not now + clock_skew: a row is eligible for
+        deletion only once `now` is clock_skew seconds *past* its expiry,
+        not while it's still within clock_skew of expiring. Getting the
+        sign wrong here silently deletes a nonce's row while a replay of
+        the exact same still-temporally-valid request would still pass
+        _check_temporal, defeating replay protection for it.
+        """
+        cutoff = int(time.time()) - self._clock_skew
         cursor = self._conn.execute(
             "DELETE FROM request_nonces WHERE expires_at < ? AND rowid IN "
             "(SELECT rowid FROM request_nonces WHERE expires_at < ? LIMIT ?)",

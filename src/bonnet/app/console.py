@@ -1,6 +1,6 @@
-"""Operator console (REPL) for a running Bonnet firehose server.
+"""Operator console (REPL) for a running Bonnet server.
 
-Extracted from BonnetFirehoseServer so the bootstrap class stays focused on
+Extracted from BonnetServer so the bootstrap class stays focused on
 component construction and lifecycle. Attribute access delegates to the
 server instance, so command bodies operate on the live components unchanged.
 """
@@ -9,6 +9,7 @@ import asyncio
 import os
 import struct
 
+from bonnet.core.crypto import Identity
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     ZERO_ID,
@@ -17,15 +18,27 @@ from bonnet.core.record import (
     compute_body_hash,
     encode_intent,
     metadata_bytes,
+    metadata_i64,
     metadata_text,
     metadata_text_list,
     metadata_u64,
     sign_intent,
 )
 
+ROLE_FLAGS = {
+    "admin": 0x01,
+    "administrator": 0x01,
+    "moderator": 0x02,
+    "mod": 0x02,
+    "none": 0x00,
+    "member": 0x00,
+}
+
+DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
 
 class OperatorConsole:
-    """Interactive administration loop for a BonnetFirehoseServer."""
+    """Interactive administration loop for a BonnetServer."""
 
     def __init__(self, server):
         self.server = server
@@ -54,6 +67,7 @@ class OperatorConsole:
             parts = line.split()
             cmd = parts[0].lower() if parts else ""
 
+            result: str | None
             if cmd == "publish-article":
                 try:
                     result = await self._repl_publish_article(parts[1:])
@@ -81,7 +95,7 @@ class OperatorConsole:
             if result:
                 print(result)
 
-    def dispatch_local_command(self, line) -> str:
+    def dispatch_local_command(self, line) -> str | None:
         parts = line.split()
         cmd = parts[0].lower()
 
@@ -117,8 +131,29 @@ class OperatorConsole:
         if cmd == "list-users":
             return self._cmd_list_users()
 
+        if cmd == "grant-role":
+            return self._cmd_grant_role(parts)
+
+        if cmd == "revoke-user":
+            return self._cmd_revoke_user(parts)
+
+        if cmd == "warn":
+            return self._cmd_warn(parts)
+
+        if cmd == "ban":
+            return self._cmd_ban(parts)
+
+        if cmd == "permaban":
+            return self._cmd_permaban(parts)
+
+        if cmd == "revoke-punishment":
+            return self._cmd_revoke_punishment(parts)
+
         if cmd == "ban-status":
             return self._cmd_ban_status(parts)
+
+        if cmd == "reports":
+            return self._cmd_reports(parts)
 
         if cmd == "event-head":
             return self._cmd_event_head(parts)
@@ -141,11 +176,17 @@ class OperatorConsole:
         if cmd == "depeer":
             return self._cmd_depeer(parts)
 
+        if cmd == "resume-origin":
+            return self._cmd_resume_origin(parts)
+
         if cmd == "purge-origin":
             return self._cmd_purge_origin(parts)
 
         if cmd == "reset-key":
             return self._cmd_reset_key(parts)
+
+        if cmd == "rotate-key":
+            return self._cmd_rotate_key(parts)
 
         return f"Unknown command: {cmd}. Type 'help' for commands."
 
@@ -167,7 +208,21 @@ class OperatorConsole:
   query-articles <board> [filters]
                                 Query articles by structured fields
   list-users [origin]           List registered users
+  grant-role <pubkey-hex> <admin|moderator|none> [username]
+                                Set a user's role (registers them if new; username
+                                required for a first-time registration)
+  revoke-user <pubkey-hex>      Revoke a user's registration on this origin
+  warn <pubkey-hex> <reason...> [--board=<name>]
+                                Issue a warning (default board: moderation.actions)
+  ban <pubkey-hex> <duration> <reason...> [--board=<name>]
+                                Issue a temporary ban. Duration is a unix timestamp
+                                or <N>[smhdw], e.g. 7d, 24h
+  permaban <pubkey-hex> <reason...> [--board=<name>]
+                                Issue a permanent ban
+  revoke-punishment <event-id-hex> [reason...]
+                                Revoke a warning/ban/permaban by its event ID
   ban-status <pubkey-hex>       Check ban status
+  reports [pubkey-hex] [limit]  Moderation queue (reports filed)
   event-head <origin>           Show firehose head
   event-range <origin> <start> <count>
                                 Show firehose events
@@ -177,8 +232,12 @@ class OperatorConsole:
   debug-acl                     Dump ACL state
   rebuild [origin]              Rebuild projections from firehose (retries failed records)
   depeer <origin>               Stop syncing an origin and freeze its projections
+  resume-origin <origin>        Clear a 'diverged' halt and let sync retry
   purge-origin <origin>         Remove all firehose and projection data for an origin
   reset-key <origin>            Clear key epoch pinning for an origin
+  rotate-key                    Rotate this server's own origin signing key
+                                (publishes bonnet.origin.key.rotate; restart
+                                required afterward)
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:
@@ -198,6 +257,276 @@ class OperatorConsole:
             msg = resp[5 : 5 + msg_len].decode("utf-8", errors="replace")
             return f"Error 0x{code:04x}: {msg}"
         return "Unknown error"
+
+    def _sign_and_publish(
+        self,
+        kind: str,
+        *,
+        board: str = "",
+        metadata: MetadataMap = None,
+        target_origin: str = "",
+        target_board: str = "",
+        target_article_id: bytes = ZERO_ID,
+        target_event_id: bytes = ZERO_ID,
+        body: bytes = b"",
+    ) -> bytes:
+        """Sign and publish a record as the server's own identity.
+
+        Shared by every permission-management command (grant-role, revoke-user,
+        warn/ban/permaban, revoke-punishment) so each one only builds its
+        kind-specific metadata and target tuple.
+        """
+        event_id = os.urandom(32)
+        intent = Intent(
+            event_id=event_id,
+            kind=kind,
+            origin=self.config.origin,
+            actor_pubkey=self.server_identity.public_key,
+            actor_username="root",
+            actor_registrar=self.config.origin,
+            board=board,
+            target_origin=target_origin,
+            target_board=target_board,
+            target_article_id=target_article_id,
+            target_event_id=target_event_id,
+            metadata=metadata if metadata is not None else MetadataMap([]),
+            body_hash=compute_body_hash(body) if body else ZERO_ID,
+            body_size=len(body),
+        )
+
+        actor_sig = sign_intent(self.server_identity, encode_intent(intent))
+
+        from bonnet.net.firehose_commands import OP_PUBLISH_RECORD
+
+        req = struct.pack(">B", OP_PUBLISH_RECORD)
+        encoded_intent = encode_intent(intent)
+        req += struct.pack(">I", len(encoded_intent)) + encoded_intent
+        req += actor_sig
+        req += struct.pack(">I", len(body)) + body
+
+        return self._local_handle(req)
+
+    def _published_event_id(self, resp: bytes) -> str:
+        rec_len = struct.unpack(">I", resp[1:5])[0]
+        from bonnet.core.record import decode_record
+
+        return decode_record(resp[5 : 5 + rec_len]).event_id.hex()
+
+    def _parse_pubkey_arg(self, hex_str: str) -> bytes | None:
+        try:
+            pk = bytes.fromhex(hex_str)
+        except ValueError:
+            return None
+        if len(pk) != 32:
+            return None
+        return pk
+
+    def _extract_board_flag(self, tokens: list, default: str) -> tuple:
+        board = default
+        remaining = []
+        for t in tokens:
+            if t.startswith("--board="):
+                board = t.split("=", 1)[1]
+            else:
+                remaining.append(t)
+        return remaining, board
+
+    def _parse_ban_duration(self, s: str) -> int | None:
+        """Accept an absolute unix timestamp, or <N><s|m|h|d|w> relative to now."""
+        try:
+            return int(s)
+        except ValueError:
+            pass
+
+        import re
+        import time
+
+        m = re.fullmatch(r"(\d+)([smhdw])", s.strip().lower())
+        if not m:
+            return None
+        n = int(m.group(1))
+        return int(time.time()) + n * DURATION_UNIT_SECONDS[m.group(2)]
+
+    # ------------------------------------------------------------------
+    # grant-role
+    # ------------------------------------------------------------------
+
+    def _cmd_grant_role(self, parts) -> str:
+        if len(parts) < 3:
+            return "Usage: grant-role <pubkey-hex> <admin|moderator|none> [username]"
+
+        pubkey = self._parse_pubkey_arg(parts[1])
+        if pubkey is None:
+            return "Invalid hex pubkey (must be 32 bytes)"
+
+        role = parts[2].lower()
+        if role not in ROLE_FLAGS:
+            return f"Unknown role '{role}'. Use admin, moderator, or none."
+        flags = ROLE_FLAGS[role]
+
+        existing = self.users.get_user_by_pubkey(self.config.origin, pubkey)
+        if len(parts) >= 4:
+            username = parts[3]
+        elif existing is not None:
+            username = existing["username"]
+        else:
+            return "Pubkey is not yet registered on this origin — supply a username."
+
+        m = MetadataMap(
+            [
+                metadata_text(1, username),
+                metadata_bytes(2, pubkey),
+                metadata_u64(3, flags),
+            ]
+        )
+
+        resp = self._sign_and_publish("bonnet.user.register", metadata=m)
+        if resp[0] == 0x00:
+            action = "Re-registered" if existing is not None else "Registered"
+            return f"{action} '{username}' ({pubkey.hex()}) with role: {role}"
+        return self._parse_response_error(resp)
+
+    # ------------------------------------------------------------------
+    # revoke-user
+    # ------------------------------------------------------------------
+
+    def _cmd_revoke_user(self, parts) -> str:
+        if len(parts) < 2:
+            return "Usage: revoke-user <pubkey-hex>"
+
+        pubkey = self._parse_pubkey_arg(parts[1])
+        if pubkey is None:
+            return "Invalid hex pubkey (must be 32 bytes)"
+
+        existing = self.users.get_user_by_pubkey(self.config.origin, pubkey)
+        if existing is None:
+            return f"'{parts[1]}' is not a registered user on this origin."
+        if existing.get("revoked"):
+            return f"'{parts[1]}' is already revoked."
+
+        records = self.firehose.get_events_range(self.config.origin, existing["reg_seq"], 1)
+        if not records:
+            return "Could not locate the registration event (data inconsistency)."
+        reg_event_id = records[0].event_id
+
+        m = MetadataMap([metadata_bytes(1, pubkey)])
+        resp = self._sign_and_publish(
+            "bonnet.user.revoke",
+            metadata=m,
+            target_origin=self.config.origin,
+            target_event_id=reg_event_id,
+        )
+        if resp[0] == 0x00:
+            return f"Revoked '{existing['username']}' ({pubkey.hex()})."
+        return self._parse_response_error(resp)
+
+    # ------------------------------------------------------------------
+    # warn / ban / permaban
+    # ------------------------------------------------------------------
+
+    def _issue_punishment(self, kind: str, pubkey: bytes, board: str, reason: str, expires_at=None):
+        m = MetadataMap([metadata_bytes(1, pubkey)])
+        if expires_at is not None:
+            m.fields.append(metadata_i64(2, expires_at))
+        return self._sign_and_publish(kind, board=board, metadata=m, body=reason.encode("utf-8"))
+
+    def _cmd_warn(self, parts) -> str:
+        if len(parts) < 3:
+            return "Usage: warn <pubkey-hex> <reason...> [--board=<name>]"
+
+        pubkey = self._parse_pubkey_arg(parts[1])
+        if pubkey is None:
+            return "Invalid hex pubkey (must be 32 bytes)"
+
+        reason_tokens, board = self._extract_board_flag(parts[2:], "moderation.actions")
+        reason = " ".join(reason_tokens)
+        if not reason:
+            return "A reason is required."
+
+        resp = self._issue_punishment("bonnet.punishment.warn", pubkey, board, reason)
+        if resp[0] == 0x00:
+            return f"Warned {pubkey.hex()} on /{board}. Event: {self._published_event_id(resp)}"
+        return self._parse_response_error(resp)
+
+    def _cmd_ban(self, parts) -> str:
+        if len(parts) < 4:
+            return (
+                "Usage: ban <pubkey-hex> <duration> <reason...> [--board=<name>]\n"
+                "Duration is a unix timestamp or <N>[smhdw], e.g. 7d, 24h"
+            )
+
+        pubkey = self._parse_pubkey_arg(parts[1])
+        if pubkey is None:
+            return "Invalid hex pubkey (must be 32 bytes)"
+
+        expires_at = self._parse_ban_duration(parts[2])
+        if expires_at is None or expires_at <= 0:
+            return "Invalid duration. Use a unix timestamp or <N>[smhdw], e.g. 7d, 24h."
+
+        reason_tokens, board = self._extract_board_flag(parts[3:], "moderation.actions")
+        reason = " ".join(reason_tokens)
+        if not reason:
+            return "A reason is required."
+
+        resp = self._issue_punishment(
+            "bonnet.punishment.ban", pubkey, board, reason, expires_at=expires_at
+        )
+        if resp[0] == 0x00:
+            from datetime import datetime
+
+            until = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d %H:%M")
+            return (
+                f"Banned {pubkey.hex()} on /{board} until {until}. "
+                f"Event: {self._published_event_id(resp)}"
+            )
+        return self._parse_response_error(resp)
+
+    def _cmd_permaban(self, parts) -> str:
+        if len(parts) < 3:
+            return "Usage: permaban <pubkey-hex> <reason...> [--board=<name>]"
+
+        pubkey = self._parse_pubkey_arg(parts[1])
+        if pubkey is None:
+            return "Invalid hex pubkey (must be 32 bytes)"
+
+        reason_tokens, board = self._extract_board_flag(parts[2:], "moderation.actions")
+        reason = " ".join(reason_tokens)
+        if not reason:
+            return "A reason is required."
+
+        resp = self._issue_punishment("bonnet.punishment.permaban", pubkey, board, reason)
+        if resp[0] == 0x00:
+            return (
+                f"Permabanned {pubkey.hex()} on /{board}. Event: {self._published_event_id(resp)}"
+            )
+        return self._parse_response_error(resp)
+
+    # ------------------------------------------------------------------
+    # revoke-punishment
+    # ------------------------------------------------------------------
+
+    def _cmd_revoke_punishment(self, parts) -> str:
+        if len(parts) < 2:
+            return "Usage: revoke-punishment <event-id-hex> [reason...]"
+
+        try:
+            event_id = bytes.fromhex(parts[1])
+        except ValueError:
+            return "Invalid event ID hex"
+        if len(event_id) != 32:
+            return "Event ID must be 32 bytes (64 hex chars)"
+
+        reason = " ".join(parts[2:])
+
+        resp = self._sign_and_publish(
+            "bonnet.punishment.revoke",
+            target_origin=self.config.origin,
+            target_event_id=event_id,
+            body=reason.encode("utf-8"),
+        )
+        if resp[0] == 0x00:
+            return f"Revoked punishment {parts[1]}."
+        return self._parse_response_error(resp)
 
     def _enc_text16(self, s: str) -> bytes:
         encoded = s.encode("utf-8")
@@ -561,7 +890,7 @@ class OperatorConsole:
         offset += 1
         bh_len = data[offset]
         offset += 1 + bh_len
-        body_size = struct.unpack(">Q", data[offset : offset + 8])[0]
+        _body_size = struct.unpack(">Q", data[offset : offset + 8])[0]
         offset += 8
         created_at = struct.unpack(">q", data[offset : offset + 8])[0]
         offset += 8
@@ -577,17 +906,17 @@ class OperatorConsole:
 
         root_len = data[offset]
         offset += 1
-        root_id = data[offset : offset + root_len] if root_len else b""
+        root_id = data[offset : offset + root_len].hex() if root_len else ""
         offset += root_len
 
         reply_len = data[offset]
         offset += 1
-        reply_id = data[offset : offset + reply_len] if reply_len else b""
+        reply_id = data[offset : offset + reply_len].hex() if reply_len else ""
         offset += reply_len
 
         has_replacement = data[offset]
         offset += 1
-        replacement_id = data[offset : offset + 32] if has_replacement else b""
+        replacement_id = data[offset : offset + 32].hex() if has_replacement else ""
         offset += 32 if has_replacement else 0
 
         pin_state, offset = self._read_text16(data, offset)
@@ -702,13 +1031,13 @@ class OperatorConsole:
             offset += 1 + aid_len
             eid_len = resp[offset]
             offset += 1 + eid_len
-            visibility = resp[offset]
+            _visibility = resp[offset]
             offset += 1
-            body_state = resp[offset]
+            _body_state = resp[offset]
             offset += 1
             bh_len = resp[offset]
             offset += 1 + bh_len
-            body_size = struct.unpack(">Q", resp[offset : offset + 8])[0]
+            _body_size = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8
@@ -789,7 +1118,7 @@ class OperatorConsole:
             return self._parse_response_error(resp)
 
         count = struct.unpack(">H", resp[1:3])[0]
-        total = struct.unpack(">I", resp[3:7])[0]
+        _total = struct.unpack(">I", resp[3:7])[0]
         truncated = resp[7]
         offset = 8
         lines = []
@@ -808,7 +1137,7 @@ class OperatorConsole:
             offset += 1 + ap_len
             created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8
-            body_avail = resp[offset]
+            _body_avail = resp[offset]
             offset += 1
             excerpt, offset = self._read_text16(resp, offset)
 
@@ -937,11 +1266,11 @@ class OperatorConsole:
             offset += 1 + eid_len
             visibility = resp[offset]
             offset += 1
-            body_state = resp[offset]
+            _body_state = resp[offset]
             offset += 1
             bh_len = resp[offset]
             offset += 1 + bh_len
-            body_size = struct.unpack(">Q", resp[offset : offset + 8])[0]
+            _body_size = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8
@@ -965,7 +1294,7 @@ class OperatorConsole:
 
             from datetime import datetime
 
-            ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
+            ts_display = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
 
             author_display = (
                 f"{author_username}@{author_registrar}" if author_username else author_pubkey.hex()
@@ -980,7 +1309,9 @@ class OperatorConsole:
                 extras.append(f"thread:{thread_state}")
             extra_str = f" [{', '.join(extras)}]" if extras else ""
 
-            lines.append(f"#{article_num:4} | {subject} | {author_display} | {ts}{extra_str}")
+            lines.append(
+                f"#{article_num:4} | {subject} | {author_display} | {ts_display}{extra_str}"
+            )
 
         if not lines:
             return "No articles match."
@@ -1005,12 +1336,17 @@ class OperatorConsole:
         offset = 3
         lines = []
         for _ in range(count):
+            _origin, offset = self._read_text16(resp, offset)
             pk_len = resp[offset]
             offset += 1
             pubkey = resp[offset : offset + pk_len].hex()
             offset += pk_len
             username, offset = self._read_text16(resp, offset)
             flags = struct.unpack(">Q", resp[offset : offset + 8])[0]
+            offset += 8
+            _reg_seq = struct.unpack(">Q", resp[offset : offset + 8])[0]
+            offset += 8
+            _created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8
             revoked = resp[offset]
             offset += 1
@@ -1084,6 +1420,73 @@ class OperatorConsole:
         return "Pending punishments:\n" + "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # reports
+    # ------------------------------------------------------------------
+
+    def _cmd_reports(self, parts) -> str:
+        """The moderation queue, read straight from the policy projection.
+
+        Reports have been dispatched and stored since the kind existed, but
+        nothing ever read the table back — one arriving over federation was
+        recorded and then seen by nobody. This is the operator's view of it;
+        agents reach the same records over the wire.
+
+        A report is an accusation by its filer and nothing more. It confers no
+        authority, and a stack of them naming one key is evidence of a stack
+        of reports.
+        """
+        from datetime import datetime
+
+        zero = bytes(32)
+        culprit = None
+        limit = 50
+        for arg in parts[1:]:
+            if len(arg) == 64:
+                try:
+                    culprit = bytes.fromhex(arg)
+                    continue
+                except ValueError:
+                    return "Invalid hex pubkey"
+            try:
+                limit = int(arg)
+            except ValueError:
+                return "Usage: reports [pubkey-hex] [limit]"
+
+        rows = self.policy.list_reports(culprit_pubkey=culprit, limit=limit)
+        if not rows:
+            return "No reports." if culprit is None else "No reports naming that key."
+
+        lines = []
+        for r in rows:
+            when = datetime.fromtimestamp(r["created_at"]).strftime("%Y-%m-%d %H:%M")
+            if r["target_article_id"] != zero:
+                target = (
+                    f"article {r['target_article_id'].hex()[:16]}... "
+                    f"in {r['target_origin']}/{r['target_board']}"
+                )
+            elif r["target_event_id"] != zero:
+                target = f"event {r['target_event_id'].hex()[:16]}... on {r['target_origin']}"
+            else:
+                target = "(no target)"
+            # Who filed it comes from the record, not from this projection.
+            # The row carries (origin, event_id) so the authoritative artifact
+            # can be consulted; actor_pubkey there is signed, a projection
+            # column would not be.
+            rec = self.firehose.get_event_by_id(r["origin"], r["event_id"])
+            filer = (rec.actor_username or rec.actor_pubkey.hex()) if rec else "(record gone)"
+            lines.append(
+                f"  {when}  seq {r['origin_seq']} on {r['origin']}\n"
+                f"    Filed by: {filer}\n"
+                f"    Names:  {r['culprit_pubkey'].hex()}\n"
+                f"    Target: {target}\n"
+                f"    Reason: {r['body_size']} bytes (hash {r['body_hash'].hex()[:16]}...)"
+            )
+        header = f"{len(rows)} report(s)"
+        if culprit is not None:
+            header += f" naming {culprit.hex()[:16]}..."
+        return header + ":\n" + "\n".join(lines)
+
+    # ------------------------------------------------------------------
     # event-head
     # ------------------------------------------------------------------
 
@@ -1106,13 +1509,24 @@ class OperatorConsole:
 
         head = decode_head(resp[3 : 3 + head_len])
 
-        return (
+        out = (
             f"Origin: {head.origin}\n"
             f"Latest seq: {head.latest_origin_seq}\n"
             f"Event count: {head.event_count}\n"
             f"Latest hash: {head.latest_event_hash.hex()}\n"
             f"Pubkey: {head.origin_pubkey.hex()}"
         )
+
+        # A halted origin looks completely normal from its head alone — the
+        # numbers are whatever we last accepted. Say so here, where an
+        # operator actually looks, rather than only in the log.
+        status = self.firehose.get_sync_status(origin)
+        if status["status"] != "ok":
+            out += (
+                f"\nSync status: {status['status']} ({status['detail']})\n"
+                f"Sync is halted. See 'resume-origin {origin}'."
+            )
+        return out
 
     # ------------------------------------------------------------------
     # event-range
@@ -1349,6 +1763,44 @@ class OperatorConsole:
         self.firehose.reset_origin_key(origin)
         return f"Reset key pinning for '{origin}'. Next sync will perform fresh TOFU."
 
+    def _cmd_rotate_key(self, parts) -> str:
+        """Rotate this server's own origin key, live.
+
+        Delegates to BonnetServer.apply_key_rotation, which publishes the
+        rotation record and hot-swaps every component that captured the old
+        identity (command handler, HTTP signer, sync manager, this console's
+        own peer_pubkey, and the live ACL admin rule where safe to). See
+        that method's docstring for the one case it can't fix automatically
+        — an operator-authored ACL rule in config.toml.
+        """
+        new_identity = Identity.generate()
+        return self.server.apply_key_rotation(new_identity)
+
+    def _cmd_resume_origin(self, parts) -> str:
+        """Clear a divergence halt so the next cycle retries.
+
+        Deliberately does not resolve the divergence — retrying against an
+        unchanged peer will simply halt again, because a forked chain cannot
+        re-converge from this side. This is for after the origin has repaired
+        itself, or alongside reset-key / purge-origin when the operator has
+        decided to take the peer's branch instead.
+        """
+        if len(parts) < 2:
+            return "Usage: resume-origin <origin>"
+        origin = parts[1]
+        status = self.firehose.get_sync_status(origin)
+        if status["status"] != "diverged":
+            return f"Origin '{origin}' is not halted (status: {status['status']})."
+        self.firehose.clear_sync_status(origin)
+        conflicts = len(self.firehose.get_conflicts(origin))
+        return (
+            f"Cleared the divergence halt on '{origin}' (was: {status['detail']}).\n"
+            f"Sync will retry on the next cycle. {conflicts} conflict record(s) kept "
+            f"as evidence.\n"
+            f"If the origin's history has not changed, it will halt again — see "
+            f"'reset-key {origin}' or 'purge-origin {origin}' to adopt its branch."
+        )
+
     def _cmd_purge_origin(self, parts) -> str:
         if len(parts) < 2:
             return "Usage: purge-origin <origin>"
@@ -1436,6 +1888,8 @@ class OperatorConsole:
                 matcher_desc.append("anonymous")
             if m.unknown:
                 matcher_desc.append("unknown")
+            if m.registered:
+                matcher_desc.append("registered")
             if m.pubkey is not None:
                 matcher_desc.append(f"pubkey={m.pubkey.hex()[:16]}...")
             if m.role is not None:

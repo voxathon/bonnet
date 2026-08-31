@@ -1,14 +1,15 @@
-"""Bonnet Firehose Server bootstrap (PROTOCOL.md).
+"""Bonnet server bootstrap.
 
-Constructs all firehose protocol components, wires them into an ASGI
-HTTP server, and provides a runnable entry point. Replaces the old v3
-Bonnet server bootstrap entirely.
+Constructs the firehose protocol components, wires them into an ASGI HTTP
+server, and provides a runnable entry point.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import time
+from typing import Protocol
 
 from bonnet.app.cli import FirehoseLocalConnection
 from bonnet.app.console import OperatorConsole
@@ -31,11 +32,16 @@ from bonnet.net.rate_limiter import RateLimiter
 from bonnet.net.replay import ReplayLedger
 
 
-class BonnetFirehoseServer:
-    """Complete Bonnet firehose server: all components wired and runnable."""
+class _Closeable(Protocol):
+    def close(self) -> None: ...
+
+
+class BonnetServer:
+    """Complete Bonnet server: all components wired and runnable."""
 
     def __init__(self, config: FirehoseConfig):
         self.config = config
+        self._closed = False
 
         os.makedirs(config.data_dir, exist_ok=True)
         os.makedirs(config.boards_dir, exist_ok=True)
@@ -107,11 +113,33 @@ class BonnetFirehoseServer:
         )
         log_msg("INIT: Dispatcher initialized")
 
+        # Tracks the one ACL rule (if any) that grants admin by the server's
+        # own key because nothing else in config did — as opposed to a rule
+        # an operator wrote into config.toml themselves. Only this rule is
+        # safe for apply_key_rotation to mutate live: it's synthesized state
+        # we own, not operator-authored config we'd silently diverge from on
+        # the next restart.
+        self._acl_admin_rule = None
+
         acl = config.acl
-        if not acl._rules and config.admin_pubkey_hex:
-            acl = ACLEvaluator(default_rules_for_admin(config.admin_pubkey_hex))
-        elif not acl._rules:
+        if config.admin_pubkey_hex:
+            # Ensure admin_pubkey_hex actually grants admin, regardless of
+            # whether other [[acl]] rules exist — it used to only take
+            # effect when acl._rules was completely empty, so the moment an
+            # operator kept even one of the sample config's default rules
+            # (the documented first-run flow: keep the three defaults,
+            # uncomment admin_pubkey), the configured key silently got
+            # nothing, with no error anywhere.
+            admin_pubkey_bytes = bytes.fromhex(config.admin_pubkey_hex)
+            has_configured_admin = any(
+                r.matcher.pubkey == admin_pubkey_bytes and r.effect == "allow" for r in acl._rules
+            )
+            if not has_configured_admin:
+                acl.add_rule(default_rules_for_admin(config.admin_pubkey_hex)[0])
+
+        if not acl._rules:
             acl = ACLEvaluator(default_rules_for_admin(self.server_identity.public_key.hex()))
+            self._acl_admin_rule = acl._rules[0]
             log_msg("INIT: no ACL rules configured, defaulting to server identity as admin")
         else:
             has_server_admin = any(
@@ -122,18 +150,20 @@ class BonnetFirehoseServer:
             if not has_server_admin:
                 from bonnet.core.acl import ACLRule, PrincipalMatcher
 
-                acl.add_rule(
-                    ACLRule(
-                        effect="allow",
-                        matcher=PrincipalMatcher(pubkey=self.server_identity.public_key),
-                        actions=["read", "write"],
-                        commands=["*"],
-                        kinds=["*"],
-                        boards=["*"],
-                        objects=["*"],
-                    )
+                admin_rule = ACLRule(
+                    effect="allow",
+                    matcher=PrincipalMatcher(pubkey=self.server_identity.public_key),
+                    actions=["read", "write"],
+                    commands=["*"],
+                    kinds=["*"],
+                    boards=["*"],
+                    objects=["*"],
                 )
+                acl.add_rule(admin_rule)
+                self._acl_admin_rule = admin_rule
                 log_msg("INIT: added server identity to ACL as admin (not in config)")
+
+        self.acl = acl
 
         self.validator = KindValidator()
         self.search = SearchService(
@@ -212,12 +242,89 @@ class BonnetFirehoseServer:
             if count:
                 log_msg(f"INIT: dispatched remote origin '{remote}' ({count} records)")
 
+        self._sweep_orphaned_staged_bodies()
+        self._verify_origin_tips()
+
         self.local_conn = FirehoseLocalConnection(
             self.server_identity.public_key,
             config.origin,
         )
 
         log_msg("INIT: complete")
+
+    def _verify_origin_tips(self) -> None:
+        """Check each origin's recorded tip against the record stored at it.
+
+        `origin_state.current_event_hash` is maintained alongside `events`
+        rather than derived from it, so a crash mid-transaction or a restored
+        database can leave the two disagreeing. That is worth catching on its
+        own terms: sync compares an incoming record's previous_event_hash
+        against this value, so a drifted tip makes every honest peer look like
+        it is serving a broken chain, and the relay would blame the peer
+        forever for our own inconsistency.
+
+        One indexed lookup per origin. Only `origin_state` is rewritten —
+        the events are signed and are never touched here.
+        """
+        for origin in self.firehose.list_origins():
+            consistent, recorded, actual = self.firehose.check_tip(origin)
+            if consistent:
+                continue
+            if actual is None:
+                log_msg(
+                    f"INIT: origin '{origin}' records a tip with no stored record at "
+                    f"its sequence — leaving alone, this needs an operator"
+                )
+                continue
+            self.firehose.repair_tip(origin)
+            log_msg(
+                f"INIT: repaired tip for origin '{origin}' "
+                f"(recorded={recorded.hex()[:16] if recorded else None} "
+                f"actual={actual.hex()[:16]})"
+            )
+
+    def _sweep_orphaned_staged_bodies(self, min_age_seconds: int = 3600) -> None:
+        """Recover or discard article bodies a crash left in staging.
+
+        stage_article_body writes here before the firehose transaction that
+        allocates an article number; only finalize_article_body (on success)
+        or delete_staged_article_body (on failure) is meant to remove the
+        file afterward. A process killed in between the two leaves a file
+        neither served nor cleaned up (internal/BUGS.md #4). Age-gated so a
+        request that's merely still in flight isn't swept out from under it.
+
+        Two outcomes per stale entry: if the record actually committed
+        (bootstrap dispatch above would already have finalized it in the
+        ordinary case, but this is independent of dispatch state and
+        doesn't rely on that ordering), finalize it into place; if no such
+        record exists at all, the append never happened and the file is a
+        true orphan — discard it.
+        """
+        now = time.time()
+        for origin, board, event_id, staged_at in self.body_store.list_staged_article_bodies():
+            # Clamped rather than a bare subtraction: a file's mtime can
+            # read as slightly ahead of this now (clock skew between the
+            # write and this read, most visible on virtualized CI runners —
+            # not reproduced locally). A negative age must never read as
+            # "younger than every threshold including 0", or the age gate
+            # silently stops gating anything at min_age_seconds=0.
+            age = max(0.0, now - staged_at)
+            if age < min_age_seconds:
+                continue
+            rec = self.firehose.get_event_by_id(origin, event_id)
+            if rec is not None and rec.article_num > 0:
+                if self.body_store.finalize_article_body(origin, board, event_id, rec.article_num):
+                    log_msg(
+                        f"INIT: recovered staged body for {origin}/{board} "
+                        f"article #{rec.article_num} (event {event_id.hex()[:16]}..., "
+                        f"age={int(age)}s)"
+                    )
+            else:
+                self.body_store.delete_staged_article_body(origin, board, event_id)
+                log_msg(
+                    f"INIT: discarded orphaned staged body {origin}/{board} "
+                    f"event {event_id.hex()[:16]}... (no matching record, age={int(age)}s)"
+                )
 
     def _ensure_root_registered(self) -> None:
         """Publish a bonnet.user.register record for the server identity if not already present."""
@@ -275,6 +382,102 @@ class BonnetFirehoseServer:
         except Exception as e:
             log_msg(f"INIT: failed to register root user: {e}")
 
+    def apply_key_rotation(self, new_identity: Identity) -> str:
+        """Rotate the server's own origin signing key live — no restart.
+
+        Publishes the bonnet.origin.key.rotate record (old key signs the
+        record, new key signs the proof — the mutual-consent scheme
+        firehose.py._apply_rotation_locked verifies), persists the new
+        private key to identity_path (old one backed up alongside it), then
+        hot-swaps every component that captured the old Identity object:
+        command_handler (signs future local publishes), http_server (signs
+        HTTP responses — its BonnetSigner bakes in the private key, so it
+        must be rebuilt, not just repointed), sync_manager (signs relay
+        witnesses for future accepted federation batches), and local_conn
+        (the console's own peer_pubkey — otherwise the console itself would
+        stop matching its ACL admin rule the moment that rule is updated
+        below).
+
+        The one thing this cannot safely do is rewrite an operator-authored
+        config.toml. If the ACL granted this server admin access through a
+        rule the operator wrote (as opposed to the automatic fallback this
+        class adds when nothing else grants admin), that rule is left alone
+        and the caller is told to update config.toml by hand — otherwise the
+        *next* restart would reload the stale key from disk and boot without
+        admin access.
+        """
+        from bonnet.core.record import (
+            Intent,
+            MetadataMap,
+            encode_intent,
+            metadata_bytes,
+            sign_intent,
+            sign_key_rotation_proof,
+        )
+
+        origin = self.config.origin
+        old_identity = self.server_identity
+
+        proof = sign_key_rotation_proof(
+            new_identity, origin, old_identity.public_key, new_identity.public_key
+        )
+        intent = Intent(
+            event_id=os.urandom(32),
+            kind="bonnet.origin.key.rotate",
+            origin=origin,
+            actor_pubkey=old_identity.public_key,
+            actor_username="root",
+            actor_registrar=origin,
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, new_identity.public_key),
+                    metadata_bytes(2, proof),
+                ]
+            ),
+        )
+        actor_sig = sign_intent(old_identity, encode_intent(intent))
+        self.firehose.append_record(old_identity, intent, actor_sig, b"")
+        self.dispatcher.dispatch_origin(origin)
+
+        identity_path = self.config.identity_path
+        backup_path = f"{identity_path}.pre-rotate-{int(time.time())}"
+        os.replace(identity_path, backup_path)
+        with open(identity_path, "wb") as f:
+            f.write(new_identity.private_key)
+
+        self.server_identity = new_identity
+        self.command_handler.set_server_identity(new_identity)
+        self.http_server.set_server_identity(new_identity)
+        self.sync_manager.set_identity(new_identity)
+        self.local_conn.server_pubkey = new_identity.public_key
+
+        acl_updated = False
+        if self._acl_admin_rule is not None:
+            self._acl_admin_rule.matcher.pubkey = new_identity.public_key
+            acl_updated = True
+
+        log_msg(
+            f"ROTATE: origin='{origin}' old={old_identity.public_key.hex()} "
+            f"new={new_identity.public_key.hex()} acl_updated={acl_updated}"
+        )
+
+        lines = [
+            f"Rotated origin '{origin}' from {old_identity.public_key.hex()} "
+            f"to {new_identity.public_key.hex()}. Effective immediately, no restart needed.",
+            f"Old identity backed up to {backup_path}.",
+        ]
+        if acl_updated:
+            lines.append("Live ACL admin rule updated to the new key.")
+        else:
+            lines.append(
+                "WARNING: this server's admin ACL rule was configured explicitly "
+                "(not the automatic fallback), so it was left untouched. If it "
+                "grants access by this server's own pubkey, update config.toml "
+                "to the new key by hand, or the next restart will boot without "
+                "admin access."
+            )
+        return "\n".join(lines)
+
     async def run(self, port: int = None, ssl_certfile: str = None, ssl_keyfile: str = None):
         import uvicorn
 
@@ -285,9 +488,7 @@ class BonnetFirehoseServer:
             ssl_keyfile = self.config.tls_key_path
 
         scheme = "https" if ssl_certfile else "http"
-        print(
-            f"Bonnet firehose server listening on {scheme}://{self.config.http_host}:{listen_port}"
-        )
+        print(f"Bonnet server listening on {scheme}://{self.config.http_host}:{listen_port}")
         print(f"Origin: {self.config.origin}")
         print(f"Hostname: {self.config.hostname}")
         print(f"Server public key: {self.server_identity.public_key.hex()}")
@@ -329,12 +530,12 @@ class BonnetFirehoseServer:
                 pass
             await self.sync_manager.stop_all()
 
-    def close(self):
-        if hasattr(self, "_closed") and self._closed:
+    def close(self) -> None:
+        if self._closed:
             return
         self._closed = True
         first_error = None
-        for closer in [
+        closers: list[_Closeable] = [
             self.command_handler,
             self.dispatcher,
             self.firehose,
@@ -342,7 +543,8 @@ class BonnetFirehoseServer:
             self.users,
             self.policy,
             self.replay_ledger,
-        ]:
+        ]
+        for closer in closers:
             try:
                 closer.close()
             except Exception as e:

@@ -1,4 +1,4 @@
-"""Global projections for the Bonnet Firehose Protocol (PROTOCOL.md §14.4).
+"""Global projections for the firehose protocol.
 
 nav.db     — board directory from bonnet.board.create/close/reopen
 users.db   — user registrations and revocations
@@ -15,33 +15,9 @@ import sqlite3
 import threading
 import time
 
-from bonnet.core.record import Record
-
-# ---------------------------------------------------------------------------
-# Kind constants
-# ---------------------------------------------------------------------------
-
-KIND_BOARD_CREATE = "bonnet.board.create"
-KIND_BOARD_CLOSE = "bonnet.board.close"
-KIND_BOARD_REOPEN = "bonnet.board.reopen"
-KIND_USER_REGISTER = "bonnet.user.register"
-KIND_USER_REVOKE = "bonnet.user.revoke"
-KIND_RULE_PUBLISH = "bonnet.rule.publish"
-KIND_RULE_REVOKE = "bonnet.rule.revoke"
-KIND_REPORT = "bonnet.report"
-KIND_PUNISHMENT_WARN = "bonnet.punishment.warn"
-KIND_PUNISHMENT_BAN = "bonnet.punishment.ban"
-KIND_PUNISHMENT_PERMABAN = "bonnet.punishment.permaban"
-KIND_PUNISHMENT_REVOKE = "bonnet.punishment.revoke"
-KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
-
-# Gate D: issuing kind -> stored punishment type name.
-PUNISHMENT_TYPE_BY_KIND = {
-    KIND_PUNISHMENT_WARN: "warning",
-    KIND_PUNISHMENT_BAN: "ban",
-    KIND_PUNISHMENT_PERMABAN: "permaban",
-}
-
+from bonnet.core.kinds import PUNISHMENT_TYPE_BY_KIND  # noqa: F401 (re-exported)
+from bonnet.core.logging import log_msg
+from bonnet.core.record import Record, verify_key_rotation_proof
 
 # ---------------------------------------------------------------------------
 # Base class
@@ -336,6 +312,25 @@ class UserProjection(_BaseProjection):
             );
             CREATE INDEX IF NOT EXISTS idx_users_username
                 ON users(username, origin);
+
+            -- Actor key successions. A separate table rather than a column on
+            -- `users` on purpose: _init_schema runs on every open, so a new
+            -- table costs nothing, while altering `users` would mean a
+            -- migration, and every migration here is tempted to clear
+            -- applied_events/projection_checkpoint — which are shared by the
+            -- whole projection, so it would silently replay unrelated kinds.
+            --
+            -- Not a denormalization either. old_pubkey is the rotate record's
+            -- own actor_pubkey and new_pubkey its metadata field 1; event_id
+            -- points back at the signed artifact those came from.
+            CREATE TABLE IF NOT EXISTS user_key_rotations (
+                origin       TEXT NOT NULL,
+                old_pubkey   BLOB NOT NULL,
+                new_pubkey   BLOB NOT NULL,
+                rotated_seq  INTEGER NOT NULL,
+                event_id     BLOB NOT NULL,
+                PRIMARY KEY (origin, old_pubkey)
+            );
         """)
 
     def apply_user_register(self, rec: Record) -> None:
@@ -367,6 +362,17 @@ class UserProjection(_BaseProjection):
                 return
             self._begin()
             try:
+                # Same-origin guard, matching board_projection.py's control
+                # kinds: a remote origin cannot revoke a user it doesn't
+                # own, even via replication. Without this, any origin could
+                # publish a user.revoke naming another origin as the target
+                # and silently revoke that origin's user once this record
+                # propagates and is dispatched here.
+                if rec.origin != rec.target_origin:
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
                 revoked_pubkey = rec.metadata.get_bytes(1) or b"\x00" * 32
                 self._conn.execute(
                     "UPDATE users SET revoked=1, revoked_seq=? WHERE origin=? AND user_pubkey=?",
@@ -379,11 +385,94 @@ class UserProjection(_BaseProjection):
                 self._rollback()
                 raise
 
+    def apply_user_key_rotate(self, rec: Record) -> None:
+        """Succeed an actor's signing key, carrying its identity forward.
+
+        Defensive throughout, because this runs on federated records too and
+        `accept_remote_range` never invokes KindValidator — only a locally
+        published record has been schema-checked by the time it lands here. A
+        malformed or unprovable rotate is marked applied and dropped rather
+        than raised: `Dispatcher.dispatch_origin` stops at the first exception
+        and leaves the checkpoint behind, so raising would wedge every later
+        record from that origin on one bad input.
+        """
+        with self._lock:
+            if self.is_applied(rec.event_id):
+                return
+            self._begin()
+            try:
+                old_pubkey = rec.actor_pubkey
+                new_pubkey = rec.metadata.get_bytes(1)
+                proof = rec.metadata.get_bytes(2)
+
+                # Scoped by lookup rather than by a claimed field: rows are
+                # keyed (origin, user_pubkey) and written at rec.origin, so
+                # an origin can only ever rotate a key registered with it.
+                # A rotate for a key this origin never registered names no
+                # row here and is not ours to apply.
+                row = self._conn.execute(
+                    "SELECT username, flags, created_at FROM users "
+                    "WHERE origin=? AND user_pubkey=?",
+                    (rec.origin, old_pubkey),
+                ).fetchone()
+
+                if (
+                    new_pubkey is None
+                    or proof is None
+                    or row is None
+                    or new_pubkey == old_pubkey
+                    or not verify_key_rotation_proof(new_pubkey, rec.origin, old_pubkey, proof)
+                ):
+                    log_msg(
+                        f"USER_ROTATE: origin='{rec.origin}' "
+                        f"old={old_pubkey.hex()[:16]} rejected "
+                        f"(unregistered, malformed, or proof invalid)"
+                    )
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
+
+                username, flags, created_at = row[0], row[1], row[2]
+
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO user_key_rotations "
+                    "(origin, old_pubkey, new_pubkey, rotated_seq, event_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (rec.origin, old_pubkey, new_pubkey, rec.origin_seq, rec.event_id),
+                )
+
+                # The old row stays, so records signed by the retired key
+                # still resolve a username. Its successor is what retires it
+                # for authentication — see get_user_by_pubkey.
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO users "
+                    "(origin, user_pubkey, username, flags, reg_seq, created_at, revoked) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                    (rec.origin, new_pubkey, username, flags, rec.origin_seq, created_at),
+                )
+
+                log_msg(
+                    f"USER_ROTATE: origin='{rec.origin}' username='{username}' "
+                    f"old={old_pubkey.hex()[:16]} new={new_pubkey.hex()[:16]} "
+                    f"seq={rec.origin_seq}"
+                )
+                self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
+
     def get_user_by_pubkey(self, origin: str, pubkey: bytes) -> dict | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT origin, user_pubkey, username, flags, reg_seq, created_at, revoked, revoked_seq "
-                "FROM users WHERE origin=? AND user_pubkey=?",
+                "SELECT u.origin, u.user_pubkey, u.username, u.flags, u.reg_seq, "
+                "u.created_at, u.revoked, u.revoked_seq, r.new_pubkey "
+                "FROM users u "
+                "LEFT JOIN user_key_rotations r "
+                "  ON r.origin = u.origin AND r.old_pubkey = u.user_pubkey "
+                "WHERE u.origin=? AND u.user_pubkey=?",
                 (origin, pubkey),
             ).fetchone()
             if not row:
@@ -397,7 +486,20 @@ class UserProjection(_BaseProjection):
                 "created_at": row[5],
                 "revoked": bool(row[6]),
                 "revoked_seq": row[7],
+                # Set once this key has been succeeded. Kept distinct from
+                # `revoked` so a moderator revocation and a voluntary
+                # rotation stay tellable apart.
+                "superseded_by": bytes(row[8]) if row[8] is not None else None,
             }
+
+    def get_key_successor(self, origin: str, pubkey: bytes) -> bytes | None:
+        """The key that succeeded `pubkey`, or None if it is still current."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT new_pubkey FROM user_key_rotations WHERE origin=? AND old_pubkey=?",
+                (origin, pubkey),
+            ).fetchone()
+            return bytes(row[0]) if row else None
 
     def list_users(self, origin: str = None, include_revoked: bool = False) -> list[dict]:
         with self._lock:
@@ -444,6 +546,7 @@ class UserProjection(_BaseProjection):
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._conn.execute("DELETE FROM users")
+                self._conn.execute("DELETE FROM user_key_rotations")
                 self._conn.execute("DELETE FROM applied_events")
                 self._conn.execute("DELETE FROM projection_checkpoint")
                 self._conn.execute("COMMIT")
@@ -456,6 +559,7 @@ class UserProjection(_BaseProjection):
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._conn.execute("DELETE FROM users WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM user_key_rotations WHERE origin=?", (origin,))
                 self._conn.execute("DELETE FROM applied_events WHERE origin=?", (origin,))
                 self._conn.execute("DELETE FROM projection_checkpoint WHERE origin=?", (origin,))
                 self._conn.execute("COMMIT")
@@ -473,7 +577,7 @@ class PolicyProjection(_BaseProjection):
     """Moderation policy projection: rules, reports, punishments."""
 
     def _init_schema(self) -> None:
-        # Gate D schema v2: punishments carry a type and a body reference.
+        # Schema v2: punishments carry a type and a body reference.
         # If an older untyped punishments table exists, reset this projection
         # entirely so the dispatcher replays it from the authoritative
         # firehose (projections are derived state and never authoritative).
@@ -485,6 +589,7 @@ class PolicyProjection(_BaseProjection):
                 DELETE FROM applied_events;
                 DELETE FROM projection_checkpoint;
             """)
+
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS rules (
                 event_id        BLOB PRIMARY KEY,
@@ -571,9 +676,20 @@ class PolicyProjection(_BaseProjection):
                 return
             self._begin()
             try:
+                # Same-origin guard, matching board_projection.py's control
+                # kinds: a remote origin cannot revoke a rule it doesn't
+                # own, even via replication. Also scope the UPDATE by
+                # target_origin, not just event_id — rules.event_id is a
+                # global (not per-origin) primary key in this table, so an
+                # unscoped match is one fewer layer of defense than it looks.
+                if rec.origin != rec.target_origin:
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
                 self._conn.execute(
-                    "UPDATE rules SET revoked=1 WHERE event_id=?",
-                    (rec.target_event_id,),
+                    "UPDATE rules SET revoked=1 WHERE event_id=? AND origin=?",
+                    (rec.target_event_id, rec.target_origin),
                 )
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
@@ -657,9 +773,24 @@ class PolicyProjection(_BaseProjection):
                 return
             self._begin()
             try:
+                # Same-origin guard, matching board_projection.py's control
+                # kinds: a remote origin cannot revoke a punishment it
+                # doesn't own, even via replication. Without this, any
+                # origin could publish a punishment.revoke naming another
+                # origin's punishment event_id as the target and silently
+                # lift that origin's ban/permaban once this record
+                # propagates and is dispatched here — defeating moderation
+                # across federation entirely. Also scope the UPDATE by
+                # target_origin, not just event_id — punishments.event_id
+                # is a global (not per-origin) primary key in this table.
+                if rec.origin != rec.target_origin:
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
                 self._conn.execute(
-                    "UPDATE punishments SET revoked=1, revoked_by=? WHERE event_id=?",
-                    (rec.event_id, rec.target_event_id),
+                    "UPDATE punishments SET revoked=1, revoked_by=? WHERE event_id=? AND origin=?",
+                    (rec.event_id, rec.target_event_id, rec.target_origin),
                 )
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
@@ -669,7 +800,7 @@ class PolicyProjection(_BaseProjection):
                 raise
 
     def apply_punishment_ack(self, rec: Record) -> None:
-        """Record a user's acknowledgment of a punishment (Gate D).
+        """Record a user's acknowledgment of a punishment.
 
         Acks are local to the user's homeserver and reference the punishment
         event ID regardless of which origin issued it. Re-acking the same
@@ -693,6 +824,57 @@ class PolicyProjection(_BaseProjection):
             except Exception:
                 self._rollback()
                 raise
+
+    def list_reports(
+        self, culprit_pubkey: bytes | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict]:
+        """The moderation queue: reports filed, newest first.
+
+        `apply_report` has been writing this table since reports were
+        dispatched, but nothing read it back, so a report arriving over
+        federation was stored and then seen by nobody. This is the read side.
+
+        A report is an accusation, not a verdict. It records who filed it
+        (`origin`/`origin_seq` locate the signed record), who they name
+        (`culprit_pubkey`), and what they point at — an article
+        (`target_origin`/`target_board`/`target_article_id`), an event
+        (`target_event_id`), or nothing at all. The validator enforces
+        exactly one of those three shapes, so a caller can switch on which
+        target fields are non-zero without worrying about mixtures.
+
+        The reason is the record body and is not stored here; fetch it with
+        `body_hash` if it is wanted.
+        """
+        sql = (
+            "SELECT event_id, origin, origin_seq, culprit_pubkey, target_origin, "
+            "target_board, target_article_id, target_event_id, body_hash, body_size, "
+            "created_at FROM reports "
+        )
+        params: tuple = ()
+        if culprit_pubkey is not None:
+            sql += "WHERE culprit_pubkey=? "
+            params = (culprit_pubkey,)
+        sql += "ORDER BY created_at DESC, origin_seq DESC LIMIT ? OFFSET ?"
+        params = params + (limit, offset)
+
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "event_id": bytes(r[0]),
+                "origin": r[1],
+                "origin_seq": r[2],
+                "culprit_pubkey": bytes(r[3]),
+                "target_origin": r[4],
+                "target_board": r[5],
+                "target_article_id": bytes(r[6]),
+                "target_event_id": bytes(r[7]),
+                "body_hash": bytes(r[8]),
+                "body_size": r[9],
+                "created_at": r[10],
+            }
+            for r in rows
+        ]
 
     def list_punishments_for_pubkey(
         self, pubkey: bytes, include_revoked: bool = False
@@ -737,7 +919,7 @@ class PolicyProjection(_BaseProjection):
         allowed_origins: set | None = None,
         now: int | None = None,
     ) -> list[dict]:
-        """Return the punishments currently gating writes by this user (Gate D).
+        """Return the punishments currently gating writes by this user.
 
         Pending means: unacknowledged warnings, unexpired temporary bans,
         and permabans — all non-revoked. When allowed_origins is provided,

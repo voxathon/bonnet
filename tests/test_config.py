@@ -197,6 +197,70 @@ admin_pubkey = "{pubkey}"
     assert any(r.matcher.pubkey == bytes.fromhex(pubkey) for r in c.acl._rules)
 
 
+def test_load_admin_pubkey_grants_admin_alongside_existing_acl_rules(tmp_path):
+    """admin_pubkey must grant admin even when [[acl]] already has rules —
+    it used to only take effect when the [[acl]] table was completely
+    empty. This is exactly the documented first-run flow: keep the sample
+    config's default rules, uncomment admin_pubkey."""
+    pubkey = "ab" * 32
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+admin_pubkey = "{pubkey}"
+
+[[acl]]
+effect = "allow"
+match.anonymous = true
+actions = ["read"]
+commands = ["BOARD_LIST"]
+boards = ["*"]
+
+[[acl]]
+effect = "allow"
+match.registered = true
+actions = ["write"]
+commands = ["PUBLISH_RECORD"]
+kinds = ["bonnet.article"]
+boards = ["*"]
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert len(c.acl._rules) == 3
+    admin_bytes = bytes.fromhex(pubkey)
+    assert any(r.matcher.pubkey == admin_bytes and r.effect == "allow" for r in c.acl._rules), (
+        "admin_pubkey must still grant admin when other [[acl]] rules exist"
+    )
+
+
+def test_load_admin_pubkey_not_duplicated_if_already_present(tmp_path):
+    """If config.toml already has an explicit rule for admin_pubkey's own
+    key, loading must not add a second, redundant one."""
+    pubkey = "ef" * 32
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+admin_pubkey = "{pubkey}"
+
+[[acl]]
+effect = "allow"
+match.pubkey = "hex:{pubkey}"
+actions = ["read", "write"]
+commands = ["*"]
+kinds = ["*"]
+boards = ["*"]
+objects = ["*"]
+""",
+    )
+    c = FirehoseConfig.load(path)
+    admin_bytes = bytes.fromhex(pubkey)
+    matching = [r for r in c.acl._rules if r.matcher.pubkey == admin_bytes and r.effect == "allow"]
+    assert len(matching) == 1
+
+
 def test_load_no_admin_no_acl(tmp_path):
     path = _write_config(
         tmp_path,
@@ -236,7 +300,7 @@ verify_tls = true
     assert c.peers[1].verify_tls is True
 
 
-def test_peer_import_flags_default_to_true(tmp_path):
+def test_peer_import_flags_default_to_false(tmp_path):
     path = _write_config(
         tmp_path,
         """
@@ -250,9 +314,9 @@ hostname = "a.test"
     )
     c = FirehoseConfig.load(path)
     peer = c.peers[0]
-    assert peer.import_warnings is True
-    assert peer.import_temp_bans is True
-    assert peer.import_permabans is True
+    assert peer.import_warnings is False
+    assert peer.import_temp_bans is False
+    assert peer.import_permabans is False
 
 
 def test_peer_import_flags_from_toml(tmp_path):
@@ -478,13 +542,13 @@ host = "127.0.0.1"
 
 
 # ---------------------------------------------------------------------------
-# BONNET_HOME storage-path fallback
+# BONNET_SERVER_HOME storage-path fallback
 # ---------------------------------------------------------------------------
 
 
-def test_bonnet_home_used_when_storage_paths_unset(tmp_path, monkeypatch):
+def test_bonnet_server_home_used_when_storage_paths_unset(tmp_path, monkeypatch):
     home = str(tmp_path / "home")
-    monkeypatch.setenv("BONNET_HOME", home)
+    monkeypatch.setenv("BONNET_SERVER_HOME", home)
     path = _write_config(tmp_path, '[server]\norigin = "bbs.test"\n')
     c = FirehoseConfig.load(path)
     assert c.data_dir == os.path.join(home, "data")
@@ -492,9 +556,9 @@ def test_bonnet_home_used_when_storage_paths_unset(tmp_path, monkeypatch):
     assert c.events_bodies_dir == os.path.join(home, "event_bodies")
 
 
-def test_explicit_config_storage_paths_win_over_bonnet_home(tmp_path, monkeypatch):
+def test_explicit_config_storage_paths_win_over_bonnet_server_home(tmp_path, monkeypatch):
     home = str(tmp_path / "home")
-    monkeypatch.setenv("BONNET_HOME", home)
+    monkeypatch.setenv("BONNET_SERVER_HOME", home)
     explicit_data_dir = str(tmp_path / "custom_data")
     path = _write_config(
         tmp_path,
@@ -506,19 +570,28 @@ data_dir = "{explicit_data_dir.replace(os.sep, "/")}"
     )
     c = FirehoseConfig.load(path)
     assert c.data_dir == explicit_data_dir.replace(os.sep, "/")
-    # boards_dir/events_bodies_dir were left unset, so BONNET_HOME still
-    # applies to those independently of the explicit data_dir override.
+    # boards_dir/events_bodies_dir were left unset, so BONNET_SERVER_HOME
+    # still applies to those independently of the explicit data_dir override.
     assert c.boards_dir == os.path.join(home, "boards")
     assert c.events_bodies_dir == os.path.join(home, "event_bodies")
 
 
-def test_storage_paths_default_without_bonnet_home(tmp_path, monkeypatch):
-    monkeypatch.delenv("BONNET_HOME", raising=False)
+def test_storage_paths_default_to_the_per_user_dir_without_bonnet_server_home(
+    tmp_path, monkeypatch
+):
+    """No more CWD-relative fallback — the per-user directory (core.home) is
+    always the default now, matching the gateway's existing model."""
+    monkeypatch.delenv("BONNET_SERVER_HOME", raising=False)
+    monkeypatch.setattr("platformdirs.user_config_dir", lambda *a, **k: str(tmp_path / "cfg"))
+    monkeypatch.setattr("platformdirs.user_data_dir", lambda *a, **k: str(tmp_path / "data-root"))
     path = _write_config(tmp_path, '[server]\norigin = "bbs.test"\n')
+
     c = FirehoseConfig.load(path)
-    assert c.data_dir == "./data"
-    assert c.boards_dir == "./boards"
-    assert c.events_bodies_dir == "./event_bodies"
+
+    expected_home = str(tmp_path / "data-root" / "server")
+    assert c.data_dir == os.path.join(expected_home, "data")
+    assert c.boards_dir == os.path.join(expected_home, "boards")
+    assert c.events_bodies_dir == os.path.join(expected_home, "event_bodies")
 
 
 # ---------------------------------------------------------------------------
@@ -628,3 +701,279 @@ def test_example_config_matches_generated_template(tmp_path):
         return data
 
     assert load_normalized(example_path) == load_normalized(generated_path)
+
+
+# ---------------------------------------------------------------------------
+# conf.d-style includes ([[acl]] / [[sync.peers]] only)
+# ---------------------------------------------------------------------------
+
+
+def test_include_merges_acl_and_peers(tmp_path):
+    (tmp_path / "acl.d").mkdir()
+    (tmp_path / "peers.d").mkdir()
+
+    (tmp_path / "acl.d" / "mods.toml").write_text(
+        """
+[[acl]]
+effect = "allow"
+match.role = "moderator"
+actions = ["write"]
+commands = ["PUBLISH_RECORD"]
+kinds = ["bonnet.punishment.warn"]
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "peers.d" / "friend.toml").write_text(
+        """
+[[sync.peers]]
+origin = "friend.example"
+hostname = "friend.example"
+""",
+        encoding="utf-8",
+    )
+
+    path = _write_config(
+        tmp_path,
+        """
+include = ["acl.d/*.toml", "peers.d/*.toml"]
+
+[server]
+origin = "bbs.test"
+
+[[acl]]
+effect = "allow"
+match.wildcard = true
+actions = ["read"]
+commands = ["*"]
+""",
+    )
+
+    c = FirehoseConfig.load(path)
+    assert len(c.acl._rules) == 2
+    assert len(c.peers) == 1
+    assert c.peers[0].origin == "friend.example"
+    assert c.unknown_keys == []
+
+
+def test_include_glob_matching_nothing_raises(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+include = ["nowhere.d/*.toml"]
+
+[server]
+origin = "bbs.test"
+""",
+    )
+    with pytest.raises(ValueError, match="matched no files"):
+        FirehoseConfig.load(path)
+
+
+def test_include_non_list_raises(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+include = "acl.d/*.toml"
+
+[server]
+origin = "bbs.test"
+""",
+    )
+    with pytest.raises(ValueError, match="must be a list"):
+        FirehoseConfig.load(path)
+
+
+def test_nested_include_raises(tmp_path):
+    (tmp_path / "acl.d").mkdir()
+    (tmp_path / "acl.d" / "bad.toml").write_text('include = ["nope.toml"]\n', encoding="utf-8")
+    path = _write_config(
+        tmp_path,
+        """
+include = ["acl.d/*.toml"]
+
+[server]
+origin = "bbs.test"
+""",
+    )
+    with pytest.raises(ValueError, match="must not itself use 'include'"):
+        FirehoseConfig.load(path)
+
+
+def test_include_file_disallows_non_acl_sync_keys(tmp_path):
+    (tmp_path / "acl.d").mkdir()
+    (tmp_path / "acl.d" / "bad.toml").write_text("[server]\nport = 9999\n", encoding="utf-8")
+    path = _write_config(
+        tmp_path,
+        """
+include = ["acl.d/*.toml"]
+
+[server]
+origin = "bbs.test"
+""",
+    )
+    with pytest.raises(ValueError, match="unsupported top-level key"):
+        FirehoseConfig.load(path)
+
+
+def test_include_file_sync_section_disallows_non_peers_keys(tmp_path):
+    (tmp_path / "peers.d").mkdir()
+    (tmp_path / "peers.d" / "bad.toml").write_text(
+        "[sync]\ninterval_seconds = 60\n", encoding="utf-8"
+    )
+    path = _write_config(
+        tmp_path,
+        """
+include = ["peers.d/*.toml"]
+
+[server]
+origin = "bbs.test"
+""",
+    )
+    with pytest.raises(ValueError, match=r"\[sync\] may only contain 'peers'"):
+        FirehoseConfig.load(path)
+
+
+def test_include_missing_matched_file_raises(tmp_path):
+    # Directly exercises _load_include_file's own not-found guard, since a
+    # glob match is normally guaranteed to exist on disk.
+    from bonnet.core.config import _load_include_file
+
+    with pytest.raises(FileNotFoundError):
+        _load_include_file(str(tmp_path / "nope.toml"))
+
+
+def test_include_file_unknown_peer_key_is_prefixed_with_relative_path(tmp_path):
+    (tmp_path / "peers.d").mkdir()
+    (tmp_path / "peers.d" / "typo.toml").write_text(
+        """
+[[sync.peers]]
+origin = "friend.example"
+hostname = "friend.example"
+bogus_field = true
+""",
+        encoding="utf-8",
+    )
+    path = _write_config(
+        tmp_path,
+        """
+include = ["peers.d/*.toml"]
+
+[server]
+origin = "bbs.test"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert len(c.unknown_keys) == 1
+    assert c.unknown_keys[0].startswith("peers.d")
+    assert c.unknown_keys[0].endswith("typo.toml:sync.peers[0].bogus_field")
+
+
+def test_include_relative_to_config_file_not_cwd(tmp_path, monkeypatch):
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+    monkeypatch.chdir(other_dir)
+
+    (tmp_path / "acl.d").mkdir()
+    (tmp_path / "acl.d" / "mods.toml").write_text(
+        """
+[[acl]]
+effect = "allow"
+match.wildcard = true
+actions = ["read"]
+commands = ["*"]
+""",
+        encoding="utf-8",
+    )
+    path = _write_config(
+        tmp_path,
+        """
+include = ["acl.d/*.toml"]
+
+[server]
+origin = "bbs.test"
+""",
+    )
+
+    c = FirehoseConfig.load(path)
+    assert len(c.acl._rules) == 1
+
+
+# ---------------------------------------------------------------------------
+# admin_pubkey_file (secret indirection)
+# ---------------------------------------------------------------------------
+
+
+def test_admin_pubkey_file_is_read_and_stripped(tmp_path):
+    pubkey = "ab" * 32
+    keyfile = tmp_path / "admin.key"
+    keyfile.write_text(f"  {pubkey}  \n", encoding="utf-8")
+
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+admin_pubkey_file = "{keyfile.as_posix()}"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.admin_pubkey_hex == pubkey
+    assert any(r.matcher.pubkey == bytes.fromhex(pubkey) for r in c.acl._rules)
+
+
+def test_admin_pubkey_and_admin_pubkey_file_are_mutually_exclusive(tmp_path):
+    keyfile = tmp_path / "admin.key"
+    keyfile.write_text("ab" * 32, encoding="utf-8")
+
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+admin_pubkey = "{"cd" * 32}"
+admin_pubkey_file = "{keyfile.as_posix()}"
+""",
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        FirehoseConfig.load(path)
+
+
+def test_admin_pubkey_file_missing_raises(tmp_path):
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+admin_pubkey_file = "{(tmp_path / "nope.key").as_posix()}"
+""",
+    )
+    with pytest.raises(ValueError, match="could not read"):
+        FirehoseConfig.load(path)
+
+
+def test_admin_pubkey_file_empty_raises(tmp_path):
+    keyfile = tmp_path / "admin.key"
+    keyfile.write_text("   \n", encoding="utf-8")
+
+    path = _write_config(
+        tmp_path,
+        f"""
+[server]
+origin = "bbs.test"
+admin_pubkey_file = "{keyfile.as_posix()}"
+""",
+    )
+    with pytest.raises(ValueError, match="is empty"):
+        FirehoseConfig.load(path)
+
+
+def test_no_admin_pubkey_or_file_is_fine(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.admin_pubkey_hex == ""

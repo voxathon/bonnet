@@ -1,4 +1,4 @@
-"""Board projection store for the Bonnet Firehose Protocol (PROTOCOL.md §14.2).
+"""Board projection store for the firehose protocol.
 
 Per-board SQLite database at boards/<origin>/<board>/metadata.db containing:
   - articles (metadata, lifecycle, pin, thread state)
@@ -16,19 +16,6 @@ import sqlite3
 import threading
 
 from bonnet.core.record import ZERO_ID, Record
-
-# ---------------------------------------------------------------------------
-# Kind constants
-# ---------------------------------------------------------------------------
-
-KIND_ARTICLE = "bonnet.article"
-KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
-KIND_ARTICLE_RESTORE = "bonnet.article.restore"
-KIND_ARTICLE_PURGE = "bonnet.article.purge"
-KIND_ARTICLE_PIN = "bonnet.article.pin"
-KIND_ARTICLE_UNPIN = "bonnet.article.unpin"
-KIND_THREAD_CLOSE = "bonnet.thread.close"
-KIND_THREAD_REOPEN = "bonnet.thread.reopen"
 
 VISIBILITY_ACTIVE = "active"
 VISIBILITY_CANCELLED = "cancelled"
@@ -93,12 +80,37 @@ def delete_board_dbs(boards_dir: str, origin: str) -> int:
 
 
 class ArticleProjection:
+    """One row of the articles table, as read back from a board projection."""
+
+    origin: str
+    board: str
+    article_num: int
+    article_id: bytes
+    visibility: str
+    body_state: str
+    pin_state: str
+    thread_state: str
+    subject: str
+    tags: str
+    options: str
+    content_type: str
+    author_pubkey: bytes
+    author_username: str
+    author_registrar: str
+    created_at: int
+    body_hash: bytes
+    body_size: int
+    root_article_id: bytes
+    reply_to_article_id: bytes
+    replacement_article_id: bytes | None
+    latest_control_seq: int
+    event_id: bytes
+
     __slots__ = (
         "origin",
         "board",
         "article_num",
         "article_id",
-        "message_id",
         "visibility",
         "body_state",
         "pin_state",
@@ -831,7 +843,7 @@ class BoardProjection:
             f"visibility IN ({placeholders})",
             "body_state != 'purged'",
         ]
-        params = [origin, board] + states
+        params: list[str | bytes] = [origin, board, *states]
 
         if text_query:
             where_parts.append("(subject LIKE ? OR tags LIKE ?)")
@@ -920,14 +932,14 @@ class BoardProjection:
             field_id: 0x01=author_pubkey, 0x02=author_username,
                       0x03=author_registrar, 0x04=tags, 0x05=created_at,
                       0x06=visibility, 0x07=thread_root, 0x08=reply_to,
-                      0x09=pin_state
+                      0x09=pin_state, 0x0A=root_article_id
             operator: 0x01=EQ, 0x02=NE, 0x03=GT, 0x04=LT, 0x05=LIKE, 0x06=IN
             value: bytes, str, int, or bool depending on field
 
         All filters are AND'd. Purged articles excluded unless visibility=purged.
         """
         where_parts = ["origin=?", "board=?"]
-        params = [origin, board]
+        params: list[str | int | bytes] = [origin, board]
 
         has_visibility_filter = False
         query_purged = False
@@ -983,11 +995,11 @@ class BoardProjection:
                     where_parts.append(f"{col} = ?")
                     params.append(int(value))
             elif field_id == 0x06:
-                if value == "purged":
+                if value == "purged" and op == 0x01:
                     has_visibility_filter = True
                     query_purged = True
                     where_parts.append("body_state = 'purged'")
-                else:
+                elif value != "purged":
                     col = "visibility"
                     if op == 0x01:
                         has_visibility_filter = True
@@ -1019,6 +1031,11 @@ class BoardProjection:
                         where_parts.append(f"{col} != 'unpinned'")
                     else:
                         where_parts.append(f"{col} = 'unpinned'")
+            elif field_id == 0x0A:
+                col = "root_article_id"
+                if op == 0x01:
+                    where_parts.append(f"{col}=?")
+                    params.append(value)
 
         if not has_visibility_filter:
             where_parts.append("visibility = 'active'")

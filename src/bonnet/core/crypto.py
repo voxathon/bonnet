@@ -1,8 +1,14 @@
+import nacl.exceptions
 import nacl.signing
-import nacl.utils
 
 
 class Identity:
+    """An Ed25519 keypair. Built through `generate` or `from_private_key`."""
+
+    _signing_key: nacl.signing.SigningKey
+    _private_key: bytes
+    public_key: bytes
+
     def __init__(self):
         pass
 

@@ -1,11 +1,11 @@
-"""Firehose event store for the Bonnet Firehose Protocol (PROTOCOL.md §14.1).
+"""The firehose event store.
 
-Phase 1: origin-global append-only event store with per-origin sequence
+Origin-global append-only event store with per-origin sequence
 allocation, board-local article-number counters, signed heads, equivocation
 conflict storage, key-epoch tracking for rotation, relay witness storage, and
 remote range acceptance with full chain verification.
 
-Uses raw sqlite3 (not core.orm) with BEGIN IMMEDIATE, WAL mode, and a
+Uses raw sqlite3 with BEGIN IMMEDIATE, WAL mode, and a
 threading.RLock for writer serialization.
 """
 
@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 
 from bonnet.core.crypto import Identity
+from bonnet.core.kinds import KIND_ARTICLE, KIND_ORIGIN_KEY_ROTATE
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     HEAD_FORMAT,
@@ -74,14 +75,6 @@ class SignatureInvalid(FirehoseError):
 
 class HeadMismatch(FirehoseError):
     pass
-
-
-# ---------------------------------------------------------------------------
-# Kind constants (§11)
-# ---------------------------------------------------------------------------
-
-KIND_ARTICLE = "bonnet.article"
-KIND_ORIGIN_KEY_ROTATE = "bonnet.origin.key.rotate"
 
 
 def _key_from_intervals(intervals: list[tuple[int, int | None, bytes]], seq: int) -> bytes | None:
@@ -238,6 +231,19 @@ class FirehoseStore:
             CREATE TABLE IF NOT EXISTS projection_checkpoints (
                 origin              TEXT PRIMARY KEY,
                 last_applied_seq    INTEGER NOT NULL DEFAULT 0
+            );
+
+            -- Why an origin is or is not being synced. Separate from
+            -- origin_state because that describes the chain (how far, which
+            -- hash); this describes our relationship to the peer serving it.
+            -- 'diverged' is terminal until an operator clears it: a chain
+            -- that forked cannot re-converge, so retrying is spending
+            -- requests on something with no path to success.
+            CREATE TABLE IF NOT EXISTS origin_sync_state (
+                origin  TEXT PRIMARY KEY,
+                status  TEXT NOT NULL,
+                detail  TEXT NOT NULL DEFAULT '',
+                since   INTEGER NOT NULL
             );
         """)
 
@@ -646,7 +652,7 @@ class FirehoseStore:
     ) -> AcceptResult:
         """Accept a contiguous range of remote records verified against a head.
 
-        Implements §17.1 acceptance rules. The caller provides pre-decoded
+        Implements the remote-range acceptance rules. The caller provides pre-decoded
         records. When the batch completes the synced range, `head` must be
         provided and is verified against the final record before being
         recorded. Intermediate batches of a multi-batch transfer pass
@@ -865,6 +871,7 @@ class FirehoseStore:
                 anchored = head is not None and head.latest_origin_seq == last_seq
 
                 if anchored:
+                    assert head is not None  # implied by anchored, spelled out for mypy
                     final_hash = expected_prev if records[-1].origin_seq == last_seq else None
                     if final_hash is None:
                         final_hash = compute_event_hash(encode_record(records[-1]))
@@ -1098,6 +1105,118 @@ class FirehoseStore:
             )
 
     # -----------------------------------------------------------------------
+    # Sync status and chain integrity
+    # -----------------------------------------------------------------------
+
+    def set_sync_status(self, origin: str, status: str, detail: str = "") -> None:
+        """Record why an origin is or is not being synced.
+
+        'ok' is the implicit default for an origin with no row; 'diverged'
+        means its chain forked from ours and syncing is halted until an
+        operator clears it.
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO origin_sync_state (origin, status, detail, since) "
+                "VALUES (?, ?, ?, ?)",
+                (origin, status, detail, int(time.time())),
+            )
+            self._conn.commit()
+
+    def get_sync_status(self, origin: str) -> dict:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT status, detail, since FROM origin_sync_state WHERE origin=?",
+                (origin,),
+            ).fetchone()
+            if not row:
+                return {"origin": origin, "status": "ok", "detail": "", "since": 0}
+            return {"origin": origin, "status": row[0], "detail": row[1], "since": row[2]}
+
+    def clear_sync_status(self, origin: str) -> bool:
+        """Clear a halt so the next cycle retries. Returns True if one existed."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM origin_sync_state WHERE origin=?", (origin,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def record_conflict(
+        self, origin: str, origin_seq: int, encoded_record: bytes, source: str, reason: str
+    ) -> None:
+        """Store a conflicting record as evidence, outside range acceptance.
+
+        `accept_remote_range` files equivocation itself, but only when a batch
+        *overlaps* sequences already held — and federation sync always requests
+        from local_seq+1, so it can never produce such a batch. A fork reaches
+        it as a ChainBreak instead, which rolls back and keeps nothing. This
+        lets the sync path preserve the same evidence for the case it can
+        actually hit.
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO event_conflicts "
+                "(origin, origin_seq, event_hash, encoded_record, source, observed_at, reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    origin,
+                    origin_seq,
+                    compute_event_hash(encoded_record),
+                    encoded_record,
+                    source,
+                    int(time.time()),
+                    reason,
+                ),
+            )
+            self._conn.commit()
+
+    def check_tip(self, origin: str) -> tuple[bool, bytes | None, bytes | None]:
+        """Compare the recorded tip hash against the stored record at it.
+
+        `origin_state` is maintained alongside `events` rather than derived
+        from it, so the two can drift — and a drifted tip makes every honest
+        peer look like it is serving a broken chain, because `expected_prev`
+        is wrong before the peer says anything. Returns
+        (consistent, recorded_hash, actual_hash); actual is None when there is
+        no record at the recorded sequence.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT highest_seq, current_event_hash FROM origin_state WHERE origin=?",
+                (origin,),
+            ).fetchone()
+            if not row:
+                return True, None, None
+            seq, recorded = row[0], bytes(row[1])
+            if seq == 0:
+                return recorded == ZERO_HASH, recorded, ZERO_HASH
+
+            erow = self._conn.execute(
+                "SELECT encoded_record FROM events WHERE origin=? AND origin_seq=?",
+                (origin, seq),
+            ).fetchone()
+            if not erow:
+                return False, recorded, None
+            actual = compute_event_hash(bytes(erow[0]))
+            return actual == recorded, recorded, actual
+
+    def repair_tip(self, origin: str) -> bool:
+        """Reset the recorded tip to the stored record at highest_seq.
+
+        Returns True if anything changed. Only touches `origin_state` — the
+        events themselves are signed and are never rewritten here.
+        """
+        consistent, _recorded, actual = self.check_tip(origin)
+        if consistent or actual is None:
+            return False
+        with self._lock:
+            self._conn.execute(
+                "UPDATE origin_state SET current_event_hash=? WHERE origin=?",
+                (actual, origin),
+            )
+            self._conn.commit()
+            return True
+
+    # -----------------------------------------------------------------------
     # Conflict queries
     # -----------------------------------------------------------------------
 
@@ -1173,6 +1292,7 @@ class FirehoseStore:
                 "SELECT COUNT(DISTINCT board) FROM events WHERE origin=? AND board != ''", (origin,)
             ).fetchone()[0]
             checkpoint = self.get_checkpoint(origin)
+            sync = self.get_sync_status(origin)
             return {
                 "origin": origin,
                 "event_count": event_count,
@@ -1181,6 +1301,8 @@ class FirehoseStore:
                 "conflict_count": conflict_count,
                 "board_count": board_count,
                 "checkpoint": checkpoint,
+                "sync_status": sync["status"],
+                "sync_detail": sync["detail"],
             }
 
     def delete_origin_data(self, origin: str) -> dict:
@@ -1198,6 +1320,7 @@ class FirehoseStore:
                     ("origin_key_epochs", "origin"),
                     ("board_counters", "origin"),
                     ("projection_checkpoints", "origin"),
+                    ("origin_sync_state", "origin"),
                 ]:
                     c = self._conn.execute(f"DELETE FROM {table} WHERE {col}=?", (origin,)).rowcount
                     counts[table] = c

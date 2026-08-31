@@ -1,4 +1,4 @@
-"""Phase 1 tests for the FirehoseStore (PROTOCOL.md §14.1, §17.1).
+"""Tests for the FirehoseStore.
 
 Tests: sequence allocation, article-number allocation, idempotent resubmit,
 event ID collision, article ID collision, chain continuity, head management,
@@ -544,7 +544,7 @@ class TestEquivocation:
             "bbs.b", 1, compute_event_hash(encode_record(records2[0])), fake_identity
         )
 
-        result = store.accept_remote_range(
+        _result = store.accept_remote_range(
             "bbs.b", records2, head2, fake_identity.public_key, source="evil.test"
         )
         conflicts = store.get_conflicts("bbs.b")
@@ -659,3 +659,115 @@ class TestConcurrency:
 
         seqs = [r.origin_seq for r in store.get_events_range("bbs.a", 1, expected_total + 1)]
         assert seqs == list(range(1, expected_total + 1))
+
+
+def _publish(store, n, origin="bbs.a"):
+    """Append n locally-authored article records under ORIGIN_A."""
+    store.init_origin_key(origin, ORIGIN_A_PUB)
+    for i in range(n):
+        intent = _make_article_intent(origin, _random_id(i + 1), _random_id(i + 40))
+        store.append_record(ORIGIN_A, intent, _sign_intent(intent), b"test body")
+
+
+class TestChainIntegrityAndSyncStatus:
+    """check_tip / repair_tip / sync status — the primitives that let the sync
+    layer tell a local inconsistency apart from a peer that forked."""
+
+    def test_tip_is_consistent_after_normal_publication(self, store):
+        _publish(store, 3)
+        consistent, recorded, actual = store.check_tip("bbs.a")
+        assert consistent
+        assert recorded == actual
+
+    def test_unknown_origin_is_trivially_consistent(self, store):
+        assert store.check_tip("never.seen")[0] is True
+
+    def test_drifted_tip_is_detected_and_repaired(self, store):
+        _publish(store, 2)
+        _, _, actual = store.check_tip("bbs.a")
+
+        store._conn.execute(
+            "UPDATE origin_state SET current_event_hash=? WHERE origin=?",
+            (b"\x99" * 32, "bbs.a"),
+        )
+        store._conn.commit()
+
+        consistent, recorded, recomputed = store.check_tip("bbs.a")
+        assert not consistent
+        assert recorded == b"\x99" * 32
+        assert recomputed == actual
+
+        assert store.repair_tip("bbs.a") is True
+        assert store.check_tip("bbs.a")[0]
+        # Idempotent: nothing left to repair.
+        assert store.repair_tip("bbs.a") is False
+
+    def test_repair_never_rewrites_events(self, store):
+        _publish(store, 2)
+        before = store._conn.execute(
+            "SELECT encoded_record FROM events WHERE origin=? ORDER BY origin_seq", ("bbs.a",)
+        ).fetchall()
+
+        store._conn.execute(
+            "UPDATE origin_state SET current_event_hash=? WHERE origin=?",
+            (b"\x99" * 32, "bbs.a"),
+        )
+        store._conn.commit()
+        store.repair_tip("bbs.a")
+
+        after = store._conn.execute(
+            "SELECT encoded_record FROM events WHERE origin=? ORDER BY origin_seq", ("bbs.a",)
+        ).fetchall()
+        assert [bytes(r[0]) for r in before] == [bytes(r[0]) for r in after]
+
+    def test_sync_status_defaults_to_ok_and_round_trips(self, store):
+        assert store.get_sync_status("bbs.b")["status"] == "ok"
+
+        store.set_sync_status("bbs.b", "diverged", "seq 7")
+        status = store.get_sync_status("bbs.b")
+        assert status["status"] == "diverged"
+        assert status["detail"] == "seq 7"
+        assert status["since"] > 0
+
+        assert store.clear_sync_status("bbs.b") is True
+        assert store.get_sync_status("bbs.b")["status"] == "ok"
+        assert store.clear_sync_status("bbs.b") is False
+
+    def test_sync_status_survives_reopening(self, tmp_path):
+        path = str(tmp_path / "reopen.db")
+        s = FirehoseStore(path)
+        s.set_sync_status("bbs.b", "diverged", "seq 7")
+        s.close()
+
+        s2 = FirehoseStore(path)
+        try:
+            assert s2.get_sync_status("bbs.b")["status"] == "diverged"
+        finally:
+            s2.close()
+
+    def test_record_conflict_stores_evidence(self, store):
+        records, _ = _make_remote_records("bbs.b", ORIGIN_B, 1)
+        encoded = encode_record(records[0])
+
+        store.record_conflict("bbs.b", 1, encoded, "peer.test", "divergence: test")
+
+        conflicts = store.get_conflicts("bbs.b")
+        assert len(conflicts) == 1
+        assert conflicts[0]["origin_seq"] == 1
+        assert conflicts[0]["event_hash"] == compute_event_hash(encoded)
+        assert conflicts[0]["source"] == "peer.test"
+
+        # Same evidence twice is not two findings.
+        store.record_conflict("bbs.b", 1, encoded, "peer.test", "divergence: test")
+        assert len(store.get_conflicts("bbs.b")) == 1
+
+    def test_origin_summary_reports_sync_status(self, store):
+        store.set_sync_status("bbs.b", "diverged", "seq 7")
+        summary = store.get_origin_summary("bbs.b")
+        assert summary["sync_status"] == "diverged"
+        assert summary["sync_detail"] == "seq 7"
+
+    def test_delete_origin_data_clears_sync_status(self, store):
+        store.set_sync_status("bbs.b", "diverged", "seq 7")
+        store.delete_origin_data("bbs.b")
+        assert store.get_sync_status("bbs.b")["status"] == "ok"

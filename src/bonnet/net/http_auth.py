@@ -1,6 +1,6 @@
-"""Bonnet RFC 9421 HTTP Message Signatures profile — Ed25519 only, async-native.
+"""Firehose RFC 9421 HTTP Message Signatures profile — Ed25519 only, async-native.
 
-Implements exactly what the Bonnet Firehose Protocol requires:
+Implements exactly what the firehose protocol requires:
   - Ed25519 sign/verify via pynacl (raw 32-byte keys, no PEM)
   - Content-Digest (RFC 9530, SHA-256)
   - Signature-Input / Signature header parsing and serialization
@@ -8,7 +8,7 @@ Implements exactly what the Bonnet Firehose Protocol requires:
   - Mandatory covered-component enforcement
   - created / expires / clock-skew validation
   - nonce matching and base64url-32-byte validation
-  - tag="bonnet-firehose-1" filtering
+  - tag="untp-1" filtering
   - keyid format validation (ed25519:<hex> for requests, origin:<name> for responses)
   - All public sign/verify methods are async (crypto offloaded via asyncio.to_thread)
 """
@@ -26,8 +26,8 @@ from dataclasses import dataclass, field
 import nacl.exceptions
 import nacl.signing
 
-BONNET_TAG = "bonnet-firehose-1"
-BONNET_LABEL = "bonnet"
+UNTP_TAG = "untp-1"
+UNTP_LABEL = "untp"
 ED25519_ALG = "ed25519"
 DEFAULT_MAX_LIFETIME = 60
 DEFAULT_CLOCK_SKEW = 30
@@ -39,8 +39,8 @@ REQUEST_REQUIRED_COMPONENTS = frozenset(
         "@target-uri",
         "content-type",
         "content-digest",
-        "bonnet-protocol",
-        "bonnet-nonce",
+        "untp-version",
+        "untp-nonce",
     }
 )
 
@@ -49,8 +49,8 @@ RESPONSE_REQUIRED_COMPONENTS = frozenset(
         "@status",
         "content-type",
         "content-digest",
-        "bonnet-protocol",
-        "bonnet-origin",
+        "untp-version",
+        "untp-origin",
     }
 )
 
@@ -219,6 +219,7 @@ def _parse_params(s: str, i: int) -> tuple[dict, int]:
             break
         i += 1  # skip =
         # read value
+        val: str | int
         if i < len(s) and s[i] == '"':
             val, i = _parse_quoted(s, i)
         else:
@@ -514,11 +515,8 @@ def _check_temporal(
 def _check_required_components(
     components: list[str],
     required: frozenset[str],
-    msg: HTTPMessage,
 ) -> None:
     for req in required:
-        if req == "bonnet-username" and not msg.has_header("bonnet-username"):
-            continue
         if req not in components:
             raise MissingComponent(f"Required component '{req}' not covered by signature")
 
@@ -547,14 +545,14 @@ def _ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> None
 
 
 class BonnetSigner:
-    """Signs HTTP messages with the Bonnet firehose RFC 9421 profile."""
+    """Signs HTTP messages with the firehose RFC 9421 profile."""
 
     def __init__(
         self,
         private_key: bytes,
         key_id: str,
-        tag: str = BONNET_TAG,
-        label: str = BONNET_LABEL,
+        tag: str = UNTP_TAG,
+        label: str = UNTP_LABEL,
         request_components: list[str] = None,
         response_components: list[str] = None,
     ):
@@ -570,16 +568,16 @@ class BonnetSigner:
             "@target-uri",
             "content-type",
             "content-digest",
-            "bonnet-protocol",
-            "bonnet-nonce",
+            "untp-version",
+            "untp-nonce",
         ]
         self._response_components = response_components or [
             "@status",
             "content-type",
             "content-digest",
-            "bonnet-protocol",
-            "bonnet-origin",
-            "bonnet-request-nonce",
+            "untp-version",
+            "untp-origin",
+            "untp-request-nonce",
         ]
 
     async def sign_request(
@@ -589,12 +587,9 @@ class BonnetSigner:
         nonce: str,
         created: int | None = None,
         expires: int | None = None,
-        include_username: bool = False,
         extra_components: Sequence[str] = (),
     ) -> None:
         components = list(self._request_components)
-        if include_username and msg.has_header("bonnet-username"):
-            components.append("bonnet-username")
         components.extend(extra_components)
         await self._sign(msg, components, nonce, created, expires)
 
@@ -606,7 +601,7 @@ class BonnetSigner:
         created: int | None = None,
         expires: int | None = None,
     ) -> None:
-        msg.set_header("Bonnet-Request-Nonce", request_nonce)
+        msg.set_header("Untp-Request-Nonce", request_nonce)
         components = list(self._response_components)
         await self._sign(msg, components, request_nonce, created, expires)
 
@@ -644,12 +639,12 @@ class BonnetSigner:
 
 
 class BonnetVerifier:
-    """Verifies HTTP messages signed with the Bonnet firehose RFC 9421 profile."""
+    """Verifies HTTP messages signed with the firehose RFC 9421 profile."""
 
     def __init__(
         self,
         key_resolver: KeyResolver,
-        tag: str = BONNET_TAG,
+        tag: str = UNTP_TAG,
         max_lifetime: int = DEFAULT_MAX_LIFETIME,
         clock_skew: int = DEFAULT_CLOCK_SKEW,
         request_required_components: frozenset = None,
@@ -679,21 +674,30 @@ class BonnetVerifier:
         require_components: bool = True,
     ) -> VerifyResult:
         result = await self._verify(msg, is_response=True, require_components=require_components)
+        # A caller passing expected_* is asking for a binding, so a missing or
+        # unsigned header is a failure rather than a reason to skip the check.
+        # Comparing an uncovered header would be worthless: it is not protected
+        # by the signature, so anyone able to replay the response can set it.
         if expected_origin is not None:
-            signed_origin = result.covered_components
-            if "bonnet-origin" in signed_origin:
-                actual = msg.header("bonnet-origin")
-                if actual != expected_origin:
-                    raise SignatureError(
-                        f"Response Bonnet-Origin {actual!r} != expected {expected_origin!r}"
-                    )
+            if not msg.has_header("untp-origin"):
+                raise SignatureError("Response is missing Untp-Origin")
+            if "untp-origin" not in result.covered_components:
+                raise SignatureError("Response signature does not cover Untp-Origin")
+            actual = msg.header("untp-origin")
+            if actual != expected_origin:
+                raise SignatureError(
+                    f"Response Untp-Origin {actual!r} != expected {expected_origin!r}"
+                )
         if expected_request_nonce is not None:
-            if msg.has_header("bonnet-request-nonce"):
-                actual = msg.header("bonnet-request-nonce")
-                if actual != expected_request_nonce:
-                    raise SignatureError(
-                        f"Response request-nonce {actual!r} != expected {expected_request_nonce!r}"
-                    )
+            if not msg.has_header("untp-request-nonce"):
+                raise SignatureError("Response is missing Untp-Request-Nonce")
+            if "untp-request-nonce" not in result.covered_components:
+                raise SignatureError("Response signature does not cover Untp-Request-Nonce")
+            actual = msg.header("untp-request-nonce")
+            if actual != expected_request_nonce:
+                raise SignatureError(
+                    f"Response request-nonce {actual!r} != expected {expected_request_nonce!r}"
+                )
         return result
 
     async def _verify(
@@ -737,16 +741,16 @@ class BonnetVerifier:
 
         if not is_response:
             _validate_nonce(nonce)
-            if msg.has_header("bonnet-nonce"):
-                header_nonce = msg.header("bonnet-nonce")
+            if msg.has_header("untp-nonce"):
+                header_nonce = msg.header("untp-nonce")
                 if header_nonce != nonce:
                     raise InvalidParameter(
-                        f"nonce param {nonce!r} != Bonnet-Nonce header {header_nonce!r}"
+                        f"nonce param {nonce!r} != Untp-Nonce header {header_nonce!r}"
                     )
 
         if require_components:
             required = self._response_required if is_response else self._request_required
-            _check_required_components(si.components, required, msg)
+            _check_required_components(si.components, required)
 
         # Validate Content-Digest if covered
         if "content-digest" in si.components and msg.body is not None:
