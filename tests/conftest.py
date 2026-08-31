@@ -11,6 +11,25 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def isolate_logging_state():
+    """Reset the `bonnet.core.logging` singleton after every test.
+
+    It's a module-level singleton guarded by an `_initialized` flag, so a
+    test that calls `init_logging()` (directly, or transitively through
+    `main()`) and exits without a matching `close_logging()` — e.g. via an
+    uncaught `SystemExit` — leaves it initialized. The next test to call
+    `init_logging()` then silently no-ops and inherits the leaked test's
+    path from `get_log_path()`. Under pytest-xdist that pairing is whatever
+    two tests happen to land in the same worker, so it only showed up as an
+    intermittent, seemingly unrelated failure in test_logging.py.
+    """
+    yield
+    from bonnet.core.logging import close_logging
+
+    close_logging()
+
+
+@pytest.fixture(autouse=True)
 def isolate_gateway_state(tmp_path, monkeypatch):
     """Point gateway state at a per-test directory.
 
