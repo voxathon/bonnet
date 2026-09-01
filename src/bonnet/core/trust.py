@@ -90,6 +90,29 @@ class TrustStore:
                 seen_at INTEGER NOT NULL
             )
         """)
+        # Which key was authoritative over which stretch of an origin's log.
+        # A pin answers "who is this origin *now*", which is enough to verify
+        # a live connection and not enough to verify a record: seq 400 was
+        # countersigned by whatever key was current at seq 400, and after a
+        # rotation that is no longer the pinned one.
+        #
+        # Cached rather than fetched at verification time, and that is the
+        # point. Asking the origin for its key history in order to check its
+        # records makes verification depend on the origin still being
+        # reachable and still willing to answer — and an origin that has gone
+        # quiet is indistinguishable from one that is withholding, so a
+        # fetch-on-demand design cannot even report which happened. Held here,
+        # the history outlives the origin.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS origin_key_epochs (
+                origin TEXT NOT NULL,
+                start_seq INTEGER NOT NULL,
+                end_seq INTEGER,
+                publickey BLOB NOT NULL,
+                cached_at INTEGER NOT NULL,
+                PRIMARY KEY (origin, start_seq)
+            )
+        """)
         self._conn.commit()
 
     def get_pin(self, origin: str) -> bytes | None:
@@ -292,6 +315,60 @@ class TrustStore:
             cursor = self._conn.execute("DELETE FROM pending_keys WHERE origin=?", (origin,))
             self._conn.commit()
         return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Key epochs: which key signed which stretch of the log
+    # ------------------------------------------------------------------
+
+    def cache_epochs(self, origin: str, epochs: list[tuple[int, int | None, bytes]]) -> None:
+        """Replace the cached epoch table for an origin.
+
+        The caller is responsible for having *verified* these — see
+        `FirehoseTransport.refresh_epoch_cache`, which re-fetches every
+        boundary as a full record and checks its signature and rotation proof
+        before handing them here. Nothing in this store can tell a verified
+        table from an invented one, so it does not pretend to.
+
+        Replace rather than merge: an epoch table is one coherent account of a
+        key history, and splicing two of them together could produce a chain
+        that neither party ever attested to.
+        """
+        now = int(time.time())
+        with self._lock:
+            self._conn.execute("DELETE FROM origin_key_epochs WHERE origin=?", (origin,))
+            self._conn.executemany(
+                "INSERT INTO origin_key_epochs (origin, start_seq, end_seq, publickey, cached_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(origin, start, end, pubkey, now) for start, end, pubkey in epochs],
+            )
+            self._conn.commit()
+
+    def get_cached_epochs(self, origin: str) -> list[tuple[int, int | None, bytes]]:
+        """The cached epoch table, ascending. Empty when nothing is cached."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT start_seq, end_seq, publickey FROM origin_key_epochs "
+                "WHERE origin=? ORDER BY start_seq",
+                (origin,),
+            ).fetchall()
+        return [(int(r[0]), int(r[1]) if r[1] is not None else None, bytes(r[2])) for r in rows]
+
+    def key_for_seq(self, origin: str, seq: int) -> bytes | None:
+        """The key that was authoritative at `seq`, or None if not known.
+
+        None is a real answer, not a failure to be papered over: without an
+        epoch covering that sequence a caller cannot say whether a signature is
+        forged or merely checked against the wrong key, and reporting the
+        second as the first would be an accusation this client cannot support.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT publickey FROM origin_key_epochs "
+                "WHERE origin=? AND start_seq<=? AND (end_seq IS NULL OR end_seq>=?) "
+                "ORDER BY start_seq DESC LIMIT 1",
+                (origin, seq, seq),
+            ).fetchone()
+            return bytes(row[0]) if row else None
 
     def reset_pin(self, origin: str) -> bool:
         """Remove a pin (operator-initiated reset). Returns True if a pin was removed."""

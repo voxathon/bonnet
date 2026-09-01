@@ -782,6 +782,60 @@ class FirehoseHTTPClient(FirehoseTransport):
         resp = await self._send_command(cmd)
         return parse_event_body_response(resp)
 
+    def verify_record(self, rec) -> dict:
+        """Check a record's two signatures here, rather than trusting the relay.
+
+        Until now nothing on the reading side verified anything. `core.record`
+        exported the verifiers, the wire delivered both signatures, and no
+        client called them — while `get_article`'s docstring told callers to
+        use the event tools "when you need the signed artifact", which those
+        tools then dropped from their output.
+
+        The two checks are independent and answer different questions.
+
+        `author` verifies `actor_signature` over the intent reconstructed from
+        the record, under `actor_pubkey`. That needs no key lookup — the key is
+        in the record — so it always has an answer, and a valid one means this
+        content is what that key signed and cannot be repudiated. It says
+        nothing about who holds that key or whether the name beside it is
+        theirs; that is `author_check`'s question.
+
+        `origin` verifies `origin_signature` over the unsigned record, under
+        the key that was authoritative *at that sequence*. That needs the epoch
+        cache, because after a rotation the current pin is not the key that
+        countersigned seq 400. With no epoch covering the sequence the answer
+        is 'unverifiable', never 'invalid': a signature checked against the
+        wrong key fails exactly like a forgery does, and reporting the two the
+        same way would turn this client's own missing state into an accusation.
+        """
+        from bonnet.core.record import (
+            encode_intent,
+            encode_unsigned_record,
+            reconstruct_intent_from_record,
+            verify_intent_signature,
+            verify_record_signature,
+        )
+
+        author_ok = verify_intent_signature(
+            rec.actor_pubkey,
+            encode_intent(reconstruct_intent_from_record(rec)),
+            rec.actor_signature,
+        )
+
+        key = self.origin_key_for_seq(rec.origin, rec.origin_seq)
+        if key is None:
+            origin_state = "unverifiable"
+        elif verify_record_signature(key, encode_unsigned_record(rec), rec.origin_signature):
+            origin_state = "valid"
+        else:
+            origin_state = "invalid"
+
+        return {
+            "author": "valid" if author_ok else "invalid",
+            "origin": origin_state,
+            "origin_key_known_for_seq": key is not None,
+        }
+
     # ------------------------------------------------------------------
     # Relay tracing
     # ------------------------------------------------------------------

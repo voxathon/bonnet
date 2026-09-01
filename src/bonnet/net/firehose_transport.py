@@ -359,6 +359,77 @@ class FirehoseTransport:
         claimed = (self._server_origin or "").lower().rstrip(".")
         return bool(claimed) and host == claimed
 
+    async def refresh_epoch_cache(self, origin: str | None = None) -> bool:
+        """Fetch, verify and cache an origin's key history. True if cached.
+
+        Anchored on the pin. The advertised table's final epoch must be the key
+        this client actually pinned, and every internal boundary is re-fetched
+        as a full record and checked — actor equal to the preceding epoch's
+        key, origin signature under that key, rotation proof chaining it to the
+        successor. KEY_EPOCHS is a hint about *where to look*, never evidence:
+        the same stance `firehose_sync._verify_epoch_hints` takes server-side,
+        and `_verify_rotation_chain` takes for pin changes.
+
+        Best-effort by design. A peer that does not implement KEY_EPOCHS, or an
+        origin that is unreachable, leaves whatever was cached before intact —
+        the point of caching is that verification keeps working when the origin
+        does not, so a failed refresh must never invalidate a good table.
+        """
+        target = origin or self._server_origin
+        if not self._trust_store or not target:
+            return False
+        pinned = self._trust_store.get_pin(target)
+        if pinned is None:
+            return False
+
+        try:
+            resp = await self.send_command(build_key_epochs(target))
+            epochs = sorted(parse_key_epochs_response(resp), key=lambda e: e[0])
+        except Exception:
+            return False
+        if not epochs or epochs[0][0] != 1 or epochs[-1][1] is not None:
+            return False
+        if epochs[-1][2] != pinned:
+            # The history does not end at the key we trust, so it is not this
+            # origin's history as far as we are concerned.
+            return False
+
+        for prev, nxt in zip(epochs, epochs[1:]):
+            boundary, _, pk_prev = prev[1], prev[2], prev[2]
+            start_i, _, pk_next = nxt
+            if boundary is None or boundary != start_i - 1:
+                return False
+            try:
+                records = parse_event_range_response(
+                    await self.send_command(build_event_range(target, boundary, 1))
+                )
+            except Exception:
+                return False
+            if len(records) != 1:
+                return False
+            rec = records[0][0]
+            if rec.kind != KIND_ORIGIN_KEY_ROTATE or rec.actor_pubkey != pk_prev:
+                return False
+            claimed = rec.metadata.get_bytes(1)
+            proof = rec.metadata.get_bytes(2)
+            if claimed != pk_next or proof is None:
+                return False
+            if not verify_record_signature(
+                pk_prev, encode_unsigned_record(rec), rec.origin_signature
+            ):
+                return False
+            if not verify_key_rotation_proof(pk_next, target, pk_prev, proof):
+                return False
+
+        self._trust_store.cache_epochs(target, epochs)
+        return True
+
+    def origin_key_for_seq(self, origin: str, seq: int) -> bytes | None:
+        """The key that countersigned `seq`, from the cache. None if unknown."""
+        if not self._trust_store:
+            return None
+        return self._trust_store.key_for_seq(origin, seq)
+
     async def _verify_rotation_chain(
         self, origin: str, old_pubkey: bytes, new_pubkey: bytes
     ) -> bool:
