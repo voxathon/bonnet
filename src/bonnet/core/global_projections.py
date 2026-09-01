@@ -246,6 +246,35 @@ class NavProjection(_BaseProjection):
                 for r in rows
             ]
 
+    def ensure_board(
+        self, origin: str, board: str, owner_pubkey: bytes, created_seq: int, created_at: int
+    ) -> None:
+        """Materialize a directory entry for `board` if none exists yet.
+
+        Publishing an article has never required a prior bonnet.board.create
+        — the per-board store is created lazily on first write, same as this
+        entry — but without one, the board was invisible to list_boards and
+        to ARTICLE_LIST's aggregate (origin="") path, which discovers which
+        boards to scan by walking this table alone. That made a published,
+        directly-gettable article unfindable through either listing. INSERT
+        OR IGNORE: a real bonnet.board.create record (see apply_board_create,
+        which uses REPLACE) always wins over this synthesized entry, whether
+        it arrives before or after the first article.
+        """
+        with self._lock:
+            self._begin()
+            try:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO boards "
+                    "(origin, board, owner_pubkey, display_name, closed, created_seq, created_at) "
+                    "VALUES (?, ?, ?, '', 0, ?, ?)",
+                    (origin, board, owner_pubkey, created_seq, created_at),
+                )
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
+
     def get_board(self, origin: str, board: str) -> dict | None:
         with self._lock:
             row = self._conn.execute(

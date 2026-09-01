@@ -383,6 +383,14 @@ def test_load_missing_config_raises(tmp_path):
         FirehoseConfig.load(path)
 
 
+def test_load_directory_path_raises_cleanly(tmp_path):
+    """Pointing --config at a directory raises IsADirectoryError, not a
+    raw open()-triggered traceback."""
+    path = str(tmp_path)  # tmp_path itself is a directory
+    with pytest.raises(IsADirectoryError):
+        FirehoseConfig.load(path)
+
+
 def test_create_default_config(tmp_path):
     """create_default_config writes a valid TOML file."""
     path = str(tmp_path / "config.toml")

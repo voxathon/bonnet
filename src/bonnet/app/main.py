@@ -67,6 +67,9 @@ def _load_and_validate_config(args) -> FirehoseConfig:
         print(f"error: config file not found: {args.config}", file=sys.stderr)
         print("run 'bonnet server --create-config' to generate a sample", file=sys.stderr)
         raise SystemExit(1)
+    except IsADirectoryError:
+        print(f"error: config path is a directory, not a file: {args.config}", file=sys.stderr)
+        raise SystemExit(1)
     except tomllib.TOMLDecodeError as exc:
         print(f"error: could not parse {args.config}: {exc}", file=sys.stderr)
         raise SystemExit(1)
