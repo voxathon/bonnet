@@ -380,6 +380,8 @@ class FirehoseConfig:
     def load(path: str) -> FirehoseConfig:
         if not os.path.exists(path):
             raise FileNotFoundError(f"config file not found: {path}")
+        if os.path.isdir(path):
+            raise IsADirectoryError(f"config path is a directory, not a file: {path}")
 
         with open(path, "rb") as f:
             data = tomllib.load(f)

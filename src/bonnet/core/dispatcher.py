@@ -234,6 +234,7 @@ class Dispatcher:
         return AUTHOR_UNREGISTERED
 
     def _dispatch_article(self, rec: Record) -> None:
+        self._nav.ensure_board(rec.origin, rec.board, rec.actor_pubkey, rec.origin_seq, rec.created_at)
         bp = self._get_board_projection(rec.origin, rec.board)
         bp.apply_article(rec, author_check=self._resolve_author_check(rec))
 

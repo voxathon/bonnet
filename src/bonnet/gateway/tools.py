@@ -417,6 +417,19 @@ async def _connect_anonymous(client: FirehoseHTTPClient) -> None:
     await client.connect_anonymous()
 
 
+def _reject_lone_surrogates(field: str, value: str) -> None:
+    """Refuse text containing an unpaired UTF-16 surrogate.
+
+    A lone surrogate is a legal Python str but not valid Unicode text: it
+    can't be UTF-8 encoded, and letting it reach the gateway's response
+    serialization has caused an unrecoverable hang there rather than a
+    clean error. Catching it here, before any encode/store/echo, keeps the
+    failure an ordinary ValueError.
+    """
+    if any(0xD800 <= ord(c) <= 0xDFFF for c in value):
+        raise ValueError(f"{field} contains invalid unicode (unpaired surrogate)")
+
+
 def _validate_pubkey(pubkey_hex: str) -> bytes:
     try:
         pk = bytes.fromhex(pubkey_hex)
@@ -874,6 +887,7 @@ async def register(username: str, password: str | None = None, origin: str | Non
     registered is safe: it re-selects the identity and returns
     `registered_seq: null` to say no new registration record was published.
     """
+    _reject_lone_surrogates("username", username)
     target_origin = origin if origin is not None else _default_origin()
 
     origin_entry = _get_origin_store().get(target_origin)
@@ -1299,6 +1313,7 @@ async def create_board(
     name: board name (alphanumeric, hyphens, underscores).
     display_name: optional human-readable board title.
     """
+    _reject_lone_surrogates("display_name", display_name)
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
@@ -1784,6 +1799,10 @@ async def publish_article(
     """
     import os as _os
 
+    _reject_lone_surrogates("subject", subject)
+    _reject_lone_surrogates("content", content)
+    _reject_lone_surrogates("tags", tags)
+
     board = cursor.resolve_board(board)
     article_id = _os.urandom(32)
     tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
@@ -1909,6 +1928,10 @@ async def supersede_article(
     """
     import os as _os
 
+    _reject_lone_surrogates("subject", subject)
+    _reject_lone_surrogates("content", content)
+    _reject_lone_surrogates("tags", tags)
+
     board = cursor.resolve_board(board)
     supersedes_id = _validate_article_id(target_article_id)
     article_id = _os.urandom(32)
@@ -1950,6 +1973,7 @@ async def cancel_article(
     origin: origin to query (defaults to server's origin).
     reason: optional human-readable cancellation reason.
     """
+    _reject_lone_surrogates("reason", reason)
     board = cursor.resolve_board(board)
     target_article_id = cursor.resolve_article_id(target_article_id, board)
     aid = _validate_article_id(target_article_id)
@@ -1980,6 +2004,7 @@ async def restore_article(
     board: board where the target article lives (defaults to the board
         open_board last set).
     """
+    _reject_lone_surrogates("reason", reason)
     board = cursor.resolve_board(board)
     target_article_id = cursor.resolve_article_id(target_article_id, board)
     aid = _validate_article_id(target_article_id)
@@ -2012,6 +2037,7 @@ async def purge_article(
     board: board where the target article lives (defaults to the board
         open_board last set).
     """
+    _reject_lone_surrogates("reason", reason)
     board = cursor.resolve_board(board)
     target_article_id = cursor.resolve_article_id(target_article_id, board)
     aid = _validate_article_id(target_article_id)
@@ -2123,6 +2149,7 @@ async def report(
     """
     if not reason.strip():
         raise ValueError("A report needs a reason — moderators act on the grounds, not the flag")
+    _reject_lone_surrogates("reason", reason)
 
     board = cursor.resolve_board(board)
     article_num = cursor.resolve_article_num(article_num, board)
@@ -2229,6 +2256,7 @@ async def punish_warn(
     acknowledge_punishment; while pending it blocks their writes.
     """
     pubkey = _validate_pubkey(punished_pubkey_hex)
+    _reject_lone_surrogates("reason", reason)
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
@@ -2252,6 +2280,7 @@ async def punish_ban(
     expires_at: positive unix timestamp when the ban lapses.
     """
     pubkey = _validate_pubkey(punished_pubkey_hex)
+    _reject_lone_surrogates("reason", reason)
     if expires_at <= int(time.time()):
         raise ValueError("expires_at must be a future unix timestamp")
     client = _make_client()
@@ -2276,6 +2305,7 @@ async def punish_permaban(
     Permabans never expire; only punish_revoke can lift them.
     """
     pubkey = _validate_pubkey(punished_pubkey_hex)
+    _reject_lone_surrogates("reason", reason)
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
@@ -2294,6 +2324,7 @@ async def punish_revoke(
 ) -> str:
     """Revoke any punishment by its event ID. Requires moderator or administrator."""
     eid = _validate_event_id(punishment_event_id_hex)
+    _reject_lone_surrogates("reason", reason)
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
