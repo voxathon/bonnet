@@ -272,6 +272,18 @@ class OperatorConsole:
     def _local_handle(self, body: bytes) -> bytes:
         return self.command_handler.handle(body, self.local_conn.to_context())
 
+    def _actor_username(self) -> str:
+        """The username currently registered to the server's own key.
+
+        Records published locally must claim the name this origin actually
+        issued to the server's key (firehose_commands.py enforces this), which
+        changes whenever an operator runs register-user. Falls back to
+        "root" only for the sliver of startup before the bootstrap
+        registration has landed.
+        """
+        existing = self.users.get_user_by_pubkey(self.config.origin, self.server_identity.public_key)
+        return existing["username"] if existing is not None else "root"
+
     def _parse_response_error(self, resp: bytes) -> str:
         try:
             parse_response(resp)
@@ -305,7 +317,7 @@ class OperatorConsole:
             kind=kind,
             origin=self.config.origin,
             actor_pubkey=self.server_identity.public_key,
-            actor_username="root",
+            actor_username=self._actor_username(),
             actor_registrar=self.config.origin,
             board=board,
             target_origin=target_origin,
@@ -588,7 +600,7 @@ class OperatorConsole:
             kind="bonnet.board.create",
             origin=self.config.origin,
             actor_pubkey=self.server_identity.public_key,
-            actor_username="root",
+            actor_username=self._actor_username(),
             actor_registrar=self.config.origin,
             board=board,
             metadata=m,
@@ -720,7 +732,7 @@ class OperatorConsole:
             kind="bonnet.article",
             origin=self.config.origin,
             actor_pubkey=self.server_identity.public_key,
-            actor_username="root",
+            actor_username=self._actor_username(),
             actor_registrar=self.config.origin,
             board=board,
             article_id=article_id,
@@ -777,7 +789,7 @@ class OperatorConsole:
             kind="bonnet.user.register",
             origin=self.config.origin,
             actor_pubkey=self.server_identity.public_key,
-            actor_username="root",
+            actor_username=self._actor_username(),
             actor_registrar=self.config.origin,
             metadata=m,
         )
