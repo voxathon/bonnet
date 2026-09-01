@@ -448,11 +448,20 @@ def test_rotate_key_http_server_signs_with_new_key(server):
     the new public key, an internally inconsistent response no client could
     verify."""
     console = OperatorConsole(server)
+    old_identity = server.server_identity
     console._cmd_rotate_key([])
 
     new_identity = server.server_identity
+    assert new_identity.private_key != old_identity.private_key
     assert server.http_server._signer._private_key == new_identity.private_key
-    assert server.http_server._signer._key_id == f"ed25519:{new_identity.public_key.hex()}"
+
+    # The keyid names the origin, not the key, so it is deliberately unchanged
+    # by a rotation: a client addresses a response by the name it pinned, and
+    # resolves that name to whatever key it currently holds. Which key signed
+    # is settled by the signature, not by the keyid — so the assertion above,
+    # on the private key the signer actually baked in, is the one carrying the
+    # weight here.
+    assert server.http_server._signer._key_id == f"origin:{server.config.origin}"
 
 
 def test_rotate_key_console_still_has_admin_access_after(server):
