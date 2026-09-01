@@ -24,6 +24,7 @@ from bonnet.core.firehose import (
     AcceptResult,
     ChainBreak,
     FirehoseStore,
+    SignatureInvalid,
 )
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
@@ -521,6 +522,8 @@ class SyncManager:
                 )
             except ChainBreak as e:
                 return await self._diagnose_chain_break(origin, client, local_seq, e)
+            except SignatureInvalid as e:
+                return self._diagnose_signature_failure(origin, e)
 
             log_msg(
                 f"SYNC_ONCE: origin='{origin}' batch seq {current_start}-{current_start + len(batch_records) - 1}: accepted={result.accepted} count={result.accepted_count} reason='{result.reason}'"
@@ -643,6 +646,50 @@ class SyncManager:
         log_msg(
             f"SYNC_ONCE: origin='{origin}' DIVERGED — {detail}. Sync halted; "
             f"an operator must resolve this (resume-origin, depeer, or reset)."
+        )
+        return AcceptResult(accepted=False, reason=f"origin diverged ({detail})")
+
+    def _diagnose_signature_failure(self, origin: str, err: SignatureInvalid) -> AcceptResult:
+        """Decide whether a signature failure is our epoch table or their key.
+
+        A record that will not verify has the same two causes a chain break
+        does, and until now only one of them was handled. `SignatureInvalid`
+        escaped `_sync_once` entirely, landed in `_sync_loop`'s blanket
+        `except Exception`, and was logged, backed off and retried hourly
+        forever — while the sync status stayed clean, so the one place an
+        operator would look said nothing was wrong.
+
+        If our own epoch table disagrees with the rotate records we hold, the
+        peer is fine and we were verifying against the wrong key: repair and
+        let the next cycle proceed, exactly as `_diagnose_chain_break` does for
+        a drifted tip.
+
+        Otherwise the peer is serving records this origin's keys do not
+        account for. That is what a name takeover looks like from here — a new
+        operator on the same origin, signing with a key no rotation record
+        connects to the one we pinned — and it cannot resolve itself by
+        retrying, because nothing about our state or theirs will change. Halt
+        and mark it, so the situation reaches a person. Halting rather than
+        depeering for the same reason as divergence: it is reversible and it
+        keeps what we already accepted.
+        """
+        consistent, stored, derived = self._firehose.check_key_epochs(origin)
+        if not consistent and self._firehose.repair_key_epochs(origin):
+            log_msg(
+                f"SYNC_ONCE: origin='{origin}' local key epochs were inconsistent "
+                f"({len(stored)} stored -> {len(derived)} derived); repaired. "
+                f"Not blaming the peer."
+            )
+            return AcceptResult(
+                accepted=False, reason="local key epochs repaired; retry next cycle"
+            )
+
+        detail = f"signature did not verify under this origin's known keys: {err}"
+        self._firehose.set_sync_status(origin, "diverged", detail)
+        log_msg(
+            f"SYNC_ONCE: origin='{origin}' DIVERGED — {detail}. This is what a key "
+            f"takeover looks like from here. Sync halted; an operator must resolve "
+            f"it (resume-origin, depeer, or reset-key)."
         )
         return AcceptResult(accepted=False, reason=f"origin diverged ({detail})")
 

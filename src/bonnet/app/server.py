@@ -244,6 +244,7 @@ class BonnetServer:
 
         self._sweep_orphaned_staged_bodies()
         self._verify_origin_tips()
+        self._verify_key_epochs()
 
         self.local_conn = FirehoseLocalConnection(
             self.server_identity.public_key,
@@ -282,6 +283,31 @@ class BonnetServer:
                 f"(recorded={recorded.hex()[:16] if recorded else None} "
                 f"actual={actual.hex()[:16]})"
             )
+
+    def _verify_key_epochs(self) -> None:
+        """Check each origin's key epochs against the rotate records it holds.
+
+        The same argument as `_verify_origin_tips`, for the table that decides
+        which key verifies which record. `origin_key_epochs` is maintained
+        alongside `events` by `_apply_rotation_locked` rather than derived from
+        them, so a restored database or a crash can leave the two disagreeing —
+        and a wrong key there makes every honest peer look like it is serving
+        forged records, which is the same "blame the peer for our own state"
+        failure the tip check exists to prevent, with a worse symptom.
+
+        Local and free: derived from records already on disk, no network. The
+        anchor (epoch 1's key) came from TOFU and cannot be re-derived, so what
+        is checked is whether the rest follows from it.
+        """
+        for origin in self.firehose.list_origins():
+            consistent, stored, derived = self.firehose.check_key_epochs(origin)
+            if consistent:
+                continue
+            if self.firehose.repair_key_epochs(origin):
+                log_msg(
+                    f"INIT: repaired key epochs for origin '{origin}' "
+                    f"({len(stored)} stored -> {len(derived)} derived)"
+                )
 
     def _sweep_orphaned_staged_bodies(self, min_age_seconds: int = 3600) -> None:
         """Recover or discard article bodies a crash left in staging.
