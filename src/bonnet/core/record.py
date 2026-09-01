@@ -39,6 +39,29 @@ MAX_METADATA_FIELDS = 256
 MAX_TEXT_FIELD = 4096
 MAX_RANGE_RESPONSE = 1 << 24
 
+
+def normalize_origin(origin: str) -> str:
+    """Canonical form of an origin name: trimmed, lowercased, no trailing dot.
+
+    Hostnames are case-insensitive and `bbs.example.` is the same name as
+    `bbs.example`, so these are one origin spelled three ways. Config has
+    normalized its own strings since it was written; nothing on the wire did,
+    which meant a caller asking for `BBS.Example` looked up a different key
+    than the one everything is stored under and quietly got nothing.
+
+    **Use this on lookup keys only — never on an origin read out of a record.**
+    A record's origin is inside the bytes its signatures cover, so the
+    authoritative spelling is whatever the publisher signed. Normalizing a
+    decoded record would change what re-encoding produces and break every
+    signature over it. Peers cannot smuggle a case-variant in regardless:
+    `accept_remote_range` requires each record's origin to equal the origin
+    being synced, which comes from config and is already normalized.
+    """
+    if not origin:
+        return ""
+    return origin.strip().lower().rstrip(".")
+
+
 #: Witnesses carried with one event. The provenance chain grows by one entry
 #: per relay the event crossed, so the honest bound is small; the cap exists
 #: because the set arrives from a peer, and a peer can fabricate entries as

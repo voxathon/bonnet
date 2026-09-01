@@ -37,6 +37,7 @@ from bonnet.core.record import (
     encode_record,
     encode_witness,
     make_origin_witness,
+    normalize_origin,
 )
 from bonnet.core.search import SearchService
 from bonnet.net.firehose_wire import (
@@ -700,6 +701,7 @@ class FirehoseCommandHandler:
     def _cmd_event_head(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
 
         head = self._firehose.get_head(origin)
@@ -716,6 +718,7 @@ class FirehoseCommandHandler:
     def _cmd_key_epochs(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
 
         epochs = self._firehose.get_key_epochs(origin)
@@ -915,6 +918,7 @@ class FirehoseCommandHandler:
     def _cmd_event_range(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
         start_seq, offset = _read_u64(data, offset)
         max_count, offset = _read_u16(data, offset)
@@ -947,6 +951,7 @@ class FirehoseCommandHandler:
     def _cmd_event_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
         event_id, offset = _read_id32(data, offset)
 
@@ -970,6 +975,7 @@ class FirehoseCommandHandler:
     def _cmd_board_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
 
         if origin == "":
             boards = self._nav.list_boards()
@@ -1011,6 +1017,7 @@ class FirehoseCommandHandler:
     def _cmd_article_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         if not origin:
             return _error(0x0003, "Article not found")
         self._maybe_queue_remote_sync(origin)
@@ -1122,6 +1129,7 @@ class FirehoseCommandHandler:
     def _cmd_article_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         board, offset = _read_text16(data, offset)
         if not self._board_read_allowed(ctx, "ARTICLE_LIST", board):
             return _success(struct.pack(">H", 0))
@@ -1192,6 +1200,7 @@ class FirehoseCommandHandler:
     def _cmd_article_search(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         board, offset = _read_text16(data, offset)
         if not self._board_read_allowed(ctx, "ARTICLE_SEARCH", board):
             out = struct.pack(">H", 0) + struct.pack(">I", 0) + struct.pack(">B", 0)
@@ -1317,6 +1326,7 @@ class FirehoseCommandHandler:
     def _cmd_article_query(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         if not origin:
             return _success(struct.pack(">H", 0))
         self._maybe_queue_remote_sync(origin)
@@ -1373,6 +1383,7 @@ class FirehoseCommandHandler:
     def _cmd_article_body(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         if not origin:
             return _error(0x0003, "Article body unavailable")
         self._maybe_queue_remote_sync(origin)
@@ -1429,6 +1440,7 @@ class FirehoseCommandHandler:
     def _cmd_user_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         if not origin:
             return _error(0x0001, "User not found")
         self._maybe_queue_remote_sync(origin)
@@ -1459,6 +1471,7 @@ class FirehoseCommandHandler:
     def _cmd_user_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         if not origin:
             return _success(struct.pack(">H", 0))
         self._maybe_queue_remote_sync(origin)
@@ -1519,6 +1532,7 @@ class FirehoseCommandHandler:
     def _cmd_event_body(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
         event_id, offset = _read_id32(data, offset)
 
