@@ -10,7 +10,15 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 
-from bonnet.core.board_projection import BoardProjection, board_db_path, delete_board_dbs
+from bonnet.core.board_projection import (
+    AUTHOR_FOREIGN,
+    AUTHOR_REGISTRY,
+    AUTHOR_UNCHECKED,
+    AUTHOR_UNREGISTERED,
+    BoardProjection,
+    board_db_path,
+    delete_board_dbs,
+)
 from bonnet.core.bodies import BodyStore
 from bonnet.core.firehose import FirehoseStore
 from bonnet.core.global_projections import (
@@ -199,9 +207,35 @@ class Dispatcher:
             return False
         return True
 
+    def _resolve_author_check(self, rec: Record) -> str:
+        """Did the naming origin issue `actor_username` to `actor_pubkey`?
+
+        Purely local, by design. The only case that would need the network is a
+        record naming *another* origin as registrar, and that one is answered
+        `foreign` without asking: the named origin may be gone, may be refusing
+        us, and by the protocol's own reasoning those two are indistinguishable
+        from the outside — so a failed lookup could never be told apart from a
+        false claim. Reporting "not ours to check" is the honest answer.
+
+        The same-origin case needs no network either, and is complete rather
+        than best-effort: sync fetches a prefix beginning at seq 1 and
+        `dispatch_origin` walks strictly in sequence, so by the time this runs
+        for seq N every `bonnet.user.register` below N from that origin has
+        already been applied. A legitimate name can therefore never read as
+        `unregistered` merely because this relay is behind.
+        """
+        if not rec.actor_username:
+            return AUTHOR_UNCHECKED
+        if rec.actor_registrar != rec.origin:
+            return AUTHOR_FOREIGN
+        user = self._users.get_user_by_pubkey(rec.origin, rec.actor_pubkey)
+        if user is not None and user["username"] == rec.actor_username:
+            return AUTHOR_REGISTRY
+        return AUTHOR_UNREGISTERED
+
     def _dispatch_article(self, rec: Record) -> None:
         bp = self._get_board_projection(rec.origin, rec.board)
-        bp.apply_article(rec)
+        bp.apply_article(rec, author_check=self._resolve_author_check(rec))
 
         if rec.article_num > 0 and rec.body_size > 0:
             if self._body_store.finalize_article_body(

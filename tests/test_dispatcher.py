@@ -141,11 +141,11 @@ def test_checkpoint_advances_past_failed_record(stack):
     original_apply = BoardProjection.apply_article
     call_count = [0]
 
-    def failing_apply(self, rec):
+    def failing_apply(self, rec, **kwargs):
         call_count[0] += 1
         if call_count[0] == 2:
             raise RuntimeError("simulated projection failure")
-        original_apply(self, rec)
+        original_apply(self, rec, **kwargs)
 
     BoardProjection.apply_article = failing_apply
     try:
@@ -175,11 +175,11 @@ def test_later_records_still_dispatched_after_failure(stack):
     original_apply = BoardProjection.apply_article
     call_count = [0]
 
-    def failing_apply(self, rec):
+    def failing_apply(self, rec, **kwargs):
         call_count[0] += 1
         if call_count[0] == 2:
             raise RuntimeError("simulated projection failure")
-        original_apply(self, rec)
+        original_apply(self, rec, **kwargs)
 
     BoardProjection.apply_article = failing_apply
     try:
@@ -214,11 +214,11 @@ def test_retry_does_not_redispatch_skipped_record(stack):
     original_apply = BoardProjection.apply_article
     call_count = [0]
 
-    def failing_apply(self, rec):
+    def failing_apply(self, rec, **kwargs):
         call_count[0] += 1
         if call_count[0] == 2:
             raise RuntimeError("simulated projection failure")
-        original_apply(self, rec)
+        original_apply(self, rec, **kwargs)
 
     BoardProjection.apply_article = failing_apply
     try:
