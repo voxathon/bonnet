@@ -737,6 +737,65 @@ class TestNavProjection:
         boards = nav_proj.list_boards("bbs.a")
         assert len(boards) == 3
 
+    def test_board_create_with_reserved_char_not_projected(self, nav_proj):
+        """A federated board.create never passes through KindValidator, so
+        this is the actual enforcement point for a bad board name. It must
+        not be listed, but dispatch must still advance past it — this is
+        NOT a rejection, or it would stall the origin's whole replication.
+        """
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
+            board="weird\\name",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        nav_proj.apply_board_create(rec)
+        assert nav_proj.get_board("bbs.a", "weird\\name") is None
+        assert nav_proj.list_boards("bbs.a") == []
+        assert nav_proj.is_applied(rec.event_id)
+
+    def test_board_create_with_control_char_not_projected(self, nav_proj):
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
+            board="\x1b[31mRED\x1b[0mboard",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        nav_proj.apply_board_create(rec)
+        assert nav_proj.list_boards("bbs.a") == []
+        assert nav_proj.is_applied(rec.event_id)
+
+    def test_board_create_after_rejected_one_still_dispatches(self, nav_proj):
+        """The rejected record must not stall subsequent records for the
+        same origin — checkpoint/is_applied still advance past it."""
+        bad = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
+            board="weird\\name",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        good = Record(
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        nav_proj.apply_board_create(bad)
+        nav_proj.apply_board_create(good)
+        assert nav_proj.list_boards("bbs.a") == [nav_proj.get_board("bbs.a", "general")]
+
 
 # ---------------------------------------------------------------------------
 # User projection tests
@@ -765,6 +824,86 @@ class TestUserProjection:
         assert user is not None
         assert user["username"] == "alice"
         assert user["revoked"] is False
+
+    def test_register_with_reserved_char_not_projected(self, user_proj):
+        """A federated user.register never passes through KindValidator, so
+        this is the actual enforcement point for a bad username. It must not
+        bind the name, but dispatch must still advance past it.
+        """
+        user_pubkey = _rid(22)
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.user.register",
+            actor_pubkey=ACTOR_PUB,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "alice/bob"),
+                    metadata_bytes(2, user_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        )
+        user_proj.apply_user_register(rec)
+        assert user_proj.get_user_by_pubkey("bbs.a", user_pubkey) is None
+        assert user_proj.username_holder("bbs.a", "alice/bob") is None
+        assert user_proj.is_applied(rec.event_id)
+
+    def test_register_with_control_char_not_projected(self, user_proj):
+        user_pubkey = _rid(23)
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.user.register",
+            actor_pubkey=ACTOR_PUB,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "zero\x00byte"),
+                    metadata_bytes(2, user_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        )
+        user_proj.apply_user_register(rec)
+        assert user_proj.get_user_by_pubkey("bbs.a", user_pubkey) is None
+        assert user_proj.is_applied(rec.event_id)
+
+    def test_register_after_rejected_one_still_dispatches(self, user_proj):
+        bad_pubkey = _rid(24)
+        good_pubkey = _rid(25)
+        bad = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.user.register",
+            actor_pubkey=ACTOR_PUB,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "alice/bob"),
+                    metadata_bytes(2, bad_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        )
+        good = Record(
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.user.register",
+            actor_pubkey=ACTOR_PUB,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "carol"),
+                    metadata_bytes(2, good_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        )
+        user_proj.apply_user_register(bad)
+        user_proj.apply_user_register(good)
+        assert user_proj.get_user_by_pubkey("bbs.a", good_pubkey)["username"] == "carol"
 
     def test_revoke(self, user_proj):
         user_pubkey = _rid(20)
