@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import time
 
+from bonnet.core.kind_validator import identity_text_violation
 from bonnet.core.kinds import PUNISHMENT_TYPE_BY_KIND  # noqa: F401 (re-exported)
 from bonnet.core.logging import log_msg
 from bonnet.core.record import Record, verify_key_rotation_proof
@@ -167,11 +168,35 @@ class NavProjection(_BaseProjection):
         """)
 
     def apply_board_create(self, rec: Record) -> None:
+        """Materialize a board.create record into the listable directory.
+
+        A record synced from federation never passes through KindValidator
+        (see kind_validator._validate_identity_text's docstring) — this is
+        the actual enforcement point for a federated board name carrying a
+        control character or reserved character. It is not rejected: the
+        record stays accepted in the firehose and keeps relaying normally,
+        it simply never gets a row here, so it never surfaces through
+        BOARD_LIST/list-boards into a display surface. The event is still
+        fetchable directly by event_id for forensics.
+        """
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
             self._begin()
             try:
+                violation = identity_text_violation(rec.board)
+                if violation is not None:
+                    log_msg(
+                        f"SECURITY: BOARD_CREATE: origin={rec.origin!r} seq={rec.origin_seq} "
+                        f"event_id={rec.event_id.hex()[:16]} board={rec.board!r} "
+                        f"REJECTED FROM PROJECTION ({violation}) — record stays in the "
+                        f"firehose and keeps relaying, but will never be listed"
+                    )
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
+
                 owner = rec.metadata.get_bytes(1) or b"\x00" * 32
                 display = rec.metadata.get_text(2) or ""
                 self._conn.execute(
@@ -369,6 +394,10 @@ class UserProjection(_BaseProjection):
         squatter would burn every good name permanently. A superseded key still
         does: `apply_user_key_rotate` carries the name forward to the successor,
         so the identity is live even though that particular key is retired.
+
+        A federated registration whose username carries a control character
+        or reserved character is likewise never bound here — see
+        apply_user_register.
         """
         with self._lock:
             row = self._conn.execute(
@@ -404,6 +433,19 @@ class UserProjection(_BaseProjection):
                 user_pubkey = rec.metadata.get_bytes(2) or b"\x00" * 32
                 flags = rec.metadata.get_u64(3) or 0
                 reg_seq = rec.origin_seq
+
+                violation = identity_text_violation(username)
+                if violation is not None:
+                    log_msg(
+                        f"SECURITY: USER_REGISTER: origin={rec.origin!r} seq={rec.origin_seq} "
+                        f"event_id={rec.event_id.hex()[:16]} username={username!r} "
+                        f"REJECTED FROM PROJECTION ({violation}) — record stays in the "
+                        f"firehose and keeps relaying, but the username will never be bound"
+                    )
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
 
                 holder = self._conn.execute(
                     "SELECT user_pubkey FROM users "
