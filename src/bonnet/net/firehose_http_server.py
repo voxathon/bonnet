@@ -110,7 +110,7 @@ class FirehoseHTTPServer:
             window_seconds=getattr(config, "rate_limit_window", 1),
         )
 
-        self._signer = self._build_signer(server_identity)
+        self._signer = self._build_signer(server_identity, config.origin)
 
         self._verifier = BonnetVerifier(
             key_resolver=FirehoseKeyResolver(),
@@ -125,10 +125,23 @@ class FirehoseHTTPServer:
         self._cleanup_counter = 0
 
     @staticmethod
-    def _build_signer(identity: Identity) -> BonnetSigner:
+    def _build_signer(identity: Identity, origin: str) -> BonnetSigner:
+        """The signer for responses this server sends.
+
+        Responses are keyed `origin:<name>`, not `ed25519:<hex>`. The
+        difference is the whole point: an `ed25519:` keyid *carries* the key it
+        should be checked against, so a client resolving it learns only that
+        whoever wrote the header also holds the matching private key. Naming
+        the origin instead forces the client to look the key up in whatever it
+        pinned for that name, which is what makes a response attributable to
+        the origin rather than to its bearer.
+
+        Requests keep `ed25519:`, and correctly — a client's key is what
+        identifies it, and the server looks up nothing.
+        """
         return BonnetSigner(
             private_key=identity.private_key,
-            key_id=f"ed25519:{identity.public_key.hex()}",
+            key_id=f"origin:{origin}",
             tag=UNTP_TAG,
             label=UNTP_LABEL,
             request_components=[
@@ -158,7 +171,7 @@ class FirehoseHTTPServer:
         with the old key while the discovery document's public_key field
         (read fresh from self._server_identity) claimed the new one."""
         self._server_identity = identity
-        self._signer = self._build_signer(identity)
+        self._signer = self._build_signer(identity, self._config.origin)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":

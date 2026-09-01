@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import os
 import time
+from urllib.parse import urlparse
 
 import httpx
 
@@ -44,6 +45,7 @@ from bonnet.net.http_auth import (
     BonnetSigner,
     BonnetVerifier,
     HTTPMessage,
+    InvalidParameter,
     KeyResolver,
     SignatureError,
     compute_content_digest,
@@ -76,12 +78,26 @@ class PinConfirmationRequired(FirehoseClientError):
     carried for the caller to weigh — it does not decide anything here.
     """
 
-    def __init__(self, origin: str, presented_key: bytes, kind: str, evidence: str = ""):
+    def __init__(
+        self,
+        origin: str,
+        presented_key: bytes,
+        kind: str,
+        evidence: str = "",
+        host_match: bool = True,
+    ):
         self.origin = origin
         self.presented_key = presented_key
         self.fingerprint = presented_key.hex()
         self.kind = kind  # "new" | "changed"
         self.evidence = evidence
+        #: Whether the origin this server claims is the host that was dialed.
+        #: An origin legitimately served from an unrelated address is a normal
+        #: deployment, so this is reported for the caller to weigh rather than
+        #: enforced — but it is the difference between "bbs.example answered at
+        #: bbs.example" and "something at unrelated.host says it is bbs.example",
+        #: and only the first is checkable against a TLS certificate.
+        self.host_match = host_match
         super().__init__(
             f"origin '{origin}' presented a key this client has not accepted "
             f"({kind}); fingerprint {self.fingerprint}"
@@ -89,17 +105,41 @@ class PinConfirmationRequired(FirehoseClientError):
 
 
 class _ServerKeyResolver(KeyResolver):
-    """Resolves the server's key for response verification."""
+    """Resolves a response's keyid to the key this client pinned for that origin.
 
-    def __init__(self, server_pubkey: bytes):
+    Only `origin:<name>` resolves, and only to the pinned key. There used to be
+    an `ed25519:<hex>` branch that returned `bytes.fromhex(key_id[8:])` — the
+    key named *in the keyid being checked* — and since the server signed its
+    responses with exactly that form, it was the branch every real response
+    took. Verification then established only that whoever wrote the header held
+    the matching private key, which any party answering the connection does. It
+    proved a signature existed, not whose it was, so the pin decided whether
+    *discovery* succeeded and nothing after it.
+
+    The origin in the keyid must also be the one this client connected to. A
+    response signed by a key we pinned for some other origin is not this
+    origin's answer, and saying so here keeps `untp-origin` from being the only
+    thing tying a response to a name.
+    """
+
+    def __init__(self, server_pubkey: bytes, server_origin: str):
         self._server_pubkey = server_pubkey
+        self._server_origin = server_origin
 
     def resolve_public_key(self, key_id: str) -> bytes:
-        if key_id.startswith("ed25519:"):
-            return bytes.fromhex(key_id[8:])
-        if key_id.startswith("origin:"):
-            return self._server_pubkey
-        raise ValueError(f"Unknown keyid format: {key_id}")
+        # InvalidParameter, not ValueError: it subclasses SignatureError, which
+        # is what `_verify_response` catches and turns into a FirehoseClientError.
+        # A bare ValueError escapes that handler and surfaces as an unhandled
+        # error from a *verification failure*, which is the one case that must
+        # always read as one. Matches FirehoseKeyResolver on the server side.
+        if not key_id.startswith("origin:"):
+            raise InvalidParameter(f"Response keyid must be origin:<name>, got: {key_id[:40]!r}")
+        named = key_id[7:]
+        if named != self._server_origin:
+            raise InvalidParameter(
+                f"Response keyid names origin {named!r}, expected {self._server_origin!r}"
+            )
+        return self._server_pubkey
 
 
 class FirehoseTransport:
@@ -180,7 +220,7 @@ class FirehoseTransport:
         self._discovery = info
 
         self._verifier = BonnetVerifier(
-            key_resolver=_ServerKeyResolver(self._server_pubkey),
+            key_resolver=_ServerKeyResolver(self._server_pubkey, self._server_origin),
             tag=UNTP_TAG,
             max_lifetime=60,
             clock_skew=30,
@@ -257,6 +297,8 @@ class FirehoseTransport:
         if pinned == public_key:
             return  # already trusted, nothing to decide
 
+        host_match = self._origin_matches_dialed_host()
+
         if self._pin_mode == PIN_MODE_CONFIRM:
             if pinned is None:
                 self._trust_store.record_pending(
@@ -266,7 +308,7 @@ class FirehoseTransport:
                     url=self._base_url,
                     verify_tls=str(self._verify),
                 )
-                raise PinConfirmationRequired(origin, public_key, "new")
+                raise PinConfirmationRequired(origin, public_key, "new", host_match=host_match)
             evidence = (
                 "chain_verified"
                 if await self._verify_rotation_chain(origin, pinned, public_key)
@@ -280,7 +322,9 @@ class FirehoseTransport:
                 url=self._base_url,
                 verify_tls=str(self._verify),
             )
-            raise PinConfirmationRequired(origin, public_key, "changed", evidence)
+            raise PinConfirmationRequired(
+                origin, public_key, "changed", evidence, host_match=host_match
+            )
 
         if self._trust_store.tofu_pin(origin, public_key):
             return
@@ -291,6 +335,29 @@ class FirehoseTransport:
             if self._trust_store.accept_rotation(origin, old_pubkey, public_key):
                 return
         raise FirehoseClientError(f"Server key pin mismatch for origin '{origin}'")
+
+    def _origin_matches_dialed_host(self) -> bool:
+        """Whether the origin this server claims is the address we dialed.
+
+        Nothing anywhere compared these before: `discover()` took `origin`
+        straight out of the response body and pinned under it, and
+        `verify_response(expected_origin=...)` compared that claim to the
+        `untp-origin` header — the same party asserting the same thing twice.
+        So a host could call itself any origin it liked, and the name a key got
+        pinned under was entirely the server's choice.
+
+        Reported, not enforced. An origin served from an unrelated address is
+        an ordinary deployment (a relay behind a CDN, a service moved to new
+        infrastructure), so refusing would break working setups to catch a case
+        the pin already covers on every visit after the first. What it changes
+        is the *first* visit, which is the one with no evidence behind it: when
+        the names line up, TLS is checking the same string the key is being
+        pinned under, and when they do not, the caller should know that before
+        accepting.
+        """
+        host = (urlparse(self._base_url).hostname or "").lower()
+        claimed = (self._server_origin or "").lower().rstrip(".")
+        return bool(claimed) and host == claimed
 
     async def _verify_rotation_chain(
         self, origin: str, old_pubkey: bytes, new_pubkey: bytes

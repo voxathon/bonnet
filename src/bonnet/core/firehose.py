@@ -875,6 +875,19 @@ class FirehoseStore:
 
                 if anchored:
                     assert head is not None  # implied by anchored, spelled out for mypy
+
+                    # The head has to be about the origin we asked for. Every
+                    # record was checked against `origin` above; the head was
+                    # checked for hash, count and signature but never for whose
+                    # log it described. Its own origin field is inside the
+                    # signed bytes, so a mismatch here is not a forgery — it is
+                    # this origin signing a head for someone else's log, which
+                    # is not an anchor for this range.
+                    if head.origin != origin:
+                        self._conn.execute("ROLLBACK")
+                        raise HeadMismatch(
+                            f"head describes origin {head.origin!r}, expected {origin!r}"
+                        )
                     final_hash = expected_prev if records[-1].origin_seq == last_seq else None
                     if final_hash is None:
                         final_hash = compute_event_hash(encode_record(records[-1]))

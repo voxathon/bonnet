@@ -439,25 +439,27 @@ def _serialize_sig_params(components: Sequence[str], params: dict) -> str:
 
 
 def _validate_keyid(keyid: str, is_response: bool) -> None:
+    """Responses name an origin; requests carry a key.
+
+    The asymmetry is deliberate and load-bearing. A response keyid must be
+    `origin:<name>` so the verifier has to *look the key up* in what it pinned
+    for that name — an `ed25519:<hex>` response keyid carries its own answer,
+    so checking it proves only that the sender holds the key it just named,
+    which is true of anyone who can answer the connection. That form was
+    accepted here, and was what the server actually sent, which left response
+    verification attributing to nobody.
+
+    A request keyid is `ed25519:<hex>` because the client's key *is* its
+    identity: the server resolves nothing, it reads the key off the request and
+    then decides what that key is allowed to do.
+    """
     if is_response:
         if keyid.startswith("origin:"):
             origin = keyid[7:]
             if not origin:
                 raise InvalidParameter("Response keyid origin is empty")
-        elif keyid.startswith("ed25519:"):
-            hex_part = keyid[8:]
-            if len(hex_part) != 64:
-                raise InvalidParameter(f"keyid hex must be 64 chars, got {len(hex_part)}")
-            try:
-                int(hex_part, 16)
-            except ValueError:
-                raise InvalidParameter("keyid hex is not valid hexadecimal")
-            if hex_part != hex_part.lower():
-                raise InvalidParameter("keyid hex must be lowercase")
         else:
-            raise InvalidParameter(
-                f"Response keyid must be origin:<name> or ed25519:<hex>, got: {keyid[:40]!r}"
-            )
+            raise InvalidParameter(f"Response keyid must be origin:<name>, got: {keyid[:40]!r}")
     else:
         if not keyid.startswith("ed25519:"):
             raise InvalidParameter(f"Request keyid must be ed25519:<hex>, got: {keyid[:40]!r}")
