@@ -25,6 +25,23 @@ means something different depending on the rule's effect:
 
 Business invariants and effective-ban checks are additional conjunctive
 gates on top of this.
+
+On "no implicit bypasses", precisely. That statement is about *this*
+evaluator: no role, origin or key is privileged in the rule algebra, and
+nothing here grants what a rule did not. It is not a claim that role is
+unused elsewhere. `firehose_commands._cmd_publish` consults `ctx.role`
+in several places — the punishment gate, the author checks on cancel /
+restore / purge, and the privilege gate on registration flags. Every one of
+those runs *after* this evaluator has already allowed the action, and can
+only narrow it further or, for the punishment gate, widen a moderation
+exemption the operator asked for. They are conjunctive gates layered on an
+allow, never a path to an allow this evaluator denied.
+
+Worth knowing which axis a grant travels on, because the two do not feed
+each other. `server.admin_pubkey` grants power through *rules* here and
+leaves `ctx.role` empty; `ctx.role` comes only from the `flags` on a user's
+registration record (see `firehose_http_server`). An operator who wants both
+needs both.
 """
 
 from __future__ import annotations
