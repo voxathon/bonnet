@@ -267,6 +267,16 @@ def test_presented_key_prefers_bearer_but_accepts_either():
     assert server.presented_key({}) == ""
 
 
+def test_presented_key_scheme_is_case_insensitive():
+    """RFC 7235 makes the auth scheme token case-insensitive - lowercase
+    'bearer' used to silently miss the exact-case check and fall through to
+    X-API-Key (empty), degrading to anonymous with no signal that a
+    credential was even presented."""
+    assert server.presented_key({"Authorization": "bearer abc"}) == "abc"
+    assert server.presented_key({"Authorization": "BEARER abc"}) == "abc"
+    assert server.presented_key({"Authorization": "BeArEr abc"}) == "abc"
+
+
 def test_gating_module_exposes_the_forbidden_set():
     """Named rather than inlined, so the restriction is greppable from the
     tools it applies to."""

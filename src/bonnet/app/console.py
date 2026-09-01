@@ -42,6 +42,57 @@ ROLE_FLAGS = {
 
 DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
+DISPLAY_TRUNCATE_WIDTH = 60
+
+
+def _truncate_display(s: str, width: int = DISPLAY_TRUNCATE_WIDTH) -> str:
+    """Elide a user-authored text field for a one-line REPL table row.
+
+    Usernames, board names, and subjects are only capped by the wire's own
+    4096-byte MAX_TEXT_FIELD - there is no stricter policy limit, deliberately
+    (this project treats names as attribution, not something to adjudicate
+    the reasonableness of - see kind_validator.py's identity_text_violation).
+    A field anywhere near that size would still
+    flood a listing with one unreadable line, so listings truncate for
+    display only; the stored/signed value is never touched.
+    """
+    return s if len(s) <= width else s[: width - 1] + "…"
+
+
+# Unicode bidi-override/embedding/isolate controls - reordering directional
+# marks (U+200E/U+200F) plus the LRE/RLE/PDF/LRO/RLO/LRI/RLI/FSI/PDI family.
+# Not blocked at publish time (kind_validator.py's identity_text_violation
+# deliberately allows these for usernames/board names - see its docstring),
+# but printing one raw to a terminal can visually reorder or hide text that
+# comes after it, so the REPL strips them at the display boundary instead.
+_BIDI_CONTROL_CHARS = "‎‏‪‫‬‭‮⁦⁧⁨⁩"
+
+
+def _sanitize_for_terminal(s: str) -> str:
+    """Strip characters unsafe to echo raw to an operator's terminal.
+
+    Article subjects, tags, content-types, and body content have no
+    character-class validation at publish time at all (kind_validator.py's
+    _validate_article only checks that a subject is present, not what's in
+    it) - so a C0 control byte (an ANSI escape sequence, e.g.) or a Unicode
+    bidi override embedded in any of those round-trips intact and would
+    otherwise render as a live terminal control sequence in a REPL command
+    that prints it raw. This is a rendering-safety fix, not a new identity
+    policy: the stored/signed bytes are never touched, only what a REPL
+    listing prints. \\n and \\t pass through unchanged.
+    """
+    out = []
+    for c in s:
+        if c in ("\n", "\t"):
+            out.append(c)
+        elif ord(c) < 0x20 or ord(c) == 0x7F:
+            continue
+        elif c in _BIDI_CONTROL_CHARS:
+            continue
+        else:
+            out.append(c)
+    return "".join(out)
+
 
 def _scoped_author(rec) -> str:
     """Render a record's author as name@registrar, or as the key.
@@ -356,6 +407,23 @@ class OperatorConsole:
             return None
         return pk
 
+    def _parse_uint_arg(self, s: str, bits: int) -> int | None:
+        """Parse an unsigned integer REPL argument, bounded for a struct.pack
+        field of the given width.
+
+        Without this, a negative or too-large value reaches struct.pack
+        directly and raises its raw format-string error ('argument out of
+        range', "'Q' format requires 0 <= number <= ...") instead of a clean
+        usage message.
+        """
+        try:
+            n = int(s)
+        except ValueError:
+            return None
+        if n < 0 or n > (2**bits - 1):
+            return None
+        return n
+
     def _extract_board_flag(self, tokens: list, default: str) -> tuple:
         board = default
         remaining = []
@@ -577,6 +645,9 @@ class OperatorConsole:
 
         board = parts[0]
 
+        if self.nav.get_board(self.config.origin, board) is not None:
+            return f"Board '{board}' already exists."
+
         display_name = ""
         try:
             display_name = input("Display name (optional): ").strip()
@@ -638,6 +709,9 @@ class OperatorConsole:
             return "Usage: publish-article <board> [reply-to-num] [supersede-num]"
 
         board = parts[0]
+
+        if self.nav.get_board(self.config.origin, board) is None:
+            return f"Error: Board '{board}' does not exist. Use create-board first."
 
         reply_to_num = 0
         if len(parts) >= 2:
@@ -842,6 +916,8 @@ class OperatorConsole:
             offset += 1 + owner_len
             display, offset = _read_text16(resp, offset)
             status = " [closed]" if closed else ""
+            name = _truncate_display(_sanitize_for_terminal(name))
+            display = _truncate_display(_sanitize_for_terminal(display))
             if aggregate:
                 lines.append(f"  {board_origin}/{name}{status}  {display}")
             else:
@@ -877,10 +953,9 @@ class OperatorConsole:
             board = parts[2]
             article_num_str = parts[3]
 
-        try:
-            article_num = int(article_num_str)
-        except ValueError:
-            return "Invalid article number"
+        article_num = self._parse_uint_arg(article_num_str, 64)
+        if article_num is None:
+            return "Invalid article number (must be 0-18446744073709551615)"
 
         from bonnet.net.firehose_commands import OP_ARTICLE_GET
 
@@ -961,13 +1036,20 @@ class OperatorConsole:
         vis_names = {0: "active", 1: "cancelled", 2: "superseded"}
         body_names = {0: "available", 1: "unavailable", 2: "purged"}
 
+        # A full article view, unlike the truncated listings above, prints
+        # subject/tags/content-type/author/body in full - but they carry no
+        # character-class validation at publish time (_validate_article only
+        # checks a subject is present), so each is sanitized before it ever
+        # reaches this operator's terminal raw.
         lines = [
             f"Article #{article_num} in /{board}",
-            f"Subject: {subject}",
+            f"Subject: {_sanitize_for_terminal(subject)}",
             f"Created: {ts}",
         ]
         if author_username and author_registrar:
-            lines.append(f"Author: {author_username}@{author_registrar}")
+            lines.append(
+                f"Author: {_sanitize_for_terminal(author_username)}@{author_registrar}"
+            )
         else:
             lines.append(f"Author: {author_pubkey}")
         lines.extend(
@@ -979,9 +1061,9 @@ class OperatorConsole:
             ]
         )
         if tags:
-            lines.append(f"Tags: {tags}")
+            lines.append(f"Tags: {_sanitize_for_terminal(tags)}")
         if content_type:
-            lines.append(f"Content-Type: {content_type}")
+            lines.append(f"Content-Type: {_sanitize_for_terminal(content_type)}")
         if root_id:
             lines.append(f"Root: {root_id}")
         if reply_id:
@@ -994,7 +1076,7 @@ class OperatorConsole:
             lines.append(f"Thread: {thread_state}")
         lines.append("-" * 40)
         if body:
-            lines.append(body)
+            lines.append(_sanitize_for_terminal(body))
         else:
             lines.append("(body unavailable)")
         return "\n".join(lines)
@@ -1024,11 +1106,18 @@ class OperatorConsole:
         if parts[1] in known_origins and len(parts) >= 3:
             origin = parts[1]
             board = parts[2]
-            offset = int(parts[3]) if len(parts) > 3 else 0
-            limit = int(parts[4]) if len(parts) > 4 else 50
+            offset_str = parts[3] if len(parts) > 3 else "0"
+            limit_str = parts[4] if len(parts) > 4 else "50"
         else:
-            offset = int(parts[2]) if len(parts) > 2 else 0
-            limit = int(parts[3]) if len(parts) > 3 else 50
+            offset_str = parts[2] if len(parts) > 2 else "0"
+            limit_str = parts[3] if len(parts) > 3 else "50"
+
+        offset = self._parse_uint_arg(offset_str, 32)
+        if offset is None:
+            return "Invalid offset (must be 0-4294967295)"
+        limit = self._parse_uint_arg(limit_str, 16)
+        if limit is None:
+            return "Invalid limit (must be 0-65535)"
 
         aggregate = origin == ""
 
@@ -1091,6 +1180,7 @@ class OperatorConsole:
             from datetime import datetime
 
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
+            subject = _truncate_display(_sanitize_for_terminal(subject))
             if aggregate:
                 lines.append(f"{art_origin} #{article_num:4} | {subject} | {ts}")
             else:
@@ -1170,6 +1260,7 @@ class OperatorConsole:
             from datetime import datetime
 
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
+            subject = _truncate_display(_sanitize_for_terminal(subject))
             if aggregate:
                 lines.append(f"{result_origin} #{article_num:4} | {subject} | {ts}")
             else:
@@ -1255,10 +1346,10 @@ class OperatorConsole:
             elif p == "--pinned":
                 filters.append((0x09, 0x01, 0x04, b"\x01"))
             elif p.startswith("--offset="):
-                try:
-                    list_offset = int(p.split("=", 1)[1])
-                except ValueError:
-                    return "Invalid offset"
+                parsed_offset = self._parse_uint_arg(p.split("=", 1)[1], 32)
+                if parsed_offset is None:
+                    return "Invalid offset (must be 0-4294967295)"
+                list_offset = parsed_offset
             elif p.startswith("--limit="):
                 try:
                     limit = int(p.split("=", 1)[1])
@@ -1343,7 +1434,8 @@ class OperatorConsole:
             extra_str = f" [{', '.join(extras)}]" if extras else ""
 
             lines.append(
-                f"#{article_num:4} | {subject} | {author_display} | {ts_display}{extra_str}"
+                f"#{article_num:4} | {_truncate_display(_sanitize_for_terminal(subject))} | "
+                f"{_truncate_display(_sanitize_for_terminal(author_display))} | {ts_display}{extra_str}"
             )
 
         if not lines:
@@ -1390,7 +1482,7 @@ class OperatorConsole:
                 role += " [mod]"
             if revoked:
                 role += " [REVOKED]"
-            lines.append(f"  {username}  {pubkey}{role}")
+            lines.append(f"  {_truncate_display(_sanitize_for_terminal(username))}  {pubkey}{role}")
 
         if not lines:
             return "No users."
@@ -1574,11 +1666,12 @@ class OperatorConsole:
             return "Usage: event-range <origin> <start> <count>"
 
         origin = parts[1]
-        try:
-            start = int(parts[2])
-            count = int(parts[3])
-        except ValueError:
-            return "Invalid start or count"
+        start = self._parse_uint_arg(parts[2], 64)
+        if start is None:
+            return "Invalid start (must be 0-18446744073709551615)"
+        count = self._parse_uint_arg(parts[3], 16)
+        if count is None:
+            return "Invalid count (must be 0-65535)"
 
         from bonnet.net.firehose_commands import OP_EVENT_RANGE
 
