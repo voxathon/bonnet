@@ -175,6 +175,28 @@ def test_check_config_bad_acl_rule_friendly_error(tmp_path, capsys, monkeypatch)
     assert "invalid configuration in" in err
 
 
+def test_check_config_reports_unknown_acl_command(tmp_path, capsys, monkeypatch):
+    """A typo'd command name in an ACL rule used to pass --check-config
+    silently as fully valid - the rule can never match anything (allow
+    grants nothing, deny blocks nothing), but nothing said so."""
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[server]\norigin = "bbs.test"\n\n'
+        "[[acl]]\n"
+        'effect = "allow"\n'
+        "match.registered = true\n"
+        'actions = ["read"]\n'
+        'commands = ["PUBLSH_RECORD"]\n',
+        encoding="utf-8",
+    )
+
+    main(["--config", str(cfg), "--check-config"])
+
+    err = capsys.readouterr().err
+    assert "unknown command 'PUBLSH_RECORD'" in err
+
+
 def test_check_config_reports_unrecognized_keys(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = tmp_path / "config.toml"

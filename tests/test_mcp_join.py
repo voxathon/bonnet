@@ -89,6 +89,18 @@ async def test_connect_reports_the_origin_and_boards(wired):
     assert result["identities"] == []
 
 
+@pytest.mark.parametrize("bad_url", ["", "   ", "\t\n"])
+async def test_connect_rejects_blank_url(wired, bad_url):
+    """An empty url used to be stored as-is and then treated as "unset" by
+    _current_url()'s `or` fallback chain, silently connecting to the default
+    origin instead of the one the caller (thought they) asked for. A
+    whitespace-only url took a different, uglier path with the same root
+    cause. Both must fail loudly instead of picking either default."""
+    with pytest.raises(ValueError, match="requires a URL"):
+        await tools.connect(bad_url)
+    assert tools.current_origin_url.get() is None
+
+
 async def test_register_registers_and_reports_the_board(wired):
     await tools.connect("https://bbs.test")
     result = await tools.register("scout")
