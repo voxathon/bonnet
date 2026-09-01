@@ -124,6 +124,26 @@ async def test_register_user_rebinds_server_identity(server):
     assert usernames == ["bob"]
 
 
+async def test_create_board_after_rename_succeeds(server, monkeypatch):
+    """Renaming the admin identity away from 'root' must not break
+    create-board/publish-article for the renamed identity.
+
+    Regression test: these commands used to hardcode actor_username="root"
+    when signing records locally, so after register-user renamed the
+    server's own key, the origin's own actor-username check
+    (firehose_commands.py) rejected every subsequent record it tried to
+    publish.
+    """
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+
+    console = OperatorConsole(server)
+    await console._repl_register_user(["chaosb"])
+
+    result = console._do_create_board(["testboard"])
+    assert "created" in result.lower()
+    assert "Error 0x0004" not in result
+
+
 # ---------------------------------------------------------------------------
 # Close
 # ---------------------------------------------------------------------------
