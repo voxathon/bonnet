@@ -25,7 +25,7 @@ from bonnet.core.firehose import (
 )
 from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
 from bonnet.core.kind_validator import KindValidator, ValidationError
-from bonnet.core.kinds import ALL_KNOWN_KINDS
+from bonnet.core.kinds import ALL_KNOWN_KINDS, KIND_USER_REGISTER
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     SIG_SIZE,
@@ -461,6 +461,36 @@ class FirehoseCommandHandler:
             ctx.to_auth_context(), "write", command="PUBLISH_RECORD", kind=kind, board=board or None
         ):
             return _error(0x0004, "Not permitted")
+
+        # Registration gates: privilege, and subject.
+        #
+        # The actor binding above fixes *who signed*, but a registration also
+        # carries the key it is about (field 2) and the flags that
+        # firehose_http_server reads back as `role` (field 3). Neither was
+        # constrained, and the shipped ACL grants unknown principals
+        # bonnet.user.register so the first-run flow works — which made
+        # administrator self-service on first contact, and let anyone bind a
+        # username onto a key they do not hold.
+        #
+        # Administrators are exempt on both counts, because provisioning is a
+        # genuine operator task: `console.grant-role` registers another party's
+        # key with a role over the local connection, which authenticates as
+        # administrator (app/cli.py FirehoseLocalConnection). Note that on the
+        # shipped config no principal can reach that exemption — the register
+        # kind is granted to `unknown` alone and the matchers are mutually
+        # exclusive — so an operator who wants it has to grant it explicitly.
+        #
+        # Nothing else legitimate is blocked: the gateway's register tool
+        # publishes flags=0 for its own key, and the server's own root
+        # registration (BonnetServer._ensure_root_registered) is appended
+        # directly to the firehose without passing through this handler.
+        if kind == KIND_USER_REGISTER and ctx.role != "administrator":
+            if (intent.metadata.get_u64(3) or 0) != 0:
+                return _error(0x0004, "Only an administrator may register privileged flags")
+            if intent.metadata.get_bytes(2) != intent.actor_pubkey:
+                return _error(
+                    0x0004, "Only an administrator may register a username for another key"
+                )
 
         # Write gate: administrators bypass; ack must pass so a
         # punished user can acknowledge their warning.

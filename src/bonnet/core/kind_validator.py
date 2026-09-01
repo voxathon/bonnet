@@ -149,6 +149,22 @@ class KindValidator:
     # ------------------------------------------------------------------
 
     def _validate_user_register(self, intent: Intent) -> None:
+        """A registration binding a username and role flags to a subject key.
+
+        Two fields here are not constrained by the actor binding that
+        `firehose_commands` applies (`intent.actor_pubkey == ctx.peer_pubkey`):
+        field 2 names the key the registration is *about*, and field 3 carries
+        the flags that `firehose_http_server` later reads back as `role`. Left
+        open, either lets a principal the ACL merely allowed to register bind a
+        username onto a key it does not hold, or name its own privilege.
+
+        Both are gated in `firehose_commands._cmd_publish` rather than here,
+        because the answer depends on who is asking: an ordinary principal may
+        only register itself, unprivileged, while an administrator may
+        legitimately do both — `console.grant-role` provisions another party's
+        key with a role over the local connection. That is an authorization
+        question, and this validator stays schema-only.
+        """
         self._require_empty_board(intent)
         self._require_empty_article_targets(intent)
 
