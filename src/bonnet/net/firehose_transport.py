@@ -28,6 +28,7 @@ from bonnet.core.crypto import Identity
 from bonnet.core.kinds import KIND_ORIGIN_KEY_ROTATE
 from bonnet.core.record import (
     encode_unsigned_record,
+    normalize_origin,
     verify_key_rotation_proof,
     verify_record_signature,
 )
@@ -358,6 +359,34 @@ class FirehoseTransport:
         host = (urlparse(self._base_url).hostname or "").lower()
         claimed = (self._server_origin or "").lower().rstrip(".")
         return bool(claimed) and host == claimed
+
+    def advertised_address(self) -> str | None:
+        """Where this origin says it can be reached, when that is not here.
+
+        The discovery document has always carried `hostname`, and nothing read
+        it — the server publishes it, the transport parses it into
+        `DiscoveryInfo`, and no call site ever looked. This makes it legible
+        without making it authoritative.
+
+        Reported, never followed. Auto-redirecting on it would hand the party
+        being identified the ability to choose where the next connection goes,
+        which is the shape of the body-redirect hop that needed an SSRF guard
+        and a TLS-policy fix. And the value would be small even then: you can
+        only read this hint from a server you already reached, so it covers a
+        planned move announced while the old address still answers, and not the
+        case anyone actually wants — a peer that went dark and came back
+        elsewhere. That case is out-of-band by nature.
+
+        What it is good for is telling an operator their configured address is
+        stale, which is a thing to surface and let them act on.
+        """
+        if self._discovery is None:
+            return None
+        advertised = normalize_origin(self._discovery.hostname)
+        if not advertised:
+            return None
+        dialed = (urlparse(self._base_url).hostname or "").lower()
+        return advertised if advertised != dialed else None
 
     async def refresh_epoch_cache(self, origin: str | None = None) -> bool:
         """Fetch, verify and cache an origin's key history. True if cached.

@@ -183,3 +183,42 @@ def test_origin_is_compared_to_the_dialed_host(url, origin, expected):
     t = FirehoseTransport(url)
     t._server_origin = origin
     assert t._origin_matches_dialed_host() is expected
+
+
+# ---------------------------------------------------------------------------
+# the address an origin advertises for itself
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "advertised", "expected"),
+    [
+        ("https://bbs.example", "bbs.example", None),
+        ("https://bbs.example", "BBS.Example.", None),
+        ("https://old.example", "new.example", "new.example"),
+        ("https://bbs.example", "", None),
+    ],
+)
+def test_an_origin_advertising_a_different_address_is_surfaced(url, advertised, expected):
+    """The discovery document has always carried `hostname` and nothing read
+    it. Now it is reported when it disagrees with where the connection landed
+    — and only reported: following it automatically would let the party being
+    identified choose where the next connection goes."""
+    from bonnet.net.firehose_models import DiscoveryInfo
+
+    t = FirehoseTransport(url)
+    t._discovery = DiscoveryInfo(
+        protocol="untp-1",
+        origin="bbs.example",
+        hostname=advertised,
+        public_key="",
+        anonymous_key="",
+        anonymous_private_key="",
+        command_endpoint="/command",
+        capabilities=[],
+    )
+    assert t.advertised_address() == expected
+
+
+def test_no_discovery_means_no_advertised_address():
+    assert FirehoseTransport("https://bbs.example").advertised_address() is None

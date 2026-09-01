@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from bonnet.core.acl import ACLEvaluator
 from bonnet.core.home import resolve_home
+from bonnet.core.record import normalize_origin
 
 
 @dataclass
@@ -47,9 +48,8 @@ class PeerConfig:
 
 
 def _normalize_origin(origin: str) -> str:
-    if not origin:
-        return ""
-    return origin.strip().lower().rstrip(".")
+    """Config's origin normalization, shared with the wire's lookup keys."""
+    return normalize_origin(origin)
 
 
 def _as_bool(table: dict, key: str, section: str, default: bool) -> bool:
