@@ -34,9 +34,16 @@ What a signature does and does not establish:
   friends return flattened projections; `_decode_article_view` reads no
   signature field, so a caller cannot check anything against `author_pubkey`.
   The relay verified the signatures at ingest and signs its response to the
-  caller under RFC 9421. Attribution on those tools is thus an assertion by
-  the relay, trustworthy exactly insofar as the relay is. The `event_*` tools
-  are the ones that carry signed records.
+  caller under RFC 9421 — a signature the client checks against the key it
+  pinned for that origin, so attribution on those tools is an assertion by
+  *that pinned origin*, trustworthy exactly insofar as it is.
+- `get_event` is where you can check for yourself. It returns both signatures
+  and a `verification` block: `author` is verified against the key carried in
+  the record, so it always has an answer, and `origin` against the key that
+  was authoritative at that sequence, which needs this client to have cached
+  the origin's key history. That history is fetched once, at connect, and kept
+  — so an origin's older records stay verifiable after the origin itself stops
+  answering.
 
 Fields carrying provenance, and their limits:
 
@@ -535,6 +542,13 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         client = _make_client()
         await _connect_anonymous(client)
         origin = client.server_origin or ""
+        # First successful contact is when to learn this origin's key history,
+        # while it is answering. Cached, verification of its older records
+        # keeps working after it stops — and an origin that has gone quiet is
+        # indistinguishable from one refusing to answer, so a client that only
+        # fetched this on demand could not tell a forgery from an outage.
+        # Best-effort: a peer without KEY_EPOCHS is not a failed connection.
+        await client.refresh_epoch_cache(origin)
         boards = [b.name for b in await client.list_boards(origin="")]
         discovery = client.discovery
         known = list(discovery.known_origins) if discovery else []
@@ -2406,6 +2420,22 @@ async def get_event(
     neither unless it is also the named registrar. `author_pubkey` is the only
     field a signature binds.
 
+    `verification` is this client checking the record's own signatures, rather
+    than relying on the relay having checked them at ingest. Two independent
+    answers:
+
+      author — `actor_signature` under `author_pubkey`. Always answerable, the
+        key being in the record. 'valid' means this content is what that key
+        signed and the author cannot deny writing it. It says nothing about
+        who holds the key, and nothing about whether the name beside it is
+        theirs — that is `actor_username` and the article tools' `author_check`.
+      origin — `origin_signature` under the key that was authoritative at this
+        sequence. 'unverifiable' means this client has no cached epoch covering
+        that sequence, usually because the origin rotated and its key history
+        was never fetched; it is not a failed check, and specifically not
+        evidence of forgery, since a signature checked against the wrong key
+        fails the same way a forged one does.
+
     `witnesses` is the provenance chain: one entry per relay that carried the
     event, each a signed statement by that relay about who handed it over. It
     is not verified here — use trace_event, which checks every signature and
@@ -2443,6 +2473,13 @@ async def get_event(
             "target_event_id": rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else "",
             "body_hash": rec.body_hash.hex(),
             "body_size": rec.body_size,
+            # The signatures themselves, which this tool used to drop while
+            # get_article's docstring pointed callers here for "the signed
+            # artifact". Present so a caller can check them independently
+            # rather than take `verification` on faith.
+            "actor_signature": rec.actor_signature.hex(),
+            "origin_signature": rec.origin_signature.hex(),
+            "verification": client.verify_record(rec),
             "witnesses": [
                 {
                     "relay_pubkey": w.relay_pubkey.hex(),
