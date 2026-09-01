@@ -625,6 +625,16 @@ _EVIDENCE_NOTE = {
     ),
 }
 
+_HOST_MISMATCH_NOTE = (
+    "Note that this server calls itself {origin} but was reached at {url}. That "
+    "is normal for a relay behind a proxy or one that has moved hosts, and the "
+    "origin name is the server's own claim either way. It matters here because "
+    "the key is about to be pinned under that name while TLS, if it is on, "
+    "certified the address instead — so the two are vouching for different "
+    "strings, and neither is checking the other. When they agree, accepting is "
+    "at least anchored to something a certificate authority saw."
+)
+
 
 def _decode_verify(stored: str) -> bool:
     """Read back a TLS verify setting recorded with a pending key.
@@ -646,7 +656,9 @@ def _pin_prompt(pending: PinConfirmationRequired, url: str) -> dict:
     body = (_PIN_PROMPT_NEW if pending.kind == "new" else _PIN_PROMPT_CHANGED).format(
         origin=pending.origin or url
     )
-    note = _EVIDENCE_NOTE.get(pending.evidence)
+    notes = [n for n in (_EVIDENCE_NOTE.get(pending.evidence),) if n]
+    if not pending.host_match:
+        notes.append(_HOST_MISMATCH_NOTE.format(origin=pending.origin or "?", url=url))
     return {
         "pin_required": True,
         "kind": pending.kind,
@@ -654,7 +666,8 @@ def _pin_prompt(pending: PinConfirmationRequired, url: str) -> dict:
         "url": url,
         "fingerprint": pending.fingerprint,
         "rotation_evidence": pending.evidence or None,
-        "message": body if note is None else f"{body}\n\n{note}",
+        "origin_matches_host": pending.host_match,
+        "message": "\n\n".join([body, *notes]),
         "next": (
             f"trust_origin_key(fingerprint='{pending.fingerprint}', decision='accept')"
             f" to accept, or decision='decline' to refuse. Nothing is trusted "
