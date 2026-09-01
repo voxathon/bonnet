@@ -82,6 +82,8 @@ def _load_and_validate_config(args) -> FirehoseConfig:
 
     if args.host:
         config.host = args.host
+    if args.port is not None:
+        config.port = args.port
 
     try:
         config.validate()
@@ -144,6 +146,13 @@ def main(argv: list[str] | None = None):
     if args.dir:
         set_home("server", args.dir)
     server_home = resolve_home("server", "BONNET_SERVER_HOME")
+    if os.path.exists(server_home) and not os.path.isdir(server_home):
+        print(
+            f"error: server home '{server_home}' exists but is not a directory "
+            "(check BONNET_SERVER_HOME / --dir)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     if args.config is None:
         args.config = os.path.join(server_home, "config.toml")
 
@@ -165,6 +174,13 @@ def main(argv: list[str] | None = None):
             FirehoseConfig.create_default_config(args.config, force=args.force, tls_paths=tls_paths)
         except FileExistsError as exc:
             print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        except NotADirectoryError:
+            print(
+                f"error: cannot create {args.config} - a path component "
+                "already exists as a file, not a directory (check BONNET_SERVER_HOME / --dir)",
+                file=sys.stderr,
+            )
             raise SystemExit(1)
         print(f"Wrote sample config to {args.config}")
         if tls_paths:
@@ -193,6 +209,13 @@ def main(argv: list[str] | None = None):
         except FileExistsError as exc:
             print(f"error: {exc}", file=sys.stderr)
             raise SystemExit(1)
+        except NotADirectoryError:
+            print(
+                f"error: cannot create {args.config} - a path component "
+                "already exists as a file, not a directory (check BONNET_SERVER_HOME / --dir)",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
         print(f"Wrote sample config to {args.config}")
         if tls_paths:
             print(f"Generated self-signed TLS certificate at {tls_paths[0]}")
@@ -208,7 +231,7 @@ def main(argv: list[str] | None = None):
         print(f"OK: {args.config} is valid.")
         print(f"  origin: {config.origin}")
         print(
-            f"  listen: {config.host}:{args.port or config.port} "
+            f"  listen: {config.host}:{config.port} "
             f"({'tls' if config.tls_enabled else 'plaintext'})"
         )
         print(f"  peers: {len(config.peers)}")
