@@ -492,6 +492,48 @@ class FirehoseCommandHandler:
                     0x0004, "Only an administrator may register a username for another key"
                 )
 
+        # First writer wins on a username, within this origin. UserProjection
+        # enforces this too and has to, since federated registrations never
+        # reach this handler — but refusing here is what lets a local caller
+        # see why, which is the behaviour the gateway's register tool already
+        # documents ("the server rejects the registration and this reports the
+        # failure — pick another name").
+        if kind == KIND_USER_REGISTER:
+            requested = intent.metadata.get_text(1) or ""
+            subject = intent.metadata.get_bytes(2) or intent.actor_pubkey
+            holder = self._users.username_holder(intent.origin, requested)
+            if holder is not None and holder != subject:
+                return _error(0x0009, f"Username '{requested}' is already registered")
+
+        # The identity a record is published under is the registrar's to state,
+        # not the caller's to choose. Until now `actor_username` and
+        # `actor_registrar` were free text on every record: the actor binding
+        # above fixes the *key*, and the two fields a reader actually reads went
+        # unchecked, so any authenticated key could publish as anyone.
+        #
+        # Refusal rather than substitution, deliberately. Both fields sit inside
+        # the bytes the actor signed, so rewriting them server-side would
+        # invalidate the intent signature. Refusing keeps two properties at
+        # once: the author signed the name they published under, and the name is
+        # one this origin issued to that key.
+        #
+        # Empty stays legal — claiming nothing is honest. bonnet.user.register
+        # is exempt because it is the record that establishes the name; there is
+        # nothing to check it against yet.
+        if kind != KIND_USER_REGISTER:
+            if intent.actor_registrar and intent.actor_registrar != self._origin:
+                return _error(
+                    0x0004,
+                    f"actor_registrar must be '{self._origin}' on a record published here",
+                )
+            if intent.actor_username:
+                registered = self._users.get_user_by_pubkey(self._origin, intent.actor_pubkey)
+                if registered is None or registered["username"] != intent.actor_username:
+                    return _error(
+                        0x0004,
+                        "actor_username is not the name this origin issued to that key",
+                    )
+
         # Write gate: administrators bypass; ack must pass so a
         # punished user can acknowledge their warning.
         if kind != KIND_PUNISHMENT_ACK and ctx.role != "administrator":

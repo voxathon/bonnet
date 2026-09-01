@@ -333,7 +333,39 @@ class UserProjection(_BaseProjection):
             );
         """)
 
+    def username_holder(self, origin: str, username: str) -> bytes | None:
+        """The key holding `username` at `origin`, or None if it is free.
+
+        Revoked registrations do not hold a name — revocation frees it, or a
+        squatter would burn every good name permanently. A superseded key still
+        does: `apply_user_key_rotate` carries the name forward to the successor,
+        so the identity is live even though that particular key is retired.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT user_pubkey FROM users WHERE origin=? AND username=? AND revoked=0 "
+                "ORDER BY reg_seq LIMIT 1",
+                (origin, username),
+            ).fetchone()
+            return bytes(row[0]) if row else None
+
     def apply_user_register(self, rec: Record) -> None:
+        """Bind a username to a key at this origin, first writer wins.
+
+        A name already held by a *different* live key is not reassigned; the
+        record stays in the firehose and is still relayed, it simply does not
+        take the name here. `firehose_commands` refuses the same case at publish
+        time so a local caller gets an error rather than silence, but this check
+        has to exist independently: federated registrations never pass through
+        that handler.
+
+        First-writer-wins is deterministic only because dispatch is ordered.
+        `Dispatcher.dispatch_origin` walks records in strict origin_seq order
+        and `rebuild_all` replays in that same order, so the winner is a
+        property of the log rather than of arrival timing. **Do not parallelize
+        dispatch within an origin** without replacing this rule with one that
+        does not depend on order.
+        """
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
@@ -343,6 +375,23 @@ class UserProjection(_BaseProjection):
                 user_pubkey = rec.metadata.get_bytes(2) or b"\x00" * 32
                 flags = rec.metadata.get_u64(3) or 0
                 reg_seq = rec.origin_seq
+
+                holder = self._conn.execute(
+                    "SELECT user_pubkey FROM users "
+                    "WHERE origin=? AND username=? AND revoked=0 ORDER BY reg_seq LIMIT 1",
+                    (rec.origin, username),
+                ).fetchone()
+                if holder is not None and bytes(holder[0]) != user_pubkey:
+                    log_msg(
+                        f"USER_REGISTER: origin='{rec.origin}' seq={rec.origin_seq} "
+                        f"username={username!r} already held by "
+                        f"{bytes(holder[0]).hex()[:16]}; registration not applied"
+                    )
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
+
                 self._conn.execute(
                     "INSERT OR REPLACE INTO users "
                     "(origin, user_pubkey, username, flags, reg_seq, created_at, revoked) "

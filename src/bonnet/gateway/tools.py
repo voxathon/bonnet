@@ -861,16 +861,26 @@ async def register(username: str, password: str | None = None, origin: str | Non
         try:
             result = await client.publish_user_register(username, identity.public_key, flags=0)
             registered_seq = result.origin_seq
-        except ProtocolError:
+        except ProtocolError as refusal:
             # Re-registering an origin this key already registered with. The
             # server is right to refuse: registration is granted to
             # `unknown` principals, and this key stopped being one the first
             # time. Treat it as registered if the origin agrees the key holds
             # this name, and re-raise otherwise so a genuine refusal is not
             # swallowed.
-            existing = await client.get_user(target_origin, identity.public_key)
+            #
+            # The confirming read can fail on its own account — an unknown
+            # principal may not be permitted USER_GET at all — and that must
+            # not substitute an unrelated error for the refusal the caller
+            # needs to see. A name already taken by someone else is a real
+            # outcome now that first-writer-wins is enforced, and "pick
+            # another name" is only actionable if that is what surfaces.
+            try:
+                existing = await client.get_user(target_origin, identity.public_key)
+            except ProtocolError:
+                existing = None
             if existing is None or existing.username != username:
-                raise
+                raise refusal from None
 
         store.mark_registered(target_origin, username)
     finally:
@@ -1493,6 +1503,7 @@ async def query_articles(
     board: str = "",
     author_pubkey: str = "",
     username: str = "",
+    registrar: str = "",
     tag: str = "",
     state: str = "",
     root_only: bool = False,
@@ -1511,8 +1522,17 @@ async def query_articles(
 
     Filtering by username is a convenience, not an identity check: usernames
     are self-chosen at registration and scoped to the registrar that accepted
-    them, so two origins may host different users under the same name. Filter
-    by author_pubkey when you need the results to be one specific author.
+    them, so two origins may host different users under the same name. A bare
+    `username` therefore matches that name under *any* registrar — pass
+    `registrar` alongside it to ask for the one identity, the way an address is
+    a local part and a domain together. Filter by author_pubkey when you need
+    the results to be one specific author regardless of naming.
+
+    Neither narrows to *verified* names. `author_check` on each result reports
+    whether the naming origin actually issued that name to that key: 'registry'
+    yes, 'unregistered' no, 'foreign' the record credits a different origin and
+    this relay does not ask it, 'unchecked' no name claimed. Filters do not
+    consider it, and nothing is hidden on the strength of it.
 
     Threading. Every result carries `root_article_id` (the thread's opening
     article; zero for a root itself) and `reply_to_article_id` (its direct
@@ -1554,6 +1574,7 @@ async def query_articles(
     board: board name (defaults to the board open_board last set).
     author_pubkey: hex Ed25519 public key to filter by author.
     username: filter by author username.
+    registrar: filter by author registrar (the origin that issued the name).
     tag: filter by tag (substring match).
     state: filter by visibility (active, cancelled, superseded).
     root_only: only show root articles (not replies).
@@ -1575,6 +1596,8 @@ async def query_articles(
         filters.append((0x01, 0x01, 0x01, pk))
     if username:
         filters.append((0x02, 0x01, 0x02, username.encode("utf-8")))
+    if registrar:
+        filters.append((0x03, 0x01, 0x02, registrar.encode("utf-8")))
     if tag:
         filters.append((0x04, 0x05, 0x02, tag.encode("utf-8")))
     if state:
@@ -2072,9 +2095,17 @@ async def report(
             target_board=board,
             target_article_id=bytes.fromhex(view.article_id),
         )
+        # Scoped, never a bare username: a name without the origin that issued
+        # it does not identify anyone, and this line is confirming a moderation
+        # action against a specific person.
+        attributed = (
+            f"{view.author_username}@{view.author_registrar}"
+            if view.author_username and view.author_registrar
+            else view.author_pubkey[:16]
+        )
         return (
             f"Reported article #{article_num} in '{board}' by "
-            f"{view.author_username or view.author_pubkey[:16]} — event seq {result.origin_seq}"
+            f"{attributed} — event seq {result.origin_seq}"
         )
     finally:
         await client.close()

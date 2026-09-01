@@ -31,6 +31,27 @@ PIN_UNPINNED = "unpinned"
 THREAD_OPEN = "open"
 THREAD_CLOSED = "closed"
 
+# Whether the naming origin actually issued `author_username` to
+# `author_pubkey`. A record's author fields are signed, so they are
+# non-repudiable — but a signature says the author wrote them, not that they
+# are true, and an origin may put any string in a record it publishes. This
+# records what could be established locally, and is reported rather than
+# enforced: nothing is filtered, hidden, or refused on the strength of it.
+#
+# The check is deliberately not a network lookup. See AUTHOR_FOREIGN.
+#: This origin's registry issued this name to this key.
+AUTHOR_REGISTRY = "registry"
+#: The registrar names this origin, which did not issue that name to that key
+#: — either the key holds no registration, or it holds one under another name.
+AUTHOR_UNREGISTERED = "unregistered"
+#: The registrar names a *different* origin. Terminal by design: resolving it
+#: would mean asking that origin, which may be gone, may be refusing us, and
+#: whose silence is indistinguishable from denial. A claim we cannot check is
+#: reported as unchecked rather than guessed at.
+AUTHOR_FOREIGN = "foreign"
+#: No username was claimed, so there is nothing to check.
+AUTHOR_UNCHECKED = "unchecked"
+
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -106,6 +127,7 @@ class ArticleProjection:
     replacement_article_id: bytes | None
     latest_control_seq: int
     event_id: bytes
+    author_check: str
 
     __slots__ = (
         "origin",
@@ -131,6 +153,7 @@ class ArticleProjection:
         "replacement_article_id",
         "latest_control_seq",
         "event_id",
+        "author_check",
     )
 
     def __init__(self, **kwargs):
@@ -214,6 +237,7 @@ class BoardProjection:
                 reply_to_article_id     BLOB NOT NULL DEFAULT x'0000000000000000000000000000000000000000000000000000000000000000',
                 replacement_article_id  BLOB,
                 latest_control_seq      INTEGER NOT NULL DEFAULT 0,
+                author_check            TEXT NOT NULL DEFAULT 'unchecked',
                 PRIMARY KEY (origin, board, article_num),
                 UNIQUE (origin, board, article_id)
             );
@@ -298,8 +322,17 @@ class BoardProjection:
     # Article operations
     # ------------------------------------------------------------------
 
-    def apply_article(self, rec: Record) -> None:
-        """Insert or update an article projection from a bonnet.article record."""
+    def apply_article(self, rec: Record, author_check: str = AUTHOR_UNCHECKED) -> None:
+        """Insert or update an article projection from a bonnet.article record.
+
+        `author_check` is resolved by the caller and stored as given — see
+        `Dispatcher._resolve_author_check`, which is the only production caller
+        and holds the user registry this projection does not. Resolving at
+        dispatch and storing the answer, rather than looking it up on read, is
+        deliberate: it pins what was true when the article was published, so a
+        later revocation or re-registration does not retroactively rewrite what
+        an old article says about its author.
+        """
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
@@ -330,11 +363,11 @@ class BoardProjection:
                     "(origin, board, article_num, article_id, event_id, "
                     "visibility, body_state, pin_state, thread_state, "
                     "subject, tags, options, content_type, "
-                    "author_pubkey, author_username, author_registrar, "
+                    "author_pubkey, author_username, author_registrar, author_check, "
                     "created_at, body_hash, body_size, "
                     "root_article_id, reply_to_article_id, latest_control_seq) "
                     "VALUES (?, ?, ?, ?, ?, 'active', ?, 'unpinned', 'open', "
-                    "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         rec.origin,
                         rec.board,
@@ -349,6 +382,7 @@ class BoardProjection:
                         rec.actor_pubkey,
                         rec.actor_username,
                         rec.actor_registrar,
+                        author_check,
                         rec.created_at,
                         rec.body_hash,
                         rec.body_size,
@@ -657,7 +691,7 @@ class BoardProjection:
                 "author_pubkey, author_username, author_registrar, "
                 "created_at, body_hash, body_size, "
                 "root_article_id, reply_to_article_id, replacement_article_id, "
-                "latest_control_seq "
+                "latest_control_seq, author_check "
                 "FROM articles WHERE origin=? AND board=? AND article_num=?",
                 (origin, board, article_num),
             ).fetchone()
@@ -687,6 +721,7 @@ class BoardProjection:
                 reply_to_article_id=bytes(row[20]),
                 replacement_article_id=bytes(row[21]) if row[21] else None,
                 latest_control_seq=row[22],
+                author_check=row[23],
             )
 
     def get_article_by_id(
@@ -700,7 +735,7 @@ class BoardProjection:
                 "author_pubkey, author_username, author_registrar, "
                 "created_at, body_hash, body_size, "
                 "root_article_id, reply_to_article_id, replacement_article_id, "
-                "latest_control_seq "
+                "latest_control_seq, author_check "
                 "FROM articles WHERE origin=? AND board=? AND article_id=?",
                 (origin, board, article_id),
             ).fetchone()
@@ -730,6 +765,7 @@ class BoardProjection:
                 reply_to_article_id=bytes(row[20]),
                 replacement_article_id=bytes(row[21]) if row[21] else None,
                 latest_control_seq=row[22],
+                author_check=row[23],
             )
 
     def list_articles(
@@ -759,7 +795,7 @@ class BoardProjection:
                 f"author_pubkey, author_username, author_registrar, "
                 f"created_at, body_hash, body_size, "
                 f"root_article_id, reply_to_article_id, replacement_article_id, "
-                f"latest_control_seq "
+                f"latest_control_seq, author_check "
                 f"FROM articles WHERE origin=? AND board=? "
                 f"AND visibility IN ({placeholders}){where_extra} "
                 f"ORDER BY created_at DESC, article_num ASC LIMIT ? OFFSET ?",
@@ -790,6 +826,7 @@ class BoardProjection:
                     reply_to_article_id=bytes(r[20]),
                     replacement_article_id=bytes(r[21]) if r[21] else None,
                     latest_control_seq=r[22],
+                    author_check=r[23],
                 )
                 for r in rows
             ]
@@ -846,7 +883,7 @@ class BoardProjection:
                 f"author_pubkey, author_username, author_registrar, "
                 f"created_at, body_hash, body_size, "
                 f"root_article_id, reply_to_article_id, replacement_article_id, "
-                f"latest_control_seq "
+                f"latest_control_seq, author_check "
                 f"FROM articles WHERE {where_clause} "
                 f"ORDER BY created_at DESC, article_num ASC LIMIT ? OFFSET ?",
                 params + [limit, offset],
@@ -877,6 +914,7 @@ class BoardProjection:
                     reply_to_article_id=bytes(r[20]),
                     replacement_article_id=bytes(r[21]) if r[21] else None,
                     latest_control_seq=r[22],
+                    author_check=r[23],
                 )
                 for r in rows
             ]
@@ -1029,7 +1067,7 @@ class BoardProjection:
                 f"author_pubkey, author_username, author_registrar, "
                 f"created_at, body_hash, body_size, "
                 f"root_article_id, reply_to_article_id, replacement_article_id, "
-                f"latest_control_seq "
+                f"latest_control_seq, author_check "
                 f"FROM articles WHERE {where_clause} "
                 f"ORDER BY article_num ASC LIMIT ? OFFSET ?",
                 params + [limit, offset],
@@ -1059,6 +1097,7 @@ class BoardProjection:
                     reply_to_article_id=bytes(r[20]),
                     replacement_article_id=bytes(r[21]) if r[21] else None,
                     latest_control_seq=r[22],
+                    author_check=r[23],
                 )
                 for r in rows
             ]
