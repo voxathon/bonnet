@@ -43,6 +43,22 @@ ROLE_FLAGS = {
 DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
+def _scoped_author(rec) -> str:
+    """Render a record's author as name@registrar, or as the key.
+
+    Never a bare username. A name is only an identity together with the origin
+    that issued it — two origins may hold the same name, and a record can claim
+    any registrar it likes — so a bare name is ambiguous at best and misleading
+    at worst. Falls back to the pubkey, which is the one field a signature
+    actually binds.
+    """
+    if rec.actor_username and rec.actor_registrar:
+        return f"{rec.actor_username}@{rec.actor_registrar}"
+    if rec.actor_username:
+        return f"{rec.actor_username}@? ({rec.actor_pubkey.hex()[:16]})"
+    return rec.actor_pubkey.hex()
+
+
 class OperatorConsole:
     """Interactive administration loop for a BonnetServer."""
 
@@ -1162,6 +1178,7 @@ class OperatorConsole:
         if len(parts) < 2:
             return (
                 "Usage: query-articles <board> [--author=<hex>] [--user=<name>] "
+                "[--registrar=<origin>] "
                 "[--tag=<tag>] [--since=<ts>] [--before=<ts>] "
                 "[--state=active|cancelled|superseded] "
                 "[--root] [--reply-to=<num>] [--pinned] "
@@ -1187,6 +1204,12 @@ class OperatorConsole:
             elif p.startswith("--user="):
                 val = p.split("=", 1)[1].encode("utf-8")
                 filters.append((0x02, 0x01, 0x02, val))
+            elif p.startswith("--registrar="):
+                # A username is only an identity together with the origin that
+                # issued it, so --user alone matches that name under any
+                # registrar. Pair them to ask for the one person.
+                val = p.split("=", 1)[1].encode("utf-8")
+                filters.append((0x03, 0x01, 0x02, val))
             elif p.startswith("--tag="):
                 val = p.split("=", 1)[1].encode("utf-8")
                 filters.append((0x04, 0x05, 0x02, val))
@@ -1471,7 +1494,11 @@ class OperatorConsole:
             # can be consulted; actor_pubkey there is signed, a projection
             # column would not be.
             rec = self.firehose.get_event_by_id(r["origin"], r["event_id"])
-            filer = (rec.actor_username or rec.actor_pubkey.hex()) if rec else "(record gone)"
+            # Scoped, never bare. A username means nothing without the origin
+            # that issued it — two origins may hold the same name — and this
+            # is a moderation surface, where a bare "filed by alice" invites
+            # acting against the wrong alice.
+            filer = _scoped_author(rec) if rec else "(record gone)"
             lines.append(
                 f"  {when}  seq {r['origin_seq']} on {r['origin']}\n"
                 f"    Filed by: {filer}\n"
@@ -1627,10 +1654,9 @@ class OperatorConsole:
             f"Pubkey:       {rec.actor_pubkey.hex()}",
         ]
 
-        if rec.actor_username:
-            lines.append(f"Username:     {rec.actor_username}")
-        if rec.actor_registrar:
-            lines.append(f"Registrar:    {rec.actor_registrar}")
+        if rec.actor_username or rec.actor_registrar:
+            lines.append(f"Claimed as:   {_scoped_author(rec)}")
+            lines.append("              (self-reported; the pubkey above is what is signed)")
 
         lines.extend(
             [

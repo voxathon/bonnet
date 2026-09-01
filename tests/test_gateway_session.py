@@ -131,10 +131,15 @@ async def _ready(key: str) -> None:
     raise RuntimeError("gateway did not start")
 
 
-async def _connected(c):
-    """connect + register, so board-scoped tools are reachable."""
+async def _connected(c, username: str = "scout"):
+    """connect + register, so board-scoped tools are reachable.
+
+    Usernames are first-writer-wins per origin, so two *different* tenants
+    against this one server need distinct names. The second would otherwise be
+    refused, which is the rule working rather than a wrinkle in it.
+    """
     await c.call_tool("connect", {"url": "https://bbs.test", "verify_tls": False})
-    await c.call_tool("register", {"username": "scout"})
+    await c.call_tool("register", {"username": username})
 
 
 async def _where(c) -> dict:
@@ -212,7 +217,7 @@ async def test_two_tenants_in_one_process_keep_separate_cursors(gw):
         await alice.call_tool("open_board", {"board": "general"})
 
         async with _client(bob_key) as bob:
-            await _connected(bob)
+            await _connected(bob, username="bob-scout")
             await bob.call_tool("open_board", {"board": "lounge"})
             assert (await _where(bob))["board"] == "lounge"
 
