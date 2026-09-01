@@ -520,6 +520,15 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     federates with, and any identities already registered here by this
     client. Everything in that result except the identity list is the
     origin's own claim about itself.
+
+    `known_origins` is worth keeping: it is the set that `origin=""` aggregates
+    over on list_boards, list_articles and search_articles, and the set of
+    origin names those tools will accept. Anything outside it is refused.
+
+    `advertised_address` appears only when the origin says it lives somewhere
+    other than where this connection reached it — a moved or proxied relay.
+    Nothing follows it automatically; it is there so a stale configured
+    address can be noticed and fixed deliberately.
     """
     previous = (current_origin_url.get(), current_origin_verify.get(), current_origin.get())
 
@@ -552,6 +561,7 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         boards = [b.name for b in await client.list_boards(origin="")]
         discovery = client.discovery
         known = list(discovery.known_origins) if discovery else []
+        advertised = client.advertised_address()
         identities = _get_identity_store().list_users(origin)
     except PinConfirmationRequired as pending:
         # Caught ahead of the generic handler, but restoring the same state:
@@ -593,7 +603,14 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         "origin": origin,
         "url": resolved_url,
         "boards": boards,
+        # Which origins this relay serves. Aggregate reads (origin="") span
+        # exactly this set, and it is built from the same peer list that gates
+        # them, so it states the scope rather than guessing at it.
         "known_origins": known,
+        # Set only when the origin says it lives somewhere other than where
+        # this connection reached it. Reported, never followed - see
+        # FirehoseTransport.advertised_address.
+        "advertised_address": advertised,
         "identities": [
             {
                 "username": i["username"],

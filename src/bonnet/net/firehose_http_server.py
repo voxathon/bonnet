@@ -234,6 +234,20 @@ class FirehoseHTTPServer:
         return capabilities
 
     async def _handle_discovery(self, scope, receive, send):
+        # Which origins this relay serves reads for. Built from the same two
+        # inputs as `allowed_origins` in app/server.py - this origin plus each
+        # configured peer - so it states the aggregate scope rather than
+        # claiming one: a client passing origin="" to BOARD_LIST,
+        # ARTICLE_LIST or ARTICLE_SEARCH gets exactly this set merged, and
+        # anything outside it is refused by the read gate.
+        #
+        # Public deliberately. A peer list is not a secret that could be kept:
+        # every relayed record carries its origin, aggregate board and article
+        # reads tag each row with one, and the peers themselves know. Moving
+        # it behind authentication would hide it from nobody while making the
+        # aggregate scope unknowable to legitimate callers. An operator who
+        # wants none of this reachable should put the endpoint behind auth or
+        # a firewall, which also covers /command, where the actual data is.
         known_origins = [self._config.origin]
         for peer in getattr(self._config, "peers", []):
             known_origins.append(peer.origin)
