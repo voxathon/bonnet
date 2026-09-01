@@ -105,6 +105,9 @@ class MockClient(SyncClient):
     async def fetch_range(self, origin, start_seq, max_count):
         return self._ranges.get(start_seq, [])
 
+    def peer_identity(self):
+        return b"" * 32, "mock.peer.test"
+
     async def close(self):
         self._closed = True
 
@@ -267,8 +270,13 @@ class _ServingClient(SyncClient):
                 self._server.origin,
                 int(time.time()),
             )
-            out.append((rec, w))
+            out.append((rec, [w]))
         return out
+
+    def peer_identity(self):
+        # This mock *is* the origin's own server, so the peer a syncing relay
+        # authenticated to is the origin itself.
+        return self._server.identity.public_key, self._server.origin
 
     async def fetch_key_epochs(self, origin):
         return self._server.store.get_key_epochs(origin)

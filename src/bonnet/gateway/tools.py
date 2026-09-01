@@ -2382,7 +2382,21 @@ async def get_event(
     event_id_hex: str,
     auth: str | None = None,
 ) -> dict:
-    """Get a single event by ID with full details including witness.
+    """Get one event by ID: the record as published, and who carried it.
+
+    This is the substrate log entry, not a projection — it is a record of
+    something having been published, not a statement that it still stands. A
+    later event may have cancelled, superseded or purged it.
+
+    `actor_username` and `actor_registrar` are the author's own claim, signed
+    but not thereby true. The origin that published the record vouches for
+    neither unless it is also the named registrar. `author_pubkey` is the only
+    field a signature binds.
+
+    `witnesses` is the provenance chain: one entry per relay that carried the
+    event, each a signed statement by that relay about who handed it over. It
+    is not verified here — use trace_event, which checks every signature and
+    shows how the links join up.
 
     origin: origin that published the event.
     event_id_hex: hex event ID (64 chars).
@@ -2394,7 +2408,7 @@ async def get_event(
             await _connect_authenticated(client, auth)
         else:
             await _connect_anonymous(client)
-        rec, witness = await client.get_event(origin, eid)
+        rec, witnesses = await client.get_event(origin, eid)
         return {
             "origin": rec.origin,
             "origin_seq": rec.origin_seq,
@@ -2416,13 +2430,16 @@ async def get_event(
             "target_event_id": rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else "",
             "body_hash": rec.body_hash.hex(),
             "body_size": rec.body_size,
-            "witness": {
-                "relay_pubkey": witness.relay_pubkey.hex(),
-                "relay_hostname": witness.relay_hostname,
-                "received_from_pubkey": witness.received_from_pubkey.hex(),
-                "received_from_hostname": witness.received_from_hostname,
-                "seen_at": witness.seen_at,
-            },
+            "witnesses": [
+                {
+                    "relay_pubkey": w.relay_pubkey.hex(),
+                    "relay_hostname": w.relay_hostname,
+                    "received_from_pubkey": w.received_from_pubkey.hex(),
+                    "received_from_hostname": w.received_from_hostname,
+                    "seen_at": w.seen_at,
+                }
+                for w in witnesses
+            ],
         }
     finally:
         await client.close()
@@ -2433,18 +2450,32 @@ async def get_event(
 async def trace_event(
     origin: str,
     event_id_hex: str,
-    max_hops: int = 10,
     auth: str | None = None,
 ) -> list[dict]:
-    """Trace an event back to its origin through relay witnesses.
+    """Show which relays carried an event, and who each says handed it to them.
 
-    Follows the witness chain hop-by-hop. Returns a list of hops with
-    relay pubkey, relay hostname, upstream pubkey, upstream hostname,
-    and seen_at timestamp.
+    One request. The chain travels with the record, so tracing does not depend
+    on the relays in it still being reachable or still willing to answer.
+
+    What a hop establishes, and what it does not. Each entry is a signed
+    statement by the relay named in `relay_pubkey`, checked here — that is what
+    `signature_valid` reports, and a false value means the entry is a forgery
+    by whoever served it, not a fact about that relay. A valid signature makes
+    the claim *attributable and non-repudiable*, not true: a relay can lie
+    about who handed it a record, it just cannot do so anonymously or deniably.
+    So read the chain as a set of accountable claims, where the earliest honest
+    link bounds where a lie could have entered.
+
+    `linked` marks hops that join the chain by matching `received_from_pubkey`
+    to another hop's `relay_pubkey`, ordered from the origin outward.
+    Unlinked hops are listed after: a gap or a fork is the interesting result
+    and is deliberately not smoothed over. `is_origin` marks the terminating
+    witness the origin signed for its own record.
+
+    Hostnames here are self-reported strings like any other record content.
 
     origin: origin that published the event.
     event_id_hex: hex event ID (64 chars).
-    max_hops: maximum hops to follow (default 10).
     """
     eid = _validate_event_id(event_id_hex)
     client = _make_client()
@@ -2453,7 +2484,7 @@ async def trace_event(
             await _connect_authenticated(client, auth)
         else:
             await _connect_anonymous(client)
-        return await client.trace_event(origin, eid, max_hops)
+        return await client.trace_event(origin, eid)
     finally:
         await client.close()
 
