@@ -872,6 +872,42 @@ class FirehoseCommandHandler:
             payload += _enc_text16(kind)
         return _success(payload)
 
+    def _witness_set(self, origin: str, rec, event_hash: bytes) -> bytes:
+        """Encode the provenance chain held for one event.
+
+        The local relay's own witness always leads; upstream ones retained from
+        peers follow. Each is a signed statement by the relay it names, so the
+        chain stays readable after any of those relays goes offline - which is
+        the whole reason it travels with the record instead of being fetched
+        from the relays themselves when someone asks.
+
+        Serving only our own link, as this did before, meant the chain died at
+        every hop: each relay downstream saw one entry and had no way to learn
+        the rest.
+        """
+        own = self._firehose.get_witness(origin, rec.event_id, self._identity.public_key)
+        if own is None:
+            own = make_origin_witness(
+                origin=origin,
+                event_id=rec.event_id,
+                event_hash=event_hash,
+                origin_identity=self._identity,
+                hostname=self._hostname,
+                seen_at=rec.created_at,
+            )
+            self._firehose.store_witness(own)
+
+        chain = [own] + [
+            w
+            for w in self._firehose.get_witnesses(origin, rec.event_id)
+            if w.relay_pubkey != own.relay_pubkey
+        ]
+        out = struct.pack(">H", len(chain))
+        for w in chain:
+            encoded = encode_witness(w)
+            out += struct.pack(">H", len(encoded)) + encoded
+        return out
+
     # ------------------------------------------------------------------
     # EVENT_RANGE
     # ------------------------------------------------------------------
@@ -893,23 +929,14 @@ class FirehoseCommandHandler:
             if max_bytes > 0 and total_bytes + len(encoded_rec) > max_bytes:
                 break
             event_hash = compute_event_hash(encoded_rec)
-
-            witness = self._firehose.get_witness(origin, rec.event_id, self._identity.public_key)
-            if witness is None:
-                witness = make_origin_witness(
-                    origin=origin,
-                    event_id=rec.event_id,
-                    event_hash=event_hash,
-                    origin_identity=self._identity,
-                    hostname=self._hostname,
-                    seen_at=rec.created_at,
-                )
-                self._firehose.store_witness(witness)
-            encoded_witness = encode_witness(witness)
+            witnesses = self._witness_set(origin, rec, event_hash)
 
             out += struct.pack(">I", len(encoded_rec)) + encoded_rec
-            out += struct.pack(">H", len(encoded_witness)) + encoded_witness
-            total_bytes += len(encoded_rec)
+            out += witnesses
+            # Witness bytes count against the caller's budget. They did not
+            # before, which under-counted every response by one witness and
+            # would now under-count by a whole chain.
+            total_bytes += len(encoded_rec) + len(witnesses)
 
         return _success(out)
 
@@ -930,24 +957,10 @@ class FirehoseCommandHandler:
         encoded_rec = encode_record(rec)
         event_hash = compute_event_hash(encoded_rec)
 
-        witness = self._firehose.get_witness(origin, rec.event_id, self._identity.public_key)
-        if witness is None:
-            witness = make_origin_witness(
-                origin=origin,
-                event_id=rec.event_id,
-                event_hash=event_hash,
-                origin_identity=self._identity,
-                hostname=self._hostname,
-                seen_at=rec.created_at,
-            )
-            self._firehose.store_witness(witness)
-        encoded_witness = encode_witness(witness)
-
         return _success(
             struct.pack(">I", len(encoded_rec))
             + encoded_rec
-            + struct.pack(">H", len(encoded_witness))
-            + encoded_witness
+            + self._witness_set(origin, rec, event_hash)
         )
 
     # ------------------------------------------------------------------
@@ -1392,10 +1405,18 @@ class FirehoseCommandHandler:
             if origin != self._origin:
                 peer = self._peer_map.get(origin)
                 if peer:
+                    # A location hint: where this origin can be reached, so the
+                    # caller can ask the party that actually holds the body.
+                    #
+                    # It no longer carries a TLS setting. That was this relay
+                    # telling a client how carefully to check someone else's
+                    # certificate — a decision that belongs to the client, sent
+                    # by the one party a client should not take it from, since
+                    # the same message chooses the destination. The client
+                    # applies its own policy to the hop.
                     out = _enc_text16(origin)
                     out += _enc_text16(peer.hostname)
                     out += struct.pack(">H", peer.port)
-                    out += struct.pack(">B", 1 if peer.verify_tls else 0)
                     return b"\x02" + out
             return _error(0x0003, "Body unavailable")
 

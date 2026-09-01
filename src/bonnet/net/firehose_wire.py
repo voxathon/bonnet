@@ -10,6 +10,7 @@ from __future__ import annotations
 import struct
 
 from bonnet.core.record import (
+    MAX_WITNESS_SET,
     ZERO_ID,
     CodecError,
     Head,
@@ -186,11 +187,18 @@ def _read_blob32(data: bytes, offset: int) -> tuple[bytes, int]:
 
 
 class BodyRedirectError(Exception):
-    def __init__(self, origin: str, hostname: str, port: int, verify_tls: bool):
+    """Where a body lives, when the relay asked for it does not hold it.
+
+    A hint about the origin's location, and nothing more. It deliberately does
+    not carry a TLS setting: how carefully to verify the far end's certificate
+    is the client's policy, and taking it from the relay that also chose the
+    destination would let one party pick both the host and the scrutiny.
+    """
+
+    def __init__(self, origin: str, hostname: str, port: int):
         self.origin = origin
         self.hostname = hostname
         self.port = port
-        self.verify_tls = verify_tls
         super().__init__(f"body redirect: origin='{origin}' hostname='{hostname}' port={port}")
 
 
@@ -413,16 +421,38 @@ def parse_permissions_response(resp: bytes) -> Permissions:
     return Permissions(principal=principal, role=role, board=board, commands=commands, kinds=kinds)
 
 
-def parse_event_range_response(resp: bytes) -> list[tuple[Record, Witness]]:
+def _read_witness_set(payload: bytes, offset: int) -> tuple[list[Witness], int]:
+    """A count-prefixed provenance chain: one witness per relay the event crossed.
+
+    Every entry is a signed statement by the relay it names, so the chain is
+    readable without contacting any of them - which is the point, since a relay
+    that has gone offline or stopped answering would otherwise erase the trail
+    through it. The set is unordered on purpose: reassemble it by matching
+    relay_pubkey against received_from_pubkey, and treat a broken or forked
+    edge as a finding rather than something a sort order should smooth over.
+
+    Nothing here is trusted. Signatures are checked where the witnesses are
+    stored (FirehoseStore.store_witness); this only frames the bytes.
+    """
+    count, offset = _read_u16(payload, offset)
+    if count > MAX_WITNESS_SET:
+        raise ProtocolError(f"witness set of {count} exceeds maximum {MAX_WITNESS_SET}")
+    witnesses = []
+    for _ in range(count):
+        raw, offset = _read_blob16(payload, offset)
+        witnesses.append(_guard(decode_witness, raw))
+    return witnesses, offset
+
+
+def parse_event_range_response(resp: bytes) -> list[tuple[Record, list[Witness]]]:
     status, payload = parse_response(resp)
     count, offset = _read_u16(payload, 0)
     results = []
     for _ in range(count):
         raw, offset = _read_blob32(payload, offset)
         rec = _guard(decode_record, raw)
-        raw, offset = _read_blob16(payload, offset)
-        witness = _guard(decode_witness, raw)
-        results.append((rec, witness))
+        witnesses, offset = _read_witness_set(payload, offset)
+        results.append((rec, witnesses))
     return results
 
 
@@ -438,14 +468,13 @@ def build_event_get(origin: str, event_id: bytes) -> bytes:
     return out
 
 
-def parse_event_get_response(resp: bytes) -> tuple[Record, Witness]:
+def parse_event_get_response(resp: bytes) -> tuple[Record, list[Witness]]:
     status, payload = parse_response(resp)
     offset = 0
     raw, offset = _read_blob32(payload, offset)
     rec = _guard(decode_record, raw)
-    raw, offset = _read_blob16(payload, offset)
-    witness = _guard(decode_witness, raw)
-    return rec, witness
+    witnesses, offset = _read_witness_set(payload, offset)
+    return rec, witnesses
 
 
 # ---------------------------------------------------------------------------
@@ -827,8 +856,7 @@ def parse_article_body_response(resp: bytes) -> bytes:
         origin, offset = _read_text16(payload, 0)
         hostname, offset = _read_text16(payload, offset)
         port, offset = _read_u16(payload, offset)
-        verify_tls, offset = _read_u8(payload, offset)
-        raise BodyRedirectError(origin, hostname, port, bool(verify_tls))
+        raise BodyRedirectError(origin, hostname, port)
     if status == STATUS_ERROR:
         parse_response(resp)
     body, _ = _read_blob32(payload, 0)

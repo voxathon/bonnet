@@ -10,6 +10,7 @@ import pytest
 
 from bonnet.core.crypto import Identity
 from bonnet.core.record import (
+    MAX_WITNESS_SET,
     ZERO_HASH,
     ZERO_ID,
     Head,
@@ -158,6 +159,15 @@ def _make_record(
     return rec
 
 
+def _encode_witness_set(witnesses) -> bytes:
+    """Frame a provenance chain the way the wire does: count, then each entry."""
+    out = struct.pack(">H", len(witnesses))
+    for w in witnesses:
+        ew = encode_witness(w)
+        out += struct.pack(">H", len(ew)) + ew
+    return out
+
+
 def _make_witness(rec: Record, hostname="bbs.test") -> Witness:
     encoded = encode_record(rec)
     event_hash = compute_event_hash(encoded)
@@ -294,17 +304,48 @@ class TestEventRange:
         recs = [_make_record(seq=i + 1) for i in range(3)]
         out = struct.pack(">H", 3)
         for rec in recs:
-            w = _make_witness(rec)
             er = encode_record(rec)
-            ew = encode_witness(w)
             out += struct.pack(">I", len(er)) + er
-            out += struct.pack(">H", len(ew)) + ew
+            out += _encode_witness_set([_make_witness(rec)])
         resp = _success(out)
 
         results = parse_event_range_response(resp)
         assert len(results) == 3
         assert results[0][0].origin_seq == 1
         assert results[2][0].origin_seq == 3
+
+    def test_parse_carries_a_multi_hop_chain(self):
+        """Each relay the event crossed adds one witness, and all of them
+        arrive together - that is what makes the chain readable when some of
+        those relays are gone."""
+        rec = _make_record()
+        chain = [
+            _make_witness(rec, hostname="origin.test"),
+            _make_witness(rec, hostname="relay-a.test"),
+            _make_witness(rec, hostname="relay-b.test"),
+        ]
+        er = encode_record(rec)
+        out = struct.pack(">H", 1) + struct.pack(">I", len(er)) + er
+        out += _encode_witness_set(chain)
+
+        results = parse_event_range_response(_success(out))
+        assert len(results) == 1
+        assert [w.relay_hostname for w in results[0][1]] == [
+            "origin.test",
+            "relay-a.test",
+            "relay-b.test",
+        ]
+
+    def test_an_oversized_witness_set_is_refused(self):
+        """The set arrives from a peer, which can fabricate entries as cheaply
+        as it relays real ones."""
+        rec = _make_record()
+        er = encode_record(rec)
+        out = struct.pack(">H", 1) + struct.pack(">I", len(er)) + er
+        out += struct.pack(">H", MAX_WITNESS_SET + 1)
+
+        with pytest.raises(ProtocolError, match="exceeds maximum"):
+            parse_event_range_response(_success(out))
 
 
 # ---------------------------------------------------------------------------
@@ -321,13 +362,22 @@ class TestEventGet:
 
     def test_parse(self):
         rec = _make_record()
-        w = _make_witness(rec)
         er = encode_record(rec)
-        ew = encode_witness(w)
-        resp = _success(struct.pack(">I", len(er)) + er + struct.pack(">H", len(ew)) + ew)
-        raw_rec, raw_w = parse_event_get_response(resp)
+        resp = _success(struct.pack(">I", len(er)) + er + _encode_witness_set([_make_witness(rec)]))
+        raw_rec, raw_ws = parse_event_get_response(resp)
         assert raw_rec.event_id == rec.event_id
-        assert raw_w.relay_pubkey == ORIGIN_PUB
+        assert len(raw_ws) == 1
+        assert raw_ws[0].relay_pubkey == ORIGIN_PUB
+
+    def test_parse_with_no_witnesses(self):
+        """An empty chain is well-formed: it says nobody has vouched for
+        carrying this, which is a fact worth being able to express."""
+        rec = _make_record()
+        er = encode_record(rec)
+        resp = _success(struct.pack(">I", len(er)) + er + struct.pack(">H", 0))
+        raw_rec, raw_ws = parse_event_get_response(resp)
+        assert raw_rec.event_id == rec.event_id
+        assert raw_ws == []
 
 
 # ---------------------------------------------------------------------------

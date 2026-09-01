@@ -1114,7 +1114,10 @@ class TestFederationSync:
                 return head, encode_head(head)
 
             async def fetch_range(self, origin, start_seq, max_count):
-                return [(rec, origin_witness)]
+                return [(rec, [origin_witness])]
+
+            def peer_identity(self):
+                return ORIGIN_PUB, "bbs.test"
 
         relay_identity = Identity.from_private_key(bytes(range(20, 52)))
         sync_mgr = SyncManager(receiver_store, relay_identity, "relay.test")
@@ -1144,6 +1147,9 @@ class TestFederationSync:
 
             async def fetch_range(self, origin, start, count):
                 return []
+
+            def peer_identity(self):
+                return ORIGIN_PUB, "bbs.test"
 
         sync_mgr = SyncManager(receiver_store, ORIGIN, "bbs.test")
         result = sync_mgr.sync_manual("bbs.test", MockClient())
@@ -1201,7 +1207,14 @@ class TestFederationSync:
                 return head, encode_head(head)
 
             async def fetch_range(self, origin, start, count):
-                return [(rec, origin_w)]
+                return [(rec, [origin_w])]
+
+            def peer_identity(self):
+                # The mock peer here *is* the origin's own server, so the
+                # authenticated peer and the origin coincide - which is why
+                # these assertions read the same as before the witness stopped
+                # being copied from the upstream's self-description.
+                return ORIGIN_PUB, "bbs.test"
 
         sync_mgr = SyncManager(receiver_store, relay_identity, "relay.test")
         result = sync_mgr.sync_manual("bbs.test", MockClient())

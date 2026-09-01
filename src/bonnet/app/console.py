@@ -1631,11 +1631,21 @@ class OperatorConsole:
 
         rec = decode_record(resp[offset : offset + rec_len])
         offset += rec_len
-        w_len = struct.unpack(">H", resp[offset : offset + 2])[0]
-        offset += 2
-        from bonnet.core.record import decode_witness, is_origin_witness
+        from bonnet.core.record import (
+            decode_witness,
+            encode_unsigned_witness,
+            is_origin_witness,
+            verify_witness_signature,
+        )
 
-        witness = decode_witness(resp[offset : offset + w_len])
+        w_count = struct.unpack(">H", resp[offset : offset + 2])[0]
+        offset += 2
+        witnesses = []
+        for _ in range(w_count):
+            w_len = struct.unpack(">H", resp[offset : offset + 2])[0]
+            offset += 2
+            witnesses.append(decode_witness(resp[offset : offset + w_len]))
+            offset += w_len
 
         from datetime import datetime
 
@@ -1738,24 +1748,31 @@ class OperatorConsole:
                 lines.append(f"  [{f.field_id}] {type_name}: {val}")
 
         zero_key = b"\x00" * 32
-        from_pubkey = (
-            witness.received_from_pubkey.hex()
-            if witness.received_from_pubkey != zero_key
-            else "(origin)"
-        )
-        lines.extend(
-            [
-                "",
-                "=== Witness ===",
-                f"Relay pubkey: {witness.relay_pubkey.hex()}",
-                f"Relay host:   {witness.relay_hostname}",
-                f"From pubkey:  {from_pubkey}",
-                f"From host:    {witness.received_from_hostname or '(origin)'}",
-                f"Seen at:      {datetime.fromtimestamp(witness.seen_at).strftime('%Y-%m-%d %H:%M:%S')}",
-                f"Origin term:  {'yes' if is_origin_witness(witness) else 'no'}",
-                f"Event hash:   {witness.event_hash.hex()}",
-            ]
-        )
+        lines.extend(["", f"=== Provenance ({len(witnesses)} witness(es)) ==="])
+        for w in witnesses:
+            from_pubkey = (
+                w.received_from_pubkey.hex() if w.received_from_pubkey != zero_key else "(origin)"
+            )
+            seen = datetime.fromtimestamp(w.seen_at).strftime("%Y-%m-%d %H:%M:%S")
+            valid = verify_witness_signature(
+                w.relay_pubkey, encode_unsigned_witness(w), w.relay_signature
+            )
+            lines.extend(
+                [
+                    f"  Relay pubkey: {w.relay_pubkey.hex()}",
+                    f"  Relay host:   {w.relay_hostname}",
+                    f"  From pubkey:  {from_pubkey}",
+                    f"  From host:    {w.received_from_hostname or '(origin)'}",
+                    f"  Seen at:      {seen}",
+                    f"  Origin term:  {'yes' if is_origin_witness(w) else 'no'}",
+                    f"  Event hash:   {w.event_hash.hex()}",
+                    # Each entry is that relay's own signed claim about who
+                    # handed it the record. A valid signature makes the claim
+                    # attributable to that key; it does not make it true.
+                    f"  Signature:    {'valid' if valid else 'INVALID'}",
+                    "",
+                ]
+            )
 
         return "\n".join(lines)
 
