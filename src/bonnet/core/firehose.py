@@ -1269,6 +1269,105 @@ class FirehoseStore:
             actual = compute_event_hash(bytes(erow[0]))
             return actual == recorded, recorded, actual
 
+    def derive_key_epochs(self, origin: str) -> list[tuple[int, int | None, bytes]] | None:
+        """Rebuild an origin's epoch table from the rotate records we hold.
+
+        The sibling of `check_tip`, for the other table maintained alongside
+        `events` rather than derived from it. `origin_key_epochs` is the more
+        load-bearing of the two — it decides *which key verifies which record* —
+        and it had no consistency check at all, while `origin_state` has had
+        one since the tip-drift incident.
+
+        Its failure mode is also worse. A drifted tip raises ChainBreak, which
+        `_diagnose_chain_break` recognises as ours and repairs. A drifted epoch
+        table raises SignatureInvalid, which looks exactly like a peer serving
+        forged records — so the relay blames an honest peer and retries forever.
+
+        Returns the epochs implied by epoch 1's key plus every stored rotate
+        record, or None when there is nothing to derive from. Epoch 1's key is
+        the TOFU anchor and cannot be re-derived: it entered from a head, not
+        from a record. So the question this answers is "given the anchor, does
+        the rest follow" — which is the same question `_derive_batch_keys` asks
+        of an incoming batch, run against stored history instead.
+        """
+        with self._lock:
+            first = self._conn.execute(
+                "SELECT start_seq, publickey FROM origin_key_epochs "
+                "WHERE origin=? ORDER BY start_seq LIMIT 1",
+                (origin,),
+            ).fetchone()
+            if not first or first[0] != 1:
+                return None
+            rows = self._conn.execute(
+                "SELECT encoded_record FROM events WHERE origin=? AND kind=? ORDER BY origin_seq",
+                (origin, KIND_ORIGIN_KEY_ROTATE),
+            ).fetchall()
+
+        current = bytes(first[1])
+        derived: list[tuple[int, int | None, bytes]] = []
+        start = 1
+        for row in rows:
+            rec = decode_record(bytes(row[0]))
+            new_key = rec.metadata.get_bytes(1)
+            proof = rec.metadata.get_bytes(2)
+            # A rotate that does not chain from the key we are holding, or
+            # whose signature or proof does not hold, is not a boundary we can
+            # derive through. Stop rather than guess: everything before it is
+            # still sound, and reporting a short table is honest where
+            # inventing the rest would not be.
+            if new_key is None or proof is None or rec.actor_pubkey != current:
+                break
+            if not verify_record_signature(
+                current, encode_unsigned_record(rec), rec.origin_signature
+            ):
+                break
+            if not verify_key_rotation_proof(new_key, origin, current, proof):
+                break
+            derived.append((start, rec.origin_seq, current))
+            start = rec.origin_seq + 1
+            current = new_key
+        derived.append((start, None, current))
+        return derived
+
+    def check_key_epochs(self, origin: str) -> tuple[bool, list, list]:
+        """Compare the stored epoch table against what the records imply.
+
+        Returns (consistent, stored, derived). Consistent when nothing can be
+        derived, since there is then nothing to disagree with.
+        """
+        derived = self.derive_key_epochs(origin)
+        stored = self.get_key_epochs(origin)
+        if derived is None:
+            return True, stored, []
+        return stored == derived, stored, derived
+
+    def repair_key_epochs(self, origin: str) -> bool:
+        """Rewrite the epoch table from the derivation. True if it changed.
+
+        Only `origin_key_epochs` is touched. The records it is derived from are
+        signed and are never rewritten here — same rule as `repair_tip`.
+        """
+        consistent, _stored, derived = self.check_key_epochs(origin)
+        if consistent or not derived:
+            return False
+        now = int(time.time())
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM origin_key_epochs WHERE origin=?", (origin,))
+                for start, end, pubkey in derived:
+                    self._conn.execute(
+                        "INSERT INTO origin_key_epochs "
+                        "(origin, start_seq, end_seq, publickey, first_seen) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (origin, start, end, pubkey, now),
+                    )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return True
+
     def repair_tip(self, origin: str) -> bool:
         """Reset the recorded tip to the stored record at highest_seq.
 

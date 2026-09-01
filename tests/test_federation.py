@@ -11,7 +11,6 @@ from bonnet.core.crypto import Identity
 from bonnet.core.firehose import (
     KIND_ARTICLE,
     KIND_ORIGIN_KEY_ROTATE,
-    FirehoseError,
     FirehoseStore,
 )
 from bonnet.core.record import (
@@ -448,13 +447,22 @@ async def test_hostile_substitution_refused_at_acceptance(tmp_path):
     )
     head.origin_signature = sign_head(attacker, encode_unsigned_head(head))
 
-    evil = MockClient(head=head, ranges={4: [(f4, None)], 5: [(f5, None)]})
+    evil = MockClient(head=head, ranges={4: [(f4, [])], 5: [(f5, [])]})
 
-    with pytest.raises(FirehoseError):
-        await mgr._sync_once(real.origin, evil, skip_allowlist=True)
+    result = await mgr._sync_once(real.origin, evil, skip_allowlist=True)
 
+    # Refused, and state untouched - the substitution never lands.
+    assert not result.accepted
     assert peer_store.get_highest_seq(real.origin) == 3
     assert peer_store.get_current_key(real.origin) == k1
+
+    # And it is now *reported*. This used to raise out of _sync_once into the
+    # loop's blanket handler, which logged and retried hourly forever while
+    # sync status stayed clean - so the one place an operator looks said
+    # nothing was wrong. Nothing about either side will change on a retry.
+    assert "diverged" in result.reason
+    status = peer_store.get_sync_status(real.origin)
+    assert status["status"] == "diverged"
 
 
 @pytest.mark.xdist_group("rotation_sync")
@@ -566,13 +574,18 @@ async def test_unlinked_rotate_rejected(tmp_path):
     )
     head.origin_signature = sign_head(attacker_new, encode_unsigned_head(head))
 
-    evil = MockClient(head=head, ranges={4: [(rot, None)]})
+    evil = MockClient(head=head, ranges={4: [(rot, [])]})
 
-    with pytest.raises(FirehoseError):
-        await mgr._sync_once(real.origin, evil, skip_allowlist=True)
+    result = await mgr._sync_once(real.origin, evil, skip_allowlist=True)
 
+    assert not result.accepted
     assert peer_store.get_highest_seq(real.origin) == 3
     assert peer_store.get_current_key(real.origin) == k0
+
+    # Reported rather than raised: an unlinked rotate is indistinguishable
+    # from a takeover of this origin's name, and neither resolves by retrying.
+    assert "diverged" in result.reason
+    assert peer_store.get_sync_status(real.origin)["status"] == "diverged"
 
 
 # ---------------------------------------------------------------------------
