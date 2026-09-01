@@ -570,6 +570,13 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     Nothing follows it automatically; it is there so a stale configured
     address can be noticed and fixed deliberately.
     """
+    if not url.strip():
+        raise ValueError(
+            "connect requires a URL (e.g. https://bbs.example:2272) - an empty "
+            "or whitespace-only value would silently fall back to the default "
+            "origin instead of connecting where you meant to"
+        )
+
     previous = (current_origin_url.get(), current_origin_verify.get(), current_origin.get())
 
     resolved_url = url.rstrip("/")

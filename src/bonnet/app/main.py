@@ -91,7 +91,44 @@ def _load_and_validate_config(args) -> FirehoseConfig:
         print(f"error: invalid configuration: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
+    for warning in _acl_rule_warnings(config):
+        print(f"warning: {warning}", file=sys.stderr)
+
     return config
+
+
+def _acl_rule_warnings(config: FirehoseConfig) -> list[str]:
+    """Flag ACL rule commands/kinds that can never match anything.
+
+    A rule's `commands`/`kinds` are free-form strings (acl.py has no
+    reference back to the real command/kind name sets - see ACLRule.from_dict),
+    so a typo silently produces a rule that never fires: on an allow it grants
+    nothing, on a deny it blocks nothing, and --check-config previously
+    reported the config fully valid either way. This is advisory, not fatal -
+    a newer command/kind name this build doesn't know about yet is not
+    actually wrong - so it warns rather than failing validation.
+    """
+    from bonnet.core.kinds import ALL_KNOWN_KINDS
+    from bonnet.net.firehose_commands import CMD_NAMES
+
+    known_commands = set(CMD_NAMES.values()) | {"*"}
+    known_kinds = set(ALL_KNOWN_KINDS) | {"*"}
+
+    warnings = []
+    for i, rule in enumerate(config.acl._rules):
+        for command in rule.commands or []:
+            if command not in known_commands:
+                warnings.append(
+                    f"acl rule [{i}] references unknown command '{command}' "
+                    "(this rule can never match anything)"
+                )
+        for kind in rule.kinds or []:
+            if kind not in known_kinds:
+                warnings.append(
+                    f"acl rule [{i}] references unknown kind '{kind}' "
+                    "(this rule can never match anything)"
+                )
+    return warnings
 
 
 def main(argv: list[str] | None = None):

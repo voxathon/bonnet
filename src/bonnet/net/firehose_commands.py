@@ -30,6 +30,7 @@ from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     SIG_SIZE,
     ZERO_ID,
+    CodecError,
     compute_body_hash,
     compute_event_hash,
     decode_intent,
@@ -413,7 +414,7 @@ class FirehoseCommandHandler:
                 return _error(0x0005, f"Unhandled opcode 0x{opcode:02x}")
         except ValueError as e:
             return _error(0x0006, str(e))
-        except (FirehoseError, ValidationError) as e:
+        except (FirehoseError, ValidationError, CodecError) as e:
             return _error(0x0006, str(e))
         except Exception as e:
             log_msg(f"COMMAND: {cmd_name} failed unexpectedly: {e}")

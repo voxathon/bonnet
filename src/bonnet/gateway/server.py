@@ -111,8 +111,13 @@ def presented_key(headers) -> str:
     Authorization bearer token.
     """
     auth = headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[7:].strip()
+    # The scheme token is case-insensitive per RFC 7235 - "bearer" is a
+    # reasonable, easy mistake for integrators used to lowercase HTTP header
+    # conventions, and it used to silently degrade to anonymous instead of
+    # being recognized.
+    scheme, _, rest = auth.partition(" ")
+    if scheme.lower() == "bearer":
+        token = rest.strip()
         if token:
             return token
     return (headers.get("X-API-Key", "") or "").strip()
