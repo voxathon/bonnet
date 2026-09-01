@@ -217,3 +217,36 @@ async def test_get_event_lets_a_reader_check_the_signatures(wired):
         "origin": "valid",
         "origin_key_known_for_seq": True,
     }
+
+
+async def test_publish_article_rejects_lone_surrogate(wired):
+    """A lone UTF-16 surrogate in content used to hang the gateway rather
+    than fail cleanly: content.encode("utf-8") raised UnicodeEncodeError,
+    and something downstream of that failed a second time trying to
+    serialize a response, with nothing ever resolving the caller's
+    call_tool() future. Reject it up front instead."""
+    await _connect_register_and_create_board("general")
+
+    with pytest.raises(Exception) as exc:
+        await tools.publish_article("subject", "bad\ud800surrogate", board="general")
+
+    assert "surrogate" in str(exc.value)
+
+
+async def test_publishing_to_an_uncreated_board_is_still_discoverable(wired):
+    """A board that was never explicitly create_board'd used to accept a
+    publish silently while staying invisible to list_boards and the default
+    (aggregate, origin="") list_articles path — a false success a caller
+    could never browse back to, since get_article could still fetch it
+    directly. The board must be discoverable through both listings once an
+    article has actually landed there."""
+    await tools.connect("https://bbs.test")
+    await tools.register("scout")
+
+    await tools.publish_article("first post", "body", board="ghost-board")
+
+    boards = await tools.list_boards(origin=ORIGIN)
+    assert "ghost-board" in {b.name for b in boards}
+
+    listing = await tools.list_articles(board="ghost-board")
+    assert [a.subject for a in listing.results] == ["first post"]

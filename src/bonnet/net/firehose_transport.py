@@ -200,7 +200,12 @@ class FirehoseTransport:
         anchor when enabled. TOFU pinning persists the key for subsequent
         connections.
         """
-        resp = await self._http.get(f"{self._base_url}/.well-known/untp")
+        try:
+            resp = await self._http.get(f"{self._base_url}/.well-known/untp")
+        except httpx.HTTPError as e:
+            raise FirehoseClientError(
+                f"could not reach {self._base_url}: {e or type(e).__name__}"
+            ) from e
         resp.raise_for_status()
         data = resp.json()
         info = DiscoveryInfo(
@@ -616,11 +621,16 @@ class FirehoseTransport:
         )
 
         headers = dict(msg.headers)
-        resp = await self._http.post(
-            f"{self._base_url}/command",
-            content=cmd_bytes,
-            headers=headers,
-        )
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/command",
+                content=cmd_bytes,
+                headers=headers,
+            )
+        except httpx.HTTPError as e:
+            raise FirehoseClientError(
+                f"could not reach {self._base_url}: {e or type(e).__name__}"
+            ) from e
 
         if resp.status_code != 200:
             raise FirehoseClientError(f"HTTP {resp.status_code}: {resp.text[:200]}")
