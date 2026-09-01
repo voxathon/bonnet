@@ -33,7 +33,6 @@ from bonnet.core.record import (
     Intent,
     MetadataMap,
     Record,
-    Witness,
     compute_body_hash,
     encode_intent,
     encode_record,
@@ -385,10 +384,10 @@ async def test_a_foreign_claim_is_relayed_verbatim_and_marked(tmp_path):
             return evil.store.get_head(origin), b""
 
         async def fetch_range(self, origin, start_seq, max_count):
-            return [
-                (r, Witness(event_origin=r.origin, event_id=r.event_id))
-                for r in evil.store.get_events_range(origin, start_seq, max_count)
-            ]
+            return [(r, []) for r in evil.store.get_events_range(origin, start_seq, max_count)]
+
+        def peer_identity(self):
+            return evil.identity.public_key, "evil.test"
 
         async def close(self):
             pass

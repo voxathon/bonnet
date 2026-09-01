@@ -39,6 +39,13 @@ MAX_METADATA_FIELDS = 256
 MAX_TEXT_FIELD = 4096
 MAX_RANGE_RESPONSE = 1 << 24
 
+#: Witnesses carried with one event. The provenance chain grows by one entry
+#: per relay the event crossed, so the honest bound is small; the cap exists
+#: because the set arrives from a peer, and a peer can fabricate entries as
+#: cheaply as it can relay real ones. Reaching it means the chain is longer
+#: than this relay will carry, not that anything is wrong.
+MAX_WITNESS_SET = 32
+
 # Domain separation tags. These namespace every hash and signature the ledger
 # produces, so a signature over one structure can never verify against another.
 # The `untp.` prefix is the substrate's namespace, distinct from the `bonnet.`

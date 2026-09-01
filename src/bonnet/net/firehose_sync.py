@@ -108,8 +108,27 @@ class SyncClient:
 
     async def fetch_range(
         self, origin: str, start_seq: int, max_count: int
-    ) -> list[tuple[Record, Witness]]:
-        """Fetch a range of records with witnesses. Returns list of (record, witness)."""
+    ) -> list[tuple[Record, list[Witness]]]:
+        """Fetch a range of records with their provenance chains.
+
+        Returns list of (record, witnesses). The witness set is whatever the
+        peer holds: its own link plus any it retained from further upstream.
+        None of it is trusted here - `FirehoseStore.store_witness` verifies
+        each signature before anything is kept.
+        """
+        raise NotImplementedError
+
+    def peer_identity(self) -> tuple[bytes, str]:
+        """The peer this client is actually authenticated to: (pubkey, hostname).
+
+        Deliberately not optional. A relay's own witness states who handed it
+        the record, and that has to be the party it really spoke to - the
+        upstream witness's self-description is the peer's claim about itself,
+        and a peer can name anyone. Before this existed the claim was copied
+        straight into `received_from_*` and signed with the local key, so a
+        hostile peer could make an honest relay attest to receiving a record
+        from a third party it had never contacted.
+        """
         raise NotImplementedError
 
     async def fetch_key_epochs(self, origin: str) -> list[tuple[int, int | None, bytes]] | None:
@@ -167,11 +186,23 @@ class HttpSyncClient(SyncClient):
 
     async def fetch_range(
         self, origin: str, start_seq: int, max_count: int
-    ) -> list[tuple[Record, Witness]]:
+    ) -> list[tuple[Record, list[Witness]]]:
         await self._ensure_connected()
         cmd = build_event_range(origin, start_seq, max_count)
         resp = await self._client.send_command(cmd)
         return parse_event_range_response(resp)
+
+    def peer_identity(self) -> tuple[bytes, str]:
+        """The key and origin settled during discovery, and pinned there.
+
+        Not read off the wire per response and not taken from any witness:
+        this is who the transport established it was talking to.
+        """
+        pubkey = self._client._server_pubkey
+        origin = self._client._server_origin
+        if pubkey is None or origin is None:
+            raise FirehoseClientError("peer identity requested before discovery completed")
+        return pubkey, origin
 
     async def fetch_key_epochs(self, origin: str) -> list[tuple[int, int | None, bytes]] | None:
         await self._ensure_connected()
@@ -456,6 +487,7 @@ class SyncManager:
 
             batch_records = [r for r, w in items]
             batch_witnesses = [w for r, w in items]
+            peer_pubkey, peer_hostname = client.peer_identity()
 
             # A peer that answers a range request with the wrong starting
             # sequence has not forked — it is buggy or hostile. Catching it
@@ -480,7 +512,11 @@ class SyncManager:
                     records=batch_records,
                     head=head if is_final else None,
                     origin_pubkey=head.origin_pubkey,
-                    source=self._hostname,
+                    # The peer we got this from, not ourselves. `source` was
+                    # recording this relay's own hostname on every imported
+                    # record, which made the one column named for provenance
+                    # answer a question nobody asked.
+                    source=peer_hostname,
                     key_intervals=key_intervals,
                 )
             except ChainBreak as e:
@@ -493,11 +529,14 @@ class SyncManager:
             if result.accepted:
                 total_accepted += result.accepted_count
 
-                for rec, upstream_witness in zip(batch_records, batch_witnesses):
-                    if self._firehose.get_event_by_id(origin, rec.event_id) is not None:
-                        local_witness = self._create_local_witness(rec, upstream_witness)
-                        if local_witness:
-                            self._firehose.store_witness(local_witness)
+                for rec, upstream in zip(batch_records, batch_witnesses):
+                    if self._firehose.get_event_by_id(origin, rec.event_id) is None:
+                        continue
+                    event_hash = compute_event_hash(encode_record(rec))
+                    self._retain_upstream(rec, event_hash, upstream)
+                    self._firehose.store_witness(
+                        self._create_local_witness(rec, event_hash, peer_pubkey, peer_hostname)
+                    )
 
                 if result.conflicts:
                     log_msg(
@@ -670,10 +709,19 @@ class SyncManager:
 
         return [(start, end, pk) for start, end, pk in epochs]
 
-    def _create_local_witness(self, rec: Record, upstream: Witness) -> Witness | None:
-        """Create a local relay witness naming the upstream as immediate source."""
-        encoded = encode_record(rec)
-        event_hash = compute_event_hash(encoded)
+    def _create_local_witness(
+        self, rec: Record, event_hash: bytes, peer_pubkey: bytes, peer_hostname: str
+    ) -> Witness:
+        """Witness that this relay received `rec` from the peer it authenticated to.
+
+        `peer_pubkey` / `peer_hostname` come from the transport's completed
+        discovery, never from the incoming witness. That distinction is the
+        whole fix: a witness is a signed report of an observation, and the only
+        observation this relay actually made is which party answered its
+        connection. Copying the upstream's account of itself and signing that
+        was lending this relay's signature to someone else's claim.
+        """
+        from bonnet.core.record import sign_witness
 
         w = Witness(
             event_origin=rec.origin,
@@ -681,14 +729,36 @@ class SyncManager:
             event_hash=event_hash,
             relay_pubkey=self._identity.public_key,
             relay_hostname=self._hostname,
-            received_from_pubkey=upstream.relay_pubkey,
-            received_from_hostname=upstream.relay_hostname,
+            received_from_pubkey=peer_pubkey,
+            received_from_hostname=peer_hostname,
             seen_at=int(time.time()),
         )
-        from bonnet.core.record import sign_witness
-
         w.relay_signature = sign_witness(self._identity, encode_unsigned_witness(w))
         return w
+
+    def _retain_upstream(self, rec: Record, event_hash: bytes, upstream: list[Witness]) -> int:
+        """Keep the peer's provenance chain so it survives the peer.
+
+        Each entry is stored only if it is *about this record* and its
+        signature verifies under the relay it names (`store_witness` does the
+        second part). A witness naming a different event hash is a statement
+        about something else and is not ours to republish alongside this one.
+
+        Retention is what makes the chain worth anything: a signed statement
+        outlives its signer, so a relay that later goes offline - or simply
+        stops answering us - does not erase the trail that ran through it.
+        """
+        kept = 0
+        for w in upstream:
+            if w.event_origin != rec.origin or w.event_id != rec.event_id:
+                continue
+            if w.event_hash != event_hash:
+                continue
+            if w.relay_pubkey == self._identity.public_key:
+                continue
+            if self._firehose.store_witness(w):
+                kept += 1
+        return kept
 
     # ------------------------------------------------------------------
     # Manual sync (for testing or operator triggers)

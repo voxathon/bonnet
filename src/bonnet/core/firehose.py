@@ -23,6 +23,7 @@ from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     HEAD_FORMAT,
     MAX_U63,
+    MAX_WITNESS_SET,
     RECORD_FORMAT,
     WITNESS_FORMAT,
     ZERO_HASH,
@@ -39,6 +40,7 @@ from bonnet.core.record import (
     encode_record,
     encode_unsigned_head,
     encode_unsigned_record,
+    encode_unsigned_witness,
     reconstruct_intent_from_record,
     sign_head,
     sign_record,
@@ -46,6 +48,7 @@ from bonnet.core.record import (
     verify_intent_signature,
     verify_key_rotation_proof,
     verify_record_signature,
+    verify_witness_signature,
 )
 
 # ---------------------------------------------------------------------------
@@ -1049,7 +1052,30 @@ class FirehoseStore:
     # Witness storage
     # -----------------------------------------------------------------------
 
-    def store_witness(self, w: Witness) -> None:
+    def store_witness(self, w: Witness) -> bool:
+        """Store a relay witness, if its signature holds. Returns whether it did.
+
+        Verification is unconditional and belongs here rather than at the call
+        sites, because the table is no longer only our own. Witnesses received
+        from a peer are retained and served onward, so an unverified row would
+        be a forgery this relay republishes — and republishing it is exactly
+        what would let a peer pin an event on a relay that never saw it.
+
+        This is the case internal/NOTEBOOK.md §18.4 ruled out, and it was right
+        to at the time: every witness here was one we minted, so checking it
+        meant checking our own signature with our own key. Retention is what
+        changes the answer. It costs one Ed25519 verify per event per relay,
+        not per read — `get_witness` returns the cached row.
+        """
+        if not verify_witness_signature(
+            w.relay_pubkey, encode_unsigned_witness(w), w.relay_signature
+        ):
+            log_msg(
+                f"WITNESS: rejecting unverifiable witness for "
+                f"{w.event_origin}/{w.event_id.hex()[:16]} claiming relay "
+                f"{w.relay_pubkey.hex()[:16]}"
+            )
+            return False
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO relay_witnesses "
@@ -1069,6 +1095,46 @@ class FirehoseStore:
                 ),
             )
             self._conn.commit()
+        return True
+
+    def get_witnesses(
+        self, event_origin: str, event_id: bytes, limit: int = MAX_WITNESS_SET
+    ) -> list[Witness]:
+        """Every witness held for an event, oldest observation first.
+
+        This is the provenance chain as far as it reached us: our own witness
+        plus each upstream one we retained and verified. It is a set to be
+        reassembled by matching relay_pubkey against received_from_pubkey, not
+        a sorted path — a broken or forked edge is the interesting finding, and
+        ordering the rows would hide it.
+
+        Every entry is a signed statement by the relay it names, so the chain
+        survives that relay going offline. That is the property retention buys
+        and a lookup-on-demand design cannot have.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT event_hash, relay_pubkey, relay_hostname, received_from_pubkey, "
+                "received_from_hostname, seen_at, relay_signature "
+                "FROM relay_witnesses WHERE event_origin=? AND event_id=? "
+                "ORDER BY seen_at, relay_pubkey LIMIT ?",
+                (event_origin, event_id, limit),
+            ).fetchall()
+        return [
+            Witness(
+                witness_format=WITNESS_FORMAT,
+                event_origin=event_origin,
+                event_id=event_id,
+                event_hash=bytes(r[0]),
+                relay_pubkey=bytes(r[1]),
+                relay_hostname=r[2],
+                received_from_pubkey=bytes(r[3]),
+                received_from_hostname=r[4],
+                seen_at=r[5],
+                relay_signature=bytes(r[6]),
+            )
+            for r in rows
+        ]
 
     def get_witness(
         self, event_origin: str, event_id: bytes, relay_pubkey: bytes
