@@ -244,6 +244,7 @@ class BonnetServer:
 
         self._sweep_orphaned_staged_bodies()
         self._verify_origin_tips()
+        self._verify_key_epochs()
 
         self.local_conn = FirehoseLocalConnection(
             self.server_identity.public_key,
@@ -282,6 +283,31 @@ class BonnetServer:
                 f"(recorded={recorded.hex()[:16] if recorded else None} "
                 f"actual={actual.hex()[:16]})"
             )
+
+    def _verify_key_epochs(self) -> None:
+        """Check each origin's key epochs against the rotate records it holds.
+
+        The same argument as `_verify_origin_tips`, for the table that decides
+        which key verifies which record. `origin_key_epochs` is maintained
+        alongside `events` by `_apply_rotation_locked` rather than derived from
+        them, so a restored database or a crash can leave the two disagreeing —
+        and a wrong key there makes every honest peer look like it is serving
+        forged records, which is the same "blame the peer for our own state"
+        failure the tip check exists to prevent, with a worse symptom.
+
+        Local and free: derived from records already on disk, no network. The
+        anchor (epoch 1's key) came from TOFU and cannot be re-derived, so what
+        is checked is whether the rest follows from it.
+        """
+        for origin in self.firehose.list_origins():
+            consistent, stored, derived = self.firehose.check_key_epochs(origin)
+            if consistent:
+                continue
+            if self.firehose.repair_key_epochs(origin):
+                log_msg(
+                    f"INIT: repaired key epochs for origin '{origin}' "
+                    f"({len(stored)} stored -> {len(derived)} derived)"
+                )
 
     def _sweep_orphaned_staged_bodies(self, min_age_seconds: int = 3600) -> None:
         """Recover or discard article bodies a crash left in staging.
@@ -325,6 +351,28 @@ class BonnetServer:
                     f"INIT: discarded orphaned staged body {origin}/{board} "
                     f"event {event_id.hex()[:16]}... (no matching record, age={int(age)}s)"
                 )
+
+    async def _sweep_staged_bodies_periodically(self, interval_seconds: int = 3600) -> None:
+        """Re-run the startup sweep for the life of the process.
+
+        Startup alone only covers crashes. A process that stays up accrues
+        orphans from every publish that failed after stage_article_body and
+        before the transaction resolved — the same window the startup sweep
+        exists for, just without the restart that used to be the only thing
+        clearing it.
+
+        Off the loop thread: the sweep walks the staging tree and queries the
+        firehose synchronously, the same reason firehose_http_server hands
+        command dispatch to asyncio.to_thread.
+        """
+        while True:
+            await asyncio.sleep(interval_seconds)
+            try:
+                await asyncio.to_thread(self._sweep_orphaned_staged_bodies)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log_msg(f"SWEEP: staged-body sweep failed: {type(e).__name__}: {e}")
 
     def _ensure_root_registered(self) -> None:
         """Publish a bonnet.user.register record for the server identity if not already present."""
@@ -421,12 +469,13 @@ class BonnetServer:
         proof = sign_key_rotation_proof(
             new_identity, origin, old_identity.public_key, new_identity.public_key
         )
+        existing = self.users.get_user_by_pubkey(origin, old_identity.public_key)
         intent = Intent(
             event_id=os.urandom(32),
             kind="bonnet.origin.key.rotate",
             origin=origin,
             actor_pubkey=old_identity.public_key,
-            actor_username="root",
+            actor_username=existing["username"] if existing is not None else "root",
             actor_registrar=origin,
             metadata=MetadataMap(
                 [
@@ -478,7 +527,12 @@ class BonnetServer:
             )
         return "\n".join(lines)
 
-    async def run(self, port: int = None, ssl_certfile: str = None, ssl_keyfile: str = None):
+    async def run(
+        self, port: int = None, ssl_certfile: str = None, ssl_keyfile: str = None
+    ) -> bool:
+        """Run until shutdown. Returns False if the server never managed to start."""
+        import sys
+
         import uvicorn
 
         listen_port = port or self.config.port
@@ -488,6 +542,58 @@ class BonnetServer:
             ssl_keyfile = self.config.tls_key_path
 
         scheme = "https" if ssl_certfile else "http"
+
+        uv_config = uvicorn.Config(
+            self.http_server,
+            host=self.config.http_host,
+            port=listen_port,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile,
+            log_level="info",
+        )
+        server = uvicorn.Server(uv_config)
+        self._uvicorn_server = server
+
+        # uvicorn.Server.startup() dereferences self.lifespan, which is only
+        # ever set inside Server._serve() (reached via .serve()/.run(), which
+        # we deliberately don't use so we can bind before printing the
+        # banner below). Replicate the bit of _serve() that sets it up.
+        if not uv_config.loaded:
+            uv_config.load()
+        server.lifespan = uv_config.lifespan_class(uv_config)
+
+        # Bind before printing anything - a bad port or a port already in
+        # use must not produce a "listening" banner (with live pubkeys) that
+        # the process then contradicts by crashing or dying silently.
+        try:
+            await server.startup()
+        except (OSError, OverflowError) as exc:
+            print(
+                f"error: could not listen on {self.config.http_host}:{listen_port}: {exc}",
+                file=sys.stderr,
+            )
+            return False
+        except SystemExit:
+            # uvicorn's own startup() logs the real bind failure (address
+            # already in use, permission denied, etc.) and calls sys.exit(1)
+            # directly instead of raising OSError - caught here so it
+            # doesn't look like the banner below ever had a chance to be
+            # true. The specific cause is whatever uvicorn just logged above
+            # this line, not guessed at here.
+            print(
+                f"error: could not listen on {self.config.http_host}:{listen_port} "
+                "(see the uvicorn error above)",
+                file=sys.stderr,
+            )
+            return False
+        if server.should_exit or not server.started:
+            print(
+                f"error: server failed to start on {self.config.http_host}:{listen_port} "
+                "(see logs for details)",
+                file=sys.stderr,
+            )
+            return False
+
         print(f"Bonnet server listening on {scheme}://{self.config.http_host}:{listen_port}")
         print(f"Origin: {self.config.origin}")
         print(f"Hostname: {self.config.hostname}")
@@ -501,34 +607,41 @@ class BonnetServer:
                 "until it's installed and on PATH, or [search] rg_path is set in config.toml"
             )
 
-        uv_config = uvicorn.Config(
-            self.http_server,
-            host=self.config.http_host,
-            port=listen_port,
-            ssl_certfile=ssl_certfile,
-            ssl_keyfile=ssl_keyfile,
-            log_level="info",
-        )
-        server = uvicorn.Server(uv_config)
-        self._uvicorn_server = server
-
-        repl_task = asyncio.create_task(OperatorConsole(self).repl_loop())
+        tasks = [asyncio.create_task(self._sweep_staged_bodies_periodically())]
+        if sys.stdin.isatty():
+            tasks.append(asyncio.create_task(OperatorConsole(self).repl_loop()))
+        else:
+            print("No interactive terminal on stdin - operator REPL disabled, serving only.")
 
         for peer in self.config.peers:
             base_url = f"https://{peer.hostname}:{peer.port}"
-            client = HttpSyncClient(base_url, verify_tls=peer.verify_tls)
+            try:
+                client = HttpSyncClient(
+                    base_url, verify_tls=peer.verify_tls, allow_private_dial=peer.allow_private
+                )
+            except ValueError as e:
+                print(
+                    f"WARNING: skipping sync peer '{peer.origin}' ({base_url}): {e} "
+                    "- set allow_private = true under this [[sync.peers]] entry to permit "
+                    "loopback/private/LAN addresses"
+                )
+                log_msg(f"SYNC: skipped peer '{peer.origin}' at {base_url}: {e}")
+                continue
             self.sync_manager.start_origin(peer.origin, client, self.config.sync_interval_seconds)
             log_msg(f"SYNC: started background sync for peer '{peer.origin}' from {base_url}")
 
         try:
-            await server.serve()
+            await server.main_loop()
         finally:
-            repl_task.cancel()
-            try:
-                await repl_task
-            except asyncio.CancelledError:
-                pass
+            for task in tasks:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             await self.sync_manager.stop_all()
+            await server.shutdown()
+        return True
 
     def close(self) -> None:
         if self._closed:

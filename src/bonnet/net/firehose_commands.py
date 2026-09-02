@@ -13,6 +13,7 @@ from __future__ import annotations
 import struct
 import threading
 import time
+from contextlib import nullcontext
 
 from bonnet.core.acl import ACLEvaluator, AuthContext
 from bonnet.core.board_projection import BoardProjection, board_db_path
@@ -25,11 +26,18 @@ from bonnet.core.firehose import (
 )
 from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
 from bonnet.core.kind_validator import KindValidator, ValidationError
-from bonnet.core.kinds import ALL_KNOWN_KINDS
+from bonnet.core.kinds import (
+    ALL_KNOWN_KINDS,
+    KIND_BOARD_CREATE,
+    KIND_PUNISHMENT_BAN,
+    KIND_PUNISHMENT_PERMABAN,
+    KIND_USER_REGISTER,
+)
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     SIG_SIZE,
     ZERO_ID,
+    CodecError,
     compute_body_hash,
     compute_event_hash,
     decode_intent,
@@ -37,6 +45,7 @@ from bonnet.core.record import (
     encode_record,
     encode_witness,
     make_origin_witness,
+    normalize_origin,
 )
 from bonnet.core.search import SearchService
 from bonnet.net.firehose_wire import (
@@ -57,6 +66,14 @@ from bonnet.net.firehose_wire import (
     OP_REPORT_LIST,
     OP_USER_GET,
     OP_USER_LIST,
+    _enc_text16,
+    _read_bytes,
+    _read_id32,
+    _read_text16,
+    _read_u8,
+    _read_u16,
+    _read_u32,
+    _read_u64,
 )
 
 KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
@@ -73,7 +90,12 @@ PUNISHMENT_TYPE_CODES = {"warning": 1, "ban": 2, "permaban": 3}
 
 
 # ---------------------------------------------------------------------------
-# Opcodes — defined once in firehose_wire.py, imported above.
+# Opcodes and the wire codec — defined once in firehose_wire.py, imported above.
+#
+# The request decoders are the same functions the client uses on responses:
+# one bounds-checked copy for both directions. ProtocolError subclasses
+# ValueError, so a malformed request still lands in handle()'s `except
+# ValueError` and comes back as a 0x0006 error frame.
 # ---------------------------------------------------------------------------
 
 CMD_NAMES = {
@@ -118,6 +140,36 @@ READ_OPS = frozenset(
     }
 )
 
+# Opcodes whose handler consults the ACL 'board' dimension: PUBLISH_RECORD
+# via the board on the intent, the rest via `_board_read_allowed`.
+#
+# Everything not listed here is board-agnostic *by construction*, not by
+# omission. The substrate reads — EVENT_HEAD, EVENT_RANGE, EVENT_GET,
+# EVENT_BODY, KEY_EPOCHS — are how a peer replicates this origin's log, and
+# the log is a hash chain: each record commits to its predecessor's hash, and
+# ingest raises ChainBreak on the first gap (`core/firehose.py`, the
+# `previous_event_hash != expected_prev` check). Filtering records out of a
+# range by board would hand every peer a broken chain. So these opcodes
+# cannot be board-scoped, and granting one is granting the whole log:
+# every record's board, author, metadata (an article's subject and tags
+# included), body hash and size, plus the body bytes of every non-article
+# kind. Article bodies are the exception — they live in the per-board store,
+# so ARTICLE_BODY's check is the only door to those.
+#
+# Grant the substrate opcodes to a principal you would grant `boards = ["*"]`.
+BOARD_SCOPED_OPS = frozenset(
+    {
+        OP_PUBLISH_RECORD,
+        OP_REPORT_LIST,
+        OP_BOARD_LIST,
+        OP_ARTICLE_GET,
+        OP_ARTICLE_LIST,
+        OP_ARTICLE_SEARCH,
+        OP_ARTICLE_QUERY,
+        OP_ARTICLE_BODY,
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Response builder helpers
@@ -142,52 +194,6 @@ def _pad32(value: bytes) -> bytes:
     NUL bytes into source files in this repo.
     """
     return (value + bytes(32))[:32]
-
-
-def _enc_text16(s: str) -> bytes:
-    encoded = s.encode("utf-8")
-    return struct.pack(">H", len(encoded)) + encoded
-
-
-def _read_text16(data: bytes, offset: int) -> tuple[str, int]:
-    if offset + 2 > len(data):
-        raise ValueError("truncated text16")
-    n = struct.unpack(">H", data[offset : offset + 2])[0]
-    offset += 2
-    if offset + n > len(data):
-        raise ValueError("truncated text16 content")
-    s = data[offset : offset + n].decode("utf-8")
-    return s, offset + n
-
-
-def _read_u64(data: bytes, offset: int) -> tuple[int, int]:
-    if offset + 8 > len(data):
-        raise ValueError("truncated u64")
-    return struct.unpack(">Q", data[offset : offset + 8])[0], offset + 8
-
-
-def _read_u16(data: bytes, offset: int) -> tuple[int, int]:
-    if offset + 2 > len(data):
-        raise ValueError("truncated u16")
-    return struct.unpack(">H", data[offset : offset + 2])[0], offset + 2
-
-
-def _read_u32(data: bytes, offset: int) -> tuple[int, int]:
-    if offset + 4 > len(data):
-        raise ValueError("truncated u32")
-    return struct.unpack(">I", data[offset : offset + 4])[0], offset + 4
-
-
-def _read_u8(data: bytes, offset: int) -> tuple[int, int]:
-    if offset + 1 > len(data):
-        raise ValueError("truncated u8")
-    return data[offset], offset + 1
-
-
-def _read_id32(data: bytes, offset: int) -> tuple[bytes, int]:
-    if offset + 32 > len(data):
-        raise ValueError("truncated id32")
-    return data[offset : offset + 32], offset + 32
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +280,15 @@ class FirehoseCommandHandler:
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
         self._boards_lock = threading.Lock()
         self._max_body_size = max_body_size
+        # Serializes the check-then-append span for bonnet.user.register and
+        # bonnet.board.create: without it, two concurrent registrations for
+        # the same name can both read "no holder yet" before either appends,
+        # so both get appended as distinct signed records even though the
+        # projection later resolves only one of them as the winner. Held
+        # across the dispatcher call too (dispatch_origin runs synchronously
+        # here), so a blocked second registration re-checks against a
+        # projection that has already caught up with the first.
+        self._identity_lock = threading.Lock()
 
     def close(self) -> None:
         with self._boards_lock:
@@ -415,7 +430,7 @@ class FirehoseCommandHandler:
                 return _error(0x0005, f"Unhandled opcode 0x{opcode:02x}")
         except ValueError as e:
             return _error(0x0006, str(e))
-        except (FirehoseError, ValidationError) as e:
+        except (FirehoseError, ValidationError, CodecError) as e:
             return _error(0x0006, str(e))
         except Exception as e:
             log_msg(f"COMMAND: {cmd_name} failed unexpectedly: {e}")
@@ -465,164 +480,292 @@ class FirehoseCommandHandler:
         ):
             return _error(0x0004, "Not permitted")
 
-        # Write gate: administrators bypass; ack must pass so a
-        # punished user can acknowledge their warning.
-        if kind != KIND_PUNISHMENT_ACK and ctx.role != "administrator":
-            gate_error = self._punishment_gate_response(intent.actor_pubkey)
-            if gate_error is not None:
-                return gate_error
+        # An article needs a real board to land in - see
+        # Dispatcher._dispatch_article for why a bare publish is no longer
+        # allowed to silently mint one. Refused here, before append, so the
+        # caller gets a clean error instead of a "successful" publish that
+        # then never surfaces as a queryable article.
+        if kind == KIND_ARTICLE and self._nav.get_board(intent.origin, board) is None:
+            return _error(0x0003, f"Board '{board}' does not exist - create it first")
 
-        if kind in (
-            KIND_ARTICLE_CANCEL,
-            KIND_ARTICLE_RESTORE,
-            KIND_ARTICLE_PURGE,
-            KIND_ARTICLE_PIN,
-            KIND_ARTICLE_UNPIN,
-            KIND_THREAD_CLOSE,
-            KIND_THREAD_REOPEN,
-        ):
-            if (
-                intent.target_article_id == ZERO_ID
-                or not intent.target_origin
-                or not intent.target_board
-            ):
-                return _error(0x0006, "Control event requires complete target tuple")
-
-            bp = self._get_board_projection(intent.target_origin, intent.target_board)
-            target = bp.get_article_by_id(
-                intent.target_origin,
-                intent.target_board,
-                intent.target_article_id,
-            )
-
-            if target is None:
-                return _error(0x0003, "Target article not found")
-
-            if kind == KIND_ARTICLE_CANCEL:
-                if target.author_pubkey != intent.actor_pubkey:
-                    if ctx.role != "administrator" and ctx.role != "moderator":
-                        return _error(
-                            0x0004, "Only the author or a moderator may cancel this article"
-                        )
-                if target.visibility == "cancelled":
-                    return _error(0x0009, "Article is already cancelled")
-                if target.visibility == "superseded":
-                    return _error(0x0009, "Cannot cancel a superseded article")
-            elif kind == KIND_ARTICLE_RESTORE:
-                if target.author_pubkey != intent.actor_pubkey:
-                    if ctx.role != "administrator" and ctx.role != "moderator":
-                        return _error(
-                            0x0004, "Only the author or a moderator may restore this article"
-                        )
-                if target.visibility != "cancelled":
-                    return _error(0x0009, "Article is not cancelled")
-                if target.body_state == "purged":
-                    return _error(0x0009, "Cannot restore a purged article")
-            elif kind == KIND_ARTICLE_PURGE:
-                if target.author_pubkey != intent.actor_pubkey:
-                    if ctx.role != "administrator" and ctx.role != "moderator":
-                        return _error(
-                            0x0004, "Only the author or a moderator may purge this article"
-                        )
-                if target.body_state == "purged":
-                    return _error(0x0009, "Article is already purged")
-            elif kind == KIND_ARTICLE_PIN:
-                if target.pin_state != "unpinned":
-                    return _error(0x0009, "Article is already pinned")
-            elif kind == KIND_ARTICLE_UNPIN:
-                if target.pin_state == "unpinned":
-                    return _error(0x0009, "Article is not pinned")
-            elif kind == KIND_THREAD_CLOSE:
-                if target.thread_state == "closed":
-                    return _error(0x0009, "Thread is already closed")
-            elif kind == KIND_THREAD_REOPEN:
-                if target.thread_state == "open":
-                    return _error(0x0009, "Thread is not closed")
-
-        if kind == KIND_ARTICLE:
-            supersedes_id = intent.metadata.get_bytes(7)
-            if supersedes_id and supersedes_id != ZERO_ID:
-                bp = self._get_board_projection(intent.origin, intent.board)
-                target = bp.get_article_by_id(intent.origin, intent.board, supersedes_id)
-                if target is None:
-                    return _error(0x0003, "Supersede target article not found")
-                if target.author_pubkey != intent.actor_pubkey:
-                    if ctx.role != "administrator" and ctx.role != "moderator":
-                        return _error(0x0004, "Only the original author may supersede an article")
-
-        if intent.body_size > 0:
-            if intent.body_size > self._max_body_size:
+        # Registration gates: privilege, and subject.
+        #
+        # The actor binding above fixes *who signed*, but a registration also
+        # carries the key it is about (field 2) and the flags that
+        # firehose_http_server reads back as `role` (field 3). Neither was
+        # constrained, and the shipped ACL grants unknown principals
+        # bonnet.user.register so the first-run flow works — which made
+        # administrator self-service on first contact, and let anyone bind a
+        # username onto a key they do not hold.
+        #
+        # Administrators are exempt on both counts, because provisioning is a
+        # genuine operator task: `console.grant-role` registers another party's
+        # key with a role over the local connection, which authenticates as
+        # administrator (app/cli.py FirehoseLocalConnection). Note that on the
+        # shipped config no principal can reach that exemption — the register
+        # kind is granted to `unknown` alone and the matchers are mutually
+        # exclusive — so an operator who wants it has to grant it explicitly.
+        #
+        # Nothing else legitimate is blocked: the gateway's register tool
+        # publishes flags=0 for its own key, and the server's own root
+        # registration (BonnetServer._ensure_root_registered) is appended
+        # directly to the firehose without passing through this handler.
+        if kind == KIND_USER_REGISTER and ctx.role != "administrator":
+            if (intent.metadata.get_u64(3) or 0) != 0:
+                return _error(0x0004, "Only an administrator may register privileged flags")
+            if intent.metadata.get_bytes(2) != intent.actor_pubkey:
                 return _error(
-                    0x0006, f"Body size {intent.body_size} exceeds maximum {self._max_body_size}"
+                    0x0004, "Only an administrator may register a username for another key"
                 )
-            if len(body) != intent.body_size:
-                return _error(0x0006, "Body length mismatch")
-            actual_hash = compute_body_hash(body)
-            if actual_hash != intent.body_hash:
-                return _error(0x0006, "Body hash mismatch")
 
-        if intent.kind == KIND_ARTICLE and intent.body_size > 0:
-            self._body_store.stage_article_body(
-                intent.origin,
-                intent.board,
-                intent.event_id,
-                body,
-                intent.body_hash,
-                intent.body_size,
-            )
-        elif intent.body_size > 0:
-            self._body_store.write_event_body(
-                intent.origin,
-                intent.event_id,
-                body,
-                intent.body_hash,
-                intent.body_size,
-            )
+        identity_guard = (
+            self._identity_lock
+            if kind in (KIND_USER_REGISTER, KIND_BOARD_CREATE)
+            else nullcontext()
+        )
+        with identity_guard:
+            # First writer wins on a username, within this origin. UserProjection
+            # enforces this too and has to, since federated registrations never
+            # reach this handler — but refusing here is what lets a local caller
+            # see why, which is the behaviour the gateway's register tool already
+            # documents ("the server rejects the registration and this reports the
+            # failure — pick another name").
+            if kind == KIND_USER_REGISTER:
+                requested = intent.metadata.get_text(1) or ""
+                subject = intent.metadata.get_bytes(2) or intent.actor_pubkey
+                holder = self._users.username_holder(intent.origin, requested)
+                if holder is not None and holder != subject:
+                    return _error(0x0009, f"Username '{requested}' is already registered")
 
-        try:
-            rec = self._firehose.append_record(
-                self._identity, intent, actor_sig, body, created_at=now
-            )
-        except Exception:
+            # Same rule, same reason, for board names: first writer wins.
+            # NavProjection.apply_board_create enforces this too and has to,
+            # since a federated board.create never reaches this handler either —
+            # but refusing here is what lets a local caller see why, instead of
+            # a signed record that's silently accepted and then just never takes
+            # ownership.
+            if kind == KIND_BOARD_CREATE:
+                claimed_owner = intent.metadata.get_bytes(1) or intent.actor_pubkey
+                existing_board = self._nav.get_board(intent.origin, board)
+                if existing_board is not None and existing_board["owner_pubkey"] != claimed_owner:
+                    return _error(0x0009, f"Board '{board}' is already owned by someone else")
+
+            # The identity a record is published under is the registrar's to state,
+            # not the caller's to choose. Until now `actor_username` and
+            # `actor_registrar` were free text on every record: the actor binding
+            # above fixes the *key*, and the two fields a reader actually reads went
+            # unchecked, so any authenticated key could publish as anyone.
+            #
+            # Refusal rather than substitution, deliberately. Both fields sit inside
+            # the bytes the actor signed, so rewriting them server-side would
+            # invalidate the intent signature. Refusing keeps two properties at
+            # once: the author signed the name they published under, and the name is
+            # one this origin issued to that key.
+            #
+            # Empty stays legal — claiming nothing is honest. bonnet.user.register
+            # is exempt because it is the record that establishes the name; there is
+            # nothing to check it against yet.
+            if kind != KIND_USER_REGISTER:
+                if intent.actor_registrar and intent.actor_registrar != self._origin:
+                    return _error(
+                        0x0004,
+                        f"actor_registrar must be '{self._origin}' on a record published here",
+                    )
+                if intent.actor_username:
+                    registered = self._users.get_user_by_pubkey(self._origin, intent.actor_pubkey)
+                    if registered is None or registered["username"] != intent.actor_username:
+                        return _error(
+                            0x0004,
+                            "actor_username is not the name this origin issued to that key",
+                        )
+
+            # An ack must name a real punishment that actually targets the
+            # acker — otherwise this signs a forged "acknowledged" record
+            # against another user's warning, a nonexistent event ID, or
+            # something that isn't a punishment at all.
+            # PolicyProjection.apply_punishment_ack enforces this too and has
+            # to, since a federated ack never reaches this handler either —
+            # but refusing here is what lets a local caller see why.
+            if kind == KIND_PUNISHMENT_ACK:
+                target_id = intent.metadata.get_bytes(1) or ZERO_ID
+                punishment = self._policy.get_punishment(target_id)
+                if punishment is None:
+                    return _error(0x0003, "No such punishment")
+                if punishment["punished_pubkey"] != intent.actor_pubkey:
+                    return _error(0x0004, "Cannot acknowledge a punishment issued to someone else")
+
+            # A moderator who bans themself is locked out of every write —
+            # including the punish_revoke needed to undo it — by the same
+            # gate a few lines down (only an administrator bypasses it). A
+            # temporary ban expires eventually; a permaban does not, so a
+            # self-permaban would be permanently unrecoverable. Refused
+            # outright rather than trusted to a confirm prompt: nothing
+            # legitimate ever needs to target one's own key with either kind.
+            if kind in (KIND_PUNISHMENT_BAN, KIND_PUNISHMENT_PERMABAN):
+                target_pubkey = intent.metadata.get_bytes(1)
+                if target_pubkey == intent.actor_pubkey:
+                    return _error(0x0004, "Cannot ban your own identity")
+
+            # Write gate: administrators bypass; ack must pass so a
+            # punished user can acknowledge their warning.
+            if kind != KIND_PUNISHMENT_ACK and ctx.role != "administrator":
+                gate_error = self._punishment_gate_response(intent.actor_pubkey)
+                if gate_error is not None:
+                    return gate_error
+
+            if kind in (
+                KIND_ARTICLE_CANCEL,
+                KIND_ARTICLE_RESTORE,
+                KIND_ARTICLE_PURGE,
+                KIND_ARTICLE_PIN,
+                KIND_ARTICLE_UNPIN,
+                KIND_THREAD_CLOSE,
+                KIND_THREAD_REOPEN,
+            ):
+                if (
+                    intent.target_article_id == ZERO_ID
+                    or not intent.target_origin
+                    or not intent.target_board
+                ):
+                    return _error(0x0006, "Control event requires complete target tuple")
+
+                bp = self._get_board_projection(intent.target_origin, intent.target_board)
+                target = bp.get_article_by_id(
+                    intent.target_origin,
+                    intent.target_board,
+                    intent.target_article_id,
+                )
+
+                if target is None:
+                    return _error(0x0003, "Target article not found")
+
+                if kind == KIND_ARTICLE_CANCEL:
+                    if target.author_pubkey != intent.actor_pubkey:
+                        if ctx.role != "administrator" and ctx.role != "moderator":
+                            return _error(
+                                0x0004, "Only the author or a moderator may cancel this article"
+                            )
+                    if target.visibility == "cancelled":
+                        return _error(0x0009, "Article is already cancelled")
+                    if target.visibility == "superseded":
+                        return _error(0x0009, "Cannot cancel a superseded article")
+                elif kind == KIND_ARTICLE_RESTORE:
+                    if target.author_pubkey != intent.actor_pubkey:
+                        if ctx.role != "administrator" and ctx.role != "moderator":
+                            return _error(
+                                0x0004, "Only the author or a moderator may restore this article"
+                            )
+                    if target.visibility != "cancelled":
+                        return _error(0x0009, "Article is not cancelled")
+                    if target.body_state == "purged":
+                        return _error(0x0009, "Cannot restore a purged article")
+                elif kind == KIND_ARTICLE_PURGE:
+                    if target.author_pubkey != intent.actor_pubkey:
+                        if ctx.role != "administrator" and ctx.role != "moderator":
+                            return _error(
+                                0x0004, "Only the author or a moderator may purge this article"
+                            )
+                    if target.body_state == "purged":
+                        return _error(0x0009, "Article is already purged")
+                elif kind == KIND_ARTICLE_PIN:
+                    if target.pin_state != "unpinned":
+                        return _error(0x0009, "Article is already pinned")
+                elif kind == KIND_ARTICLE_UNPIN:
+                    if target.pin_state == "unpinned":
+                        return _error(0x0009, "Article is not pinned")
+                elif kind == KIND_THREAD_CLOSE:
+                    if target.thread_state == "closed":
+                        return _error(0x0009, "Thread is already closed")
+                elif kind == KIND_THREAD_REOPEN:
+                    if target.thread_state == "open":
+                        return _error(0x0009, "Thread is not closed")
+
+            if kind == KIND_ARTICLE:
+                supersedes_id = intent.metadata.get_bytes(7)
+                if supersedes_id and supersedes_id != ZERO_ID:
+                    bp = self._get_board_projection(intent.origin, intent.board)
+                    target = bp.get_article_by_id(intent.origin, intent.board, supersedes_id)
+                    if target is None:
+                        return _error(0x0003, "Supersede target article not found")
+                    if target.author_pubkey != intent.actor_pubkey:
+                        if ctx.role != "administrator" and ctx.role != "moderator":
+                            return _error(
+                                0x0004, "Only the original author may supersede an article"
+                            )
+
+            if intent.body_size > 0:
+                if intent.body_size > self._max_body_size:
+                    return _error(
+                        0x0006,
+                        f"Body size {intent.body_size} exceeds maximum {self._max_body_size}",
+                    )
+                if len(body) != intent.body_size:
+                    return _error(0x0006, "Body length mismatch")
+                actual_hash = compute_body_hash(body)
+                if actual_hash != intent.body_hash:
+                    return _error(0x0006, "Body hash mismatch")
+
             if intent.kind == KIND_ARTICLE and intent.body_size > 0:
-                self._body_store.delete_staged_article_body(
-                    intent.origin, intent.board, intent.event_id
+                self._body_store.stage_article_body(
+                    intent.origin,
+                    intent.board,
+                    intent.event_id,
+                    body,
+                    intent.body_hash,
+                    intent.body_size,
                 )
             elif intent.body_size > 0:
-                self._body_store.delete_event_body(intent.origin, intent.event_id)
-            raise
+                self._body_store.write_event_body(
+                    intent.origin,
+                    intent.event_id,
+                    body,
+                    intent.body_hash,
+                    intent.body_size,
+                )
 
-        if intent.kind == KIND_ARTICLE and intent.body_size > 0:
-            self._body_store.finalize_article_body(
-                intent.origin,
-                intent.board,
-                intent.event_id,
-                rec.article_num,
+            try:
+                rec = self._firehose.append_record(
+                    self._identity, intent, actor_sig, body, created_at=now
+                )
+            except Exception:
+                if intent.kind == KIND_ARTICLE and intent.body_size > 0:
+                    self._body_store.delete_staged_article_body(
+                        intent.origin, intent.board, intent.event_id
+                    )
+                elif intent.body_size > 0:
+                    self._body_store.delete_event_body(intent.origin, intent.event_id)
+                raise
+
+            if intent.kind == KIND_ARTICLE and intent.body_size > 0:
+                self._body_store.finalize_article_body(
+                    intent.origin,
+                    intent.board,
+                    intent.event_id,
+                    rec.article_num,
+                )
+
+            if self._dispatcher:
+                self._dispatcher.dispatch_origin(self._origin)
+
+            encoded_rec = encode_record(rec)
+            event_hash = compute_event_hash(encoded_rec)
+
+            witness = make_origin_witness(
+                origin=self._origin,
+                event_id=rec.event_id,
+                event_hash=event_hash,
+                origin_identity=self._identity,
+                hostname=self._hostname,
+                seen_at=now,
             )
+            self._firehose.store_witness(witness)
+            encoded_witness = encode_witness(witness)
 
-        if self._dispatcher:
-            self._dispatcher.dispatch_origin(self._origin)
-
-        encoded_rec = encode_record(rec)
-        event_hash = compute_event_hash(encoded_rec)
-
-        witness = make_origin_witness(
-            origin=self._origin,
-            event_id=rec.event_id,
-            event_hash=event_hash,
-            origin_identity=self._identity,
-            hostname=self._hostname,
-            seen_at=now,
-        )
-        self._firehose.store_witness(witness)
-        encoded_witness = encode_witness(witness)
-
-        return _success(
-            struct.pack(">I", len(encoded_rec))
-            + encoded_rec
-            + struct.pack(">H", len(encoded_witness))
-            + encoded_witness
-        )
+            return _success(
+                struct.pack(">I", len(encoded_rec))
+                + encoded_rec
+                + struct.pack(">H", len(encoded_witness))
+                + encoded_witness
+            )
 
     # ------------------------------------------------------------------
     # EVENT_HEAD
@@ -631,6 +774,7 @@ class FirehoseCommandHandler:
     def _cmd_event_head(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
 
         head = self._firehose.get_head(origin)
@@ -647,6 +791,7 @@ class FirehoseCommandHandler:
     def _cmd_key_epochs(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
 
         epochs = self._firehose.get_key_epochs(origin)
@@ -690,8 +835,8 @@ class FirehoseCommandHandler:
         """
         offset = 0
         key_len, offset = _read_u8(data, offset)
-        culprit = data[offset : offset + key_len] if key_len else None
-        offset += key_len
+        culprit_raw, offset = _read_bytes(data, offset, key_len, "culprit pubkey")
+        culprit = culprit_raw or None
         limit, offset = _read_u16(data, offset)
         page_offset, offset = _read_u16(data, offset)
 
@@ -747,9 +892,19 @@ class FirehoseCommandHandler:
         the whole point — a client that infers permissions from anything else
         is maintaining a second, divergent copy of this policy.
 
-        Scoped to the board in the request when one is given. ACL rules carry
-        a board dimension, so the same principal may publish to one board and
-        not another, and a board-independent answer cannot express that.
+        Scoped to the board in the request when one is given — but only for
+        the opcodes that actually consult the board dimension (see
+        BOARD_SCOPED_OPS). ACL rules carry a board dimension, so the same
+        principal may publish to one board and not another, and a
+        board-independent answer cannot express that.
+
+        Scoping the board-agnostic opcodes too would break the promise above.
+        A board-scoped deny would drop EVENT_GET from this list while a real
+        EVENT_GET still succeeded, because `handle()` gates it without a
+        board and no handler re-checks. Reporting them unscoped is the
+        honest answer: the substrate reads are not board-restrictable, and a
+        caller reading this list needs to see that rather than a denial the
+        relay will not enforce.
 
         This is deliberately an ordinary ACL-gated read: an operator who does
         not want policy shape enumerated can deny it like anything else, and
@@ -772,7 +927,7 @@ class FirehoseCommandHandler:
                 auth,
                 "write" if opcode in WRITE_OPS else "read",
                 command=name,
-                board=scope,
+                board=scope if opcode in BOARD_SCOPED_OPS else None,
             )
         ]
 
@@ -793,6 +948,42 @@ class FirehoseCommandHandler:
             payload += _enc_text16(kind)
         return _success(payload)
 
+    def _witness_set(self, origin: str, rec, event_hash: bytes) -> bytes:
+        """Encode the provenance chain held for one event.
+
+        The local relay's own witness always leads; upstream ones retained from
+        peers follow. Each is a signed statement by the relay it names, so the
+        chain stays readable after any of those relays goes offline - which is
+        the whole reason it travels with the record instead of being fetched
+        from the relays themselves when someone asks.
+
+        Serving only our own link, as this did before, meant the chain died at
+        every hop: each relay downstream saw one entry and had no way to learn
+        the rest.
+        """
+        own = self._firehose.get_witness(origin, rec.event_id, self._identity.public_key)
+        if own is None:
+            own = make_origin_witness(
+                origin=origin,
+                event_id=rec.event_id,
+                event_hash=event_hash,
+                origin_identity=self._identity,
+                hostname=self._hostname,
+                seen_at=rec.created_at,
+            )
+            self._firehose.store_witness(own)
+
+        chain = [own] + [
+            w
+            for w in self._firehose.get_witnesses(origin, rec.event_id)
+            if w.relay_pubkey != own.relay_pubkey
+        ]
+        out = struct.pack(">H", len(chain))
+        for w in chain:
+            encoded = encode_witness(w)
+            out += struct.pack(">H", len(encoded)) + encoded
+        return out
+
     # ------------------------------------------------------------------
     # EVENT_RANGE
     # ------------------------------------------------------------------
@@ -800,6 +991,7 @@ class FirehoseCommandHandler:
     def _cmd_event_range(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
         start_seq, offset = _read_u64(data, offset)
         max_count, offset = _read_u16(data, offset)
@@ -814,23 +1006,14 @@ class FirehoseCommandHandler:
             if max_bytes > 0 and total_bytes + len(encoded_rec) > max_bytes:
                 break
             event_hash = compute_event_hash(encoded_rec)
-
-            witness = self._firehose.get_witness(origin, rec.event_id, self._identity.public_key)
-            if witness is None:
-                witness = make_origin_witness(
-                    origin=origin,
-                    event_id=rec.event_id,
-                    event_hash=event_hash,
-                    origin_identity=self._identity,
-                    hostname=self._hostname,
-                    seen_at=rec.created_at,
-                )
-                self._firehose.store_witness(witness)
-            encoded_witness = encode_witness(witness)
+            witnesses = self._witness_set(origin, rec, event_hash)
 
             out += struct.pack(">I", len(encoded_rec)) + encoded_rec
-            out += struct.pack(">H", len(encoded_witness)) + encoded_witness
-            total_bytes += len(encoded_rec)
+            out += witnesses
+            # Witness bytes count against the caller's budget. They did not
+            # before, which under-counted every response by one witness and
+            # would now under-count by a whole chain.
+            total_bytes += len(encoded_rec) + len(witnesses)
 
         return _success(out)
 
@@ -841,6 +1024,7 @@ class FirehoseCommandHandler:
     def _cmd_event_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
         event_id, offset = _read_id32(data, offset)
 
@@ -851,24 +1035,10 @@ class FirehoseCommandHandler:
         encoded_rec = encode_record(rec)
         event_hash = compute_event_hash(encoded_rec)
 
-        witness = self._firehose.get_witness(origin, rec.event_id, self._identity.public_key)
-        if witness is None:
-            witness = make_origin_witness(
-                origin=origin,
-                event_id=rec.event_id,
-                event_hash=event_hash,
-                origin_identity=self._identity,
-                hostname=self._hostname,
-                seen_at=rec.created_at,
-            )
-            self._firehose.store_witness(witness)
-        encoded_witness = encode_witness(witness)
-
         return _success(
             struct.pack(">I", len(encoded_rec))
             + encoded_rec
-            + struct.pack(">H", len(encoded_witness))
-            + encoded_witness
+            + self._witness_set(origin, rec, event_hash)
         )
 
     # ------------------------------------------------------------------
@@ -878,6 +1048,7 @@ class FirehoseCommandHandler:
     def _cmd_board_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
 
         if origin == "":
             boards = self._nav.list_boards()
@@ -919,6 +1090,7 @@ class FirehoseCommandHandler:
     def _cmd_article_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         if not origin:
             return _error(0x0003, "Article not found")
         self._maybe_queue_remote_sync(origin)
@@ -1030,6 +1202,7 @@ class FirehoseCommandHandler:
     def _cmd_article_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         board, offset = _read_text16(data, offset)
         if not self._board_read_allowed(ctx, "ARTICLE_LIST", board):
             return _success(struct.pack(">H", 0))
@@ -1100,6 +1273,7 @@ class FirehoseCommandHandler:
     def _cmd_article_search(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         board, offset = _read_text16(data, offset)
         if not self._board_read_allowed(ctx, "ARTICLE_SEARCH", board):
             out = struct.pack(">H", 0) + struct.pack(">I", 0) + struct.pack(">B", 0)
@@ -1225,6 +1399,7 @@ class FirehoseCommandHandler:
     def _cmd_article_query(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         if not origin:
             return _success(struct.pack(">H", 0))
         self._maybe_queue_remote_sync(origin)
@@ -1241,8 +1416,7 @@ class FirehoseCommandHandler:
             operator, offset = _read_u8(data, offset)
             value_type, offset = _read_u8(data, offset)
             value_len, offset = _read_u16(data, offset)
-            raw_value = data[offset : offset + value_len]
-            offset += value_len
+            raw_value, offset = _read_bytes(data, offset, value_len, "filter value")
 
             value: bytes | str | int | bool
             if value_type == 0x01:
@@ -1282,6 +1456,7 @@ class FirehoseCommandHandler:
     def _cmd_article_body(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         if not origin:
             return _error(0x0003, "Article body unavailable")
         self._maybe_queue_remote_sync(origin)
@@ -1314,10 +1489,18 @@ class FirehoseCommandHandler:
             if origin != self._origin:
                 peer = self._peer_map.get(origin)
                 if peer:
+                    # A location hint: where this origin can be reached, so the
+                    # caller can ask the party that actually holds the body.
+                    #
+                    # It no longer carries a TLS setting. That was this relay
+                    # telling a client how carefully to check someone else's
+                    # certificate — a decision that belongs to the client, sent
+                    # by the one party a client should not take it from, since
+                    # the same message chooses the destination. The client
+                    # applies its own policy to the hop.
                     out = _enc_text16(origin)
                     out += _enc_text16(peer.hostname)
                     out += struct.pack(">H", peer.port)
-                    out += struct.pack(">B", 1 if peer.verify_tls else 0)
                     return b"\x02" + out
             return _error(0x0003, "Body unavailable")
 
@@ -1330,14 +1513,14 @@ class FirehoseCommandHandler:
     def _cmd_user_get(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         if not origin:
             return _error(0x0001, "User not found")
         self._maybe_queue_remote_sync(origin)
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _error(0x0001, "User not found")
         pubkey_len, offset = _read_u8(data, offset)
-        pubkey = data[offset : offset + pubkey_len]
-        offset += pubkey_len
+        pubkey, offset = _read_bytes(data, offset, pubkey_len, "pubkey")
 
         user = self._users.get_user_by_pubkey(origin, pubkey)
         if user is None:
@@ -1361,6 +1544,7 @@ class FirehoseCommandHandler:
     def _cmd_user_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         if not origin:
             return _success(struct.pack(">H", 0))
         self._maybe_queue_remote_sync(origin)
@@ -1391,9 +1575,7 @@ class FirehoseCommandHandler:
     def _cmd_ban_status(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         pubkey_len, offset = _read_u8(data, offset)
-        if offset + pubkey_len > len(data):
-            return _error(0x0006, "Truncated pubkey")
-        pubkey = data[offset : offset + pubkey_len]
+        pubkey, offset = _read_bytes(data, offset, pubkey_len, "pubkey")
 
         try:
             punishments = self._policy.list_pending_for_pubkey(
@@ -1423,6 +1605,7 @@ class FirehoseCommandHandler:
     def _cmd_event_body(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
         event_id, offset = _read_id32(data, offset)
 

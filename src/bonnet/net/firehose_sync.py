@@ -24,6 +24,7 @@ from bonnet.core.firehose import (
     AcceptResult,
     ChainBreak,
     FirehoseStore,
+    SignatureInvalid,
 )
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
@@ -108,8 +109,27 @@ class SyncClient:
 
     async def fetch_range(
         self, origin: str, start_seq: int, max_count: int
-    ) -> list[tuple[Record, Witness]]:
-        """Fetch a range of records with witnesses. Returns list of (record, witness)."""
+    ) -> list[tuple[Record, list[Witness]]]:
+        """Fetch a range of records with their provenance chains.
+
+        Returns list of (record, witnesses). The witness set is whatever the
+        peer holds: its own link plus any it retained from further upstream.
+        None of it is trusted here - `FirehoseStore.store_witness` verifies
+        each signature before anything is kept.
+        """
+        raise NotImplementedError
+
+    def peer_identity(self) -> tuple[bytes, str]:
+        """The peer this client is actually authenticated to: (pubkey, hostname).
+
+        Deliberately not optional. A relay's own witness states who handed it
+        the record, and that has to be the party it really spoke to - the
+        upstream witness's self-description is the peer's claim about itself,
+        and a peer can name anyone. Before this existed the claim was copied
+        straight into `received_from_*` and signed with the local key, so a
+        hostile peer could make an honest relay attest to receiving a record
+        from a third party it had never contacted.
+        """
         raise NotImplementedError
 
     async def fetch_key_epochs(self, origin: str) -> list[tuple[int, int | None, bytes]] | None:
@@ -167,11 +187,23 @@ class HttpSyncClient(SyncClient):
 
     async def fetch_range(
         self, origin: str, start_seq: int, max_count: int
-    ) -> list[tuple[Record, Witness]]:
+    ) -> list[tuple[Record, list[Witness]]]:
         await self._ensure_connected()
         cmd = build_event_range(origin, start_seq, max_count)
         resp = await self._client.send_command(cmd)
         return parse_event_range_response(resp)
+
+    def peer_identity(self) -> tuple[bytes, str]:
+        """The key and origin settled during discovery, and pinned there.
+
+        Not read off the wire per response and not taken from any witness:
+        this is who the transport established it was talking to.
+        """
+        pubkey = self._client._server_pubkey
+        origin = self._client._server_origin
+        if pubkey is None or origin is None:
+            raise FirehoseClientError("peer identity requested before discovery completed")
+        return pubkey, origin
 
     async def fetch_key_epochs(self, origin: str) -> list[tuple[int, int | None, bytes]] | None:
         await self._ensure_connected()
@@ -323,23 +355,31 @@ class SyncManager:
         while True:
             try:
                 origin = await self._sync_queue.get()
-                client = self._clients.get(origin)
-                if client is None:
-                    continue
-                backoff = self._peer_backoff.get(origin, 0)
-                if backoff > 0:
-                    last_fail = self._peer_last_failure.get(origin, 0)
-                    if time.time() - last_fail < backoff:
-                        log_msg(
-                            f"SYNC_WORKER: origin='{origin}' in backoff ({backoff}s), skipping on-demand sync"
-                        )
-                        continue
+                # Every exit below this point must release _inflight, not
+                # just the ones that ran a sync: queue_sync refuses an origin
+                # already in the set, so an entry left behind by a skip is
+                # not a stalled sync but a permanently dead on-read trigger
+                # for that peer. The skips used to `continue` past the
+                # release, which is why this try covers all of them.
                 try:
-                    await self._sync_once(origin, client)
-                    self._record_peer_success(origin)
-                except Exception as e:
-                    log_msg(f"SYNC_WORKER: error syncing origin '{origin}': {e}")
-                    self._record_peer_failure(origin)
+                    client = self._clients.get(origin)
+                    if client is None:
+                        continue
+                    backoff = self._peer_backoff.get(origin, 0)
+                    if backoff > 0:
+                        last_fail = self._peer_last_failure.get(origin, 0)
+                        if time.time() - last_fail < backoff:
+                            log_msg(
+                                f"SYNC_WORKER: origin='{origin}' in backoff ({backoff}s), "
+                                "skipping on-demand sync"
+                            )
+                            continue
+                    try:
+                        await self._sync_once(origin, client)
+                        self._record_peer_success(origin)
+                    except Exception as e:
+                        log_msg(f"SYNC_WORKER: error syncing origin '{origin}': {e}")
+                        self._record_peer_failure(origin)
                 finally:
                     self._inflight.discard(origin)
                     self._sync_queue.task_done()
@@ -448,6 +488,7 @@ class SyncManager:
 
             batch_records = [r for r, w in items]
             batch_witnesses = [w for r, w in items]
+            peer_pubkey, peer_hostname = client.peer_identity()
 
             # A peer that answers a range request with the wrong starting
             # sequence has not forked — it is buggy or hostile. Catching it
@@ -472,11 +513,17 @@ class SyncManager:
                     records=batch_records,
                     head=head if is_final else None,
                     origin_pubkey=head.origin_pubkey,
-                    source=self._hostname,
+                    # The peer we got this from, not ourselves. `source` was
+                    # recording this relay's own hostname on every imported
+                    # record, which made the one column named for provenance
+                    # answer a question nobody asked.
+                    source=peer_hostname,
                     key_intervals=key_intervals,
                 )
             except ChainBreak as e:
                 return await self._diagnose_chain_break(origin, client, local_seq, e)
+            except SignatureInvalid as e:
+                return self._diagnose_signature_failure(origin, e)
 
             log_msg(
                 f"SYNC_ONCE: origin='{origin}' batch seq {current_start}-{current_start + len(batch_records) - 1}: accepted={result.accepted} count={result.accepted_count} reason='{result.reason}'"
@@ -485,11 +532,14 @@ class SyncManager:
             if result.accepted:
                 total_accepted += result.accepted_count
 
-                for rec, upstream_witness in zip(batch_records, batch_witnesses):
-                    if self._firehose.get_event_by_id(origin, rec.event_id) is not None:
-                        local_witness = self._create_local_witness(rec, upstream_witness)
-                        if local_witness:
-                            self._firehose.store_witness(local_witness)
+                for rec, upstream in zip(batch_records, batch_witnesses):
+                    if self._firehose.get_event_by_id(origin, rec.event_id) is None:
+                        continue
+                    event_hash = compute_event_hash(encode_record(rec))
+                    self._retain_upstream(rec, event_hash, upstream)
+                    self._firehose.store_witness(
+                        self._create_local_witness(rec, event_hash, peer_pubkey, peer_hostname)
+                    )
 
                 if result.conflicts:
                     log_msg(
@@ -599,6 +649,50 @@ class SyncManager:
         )
         return AcceptResult(accepted=False, reason=f"origin diverged ({detail})")
 
+    def _diagnose_signature_failure(self, origin: str, err: SignatureInvalid) -> AcceptResult:
+        """Decide whether a signature failure is our epoch table or their key.
+
+        A record that will not verify has the same two causes a chain break
+        does, and until now only one of them was handled. `SignatureInvalid`
+        escaped `_sync_once` entirely, landed in `_sync_loop`'s blanket
+        `except Exception`, and was logged, backed off and retried hourly
+        forever — while the sync status stayed clean, so the one place an
+        operator would look said nothing was wrong.
+
+        If our own epoch table disagrees with the rotate records we hold, the
+        peer is fine and we were verifying against the wrong key: repair and
+        let the next cycle proceed, exactly as `_diagnose_chain_break` does for
+        a drifted tip.
+
+        Otherwise the peer is serving records this origin's keys do not
+        account for. That is what a name takeover looks like from here — a new
+        operator on the same origin, signing with a key no rotation record
+        connects to the one we pinned — and it cannot resolve itself by
+        retrying, because nothing about our state or theirs will change. Halt
+        and mark it, so the situation reaches a person. Halting rather than
+        depeering for the same reason as divergence: it is reversible and it
+        keeps what we already accepted.
+        """
+        consistent, stored, derived = self._firehose.check_key_epochs(origin)
+        if not consistent and self._firehose.repair_key_epochs(origin):
+            log_msg(
+                f"SYNC_ONCE: origin='{origin}' local key epochs were inconsistent "
+                f"({len(stored)} stored -> {len(derived)} derived); repaired. "
+                f"Not blaming the peer."
+            )
+            return AcceptResult(
+                accepted=False, reason="local key epochs repaired; retry next cycle"
+            )
+
+        detail = f"signature did not verify under this origin's known keys: {err}"
+        self._firehose.set_sync_status(origin, "diverged", detail)
+        log_msg(
+            f"SYNC_ONCE: origin='{origin}' DIVERGED — {detail}. This is what a key "
+            f"takeover looks like from here. Sync halted; an operator must resolve "
+            f"it (resume-origin, depeer, or reset-key)."
+        )
+        return AcceptResult(accepted=False, reason=f"origin diverged ({detail})")
+
     async def _verify_epoch_hints(
         self, origin: str, client: SyncClient, head: Head
     ) -> list[tuple[int, int | None, bytes]] | None:
@@ -662,10 +756,19 @@ class SyncManager:
 
         return [(start, end, pk) for start, end, pk in epochs]
 
-    def _create_local_witness(self, rec: Record, upstream: Witness) -> Witness | None:
-        """Create a local relay witness naming the upstream as immediate source."""
-        encoded = encode_record(rec)
-        event_hash = compute_event_hash(encoded)
+    def _create_local_witness(
+        self, rec: Record, event_hash: bytes, peer_pubkey: bytes, peer_hostname: str
+    ) -> Witness:
+        """Witness that this relay received `rec` from the peer it authenticated to.
+
+        `peer_pubkey` / `peer_hostname` come from the transport's completed
+        discovery, never from the incoming witness. That distinction is the
+        whole fix: a witness is a signed report of an observation, and the only
+        observation this relay actually made is which party answered its
+        connection. Copying the upstream's account of itself and signing that
+        was lending this relay's signature to someone else's claim.
+        """
+        from bonnet.core.record import sign_witness
 
         w = Witness(
             event_origin=rec.origin,
@@ -673,14 +776,36 @@ class SyncManager:
             event_hash=event_hash,
             relay_pubkey=self._identity.public_key,
             relay_hostname=self._hostname,
-            received_from_pubkey=upstream.relay_pubkey,
-            received_from_hostname=upstream.relay_hostname,
+            received_from_pubkey=peer_pubkey,
+            received_from_hostname=peer_hostname,
             seen_at=int(time.time()),
         )
-        from bonnet.core.record import sign_witness
-
         w.relay_signature = sign_witness(self._identity, encode_unsigned_witness(w))
         return w
+
+    def _retain_upstream(self, rec: Record, event_hash: bytes, upstream: list[Witness]) -> int:
+        """Keep the peer's provenance chain so it survives the peer.
+
+        Each entry is stored only if it is *about this record* and its
+        signature verifies under the relay it names (`store_witness` does the
+        second part). A witness naming a different event hash is a statement
+        about something else and is not ours to republish alongside this one.
+
+        Retention is what makes the chain worth anything: a signed statement
+        outlives its signer, so a relay that later goes offline - or simply
+        stops answering us - does not erase the trail that ran through it.
+        """
+        kept = 0
+        for w in upstream:
+            if w.event_origin != rec.origin or w.event_id != rec.event_id:
+                continue
+            if w.event_hash != event_hash:
+                continue
+            if w.relay_pubkey == self._identity.public_key:
+                continue
+            if self._firehose.store_witness(w):
+                kept += 1
+        return kept
 
     # ------------------------------------------------------------------
     # Manual sync (for testing or operator triggers)

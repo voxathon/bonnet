@@ -110,7 +110,7 @@ class FirehoseHTTPServer:
             window_seconds=getattr(config, "rate_limit_window", 1),
         )
 
-        self._signer = self._build_signer(server_identity)
+        self._signer = self._build_signer(server_identity, config.origin)
 
         self._verifier = BonnetVerifier(
             key_resolver=FirehoseKeyResolver(),
@@ -125,10 +125,23 @@ class FirehoseHTTPServer:
         self._cleanup_counter = 0
 
     @staticmethod
-    def _build_signer(identity: Identity) -> BonnetSigner:
+    def _build_signer(identity: Identity, origin: str) -> BonnetSigner:
+        """The signer for responses this server sends.
+
+        Responses are keyed `origin:<name>`, not `ed25519:<hex>`. The
+        difference is the whole point: an `ed25519:` keyid *carries* the key it
+        should be checked against, so a client resolving it learns only that
+        whoever wrote the header also holds the matching private key. Naming
+        the origin instead forces the client to look the key up in whatever it
+        pinned for that name, which is what makes a response attributable to
+        the origin rather than to its bearer.
+
+        Requests keep `ed25519:`, and correctly — a client's key is what
+        identifies it, and the server looks up nothing.
+        """
         return BonnetSigner(
             private_key=identity.private_key,
-            key_id=f"ed25519:{identity.public_key.hex()}",
+            key_id=f"origin:{origin}",
             tag=UNTP_TAG,
             label=UNTP_LABEL,
             request_components=[
@@ -158,19 +171,32 @@ class FirehoseHTTPServer:
         with the old key while the discovery document's public_key field
         (read fresh from self._server_identity) claimed the new one."""
         self._server_identity = identity
-        self._signer = self._build_signer(identity)
+        self._signer = self._build_signer(identity, self._config.origin)
+
+    # Every route this server exposes, with the methods it accepts on that
+    # path. A path here but with the wrong method is a 405 (with an Allow
+    # header, per RFC 9110) rather than a 404 - the two mean different things
+    # to a client debugging a request, and collapsing them into one generic
+    # "Not Found" hides that a plain GET /command was actually close.
+    _ROUTES: dict[str, tuple[str, ...]] = {
+        "/.well-known/untp": ("GET",),
+        "/command": ("POST",),
+    }
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             path = scope.get("path", "")
             method = scope.get("method", "")
 
-            if path == "/.well-known/untp" and method == "GET":
-                await self._handle_discovery(scope, receive, send)
-            elif path == "/command" and method == "POST":
-                await self._handle_command(scope, receive, send)
-            else:
+            allowed_methods = self._ROUTES.get(path)
+            if allowed_methods is None:
                 await self._send_error_response(send, 404, b"Not Found")
+            elif method not in allowed_methods:
+                await self._send_method_not_allowed(send, allowed_methods)
+            elif path == "/.well-known/untp":
+                await self._handle_discovery(scope, receive, send)
+            else:
+                await self._handle_command(scope, receive, send)
         elif scope["type"] == "lifespan":
             await self._handle_lifespan(scope, receive, send)
         else:
@@ -221,6 +247,20 @@ class FirehoseHTTPServer:
         return capabilities
 
     async def _handle_discovery(self, scope, receive, send):
+        # Which origins this relay serves reads for. Built from the same two
+        # inputs as `allowed_origins` in app/server.py - this origin plus each
+        # configured peer - so it states the aggregate scope rather than
+        # claiming one: a client passing origin="" to BOARD_LIST,
+        # ARTICLE_LIST or ARTICLE_SEARCH gets exactly this set merged, and
+        # anything outside it is refused by the read gate.
+        #
+        # Public deliberately. A peer list is not a secret that could be kept:
+        # every relayed record carries its origin, aggregate board and article
+        # reads tag each row with one, and the peers themselves know. Moving
+        # it behind authentication would hide it from nobody while making the
+        # aggregate scope unknowable to legitimate callers. An operator who
+        # wants none of this reachable should put the endpoint behind auth or
+        # a firewall, which also covers /command, where the actual data is.
         known_origins = [self._config.origin]
         for peer in getattr(self._config, "peers", []):
             known_origins.append(peer.origin)
@@ -233,6 +273,14 @@ class FirehoseHTTPServer:
                 "hostname": self._config.hostname,
                 "public_key": self._server_identity.public_key.hex(),
                 "anonymous_key": self._anonymous_public_key.hex(),
+                # Not a leaked secret, despite the name: the "anonymous"
+                # identity is a keypair this server mints so any caller can
+                # sign as an unauthenticated principal without holding a real
+                # one (see the `unknown` principal in acl.py). Publishing the
+                # private half here, unauthenticated, is what lets a client
+                # skip generating and registering its own throwaway key just
+                # to make a read. Every caller of this endpoint gets the same
+                # keypair, so nothing here is unique to whoever fetches it.
                 "anonymous_private_key": self._anonymous_identity.private_key.hex(),
                 "command_endpoint": "/command",
                 "known_origins": known_origins,
@@ -481,6 +529,17 @@ class FirehoseHTTPServer:
     async def _send_error_response(self, send, status_code: int, body: bytes):
         await self._send_raw(send, status_code, [(b"content-type", b"text/plain")], body)
 
+    async def _send_method_not_allowed(self, send, allowed_methods: tuple[str, ...]) -> None:
+        await self._send_raw(
+            send,
+            405,
+            [
+                (b"content-type", b"text/plain"),
+                (b"allow", ", ".join(allowed_methods).encode("ascii")),
+            ],
+            b"Method Not Allowed",
+        )
+
     async def _send_raw(self, send, status_code: int, headers: list, body: bytes):
         raw_headers = []
         for item in headers:
@@ -564,10 +623,6 @@ class FirehoseHTTPServer:
         if isinstance(e, MalformedSignature):
             return f"Malformed signature: {e}"
         return f"Signature error: {e}"
-
-    @property
-    def anonymous_public_key(self) -> bytes:
-        return self._anonymous_public_key
 
     @property
     def anonymous_private_key(self) -> bytes:

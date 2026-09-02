@@ -11,6 +11,7 @@ Normal article queries use only this bounded database.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import threading
@@ -29,6 +30,27 @@ PIN_UNPINNED = "unpinned"
 
 THREAD_OPEN = "open"
 THREAD_CLOSED = "closed"
+
+# Whether the naming origin actually issued `author_username` to
+# `author_pubkey`. A record's author fields are signed, so they are
+# non-repudiable — but a signature says the author wrote them, not that they
+# are true, and an origin may put any string in a record it publishes. This
+# records what could be established locally, and is reported rather than
+# enforced: nothing is filtered, hidden, or refused on the strength of it.
+#
+# The check is deliberately not a network lookup. See AUTHOR_FOREIGN.
+#: This origin's registry issued this name to this key.
+AUTHOR_REGISTRY = "registry"
+#: The registrar names this origin, which did not issue that name to that key
+#: — either the key holds no registration, or it holds one under another name.
+AUTHOR_UNREGISTERED = "unregistered"
+#: The registrar names a *different* origin. Terminal by design: resolving it
+#: would mean asking that origin, which may be gone, may be refusing us, and
+#: whose silence is indistinguishable from denial. A claim we cannot check is
+#: reported as unchecked rather than guessed at.
+AUTHOR_FOREIGN = "foreign"
+#: No username was claimed, so there is nothing to check.
+AUTHOR_UNCHECKED = "unchecked"
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +127,7 @@ class ArticleProjection:
     replacement_article_id: bytes | None
     latest_control_seq: int
     event_id: bytes
+    author_check: str
 
     __slots__ = (
         "origin",
@@ -130,6 +153,7 @@ class ArticleProjection:
         "replacement_article_id",
         "latest_control_seq",
         "event_id",
+        "author_check",
     )
 
     def __init__(self, **kwargs):
@@ -160,6 +184,33 @@ class BoardProjection:
         with self._lock:
             self._conn.close()
 
+    @contextlib.contextmanager
+    def _transaction(self):
+        """BEGIN IMMEDIATE ... COMMIT, rolling back and re-raising on failure.
+
+        `isolation_level=None` turns off sqlite3's implicit transactions, so
+        every write here brackets itself explicitly. The connection is shared
+        across threads (`net/firehose_http_server.py` dispatches through
+        `asyncio.to_thread`), which is why the bracket is IMMEDIATE and why
+        every caller holds `self._lock` around it.
+
+        An early `return` inside the block is a normal exit and therefore
+        commits — the cross-origin short-circuits in the apply_* methods
+        below rely on that.
+
+        Catches BaseException, not Exception: a cancellation or KeyboardInterrupt
+        arriving mid-write would otherwise leave the transaction open on a
+        connection every other caller shares.
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        else:
+            self._conn.execute("COMMIT")
+
     def _init_schema(self) -> None:
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS articles (
@@ -186,6 +237,7 @@ class BoardProjection:
                 reply_to_article_id     BLOB NOT NULL DEFAULT x'0000000000000000000000000000000000000000000000000000000000000000',
                 replacement_article_id  BLOB,
                 latest_control_seq      INTEGER NOT NULL DEFAULT 0,
+                author_check            TEXT NOT NULL DEFAULT 'unchecked',
                 PRIMARY KEY (origin, board, article_num),
                 UNIQUE (origin, board, article_id)
             );
@@ -270,13 +322,21 @@ class BoardProjection:
     # Article operations
     # ------------------------------------------------------------------
 
-    def apply_article(self, rec: Record) -> None:
-        """Insert or update an article projection from a bonnet.article record."""
+    def apply_article(self, rec: Record, author_check: str = AUTHOR_UNCHECKED) -> None:
+        """Insert or update an article projection from a bonnet.article record.
+
+        `author_check` is resolved by the caller and stored as given — see
+        `Dispatcher._resolve_author_check`, which is the only production caller
+        and holds the user registry this projection does not. Resolving at
+        dispatch and storing the answer, rather than looking it up on read, is
+        deliberate: it pins what was true when the article was published, so a
+        later revocation or re-registration does not retroactively rewrite what
+        an old article says about its author.
+        """
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 subject = rec.metadata.get_text(1) or ""
                 tags_list = rec.metadata.get_text_list(2) or []
                 options_list = rec.metadata.get_text_list(3) or []
@@ -303,11 +363,11 @@ class BoardProjection:
                     "(origin, board, article_num, article_id, event_id, "
                     "visibility, body_state, pin_state, thread_state, "
                     "subject, tags, options, content_type, "
-                    "author_pubkey, author_username, author_registrar, "
+                    "author_pubkey, author_username, author_registrar, author_check, "
                     "created_at, body_hash, body_size, "
                     "root_article_id, reply_to_article_id, latest_control_seq) "
                     "VALUES (?, ?, ?, ?, ?, 'active', ?, 'unpinned', 'open', "
-                    "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         rec.origin,
                         rec.board,
@@ -322,6 +382,7 @@ class BoardProjection:
                         rec.actor_pubkey,
                         rec.actor_username,
                         rec.actor_registrar,
+                        author_check,
                         rec.created_at,
                         rec.body_hash,
                         rec.body_size,
@@ -335,21 +396,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_cancel(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -364,21 +419,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_restore(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -393,21 +442,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_purge(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -421,21 +464,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_pin(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 priority = rec.metadata.get_i64(1) or 0
@@ -454,21 +491,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_unpin(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -482,21 +513,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_thread_close(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -510,21 +535,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_thread_reopen(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 if rec.origin != rec.target_origin:
                     self._mark_applied(rec)
                     self._set_checkpoint(rec.origin, rec.origin_seq)
-                    self._conn.execute("COMMIT")
                     return
 
                 updated = self._conn.execute(
@@ -538,24 +557,15 @@ class BoardProjection:
 
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def apply_unknown(self, rec: Record) -> None:
         """Record an unknown kind as applied (no projection effect)."""
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     # ------------------------------------------------------------------
     # Pending controls
@@ -681,7 +691,7 @@ class BoardProjection:
                 "author_pubkey, author_username, author_registrar, "
                 "created_at, body_hash, body_size, "
                 "root_article_id, reply_to_article_id, replacement_article_id, "
-                "latest_control_seq "
+                "latest_control_seq, author_check "
                 "FROM articles WHERE origin=? AND board=? AND article_num=?",
                 (origin, board, article_num),
             ).fetchone()
@@ -711,6 +721,7 @@ class BoardProjection:
                 reply_to_article_id=bytes(row[20]),
                 replacement_article_id=bytes(row[21]) if row[21] else None,
                 latest_control_seq=row[22],
+                author_check=row[23],
             )
 
     def get_article_by_id(
@@ -724,7 +735,7 @@ class BoardProjection:
                 "author_pubkey, author_username, author_registrar, "
                 "created_at, body_hash, body_size, "
                 "root_article_id, reply_to_article_id, replacement_article_id, "
-                "latest_control_seq "
+                "latest_control_seq, author_check "
                 "FROM articles WHERE origin=? AND board=? AND article_id=?",
                 (origin, board, article_id),
             ).fetchone()
@@ -754,6 +765,7 @@ class BoardProjection:
                 reply_to_article_id=bytes(row[20]),
                 replacement_article_id=bytes(row[21]) if row[21] else None,
                 latest_control_seq=row[22],
+                author_check=row[23],
             )
 
     def list_articles(
@@ -783,7 +795,7 @@ class BoardProjection:
                 f"author_pubkey, author_username, author_registrar, "
                 f"created_at, body_hash, body_size, "
                 f"root_article_id, reply_to_article_id, replacement_article_id, "
-                f"latest_control_seq "
+                f"latest_control_seq, author_check "
                 f"FROM articles WHERE origin=? AND board=? "
                 f"AND visibility IN ({placeholders}){where_extra} "
                 f"ORDER BY created_at DESC, article_num ASC LIMIT ? OFFSET ?",
@@ -814,6 +826,7 @@ class BoardProjection:
                     reply_to_article_id=bytes(r[20]),
                     replacement_article_id=bytes(r[21]) if r[21] else None,
                     latest_control_seq=r[22],
+                    author_check=r[23],
                 )
                 for r in rows
             ]
@@ -846,8 +859,15 @@ class BoardProjection:
         params: list[str | bytes] = [origin, board, *states]
 
         if text_query:
-            where_parts.append("(subject LIKE ? OR tags LIKE ?)")
-            like = f"%{text_query}%"
+            # Escape the LIKE wildcards a caller's literal text might contain
+            # before wrapping it in our own — otherwise searching for the
+            # literal string "%" or "_" is interpreted as a wildcard and
+            # matches every row, contradicting the documented substring
+            # search. '\' is escaped first so a literal backslash in the
+            # query can't be mistaken for part of one of our escapes.
+            escaped = text_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where_parts.append("(subject LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')")
+            like = f"%{escaped}%"
             params.extend([like, like])
 
         if actor_pubkey is not None:
@@ -870,7 +890,7 @@ class BoardProjection:
                 f"author_pubkey, author_username, author_registrar, "
                 f"created_at, body_hash, body_size, "
                 f"root_article_id, reply_to_article_id, replacement_article_id, "
-                f"latest_control_seq "
+                f"latest_control_seq, author_check "
                 f"FROM articles WHERE {where_clause} "
                 f"ORDER BY created_at DESC, article_num ASC LIMIT ? OFFSET ?",
                 params + [limit, offset],
@@ -901,6 +921,7 @@ class BoardProjection:
                     reply_to_article_id=bytes(r[20]),
                     replacement_article_id=bytes(r[21]) if r[21] else None,
                     latest_control_seq=r[22],
+                    author_check=r[23],
                 )
                 for r in rows
             ]
@@ -1053,7 +1074,7 @@ class BoardProjection:
                 f"author_pubkey, author_username, author_registrar, "
                 f"created_at, body_hash, body_size, "
                 f"root_article_id, reply_to_article_id, replacement_article_id, "
-                f"latest_control_seq "
+                f"latest_control_seq, author_check "
                 f"FROM articles WHERE {where_clause} "
                 f"ORDER BY article_num ASC LIMIT ? OFFSET ?",
                 params + [limit, offset],
@@ -1083,6 +1104,7 @@ class BoardProjection:
                     reply_to_article_id=bytes(r[20]),
                     replacement_article_id=bytes(r[21]) if r[21] else None,
                     latest_control_seq=r[22],
+                    author_check=r[23],
                 )
                 for r in rows
             ]
@@ -1094,16 +1116,11 @@ class BoardProjection:
     def clear(self) -> None:
         """Delete all projection data for a full rebuild."""
         with self._lock:
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self._transaction():
                 self._conn.execute("DELETE FROM articles")
                 self._conn.execute("DELETE FROM pending_controls")
                 self._conn.execute("DELETE FROM applied_events")
                 self._conn.execute("DELETE FROM projection_checkpoint")
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
 
     def update_body_state(self, origin: str, board: str, article_num: int, state: str) -> None:
         """Update body availability state for an article."""

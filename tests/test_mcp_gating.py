@@ -440,6 +440,40 @@ async def test_call_time_gate_checks_the_calls_own_board(bridge):
     assert "per the relay's own PERMISSIONS" in str(exc.value)
 
 
+async def test_call_time_gate_honors_the_calls_own_auth(bridge):
+    """A call's own auth= must be judged on its own identity, not the
+    session default — the same per-call identity model my_permissions(auth=)
+    already implements. Before this was wired through, gating computed
+    _identity_missing() off current_username alone, so a call naming a
+    perfectly valid auth= was refused "no identity selected" whenever the
+    session's own default happened to be unset."""
+    from bonnet.core.acl import ACLRule, PrincipalMatcher
+
+    acl = bridge["command_handler"]._acl
+    acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(registered=True),
+            actions=["write"],
+            commands=["PUBLISH_RECORD"],
+            kinds=["bonnet.board.create", "bonnet.article"],
+            boards=["*"],
+        )
+    )
+
+    await _connect_and_register("scout")
+    await tools.create_board("general")
+    # Simulate a caller relying entirely on auth=, not a session default.
+    tools.current_username.set(None)
+
+    async with Client(tools.mcp) as c:
+        result = await c.call_tool(
+            "publish_article",
+            {"board": "general", "subject": "s", "content": "c", "auth": "scout"},
+        )
+    assert result is not None
+
+
 async def test_notification_is_best_effort_outside_a_request(bridge):
     """At startup or in tests there is no session; failing to notify must
     never fail the operation that caused the change."""

@@ -39,6 +39,36 @@ MAX_METADATA_FIELDS = 256
 MAX_TEXT_FIELD = 4096
 MAX_RANGE_RESPONSE = 1 << 24
 
+
+def normalize_origin(origin: str) -> str:
+    """Canonical form of an origin name: trimmed, lowercased, no trailing dot.
+
+    Hostnames are case-insensitive and `bbs.example.` is the same name as
+    `bbs.example`, so these are one origin spelled three ways. Config has
+    normalized its own strings since it was written; nothing on the wire did,
+    which meant a caller asking for `BBS.Example` looked up a different key
+    than the one everything is stored under and quietly got nothing.
+
+    **Use this on lookup keys only — never on an origin read out of a record.**
+    A record's origin is inside the bytes its signatures cover, so the
+    authoritative spelling is whatever the publisher signed. Normalizing a
+    decoded record would change what re-encoding produces and break every
+    signature over it. Peers cannot smuggle a case-variant in regardless:
+    `accept_remote_range` requires each record's origin to equal the origin
+    being synced, which comes from config and is already normalized.
+    """
+    if not origin:
+        return ""
+    return origin.strip().lower().rstrip(".")
+
+
+#: Witnesses carried with one event. The provenance chain grows by one entry
+#: per relay the event crossed, so the honest bound is small; the cap exists
+#: because the set arrives from a peer, and a peer can fabricate entries as
+#: cheaply as it can relay real ones. Reaching it means the chain is longer
+#: than this relay will carry, not that anything is wrong.
+MAX_WITNESS_SET = 32
+
 # Domain separation tags. These namespace every hash and signature the ledger
 # produces, so a signature over one structure can never verify against another.
 # The `untp.` prefix is the substrate's namespace, distinct from the `bonnet.`
@@ -241,9 +271,6 @@ class _Reader:
             raise LengthExceeded(f"blob32 length {n} exceeds {max_len}")
         return self.read(n)
 
-    def at_end(self) -> bool:
-        return self.offset >= len(self.data)
-
     def expect_end(self) -> None:
         if self.offset < len(self.data):
             raise TrailingInput(
@@ -330,10 +357,6 @@ class MetadataMap:
         r = _Reader(f.value)
         count = r.u16()
         return [r.text16() for _ in range(count)]
-
-
-def metadata_field_bytes(field_id: int, value_type: int, value: bytes) -> MetadataField:
-    return MetadataField(field_id=field_id, value_type=value_type, value=value)
 
 
 def metadata_text(field_id: int, text: str) -> MetadataField:
@@ -844,26 +867,6 @@ def decode_head(data: bytes) -> Head:
     return h
 
 
-def decode_unsigned_head(data: bytes) -> tuple[Head, bytes]:
-    r = _Reader(data)
-    fmt = r.u8()
-    if fmt != HEAD_FORMAT:
-        raise InvalidValue(f"head_format must be {HEAD_FORMAT}, got {fmt}")
-    h = Head(
-        head_format=fmt,
-        origin=r.text16(MAX_ORIGIN_HOSTNAME),
-        latest_origin_seq=r.u64(),
-        latest_event_hash=r.id32(),
-        event_count=r.u64(),
-        generated_at=r.i64(),
-        origin_pubkey=r.key32(),
-    )
-    sig = r.sig64()
-    r.expect_end()
-    h.origin_signature = sig
-    return h, sig
-
-
 # ---------------------------------------------------------------------------
 # Relay Witness
 # ---------------------------------------------------------------------------
@@ -921,28 +924,6 @@ def decode_witness(data: bytes) -> Witness:
     )
     r.expect_end()
     return w
-
-
-def decode_unsigned_witness(data: bytes) -> tuple[Witness, bytes]:
-    r = _Reader(data)
-    fmt = r.u8()
-    if fmt != WITNESS_FORMAT:
-        raise InvalidValue(f"witness_format must be {WITNESS_FORMAT}, got {fmt}")
-    w = Witness(
-        witness_format=fmt,
-        event_origin=r.text16(MAX_ORIGIN_HOSTNAME),
-        event_id=r.id32(),
-        event_hash=r.id32(),
-        relay_pubkey=r.key32(),
-        relay_hostname=r.text16(MAX_ORIGIN_HOSTNAME),
-        received_from_pubkey=r.key32(),
-        received_from_hostname=r.text16(MAX_ORIGIN_HOSTNAME),
-        seen_at=r.i64(),
-    )
-    sig = r.sig64()
-    r.expect_end()
-    w.relay_signature = sig
-    return w, sig
 
 
 def is_origin_witness(w: Witness) -> bool:

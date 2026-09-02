@@ -270,9 +270,6 @@ class Permissions:
     def may(self, command: str) -> bool:
         return command in self.commands
 
-    def may_publish(self, kind: str) -> bool:
-        return "PUBLISH_RECORD" in self.commands and kind in self.kinds
-
 
 @dataclass
 class ReportInfo:

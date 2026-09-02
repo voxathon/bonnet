@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import os
 import time
+from urllib.parse import urlparse
 
 import httpx
 
@@ -27,6 +28,7 @@ from bonnet.core.crypto import Identity
 from bonnet.core.kinds import KIND_ORIGIN_KEY_ROTATE
 from bonnet.core.record import (
     encode_unsigned_record,
+    normalize_origin,
     verify_key_rotation_proof,
     verify_record_signature,
 )
@@ -44,6 +46,7 @@ from bonnet.net.http_auth import (
     BonnetSigner,
     BonnetVerifier,
     HTTPMessage,
+    InvalidParameter,
     KeyResolver,
     SignatureError,
     compute_content_digest,
@@ -76,12 +79,26 @@ class PinConfirmationRequired(FirehoseClientError):
     carried for the caller to weigh — it does not decide anything here.
     """
 
-    def __init__(self, origin: str, presented_key: bytes, kind: str, evidence: str = ""):
+    def __init__(
+        self,
+        origin: str,
+        presented_key: bytes,
+        kind: str,
+        evidence: str = "",
+        host_match: bool = True,
+    ):
         self.origin = origin
         self.presented_key = presented_key
         self.fingerprint = presented_key.hex()
         self.kind = kind  # "new" | "changed"
         self.evidence = evidence
+        #: Whether the origin this server claims is the host that was dialed.
+        #: An origin legitimately served from an unrelated address is a normal
+        #: deployment, so this is reported for the caller to weigh rather than
+        #: enforced — but it is the difference between "bbs.example answered at
+        #: bbs.example" and "something at unrelated.host says it is bbs.example",
+        #: and only the first is checkable against a TLS certificate.
+        self.host_match = host_match
         super().__init__(
             f"origin '{origin}' presented a key this client has not accepted "
             f"({kind}); fingerprint {self.fingerprint}"
@@ -89,17 +106,41 @@ class PinConfirmationRequired(FirehoseClientError):
 
 
 class _ServerKeyResolver(KeyResolver):
-    """Resolves the server's key for response verification."""
+    """Resolves a response's keyid to the key this client pinned for that origin.
 
-    def __init__(self, server_pubkey: bytes):
+    Only `origin:<name>` resolves, and only to the pinned key. There used to be
+    an `ed25519:<hex>` branch that returned `bytes.fromhex(key_id[8:])` — the
+    key named *in the keyid being checked* — and since the server signed its
+    responses with exactly that form, it was the branch every real response
+    took. Verification then established only that whoever wrote the header held
+    the matching private key, which any party answering the connection does. It
+    proved a signature existed, not whose it was, so the pin decided whether
+    *discovery* succeeded and nothing after it.
+
+    The origin in the keyid must also be the one this client connected to. A
+    response signed by a key we pinned for some other origin is not this
+    origin's answer, and saying so here keeps `untp-origin` from being the only
+    thing tying a response to a name.
+    """
+
+    def __init__(self, server_pubkey: bytes, server_origin: str):
         self._server_pubkey = server_pubkey
+        self._server_origin = server_origin
 
     def resolve_public_key(self, key_id: str) -> bytes:
-        if key_id.startswith("ed25519:"):
-            return bytes.fromhex(key_id[8:])
-        if key_id.startswith("origin:"):
-            return self._server_pubkey
-        raise ValueError(f"Unknown keyid format: {key_id}")
+        # InvalidParameter, not ValueError: it subclasses SignatureError, which
+        # is what `_verify_response` catches and turns into a FirehoseClientError.
+        # A bare ValueError escapes that handler and surfaces as an unhandled
+        # error from a *verification failure*, which is the one case that must
+        # always read as one. Matches FirehoseKeyResolver on the server side.
+        if not key_id.startswith("origin:"):
+            raise InvalidParameter(f"Response keyid must be origin:<name>, got: {key_id[:40]!r}")
+        named = key_id[7:]
+        if named != self._server_origin:
+            raise InvalidParameter(
+                f"Response keyid names origin {named!r}, expected {self._server_origin!r}"
+            )
+        return self._server_pubkey
 
 
 class FirehoseTransport:
@@ -159,7 +200,12 @@ class FirehoseTransport:
         anchor when enabled. TOFU pinning persists the key for subsequent
         connections.
         """
-        resp = await self._http.get(f"{self._base_url}/.well-known/untp")
+        try:
+            resp = await self._http.get(f"{self._base_url}/.well-known/untp")
+        except httpx.HTTPError as e:
+            raise FirehoseClientError(
+                f"could not reach {self._base_url}: {e or type(e).__name__}"
+            ) from e
         resp.raise_for_status()
         data = resp.json()
         info = DiscoveryInfo(
@@ -180,7 +226,7 @@ class FirehoseTransport:
         self._discovery = info
 
         self._verifier = BonnetVerifier(
-            key_resolver=_ServerKeyResolver(self._server_pubkey),
+            key_resolver=_ServerKeyResolver(self._server_pubkey, self._server_origin),
             tag=UNTP_TAG,
             max_lifetime=60,
             clock_skew=30,
@@ -257,6 +303,8 @@ class FirehoseTransport:
         if pinned == public_key:
             return  # already trusted, nothing to decide
 
+        host_match = self._origin_matches_dialed_host()
+
         if self._pin_mode == PIN_MODE_CONFIRM:
             if pinned is None:
                 self._trust_store.record_pending(
@@ -266,7 +314,7 @@ class FirehoseTransport:
                     url=self._base_url,
                     verify_tls=str(self._verify),
                 )
-                raise PinConfirmationRequired(origin, public_key, "new")
+                raise PinConfirmationRequired(origin, public_key, "new", host_match=host_match)
             evidence = (
                 "chain_verified"
                 if await self._verify_rotation_chain(origin, pinned, public_key)
@@ -280,7 +328,9 @@ class FirehoseTransport:
                 url=self._base_url,
                 verify_tls=str(self._verify),
             )
-            raise PinConfirmationRequired(origin, public_key, "changed", evidence)
+            raise PinConfirmationRequired(
+                origin, public_key, "changed", evidence, host_match=host_match
+            )
 
         if self._trust_store.tofu_pin(origin, public_key):
             return
@@ -291,6 +341,128 @@ class FirehoseTransport:
             if self._trust_store.accept_rotation(origin, old_pubkey, public_key):
                 return
         raise FirehoseClientError(f"Server key pin mismatch for origin '{origin}'")
+
+    def _origin_matches_dialed_host(self) -> bool:
+        """Whether the origin this server claims is the address we dialed.
+
+        Nothing anywhere compared these before: `discover()` took `origin`
+        straight out of the response body and pinned under it, and
+        `verify_response(expected_origin=...)` compared that claim to the
+        `untp-origin` header — the same party asserting the same thing twice.
+        So a host could call itself any origin it liked, and the name a key got
+        pinned under was entirely the server's choice.
+
+        Reported, not enforced. An origin served from an unrelated address is
+        an ordinary deployment (a relay behind a CDN, a service moved to new
+        infrastructure), so refusing would break working setups to catch a case
+        the pin already covers on every visit after the first. What it changes
+        is the *first* visit, which is the one with no evidence behind it: when
+        the names line up, TLS is checking the same string the key is being
+        pinned under, and when they do not, the caller should know that before
+        accepting.
+        """
+        host = (urlparse(self._base_url).hostname or "").lower()
+        claimed = (self._server_origin or "").lower().rstrip(".")
+        return bool(claimed) and host == claimed
+
+    def advertised_address(self) -> str | None:
+        """Where this origin says it can be reached, when that is not here.
+
+        The discovery document has always carried `hostname`, and nothing read
+        it — the server publishes it, the transport parses it into
+        `DiscoveryInfo`, and no call site ever looked. This makes it legible
+        without making it authoritative.
+
+        Reported, never followed. Auto-redirecting on it would hand the party
+        being identified the ability to choose where the next connection goes,
+        which is the shape of the body-redirect hop that needed an SSRF guard
+        and a TLS-policy fix. And the value would be small even then: you can
+        only read this hint from a server you already reached, so it covers a
+        planned move announced while the old address still answers, and not the
+        case anyone actually wants — a peer that went dark and came back
+        elsewhere. That case is out-of-band by nature.
+
+        What it is good for is telling an operator their configured address is
+        stale, which is a thing to surface and let them act on.
+        """
+        if self._discovery is None:
+            return None
+        advertised = normalize_origin(self._discovery.hostname)
+        if not advertised:
+            return None
+        dialed = (urlparse(self._base_url).hostname or "").lower()
+        return advertised if advertised != dialed else None
+
+    async def refresh_epoch_cache(self, origin: str | None = None) -> bool:
+        """Fetch, verify and cache an origin's key history. True if cached.
+
+        Anchored on the pin. The advertised table's final epoch must be the key
+        this client actually pinned, and every internal boundary is re-fetched
+        as a full record and checked — actor equal to the preceding epoch's
+        key, origin signature under that key, rotation proof chaining it to the
+        successor. KEY_EPOCHS is a hint about *where to look*, never evidence:
+        the same stance `firehose_sync._verify_epoch_hints` takes server-side,
+        and `_verify_rotation_chain` takes for pin changes.
+
+        Best-effort by design. A peer that does not implement KEY_EPOCHS, or an
+        origin that is unreachable, leaves whatever was cached before intact —
+        the point of caching is that verification keeps working when the origin
+        does not, so a failed refresh must never invalidate a good table.
+        """
+        target = origin or self._server_origin
+        if not self._trust_store or not target:
+            return False
+        pinned = self._trust_store.get_pin(target)
+        if pinned is None:
+            return False
+
+        try:
+            resp = await self.send_command(build_key_epochs(target))
+            epochs = sorted(parse_key_epochs_response(resp), key=lambda e: e[0])
+        except Exception:
+            return False
+        if not epochs or epochs[0][0] != 1 or epochs[-1][1] is not None:
+            return False
+        if epochs[-1][2] != pinned:
+            # The history does not end at the key we trust, so it is not this
+            # origin's history as far as we are concerned.
+            return False
+
+        for prev, nxt in zip(epochs, epochs[1:]):
+            boundary, _, pk_prev = prev[1], prev[2], prev[2]
+            start_i, _, pk_next = nxt
+            if boundary is None or boundary != start_i - 1:
+                return False
+            try:
+                records = parse_event_range_response(
+                    await self.send_command(build_event_range(target, boundary, 1))
+                )
+            except Exception:
+                return False
+            if len(records) != 1:
+                return False
+            rec = records[0][0]
+            if rec.kind != KIND_ORIGIN_KEY_ROTATE or rec.actor_pubkey != pk_prev:
+                return False
+            claimed = rec.metadata.get_bytes(1)
+            proof = rec.metadata.get_bytes(2)
+            if claimed != pk_next or proof is None:
+                return False
+            if not verify_record_signature(
+                pk_prev, encode_unsigned_record(rec), rec.origin_signature
+            ):
+                return False
+            if not verify_key_rotation_proof(pk_next, target, pk_prev, proof):
+                return False
+
+        self._trust_store.cache_epochs(target, epochs)
+        return True
+
+    def origin_key_for_seq(self, origin: str, seq: int) -> bytes | None:
+        """The key that countersigned `seq`, from the cache. None if unknown."""
+        if not self._trust_store:
+            return None
+        return self._trust_store.key_for_seq(origin, seq)
 
     async def _verify_rotation_chain(
         self, origin: str, old_pubkey: bytes, new_pubkey: bytes
@@ -449,11 +621,16 @@ class FirehoseTransport:
         )
 
         headers = dict(msg.headers)
-        resp = await self._http.post(
-            f"{self._base_url}/command",
-            content=cmd_bytes,
-            headers=headers,
-        )
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/command",
+                content=cmd_bytes,
+                headers=headers,
+            )
+        except httpx.HTTPError as e:
+            raise FirehoseClientError(
+                f"could not reach {self._base_url}: {e or type(e).__name__}"
+            ) from e
 
         if resp.status_code != 200:
             raise FirehoseClientError(f"HTTP {resp.status_code}: {resp.text[:200]}")

@@ -172,6 +172,8 @@ class Registry:
                 " ORDER BY created_at"
             ).fetchall()
         else:
+            if self.get_tenant(tenant_id) is None:
+                raise TenantError(f"no such tenant {tenant_id!r}")
             rows = self._conn.execute(
                 "SELECT key_id, tenant_id, label, created_at, revoked_at FROM api_keys"
                 " WHERE tenant_id = ? ORDER BY created_at",
