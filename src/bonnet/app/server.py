@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Protocol
+from typing import Any, Protocol
 
 from bonnet.app.cli import FirehoseLocalConnection
 from bonnet.app.console import OperatorConsole
@@ -42,6 +42,10 @@ class BonnetServer:
     def __init__(self, config: FirehoseConfig):
         self.config = config
         self._closed = False
+        # Set for real once run() binds (see run()'s startup()). Declared
+        # here so a signal handler racing with startup has something to
+        # check rather than an AttributeError.
+        self._uvicorn_server: Any = None
 
         os.makedirs(config.data_dir, exist_ok=True)
         os.makedirs(config.boards_dir, exist_ok=True)
@@ -469,12 +473,13 @@ class BonnetServer:
         proof = sign_key_rotation_proof(
             new_identity, origin, old_identity.public_key, new_identity.public_key
         )
+        existing = self.users.get_user_by_pubkey(origin, old_identity.public_key)
         intent = Intent(
             event_id=os.urandom(32),
             kind="bonnet.origin.key.rotate",
             origin=origin,
             actor_pubkey=old_identity.public_key,
-            actor_username="root",
+            actor_username=existing["username"] if existing is not None else "root",
             actor_registrar=origin,
             metadata=MetadataMap(
                 [
@@ -526,7 +531,12 @@ class BonnetServer:
             )
         return "\n".join(lines)
 
-    async def run(self, port: int = None, ssl_certfile: str = None, ssl_keyfile: str = None):
+    async def run(
+        self, port: int = None, ssl_certfile: str = None, ssl_keyfile: str = None
+    ) -> bool:
+        """Run until shutdown. Returns False if the server never managed to start."""
+        import sys
+
         import uvicorn
 
         listen_port = port or self.config.port
@@ -536,6 +546,58 @@ class BonnetServer:
             ssl_keyfile = self.config.tls_key_path
 
         scheme = "https" if ssl_certfile else "http"
+
+        uv_config = uvicorn.Config(
+            self.http_server,
+            host=self.config.http_host,
+            port=listen_port,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile,
+            log_level="info",
+        )
+        server = uvicorn.Server(uv_config)
+        self._uvicorn_server = server
+
+        # uvicorn.Server.startup() dereferences self.lifespan, which is only
+        # ever set inside Server._serve() (reached via .serve()/.run(), which
+        # we deliberately don't use so we can bind before printing the
+        # banner below). Replicate the bit of _serve() that sets it up.
+        if not uv_config.loaded:
+            uv_config.load()
+        server.lifespan = uv_config.lifespan_class(uv_config)
+
+        # Bind before printing anything - a bad port or a port already in
+        # use must not produce a "listening" banner (with live pubkeys) that
+        # the process then contradicts by crashing or dying silently.
+        try:
+            await server.startup()
+        except (OSError, OverflowError) as exc:
+            print(
+                f"error: could not listen on {self.config.http_host}:{listen_port}: {exc}",
+                file=sys.stderr,
+            )
+            return False
+        except SystemExit:
+            # uvicorn's own startup() logs the real bind failure (address
+            # already in use, permission denied, etc.) and calls sys.exit(1)
+            # directly instead of raising OSError - caught here so it
+            # doesn't look like the banner below ever had a chance to be
+            # true. The specific cause is whatever uvicorn just logged above
+            # this line, not guessed at here.
+            print(
+                f"error: could not listen on {self.config.http_host}:{listen_port} "
+                "(see the uvicorn error above)",
+                file=sys.stderr,
+            )
+            return False
+        if server.should_exit or not server.started:
+            print(
+                f"error: server failed to start on {self.config.http_host}:{listen_port} "
+                "(see logs for details)",
+                file=sys.stderr,
+            )
+            return False
+
         print(f"Bonnet server listening on {scheme}://{self.config.http_host}:{listen_port}")
         print(f"Origin: {self.config.origin}")
         print(f"Hostname: {self.config.hostname}")
@@ -549,36 +611,41 @@ class BonnetServer:
                 "until it's installed and on PATH, or [search] rg_path is set in config.toml"
             )
 
-        uv_config = uvicorn.Config(
-            self.http_server,
-            host=self.config.http_host,
-            port=listen_port,
-            ssl_certfile=ssl_certfile,
-            ssl_keyfile=ssl_keyfile,
-            log_level="info",
-        )
-        server = uvicorn.Server(uv_config)
-        self._uvicorn_server = server
-
-        repl_task = asyncio.create_task(OperatorConsole(self).repl_loop())
-        sweep_task = asyncio.create_task(self._sweep_staged_bodies_periodically())
+        tasks = [asyncio.create_task(self._sweep_staged_bodies_periodically())]
+        if sys.stdin.isatty():
+            tasks.append(asyncio.create_task(OperatorConsole(self).repl_loop()))
+        else:
+            print("No interactive terminal on stdin - operator REPL disabled, serving only.")
 
         for peer in self.config.peers:
             base_url = f"https://{peer.hostname}:{peer.port}"
-            client = HttpSyncClient(base_url, verify_tls=peer.verify_tls)
+            try:
+                client = HttpSyncClient(
+                    base_url, verify_tls=peer.verify_tls, allow_private_dial=peer.allow_private
+                )
+            except ValueError as e:
+                print(
+                    f"WARNING: skipping sync peer '{peer.origin}' ({base_url}): {e} "
+                    "- set allow_private = true under this [[sync.peers]] entry to permit "
+                    "loopback/private/LAN addresses"
+                )
+                log_msg(f"SYNC: skipped peer '{peer.origin}' at {base_url}: {e}")
+                continue
             self.sync_manager.start_origin(peer.origin, client, self.config.sync_interval_seconds)
             log_msg(f"SYNC: started background sync for peer '{peer.origin}' from {base_url}")
 
         try:
-            await server.serve()
+            await server.main_loop()
         finally:
-            for task in (repl_task, sweep_task):
+            for task in tasks:
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
             await self.sync_manager.stop_all()
+            await server.shutdown()
+        return True
 
     def close(self) -> None:
         if self._closed:

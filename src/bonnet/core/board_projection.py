@@ -859,8 +859,15 @@ class BoardProjection:
         params: list[str | bytes] = [origin, board, *states]
 
         if text_query:
-            where_parts.append("(subject LIKE ? OR tags LIKE ?)")
-            like = f"%{text_query}%"
+            # Escape the LIKE wildcards a caller's literal text might contain
+            # before wrapping it in our own — otherwise searching for the
+            # literal string "%" or "_" is interpreted as a wildcard and
+            # matches every row, contradicting the documented substring
+            # search. '\' is escaped first so a literal backslash in the
+            # query can't be mistaken for part of one of our escapes.
+            escaped = text_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where_parts.append("(subject LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')")
+            like = f"%{escaped}%"
             params.extend([like, like])
 
         if actor_pubkey is not None:

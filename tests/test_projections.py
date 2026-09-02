@@ -1,5 +1,6 @@
 """Body storage, board projections, global projections, and state reduction."""
 
+import hashlib
 import time
 
 import pytest
@@ -61,6 +62,27 @@ def _make_article_intent(origin, eid, aid, board="general", body=b"hello world")
         ),
         body_hash=compute_body_hash(body),
         body_size=len(body),
+    )
+
+
+def _create_board_direct(nav, origin, board, owner=ACTOR_PUB):
+    """Materialize `board` straight in the nav projection - no firehose
+    record, no origin_seq consumed - for tests that need a board to exist
+    before _dispatch_article will project an article to it (see
+    dispatcher.py), without disturbing their own dispatch-count assertions.
+    Not safe across a Dispatcher.rebuild_all, which clears nav per-origin;
+    tests that rebuild need a real bonnet.board.create record instead."""
+    nav.apply_board_create(
+        Record(
+            origin=origin,
+            origin_seq=0,
+            event_id=hashlib.sha256(f"test-board:{origin}:{board}".encode()).digest(),
+            kind="bonnet.board.create",
+            actor_pubkey=owner,
+            board=board,
+            metadata=MetadataMap([metadata_bytes(1, owner)]),
+            created_at=0,
+        )
     )
 
 
@@ -737,6 +759,86 @@ class TestNavProjection:
         boards = nav_proj.list_boards("bbs.a")
         assert len(boards) == 3
 
+    def test_board_create_with_reserved_char_not_projected(self, nav_proj):
+        """A federated board.create never passes through KindValidator, so
+        this is the actual enforcement point for a bad board name. It must
+        not be listed, but dispatch must still advance past it — this is
+        NOT a rejection, or it would stall the origin's whole replication.
+        """
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
+            board="weird\\name",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        nav_proj.apply_board_create(rec)
+        assert nav_proj.get_board("bbs.a", "weird\\name") is None
+        assert nav_proj.list_boards("bbs.a") == []
+        assert nav_proj.is_applied(rec.event_id)
+
+    def test_board_create_with_control_char_not_projected(self, nav_proj):
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
+            board="\x1b[31mRED\x1b[0mboard",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        nav_proj.apply_board_create(rec)
+        assert nav_proj.list_boards("bbs.a") == []
+        assert nav_proj.is_applied(rec.event_id)
+
+    def test_board_create_with_padding_whitespace_not_projected(self, nav_proj):
+        """Regression for the chaos-testing report's #2.3: a name padded with
+        leading/trailing whitespace ("  general  ") used to be accepted as a
+        distinct identifier from its trimmed form, visually indistinguishable
+        from it in most renderers. identity_text_violation's whitespace-only
+        check inspected the stripped string without ever using it, so padded
+        names slipped through the one check that did look at .strip()."""
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
+            board="  general  ",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        nav_proj.apply_board_create(rec)
+        assert nav_proj.get_board("bbs.a", "  general  ") is None
+        assert nav_proj.list_boards("bbs.a") == []
+        assert nav_proj.is_applied(rec.event_id)
+
+    def test_board_create_after_rejected_one_still_dispatches(self, nav_proj):
+        """The rejected record must not stall subsequent records for the
+        same origin — checkpoint/is_applied still advance past it."""
+        bad = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
+            board="weird\\name",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        good = Record(
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        nav_proj.apply_board_create(bad)
+        nav_proj.apply_board_create(good)
+        assert nav_proj.list_boards("bbs.a") == [nav_proj.get_board("bbs.a", "general")]
+
 
 # ---------------------------------------------------------------------------
 # User projection tests
@@ -765,6 +867,86 @@ class TestUserProjection:
         assert user is not None
         assert user["username"] == "alice"
         assert user["revoked"] is False
+
+    def test_register_with_reserved_char_not_projected(self, user_proj):
+        """A federated user.register never passes through KindValidator, so
+        this is the actual enforcement point for a bad username. It must not
+        bind the name, but dispatch must still advance past it.
+        """
+        user_pubkey = _rid(22)
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.user.register",
+            actor_pubkey=ACTOR_PUB,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "alice/bob"),
+                    metadata_bytes(2, user_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        )
+        user_proj.apply_user_register(rec)
+        assert user_proj.get_user_by_pubkey("bbs.a", user_pubkey) is None
+        assert user_proj.username_holder("bbs.a", "alice/bob") is None
+        assert user_proj.is_applied(rec.event_id)
+
+    def test_register_with_control_char_not_projected(self, user_proj):
+        user_pubkey = _rid(23)
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.user.register",
+            actor_pubkey=ACTOR_PUB,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "zero\x00byte"),
+                    metadata_bytes(2, user_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        )
+        user_proj.apply_user_register(rec)
+        assert user_proj.get_user_by_pubkey("bbs.a", user_pubkey) is None
+        assert user_proj.is_applied(rec.event_id)
+
+    def test_register_after_rejected_one_still_dispatches(self, user_proj):
+        bad_pubkey = _rid(24)
+        good_pubkey = _rid(25)
+        bad = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.user.register",
+            actor_pubkey=ACTOR_PUB,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "alice/bob"),
+                    metadata_bytes(2, bad_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        )
+        good = Record(
+            origin="bbs.a",
+            origin_seq=2,
+            event_id=_rid(2),
+            kind="bonnet.user.register",
+            actor_pubkey=ACTOR_PUB,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "carol"),
+                    metadata_bytes(2, good_pubkey),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        )
+        user_proj.apply_user_register(bad)
+        user_proj.apply_user_register(good)
+        assert user_proj.get_user_by_pubkey("bbs.a", good_pubkey)["username"] == "carol"
 
     def test_revoke(self, user_proj):
         user_pubkey = _rid(20)
@@ -1318,6 +1500,7 @@ class TestDispatcher:
     def test_dispatch_article_and_query(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
+        _create_board_direct(nav, "bbs.a", "general")
 
         body = b"hello world"
         intent = _make_article_intent("bbs.a", _rid(1), _rid(2), body=body)
@@ -1342,6 +1525,7 @@ class TestDispatcher:
     def test_dispatch_cancel_after_article(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
+        _create_board_direct(nav, "bbs.a", "general")
 
         aid = _rid(2)
         intent = _make_article_intent("bbs.a", _rid(1), aid)
@@ -1370,6 +1554,7 @@ class TestDispatcher:
     def test_dispatch_control_before_target(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
+        _create_board_direct(nav, "bbs.a", "general")
 
         aid = _rid(50)
         cancel_intent = Intent(
@@ -1510,6 +1695,17 @@ class TestDispatcher:
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
 
+        board_intent = Intent(
+            event_id=_rid(0),
+            kind="bonnet.board.create",
+            origin="bbs.a",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        board_sig = sign_intent(ACTOR, encode_intent(board_intent))
+        firehose.append_record(ORIGIN_A, board_intent, board_sig, b"")
+
         body = b"rebuild me"
         intent = _make_article_intent("bbs.a", _rid(1), _rid(2), body=body)
         sig = sign_intent(ACTOR, encode_intent(intent))
@@ -1523,7 +1719,7 @@ class TestDispatcher:
         assert bp.article_count("bbs.a", "general") == 1
 
         count = d.rebuild_all("bbs.a")
-        assert count == 1
+        assert count == 2  # the board.create plus the article
 
         bp2 = d._get_board_projection("bbs.a", "general")
         assert bp2.article_count("bbs.a", "general") == 1
@@ -1534,6 +1730,7 @@ class TestDispatcher:
     def test_crash_recovery_replay(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
+        _create_board_direct(nav, "bbs.a", "general")
 
         for i in range(3):
             body = f"body{i}".encode()
@@ -1559,6 +1756,7 @@ class TestDispatcher:
     def test_purge_deletes_body(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
+        _create_board_direct(nav, "bbs.a", "general")
 
         body = b"purge me"
         aid = _rid(2)

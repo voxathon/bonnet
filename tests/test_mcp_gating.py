@@ -428,6 +428,20 @@ async def test_call_time_gate_checks_the_calls_own_board(bridge):
 
     await _connect_and_register("scout")
     tools.current_username.set("scout")
+    # open_board now confirms the board exists (regression for the
+    # chaos-testing report's #1.1) - "mine" is only a name in an ACL rule
+    # above, so it has to actually be created before it can be opened.
+    acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(registered=True),
+            actions=["write"],
+            commands=["PUBLISH_RECORD"],
+            kinds=["bonnet.board.create"],
+            boards=["*"],
+        )
+    )
+    await tools.create_board("mine")
     await tools.open_board("mine")
 
     async with Client(tools.mcp) as c:
