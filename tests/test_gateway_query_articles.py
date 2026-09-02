@@ -204,9 +204,9 @@ async def test_get_event_lets_a_reader_check_the_signatures(wired):
     await tools.publish_article("signed", "content", board="general")
 
     events = await tools.event_range(origin=ORIGIN, start_seq=1, max_count=50)
-    article = [e for e in events if e["kind"] == "bonnet.article"][-1]
+    article = [e for e in events if e.kind == "bonnet.article"][-1]
 
-    got = await tools.get_event(origin=ORIGIN, event_id_hex=article["event_id"])
+    got = await tools.get_event(origin=ORIGIN, event_id_hex=article.event_id)
 
     assert len(got["actor_signature"]) == 128
     assert len(got["origin_signature"]) == 128
