@@ -519,7 +519,9 @@ class FirehoseCommandHandler:
                 )
 
         identity_guard = (
-            self._identity_lock if kind in (KIND_USER_REGISTER, KIND_BOARD_CREATE) else nullcontext()
+            self._identity_lock
+            if kind in (KIND_USER_REGISTER, KIND_BOARD_CREATE)
+            else nullcontext()
         )
         with identity_guard:
             # First writer wins on a username, within this origin. UserProjection
@@ -686,12 +688,15 @@ class FirehoseCommandHandler:
                         return _error(0x0003, "Supersede target article not found")
                     if target.author_pubkey != intent.actor_pubkey:
                         if ctx.role != "administrator" and ctx.role != "moderator":
-                            return _error(0x0004, "Only the original author may supersede an article")
+                            return _error(
+                                0x0004, "Only the original author may supersede an article"
+                            )
 
             if intent.body_size > 0:
                 if intent.body_size > self._max_body_size:
                     return _error(
-                        0x0006, f"Body size {intent.body_size} exceeds maximum {self._max_body_size}"
+                        0x0006,
+                        f"Body size {intent.body_size} exceeds maximum {self._max_body_size}",
                     )
                 if len(body) != intent.body_size:
                     return _error(0x0006, "Body length mismatch")
