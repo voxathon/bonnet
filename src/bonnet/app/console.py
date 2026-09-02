@@ -337,7 +337,9 @@ class OperatorConsole:
         "root" only for the sliver of startup before the bootstrap
         registration has landed.
         """
-        existing = self.users.get_user_by_pubkey(self.config.origin, self.server_identity.public_key)
+        existing = self.users.get_user_by_pubkey(
+            self.config.origin, self.server_identity.public_key
+        )
         return existing["username"] if existing is not None else "root"
 
     def _parse_response_error(self, resp: bytes) -> str:
@@ -1056,9 +1058,7 @@ class OperatorConsole:
             f"Created: {ts}",
         ]
         if author_username and author_registrar:
-            lines.append(
-                f"Author: {_sanitize_for_terminal(author_username)}@{author_registrar}"
-            )
+            lines.append(f"Author: {_sanitize_for_terminal(author_username)}@{author_registrar}")
         else:
             lines.append(f"Author: {author_pubkey}")
         lines.extend(
