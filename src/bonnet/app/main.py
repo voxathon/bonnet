@@ -319,7 +319,16 @@ def main(argv: list[str] | None = None):
             print(f"  {len(config.unknown_keys)} unrecognized key(s) ignored (see warnings above)")
         return
 
-    log_dir = os.path.join(server_home, "logs")
+    # Logs live next to whatever config.toml this run actually loaded, not
+    # the globally-remembered `--dir`/`--init` pointer `server_home` falls
+    # back to (see core.config.from_toml's matching fix) — an explicit
+    # `--config PATH` with no `--dir`/`BONNET_SERVER_HOME` would otherwise
+    # log to a stale, unrelated prior invocation's home directory.
+    if args.dir or os.environ.get("BONNET_SERVER_HOME"):
+        log_home = server_home
+    else:
+        log_home = os.path.dirname(os.path.abspath(args.config))
+    log_dir = os.path.join(log_home, "logs")
     try:
         init_logging(log_dir)
     except OSError as exc:
