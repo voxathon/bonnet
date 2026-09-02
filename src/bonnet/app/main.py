@@ -66,7 +66,15 @@ def _load_and_validate_config(args) -> FirehoseConfig:
         config = FirehoseConfig.load(args.config)
     except FileNotFoundError:
         print(f"error: config file not found: {args.config}", file=sys.stderr)
-        print("run 'bonnet server --create-config' to generate a sample", file=sys.stderr)
+        # README's "Running a board" walkthrough only ever mentions --init
+        # (which also generates TLS certs and prints next steps); a first-run
+        # user following it literally used to be told about --create-config
+        # instead, which writes a config with no certs and no guidance.
+        print("run 'bonnet server --init' to generate a config and get started", file=sys.stderr)
+        print(
+            "(or 'bonnet server --create-config' for just a sample config, no TLS setup)",
+            file=sys.stderr,
+        )
         raise SystemExit(1)
     except IsADirectoryError:
         print(f"error: config path is a directory, not a file: {args.config}", file=sys.stderr)
@@ -319,7 +327,16 @@ def main(argv: list[str] | None = None):
             print(f"  {len(config.unknown_keys)} unrecognized key(s) ignored (see warnings above)")
         return
 
-    log_dir = os.path.join(server_home, "logs")
+    # Logs live next to whatever config.toml this run actually loaded, not
+    # the globally-remembered `--dir`/`--init` pointer `server_home` falls
+    # back to (see core.config.from_toml's matching fix) — an explicit
+    # `--config PATH` with no `--dir`/`BONNET_SERVER_HOME` would otherwise
+    # log to a stale, unrelated prior invocation's home directory.
+    if args.dir or os.environ.get("BONNET_SERVER_HOME"):
+        log_home = server_home
+    else:
+        log_home = os.path.dirname(os.path.abspath(args.config))
+    log_dir = os.path.join(log_home, "logs")
     try:
         init_logging(log_dir)
     except OSError as exc:
@@ -341,23 +358,71 @@ def main(argv: list[str] | None = None):
 
     server = BonnetServer(config)
 
-    def handle_sigterm(signum, frame):
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, handle_sigterm)
-
     started = False
     try:
-        started = asyncio.run(
-            server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key)
-        )
+        started = asyncio.run(_serve_until_signal(server, args))
     except KeyboardInterrupt:
+        # Ctrl+C's SIGINT, unrelated to the SIGTERM handling below - asyncio
+        # itself raises this one, out of _serve_until_signal's control.
         print("\nShutting down...")
         started = True
     finally:
         server.close()
     if not started:
         raise SystemExit(1)
+
+
+async def _serve_until_signal(server: BonnetServer, args) -> bool:
+    """Run the server, stopping cleanly on SIGTERM.
+
+    A prior version's SIGTERM handler called `raise KeyboardInterrupt`
+    directly from inside `signal.signal`'s synchronous callback. Python only
+    delivers that between bytecode instructions, so it could land anywhere -
+    including inside asyncio's own shutdown machinery - and did,
+    intermittently: "RuntimeError: coroutine ignored GeneratorExit" and
+    "Task was destroyed but it is pending!" on ~2 of 6 runs in chaos
+    testing, "RuntimeError: Event loop is closed" on another. The process
+    still exited, but it read exactly like a crash on ordinary shutdown.
+
+    The fix is the standard asyncio-safe pattern: the handler only ever
+    schedules an ordinary callback (`should_exit = True`, or cancelling this
+    coroutine before the server has bound anything to stop gracefully) via
+    `call_soon_threadsafe`, run by the loop at a safe point between awaits -
+    never an exception thrown into whatever happened to be executing.
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.ensure_future(
+        server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key)
+    )
+    printed_shutting_down = False
+
+    def _stop() -> None:
+        nonlocal printed_shutting_down
+        if not printed_shutting_down:
+            print("\nShutting down...")
+            printed_shutting_down = True
+        if server._uvicorn_server is not None:
+            server._uvicorn_server.should_exit = True
+        else:
+            # Arrived before run() finished binding - nothing bound yet to
+            # stop gracefully, so cancel the whole attempt instead.
+            task.cancel()
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _stop)
+    except NotImplementedError:
+        # Windows: add_signal_handler isn't implemented for SIGTERM, but
+        # signal.signal(SIGTERM, ...) still runs for os.kill()-delivered
+        # signals. call_soon_threadsafe hands the same _stop callback to the
+        # loop instead of executing it inline in the signal callback, which
+        # is what keeps this safe even though it's still signal.signal under
+        # the hood.
+        signal.signal(signal.SIGTERM, lambda signum, frame: loop.call_soon_threadsafe(_stop))
+
+    try:
+        return await task
+    except asyncio.CancelledError:
+        return True
 
 
 if __name__ == "__main__":
