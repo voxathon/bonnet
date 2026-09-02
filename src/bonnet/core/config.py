@@ -351,7 +351,9 @@ class FirehoseConfig:
                 raise ValueError(f"config: duplicate peer origin '{peer.origin}'")
             seen_origins.add(normalized_origin)
             if not isinstance(peer.port, int) or isinstance(peer.port, bool):
-                raise ValueError(f"config: peer '{peer.origin}' port must be an integer, got {peer.port!r}")
+                raise ValueError(
+                    f"config: peer '{peer.origin}' port must be an integer, got {peer.port!r}"
+                )
             if not (1 <= peer.port <= 65535):
                 raise ValueError(f"config: peer '{peer.origin}' port {peer.port} out of range")
             for flag in ("import_warnings", "import_temp_bans", "import_permabans"):

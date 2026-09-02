@@ -232,9 +232,9 @@ class CleanTransportErrorMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        if response.status_code != 400 or not response.headers.get(
-            "content-type", ""
-        ).startswith("application/json"):
+        if response.status_code != 400 or not response.headers.get("content-type", "").startswith(
+            "application/json"
+        ):
             return response
 
         body = b"".join([chunk async for chunk in response.body_iterator])
@@ -251,7 +251,9 @@ class CleanTransportErrorMiddleware(BaseHTTPMiddleware):
                     error["message"] = "Malformed JSON-RPC request"
                     body = json.dumps(data).encode("utf-8")
 
-        return Response(content=body, status_code=response.status_code, media_type="application/json")
+        return Response(
+            content=body, status_code=response.status_code, media_type="application/json"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:

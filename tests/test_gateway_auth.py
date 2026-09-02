@@ -290,9 +290,10 @@ def test_presented_key_scheme_is_case_insensitive():
 
 
 def test_presented_key_candidates_orders_bearer_before_x_api_key():
-    assert server.presented_key_candidates(
-        {"Authorization": "Bearer abc", "X-API-Key": "xyz"}
-    ) == ["abc", "xyz"]
+    assert server.presented_key_candidates({"Authorization": "Bearer abc", "X-API-Key": "xyz"}) == [
+        "abc",
+        "xyz",
+    ]
     assert server.presented_key_candidates({"X-API-Key": "xyz"}) == ["xyz"]
     assert server.presented_key_candidates({"Authorization": "Bearer abc"}) == ["abc"]
     assert server.presented_key_candidates({"Authorization": "Bearer ", "X-API-Key": "xyz"}) == [
