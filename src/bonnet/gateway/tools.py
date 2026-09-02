@@ -1003,7 +1003,7 @@ async def register(username: str, password: str | None = None, origin: str | Non
     unlocked = await _unlock_origin_tools()
 
     already_registered = registered_seq is None
-    result = {
+    response: dict[str, list[str] | str | int | None] = {
         "origin": target_origin,
         "username": username,
         "public_key": identity.public_key.hex(),
@@ -1016,11 +1016,11 @@ async def register(username: str, password: str | None = None, origin: str | Non
         "tools_unlocked": unlocked,
     }
     if already_registered:
-        result["message"] = (
+        response["message"] = (
             f"'{username}' was already registered on this origin under this key - "
             "re-selected the existing identity; no new registration record was published."
         )
-    return result
+    return response
 
 
 @mcp.tool

@@ -52,11 +52,10 @@ Environment variables (command-line flags win over all of them):
 """
 
 import argparse
+import json
 import os
 import sys
 from typing import Literal, cast
-
-import json
 
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
@@ -246,10 +245,11 @@ class CleanTransportErrorMiddleware(BaseHTTPMiddleware):
 
         if isinstance(data, dict):
             error = data.get("error")
-            message = error.get("message") if isinstance(error, dict) else None
-            if isinstance(message, str) and "errors.pydantic.dev" in message:
-                error["message"] = "Malformed JSON-RPC request"
-                body = json.dumps(data).encode("utf-8")
+            if isinstance(error, dict):
+                message = error.get("message")
+                if isinstance(message, str) and "errors.pydantic.dev" in message:
+                    error["message"] = "Malformed JSON-RPC request"
+                    body = json.dumps(data).encode("utf-8")
 
         return Response(content=body, status_code=response.status_code, media_type="application/json")
 
