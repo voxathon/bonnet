@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import glob
 import os
+import socket
 import tomllib
 from dataclasses import dataclass
 
@@ -31,6 +32,7 @@ class PeerConfig:
     hostname: str
     port: int = 2272
     verify_tls: bool = False
+    allow_private: bool = False
     import_warnings: bool = False
     import_temp_bans: bool = False
     import_permabans: bool = False
@@ -106,6 +108,7 @@ _PEER_KEYS = {
     "hostname",
     "port",
     "verify_tls",
+    "allow_private",
     "import_warnings",
     "import_temp_bans",
     "import_permabans",
@@ -292,8 +295,14 @@ class FirehoseConfig:
         """Raise ValueError if configuration is invalid."""
         if not self.origin:
             raise ValueError("config: origin must not be empty")
+        if not isinstance(self.port, int) or isinstance(self.port, bool):
+            raise ValueError(f"config: port must be an integer, got {self.port!r}")
         if not (1 <= self.port <= 65535):
             raise ValueError(f"config: port {self.port} out of range [1, 65535]")
+        try:
+            socket.getaddrinfo(self.host, None)
+        except socket.gaierror as exc:
+            raise ValueError(f"config: host {self.host!r} does not resolve: {exc}") from exc
         if self.max_request_size <= 0:
             raise ValueError(
                 f"config: max_request_size must be positive, got {self.max_request_size}"
@@ -341,6 +350,8 @@ class FirehoseConfig:
             if normalized_origin in seen_origins:
                 raise ValueError(f"config: duplicate peer origin '{peer.origin}'")
             seen_origins.add(normalized_origin)
+            if not isinstance(peer.port, int) or isinstance(peer.port, bool):
+                raise ValueError(f"config: peer '{peer.origin}' port must be an integer, got {peer.port!r}")
             if not (1 <= peer.port <= 65535):
                 raise ValueError(f"config: peer '{peer.origin}' port {peer.port} out of range")
             for flag in ("import_warnings", "import_temp_bans", "import_permabans"):
@@ -465,6 +476,7 @@ class FirehoseConfig:
                     hostname=p.get("hostname", ""),
                     port=p.get("port", 2272),
                     verify_tls=p.get("verify_tls", False),
+                    allow_private=_as_bool(p, "allow_private", "sync.peers", False),
                     import_warnings=_as_bool(p, "import_warnings", "sync.peers", False),
                     import_temp_bans=_as_bool(p, "import_temp_bans", "sync.peers", False),
                     import_permabans=_as_bool(p, "import_permabans", "sync.peers", False),
@@ -569,6 +581,9 @@ interval_seconds = 300
 # Firehose federation peers. Each entry starts a background sync loop.
 # The origin is the peer's Bonnet origin string; hostname/port is the dial address.
 # verify_tls should be false for self-signed certs (common on LAN).
+# allow_private permits dialing loopback/private/link-local addresses (e.g.
+# 127.0.0.1 or 10.0.0.15) - refused by default as an SSRF guard, so set this
+# to true for local testing or a real LAN-only federation deployment.
 # import_warnings, import_temp_bans, and import_permabans control which
 # punishment types this peer's moderation actions are enforced with locally.
 # Records are always stored and relayed regardless; these flags only govern
@@ -579,6 +594,7 @@ interval_seconds = 300
 # hostname = "10.0.0.15"
 # port = 2272
 # verify_tls = false
+# allow_private = true
 # import_warnings = true
 # import_temp_bans = true
 # import_permabans = false
