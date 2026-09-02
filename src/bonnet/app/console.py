@@ -10,6 +10,7 @@ import os
 import struct
 
 from bonnet.core.crypto import Identity
+from bonnet.core.kind_validator import identity_text_violation
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     ZERO_ID,
@@ -130,6 +131,8 @@ class OperatorConsole:
             try:
                 line = await loop.run_in_executor(None, lambda: input("bonnet> "))
             except EOFError:
+                if hasattr(self, "_uvicorn_server") and self._uvicorn_server:
+                    self._uvicorn_server.should_exit = True
                 break
 
             line = line.strip()
@@ -309,8 +312,10 @@ class OperatorConsole:
   purge-origin <origin>         Remove all firehose and projection data for an origin
   reset-key <origin>            Clear key epoch pinning for an origin
   rotate-key                    Rotate this server's own origin signing key
-                                (publishes bonnet.origin.key.rotate; restart
-                                required afterward)
+                                (publishes bonnet.origin.key.rotate; effective
+                                immediately, no restart needed - unless the
+                                admin ACL rule was hand-written in config.toml,
+                                in which case that file needs a manual update)
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:
@@ -644,6 +649,10 @@ class OperatorConsole:
             return "Usage: create-board <name>"
 
         board = parts[0]
+
+        violation = identity_text_violation(board)
+        if violation is not None:
+            return f"Invalid board name {board!r}: {violation}."
 
         if self.nav.get_board(self.config.origin, board) is not None:
             return f"Board '{board}' already exists."

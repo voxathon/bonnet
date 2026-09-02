@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import glob
 import os
+import socket
 import tomllib
 from dataclasses import dataclass
 
@@ -298,6 +299,10 @@ class FirehoseConfig:
             raise ValueError(f"config: port must be an integer, got {self.port!r}")
         if not (1 <= self.port <= 65535):
             raise ValueError(f"config: port {self.port} out of range [1, 65535]")
+        try:
+            socket.getaddrinfo(self.host, None)
+        except socket.gaierror as exc:
+            raise ValueError(f"config: host {self.host!r} does not resolve: {exc}") from exc
         if self.max_request_size <= 0:
             raise ValueError(
                 f"config: max_request_size must be positive, got {self.max_request_size}"

@@ -25,7 +25,7 @@ from bonnet.core.firehose import (
 )
 from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
 from bonnet.core.kind_validator import KindValidator, ValidationError
-from bonnet.core.kinds import ALL_KNOWN_KINDS, KIND_USER_REGISTER
+from bonnet.core.kinds import ALL_KNOWN_KINDS, KIND_BOARD_CREATE, KIND_USER_REGISTER
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     SIG_SIZE,
@@ -464,6 +464,14 @@ class FirehoseCommandHandler:
         ):
             return _error(0x0004, "Not permitted")
 
+        # An article needs a real board to land in - see
+        # Dispatcher._dispatch_article for why a bare publish is no longer
+        # allowed to silently mint one. Refused here, before append, so the
+        # caller gets a clean error instead of a "successful" publish that
+        # then never surfaces as a queryable article.
+        if kind == KIND_ARTICLE and self._nav.get_board(intent.origin, board) is None:
+            return _error(0x0003, f"Board '{board}' does not exist - create it first")
+
         # Registration gates: privilege, and subject.
         #
         # The actor binding above fixes *who signed*, but a registration also
@@ -506,6 +514,18 @@ class FirehoseCommandHandler:
             holder = self._users.username_holder(intent.origin, requested)
             if holder is not None and holder != subject:
                 return _error(0x0009, f"Username '{requested}' is already registered")
+
+        # Same rule, same reason, for board names: first writer wins.
+        # NavProjection.apply_board_create enforces this too and has to,
+        # since a federated board.create never reaches this handler either —
+        # but refusing here is what lets a local caller see why, instead of
+        # a signed record that's silently accepted and then just never takes
+        # ownership.
+        if kind == KIND_BOARD_CREATE:
+            claimed_owner = intent.metadata.get_bytes(1) or intent.actor_pubkey
+            existing_board = self._nav.get_board(intent.origin, board)
+            if existing_board is not None and existing_board["owner_pubkey"] != claimed_owner:
+                return _error(0x0009, f"Board '{board}' is already owned by someone else")
 
         # The identity a record is published under is the registrar's to state,
         # not the caller's to choose. Until now `actor_username` and

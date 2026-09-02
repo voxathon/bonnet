@@ -181,8 +181,8 @@ def main(argv: list[str] | None = None):
     args = parser.parse_args(argv)
 
     if args.dir:
-        set_home("server", args.dir)
-    server_home = resolve_home("server", "BONNET_SERVER_HOME")
+        args.dir = os.path.expanduser(args.dir)
+    server_home = args.dir or resolve_home("server", "BONNET_SERVER_HOME")
     if os.path.exists(server_home) and not os.path.isdir(server_home):
         print(
             f"error: server home '{server_home}' exists but is not a directory "
@@ -190,6 +190,14 @@ def main(argv: list[str] | None = None):
             file=sys.stderr,
         )
         raise SystemExit(1)
+    # Only remember --dir for future runs that omit it entirely. A process
+    # with BONNET_SERVER_HOME set always resolves via that override anyway
+    # (see resolve_home) - writing to the pointer file here would only
+    # leak this run's --dir into other processes on the same machine that
+    # rely on their *own* BONNET_SERVER_HOME for isolation, since the
+    # pointer file isn't scoped by that env var.
+    if args.dir and not os.environ.get("BONNET_SERVER_HOME"):
+        set_home("server", args.dir)
     if args.config is None:
         args.config = os.path.join(server_home, "config.toml")
 
@@ -297,12 +305,18 @@ def main(argv: list[str] | None = None):
 
     signal.signal(signal.SIGTERM, handle_sigterm)
 
+    started = False
     try:
-        asyncio.run(server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key))
+        started = asyncio.run(
+            server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key)
+        )
     except KeyboardInterrupt:
         print("\nShutting down...")
+        started = True
     finally:
         server.close()
+    if not started:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
