@@ -273,6 +273,14 @@ class FirehoseHTTPServer:
                 "hostname": self._config.hostname,
                 "public_key": self._server_identity.public_key.hex(),
                 "anonymous_key": self._anonymous_public_key.hex(),
+                # Not a leaked secret, despite the name: the "anonymous"
+                # identity is a keypair this server mints so any caller can
+                # sign as an unauthenticated principal without holding a real
+                # one (see the `unknown` principal in acl.py). Publishing the
+                # private half here, unauthenticated, is what lets a client
+                # skip generating and registering its own throwaway key just
+                # to make a read. Every caller of this endpoint gets the same
+                # keypair, so nothing here is unique to whoever fetches it.
                 "anonymous_private_key": self._anonymous_identity.private_key.hex(),
                 "command_endpoint": "/command",
                 "known_origins": known_origins,

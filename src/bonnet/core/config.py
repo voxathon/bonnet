@@ -491,7 +491,10 @@ class FirehoseConfig:
 
     @staticmethod
     def create_default_config(
-        path: str, force: bool = False, tls_paths: tuple[str, str] | None = None
+        path: str,
+        force: bool = False,
+        tls_paths: tuple[str, str] | None = None,
+        port: int = 2272,
     ) -> FirehoseConfig:
         """Write a sample config file and return the default config.
 
@@ -507,15 +510,18 @@ class FirehoseConfig:
             raise FileExistsError(f"config file already exists: {path} (use --force to overwrite)")
         config = FirehoseConfig(
             acl=ACLEvaluator([]),
+            port=port,
             tls_enabled=tls_paths is not None,
             tls_cert_path=tls_paths[0] if tls_paths else "",
             tls_key_path=tls_paths[1] if tls_paths else "",
         )
-        config._write_default(path, tls_paths=tls_paths)
+        config._write_default(path, tls_paths=tls_paths, port=port)
         return config
 
     @staticmethod
-    def _write_default(path: str, tls_paths: tuple[str, str] | None = None) -> None:
+    def _write_default(
+        path: str, tls_paths: tuple[str, str] | None = None, port: int = 2272
+    ) -> None:
         if tls_paths:
             cert_path, key_path = tls_paths
             tls_section = f"""[tls]
@@ -550,7 +556,7 @@ hostname = ""
 # data_dir = "./data"
 # boards_dir = "./boards"
 # events_bodies_dir = "./event_bodies"
-port = 2272
+port = {port}
 # Bind address: 127.0.0.1 for local-only, 0.0.0.0 for all interfaces.
 # Change this deliberately once you're ready to accept remote connections.
 host = "127.0.0.1"
