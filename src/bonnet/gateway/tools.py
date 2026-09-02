@@ -66,6 +66,7 @@ any downstream tool call.
 import contextvars
 import os
 import time
+from urllib.parse import urlsplit
 
 import httpx
 from fastmcp import FastMCP
@@ -575,6 +576,12 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
             "connect requires a URL (e.g. https://bbs.example:2272) - an empty "
             "or whitespace-only value would silently fall back to the default "
             "origin instead of connecting where you meant to"
+        )
+    parsed = urlsplit(url.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(
+            f"connect requires an http:// or https:// URL, got {url!r} "
+            "(e.g. https://bbs.example:2272)"
         )
 
     previous = (current_origin_url.get(), current_origin_verify.get(), current_origin.get())
@@ -1448,6 +1455,10 @@ async def get_article(
     include_body: whether to fetch the article body content.
     origin: origin to query (defaults to server's origin).
     """
+    article_num = _require_int("article_num", article_num)
+    if article_num < 0:
+        raise ValueError("article_num must be non-negative")
+
     board = cursor.resolve_board(board)
     client = _make_client()
     try:
@@ -1456,7 +1467,12 @@ async def get_article(
         else:
             await _connect_anonymous(client)
         origin = origin or client._server_origin or ""
-        view = await client.get_article(origin, board, article_num, include_body)
+        try:
+            view = await client.get_article(origin, board, article_num, include_body)
+        except ProtocolError as e:
+            if e.code == 0x0003:
+                return None
+            raise
         if view and include_body and view.body is None and view.body_size > 0:
             try:
                 body = await client.get_article_body(origin, board, article_num)
@@ -2187,6 +2203,9 @@ async def report(
     if not reason.strip():
         raise ValueError("A report needs a reason — moderators act on the grounds, not the flag")
     _reject_lone_surrogates("reason", reason)
+    article_num = _require_int("article_num", article_num)
+    if article_num < 0:
+        raise ValueError("article_num must be non-negative")
 
     board = cursor.resolve_board(board)
     article_num = cursor.resolve_article_num(article_num, board)

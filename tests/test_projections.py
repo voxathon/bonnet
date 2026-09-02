@@ -1,5 +1,6 @@
 """Body storage, board projections, global projections, and state reduction."""
 
+import hashlib
 import time
 
 import pytest
@@ -61,6 +62,27 @@ def _make_article_intent(origin, eid, aid, board="general", body=b"hello world")
         ),
         body_hash=compute_body_hash(body),
         body_size=len(body),
+    )
+
+
+def _create_board_direct(nav, origin, board, owner=ACTOR_PUB):
+    """Materialize `board` straight in the nav projection - no firehose
+    record, no origin_seq consumed - for tests that need a board to exist
+    before _dispatch_article will project an article to it (see
+    dispatcher.py), without disturbing their own dispatch-count assertions.
+    Not safe across a Dispatcher.rebuild_all, which clears nav per-origin;
+    tests that rebuild need a real bonnet.board.create record instead."""
+    nav.apply_board_create(
+        Record(
+            origin=origin,
+            origin_seq=0,
+            event_id=hashlib.sha256(f"test-board:{origin}:{board}".encode()).digest(),
+            kind="bonnet.board.create",
+            actor_pubkey=owner,
+            board=board,
+            metadata=MetadataMap([metadata_bytes(1, owner)]),
+            created_at=0,
+        )
     )
 
 
@@ -1457,6 +1479,7 @@ class TestDispatcher:
     def test_dispatch_article_and_query(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
+        _create_board_direct(nav, "bbs.a", "general")
 
         body = b"hello world"
         intent = _make_article_intent("bbs.a", _rid(1), _rid(2), body=body)
@@ -1481,6 +1504,7 @@ class TestDispatcher:
     def test_dispatch_cancel_after_article(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
+        _create_board_direct(nav, "bbs.a", "general")
 
         aid = _rid(2)
         intent = _make_article_intent("bbs.a", _rid(1), aid)
@@ -1509,6 +1533,7 @@ class TestDispatcher:
     def test_dispatch_control_before_target(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
+        _create_board_direct(nav, "bbs.a", "general")
 
         aid = _rid(50)
         cancel_intent = Intent(
@@ -1649,6 +1674,17 @@ class TestDispatcher:
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
 
+        board_intent = Intent(
+            event_id=_rid(0),
+            kind="bonnet.board.create",
+            origin="bbs.a",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        board_sig = sign_intent(ACTOR, encode_intent(board_intent))
+        firehose.append_record(ORIGIN_A, board_intent, board_sig, b"")
+
         body = b"rebuild me"
         intent = _make_article_intent("bbs.a", _rid(1), _rid(2), body=body)
         sig = sign_intent(ACTOR, encode_intent(intent))
@@ -1662,7 +1698,7 @@ class TestDispatcher:
         assert bp.article_count("bbs.a", "general") == 1
 
         count = d.rebuild_all("bbs.a")
-        assert count == 1
+        assert count == 2  # the board.create plus the article
 
         bp2 = d._get_board_projection("bbs.a", "general")
         assert bp2.article_count("bbs.a", "general") == 1
@@ -1673,6 +1709,7 @@ class TestDispatcher:
     def test_crash_recovery_replay(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
+        _create_board_direct(nav, "bbs.a", "general")
 
         for i in range(3):
             body = f"body{i}".encode()
@@ -1698,6 +1735,7 @@ class TestDispatcher:
     def test_purge_deletes_body(self, dispatcher):
         d, firehose, nav, users, policy, bs = dispatcher
         firehose.init_origin_key("bbs.a", ORIGIN_A_PUB)
+        _create_board_direct(nav, "bbs.a", "general")
 
         body = b"purge me"
         aid = _rid(2)
