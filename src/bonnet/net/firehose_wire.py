@@ -117,7 +117,40 @@ def _guard(fn, *args):
 
 def _enc_text16(s: str) -> bytes:
     encoded = s.encode("utf-8")
+    if len(encoded) > 0xFFFF:
+        raise ProtocolError(f"text16 encoded length {len(encoded)} exceeds {0xFFFF}")
     return struct.pack(">H", len(encoded)) + encoded
+
+
+def _enc_u64(v: int, what: str) -> bytes:
+    """Pack an unsigned 64-bit request field, rejecting what struct.pack won't.
+
+    Sibling to _read_u64, on the encode side: request builders take these
+    values from tool callers, not from an already-validated Record, so the
+    range/type checks core.record's decoders get for free have to happen
+    here instead of surfacing as a raw struct.error.
+    """
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ProtocolError(f"{what} must be an integer, got {type(v).__name__}")
+    if not 0 <= v <= 0xFFFFFFFFFFFFFFFF:
+        raise ProtocolError(f"{what} must be between 0 and 2**64-1, got {v}")
+    return struct.pack(">Q", v)
+
+
+def _enc_u32(v: int, what: str) -> bytes:
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ProtocolError(f"{what} must be an integer, got {type(v).__name__}")
+    if not 0 <= v <= 0xFFFFFFFF:
+        raise ProtocolError(f"{what} must be between 0 and 2**32-1, got {v}")
+    return struct.pack(">I", v)
+
+
+def _enc_u16(v: int, what: str) -> bytes:
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ProtocolError(f"{what} must be an integer, got {type(v).__name__}")
+    if not 0 <= v <= 0xFFFF:
+        raise ProtocolError(f"{what} must be between 0 and 2**16-1, got {v}")
+    return struct.pack(">H", v)
 
 
 def _read_bytes(data: bytes, offset: int, n: int, what: str) -> tuple[bytes, int]:
@@ -304,9 +337,9 @@ def build_event_range(
 ) -> bytes:
     out = struct.pack(">B", OP_EVENT_RANGE)
     out += _enc_text16(origin)
-    out += struct.pack(">Q", start_seq)
-    out += struct.pack(">H", max_count)
-    out += struct.pack(">I", max_bytes)
+    out += _enc_u64(start_seq, "start_seq")
+    out += _enc_u16(max_count, "max_count")
+    out += _enc_u32(max_bytes, "max_bytes")
     return out
 
 
@@ -336,7 +369,7 @@ def build_report_list(culprit_pubkey: bytes = b"", limit: int = 100, offset: int
     """Build a REPORT_LIST request. Empty culprit means every report."""
     out = struct.pack(">B", OP_REPORT_LIST)
     out += struct.pack(">B", len(culprit_pubkey)) + culprit_pubkey
-    out += struct.pack(">H", limit) + struct.pack(">H", offset)
+    out += _enc_u16(limit, "limit") + _enc_u16(offset, "offset")
     return out
 
 
@@ -528,7 +561,7 @@ def build_article_get(
     out += _enc_text16(board)
     out += struct.pack(">B", selector_type)
     if selector_type == SELECTOR_BY_NUM:
-        out += struct.pack(">Q", selector)
+        out += _enc_u64(selector, "article_num")  # type: ignore[arg-type]
     elif selector_type == SELECTOR_BY_ID:
         if not isinstance(selector, bytes):
             raise ProtocolError("by-ID selector must be bytes")
@@ -632,12 +665,14 @@ def build_article_list(
         flags |= 0x02
     if include_purged:
         flags |= 0x04
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ProtocolError(f"limit must be an integer, got {type(limit).__name__}")
     limit = max(1, min(limit, 65535))
     out = struct.pack(">B", OP_ARTICLE_LIST)
     out += _enc_text16(origin)
     out += _enc_text16(board)
-    out += struct.pack(">I", offset)
-    out += struct.pack(">H", limit)
+    out += _enc_u32(offset, "offset")
+    out += _enc_u16(limit, "limit")
     out += struct.pack(">B", flags)
     return out
 
@@ -741,14 +776,16 @@ def build_article_search(
         flags |= 0x01
     if include_superseded:
         flags |= 0x02
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ProtocolError(f"limit must be an integer, got {type(limit).__name__}")
     limit = max(1, min(limit, 65535))
     out = struct.pack(">B", OP_ARTICLE_SEARCH)
     out += _enc_text16(origin)
     out += _enc_text16(board)
     out += _enc_text16(meta_query)
     out += _enc_text16(body_query)
-    out += struct.pack(">I", offset)
-    out += struct.pack(">H", limit)
+    out += _enc_u32(offset, "offset")
+    out += _enc_u16(limit, "limit")
     out += struct.pack(">B", flags)
     return out
 
@@ -816,10 +853,12 @@ def build_article_query(
         out += struct.pack(">B", field_id)
         out += struct.pack(">B", operator)
         out += struct.pack(">B", value_type)
-        out += struct.pack(">H", len(value)) + value
+        out += _enc_u16(len(value), "filter value length") + value
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ProtocolError(f"limit must be an integer, got {type(limit).__name__}")
     limit = max(1, min(limit, 65535))
-    out += struct.pack(">I", offset)
-    out += struct.pack(">H", limit)
+    out += _enc_u32(offset, "offset")
+    out += _enc_u16(limit, "limit")
     return out
 
 
@@ -843,7 +882,7 @@ def build_article_body(origin: str, board: str, article_num: int) -> bytes:
     out = struct.pack(">B", OP_ARTICLE_BODY)
     out += _enc_text16(origin)
     out += _enc_text16(board)
-    out += struct.pack(">Q", article_num)
+    out += _enc_u64(article_num, "article_num")
     return out
 
 

@@ -117,6 +117,15 @@ def test_keys_cannot_be_minted_for_a_tenant_that_does_not_exist(gw):
         tenants.add_key("nobody")
 
 
+def test_listing_keys_for_a_tenant_that_does_not_exist_is_an_error(gw):
+    """list_keys("nobody") used to return an empty list, indistinguishable
+    from a real tenant that simply holds zero keys - add_key/revoke_key
+    both already raise TenantError for an unknown tenant, so list_keys now
+    matches them instead of being the one silent exception."""
+    with pytest.raises(TenantError):
+        tenants.list_keys("nobody")
+
+
 # --- tenant lifecycle ------------------------------------------------------
 
 

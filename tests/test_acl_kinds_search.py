@@ -603,6 +603,93 @@ class TestKindValidator:
         with pytest.raises(ValidationError, match="reserved"):
             self.validator.validate(intent)
 
+    @pytest.mark.parametrize(
+        "username",
+        [
+            "",
+            "   ",
+            "zero\x00byte",
+            "\x1b[31mRED\x1b[0m",  # ESC is a control byte
+            "alice/bob",
+            "alice<bob>",
+            'alice"bob',
+            "alice|bob",
+            "alice?bob",
+            "alice*bob",
+            "alice:bob",
+            "alice\\bob",
+        ],
+    )
+    def test_user_register_rejects_unfit_username(self, username):
+        intent = self._intent(
+            kind="bonnet.user.register",
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, username),
+                    metadata_bytes(2, USER_PUB),
+                    metadata_u64(3, 0x01),
+                ]
+            ),
+        )
+        with pytest.raises(ValidationError):
+            self.validator.validate(intent)
+
+    def test_user_register_accepts_unicode_username(self):
+        # Bidi-override/confusable characters are deliberately NOT filtered
+        # here — pubkeys, not display strings, are the trust anchor (see
+        # internal/NOTEBOOK.md section 14). Only control bytes and the
+        # reserved-filename character set are rejected.
+        intent = self._intent(
+            kind="bonnet.user.register",
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, chr(0x202E) + "evil"),  # RLO
+                    metadata_bytes(2, USER_PUB),
+                    metadata_u64(3, 0x01),
+                ]
+            ),
+        )
+        self.validator.validate(intent)
+
+    @pytest.mark.parametrize(
+        "board",
+        [
+            "zero\x00byte",
+            "\x1b[31mRED\x1b[0mboard",
+            "../../etc/passwd",
+            "a\\b",
+        ],
+    )
+    def test_board_create_rejects_unfit_board_name(self, board):
+        intent = self._intent(
+            kind="bonnet.board.create",
+            board=board,
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, USER_PUB),
+                ]
+            ),
+        )
+        with pytest.raises(ValidationError):
+            self.validator.validate(intent)
+
+    def test_article_to_existing_board_not_rechecked_for_reserved_chars(self):
+        # The character check runs only at board-creation time, not on every
+        # subsequent reference — a board that predates this rule (or was
+        # created by a federated peer under looser policy) must still be
+        # postable to.
+        intent = self._intent(
+            board="weird\\name",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Subject"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+        )
+        self.validator.validate(intent)
+
     def test_user_revoke_valid(self):
         intent = self._intent(
             kind="bonnet.user.revoke",

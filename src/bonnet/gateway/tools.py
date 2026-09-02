@@ -66,6 +66,7 @@ any downstream tool call.
 import contextvars
 import os
 import time
+from urllib.parse import urlsplit
 
 import httpx
 from fastmcp import FastMCP
@@ -430,6 +431,33 @@ def _reject_lone_surrogates(field: str, value: str) -> None:
         raise ValueError(f"{field} contains invalid unicode (unpaired surrogate)")
 
 
+def _require_int(name: str, value: object) -> int:
+    """Type-check a pagination arg before it hits a bare comparison.
+
+    `offset < 0` and friends assume an int; a str/None/float arriving here
+    (a real risk since these tools are called directly, bypassing whatever
+    JSON-Schema coercion an MCP host would otherwise apply) throws a raw
+    TypeError instead of a clean, actionable ValueError.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer, got {type(value).__name__}")
+    return value
+
+
+def _require_text_fields(**fields: str) -> None:
+    """Type-check and surrogate-check a batch of string tool args.
+
+    Args arrive here straight from the caller, not from a validated schema —
+    a wrong-typed None/int/list must fail as a clean ValueError, not as
+    whatever AttributeError/TypeError the first .encode()/iteration downstream
+    happens to throw.
+    """
+    for field, value in fields.items():
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a string, got {type(value).__name__}")
+        _reject_lone_surrogates(field, value)
+
+
 def _validate_pubkey(pubkey_hex: str) -> bytes:
     try:
         pk = bytes.fromhex(pubkey_hex)
@@ -543,6 +571,19 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     Nothing follows it automatically; it is there so a stale configured
     address can be noticed and fixed deliberately.
     """
+    if not url.strip():
+        raise ValueError(
+            "connect requires a URL (e.g. https://bbs.example:2272) - an empty "
+            "or whitespace-only value would silently fall back to the default "
+            "origin instead of connecting where you meant to"
+        )
+    parsed = urlsplit(url.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(
+            f"connect requires an http:// or https:// URL, got {url!r} "
+            "(e.g. https://bbs.example:2272)"
+        )
+
     previous = (current_origin_url.get(), current_origin_verify.get(), current_origin.get())
 
     resolved_url = url.rstrip("/")
@@ -1414,6 +1455,10 @@ async def get_article(
     include_body: whether to fetch the article body content.
     origin: origin to query (defaults to server's origin).
     """
+    article_num = _require_int("article_num", article_num)
+    if article_num < 0:
+        raise ValueError("article_num must be non-negative")
+
     board = cursor.resolve_board(board)
     client = _make_client()
     try:
@@ -1422,7 +1467,12 @@ async def get_article(
         else:
             await _connect_anonymous(client)
         origin = origin or client._server_origin or ""
-        view = await client.get_article(origin, board, article_num, include_body)
+        try:
+            view = await client.get_article(origin, board, article_num, include_body)
+        except ProtocolError as e:
+            if e.code == 0x0003:
+                return None
+            raise
         if view and include_body and view.body is None and view.body_size > 0:
             try:
                 body = await client.get_article_body(origin, board, article_num)
@@ -1484,6 +1534,8 @@ async def list_articles(
     origin: origin to query (empty = aggregate across all known origins).
     """
     board = cursor.resolve_board(board)
+    offset = _require_int("offset", offset)
+    limit = _require_int("limit", limit)
     if offset < 0:
         raise ValueError("offset must be non-negative")
     if limit < 1:
@@ -1539,6 +1591,8 @@ async def search_articles(
     origin: origin to query (empty = aggregate across all known origins).
     """
     board = cursor.resolve_board(board)
+    offset = _require_int("offset", offset)
+    limit = _require_int("limit", limit)
     if offset < 0:
         raise ValueError("offset must be non-negative")
     if limit < 1:
@@ -1645,6 +1699,8 @@ async def query_articles(
         here, unlike list_articles/search_articles).
     """
     board = cursor.resolve_board(board)
+    offset = _require_int("offset", offset)
+    limit = _require_int("limit", limit)
     if offset < 0:
         raise ValueError("offset must be non-negative")
     if limit < 1:
@@ -1728,6 +1784,7 @@ async def read_thread(
     origin: origin to query (defaults to server's origin).
     """
     board = cursor.resolve_board(board)
+    limit = _require_int("limit", limit)
     if limit < 1:
         raise ValueError("limit must be at least 1")
 
@@ -1799,9 +1856,7 @@ async def publish_article(
     """
     import os as _os
 
-    _reject_lone_surrogates("subject", subject)
-    _reject_lone_surrogates("content", content)
-    _reject_lone_surrogates("tags", tags)
+    _require_text_fields(subject=subject, content=content, tags=tags)
 
     board = cursor.resolve_board(board)
     article_id = _os.urandom(32)
@@ -1928,9 +1983,7 @@ async def supersede_article(
     """
     import os as _os
 
-    _reject_lone_surrogates("subject", subject)
-    _reject_lone_surrogates("content", content)
-    _reject_lone_surrogates("tags", tags)
+    _require_text_fields(subject=subject, content=content, tags=tags)
 
     board = cursor.resolve_board(board)
     supersedes_id = _validate_article_id(target_article_id)
@@ -2150,6 +2203,9 @@ async def report(
     if not reason.strip():
         raise ValueError("A report needs a reason — moderators act on the grounds, not the flag")
     _reject_lone_surrogates("reason", reason)
+    article_num = _require_int("article_num", article_num)
+    if article_num < 0:
+        raise ValueError("article_num must be non-negative")
 
     board = cursor.resolve_board(board)
     article_num = cursor.resolve_article_num(article_num, board)

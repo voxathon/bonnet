@@ -300,6 +300,39 @@ verify_tls = true
     assert c.peers[1].verify_tls is True
 
 
+def test_peer_allow_private_defaults_false(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "10.0.0.15"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.peers[0].allow_private is False
+
+
+def test_peer_allow_private_true(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "10.0.0.15"
+allow_private = true
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.peers[0].allow_private is True
+
+
 def test_peer_import_flags_default_to_false(tmp_path):
     path = _write_config(
         tmp_path,
@@ -480,6 +513,14 @@ def test_validate_rejects_bad_port():
         c.validate()
     c = FirehoseConfig(port=99999)
     with pytest.raises(ValueError, match="port"):
+        c.validate()
+
+
+def test_validate_rejects_non_int_port():
+    """A quoted port ("22721") in config.toml used to raise a bare
+    TypeError from `1 <= self.port <= 65535` instead of a clean ValueError."""
+    c = FirehoseConfig(port="22721")
+    with pytest.raises(ValueError, match="port must be an integer"):
         c.validate()
 
 
