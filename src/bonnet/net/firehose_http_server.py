@@ -173,17 +173,30 @@ class FirehoseHTTPServer:
         self._server_identity = identity
         self._signer = self._build_signer(identity, self._config.origin)
 
+    # Every route this server exposes, with the methods it accepts on that
+    # path. A path here but with the wrong method is a 405 (with an Allow
+    # header, per RFC 9110) rather than a 404 - the two mean different things
+    # to a client debugging a request, and collapsing them into one generic
+    # "Not Found" hides that a plain GET /command was actually close.
+    _ROUTES: dict[str, tuple[str, ...]] = {
+        "/.well-known/untp": ("GET",),
+        "/command": ("POST",),
+    }
+
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             path = scope.get("path", "")
             method = scope.get("method", "")
 
-            if path == "/.well-known/untp" and method == "GET":
-                await self._handle_discovery(scope, receive, send)
-            elif path == "/command" and method == "POST":
-                await self._handle_command(scope, receive, send)
-            else:
+            allowed_methods = self._ROUTES.get(path)
+            if allowed_methods is None:
                 await self._send_error_response(send, 404, b"Not Found")
+            elif method not in allowed_methods:
+                await self._send_method_not_allowed(send, allowed_methods)
+            elif path == "/.well-known/untp":
+                await self._handle_discovery(scope, receive, send)
+            else:
+                await self._handle_command(scope, receive, send)
         elif scope["type"] == "lifespan":
             await self._handle_lifespan(scope, receive, send)
         else:
@@ -507,6 +520,17 @@ class FirehoseHTTPServer:
 
     async def _send_error_response(self, send, status_code: int, body: bytes):
         await self._send_raw(send, status_code, [(b"content-type", b"text/plain")], body)
+
+    async def _send_method_not_allowed(self, send, allowed_methods: tuple[str, ...]) -> None:
+        await self._send_raw(
+            send,
+            405,
+            [
+                (b"content-type", b"text/plain"),
+                (b"allow", ", ".join(allowed_methods).encode("ascii")),
+            ],
+            b"Method Not Allowed",
+        )
 
     async def _send_raw(self, send, status_code: int, headers: list, body: bytes):
         raw_headers = []
