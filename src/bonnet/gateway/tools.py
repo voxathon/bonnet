@@ -66,6 +66,7 @@ any downstream tool call.
 import contextvars
 import os
 import time
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import httpx
@@ -140,6 +141,51 @@ When a tool is called with origin="" the results merge every origin this relay
 knows, spanning hosts under different operators and different moderation policy.
 Check each item's origin before treating entries as comparable.
 """
+
+
+@dataclass
+class IdentityInfo:
+    """A signing identity this client holds for an origin. See list_identities."""
+
+    origin: str
+    username: str
+    public_key: str
+    registered: bool
+    wrapped: bool
+    active: bool
+
+
+@dataclass
+class EventSummary:
+    """One entry from event_range: a raw substrate-log record summary."""
+
+    origin_seq: int
+    kind: str
+    event_id: str
+    actor_pubkey: str
+    actor_username: str
+    actor_registrar: str
+    board: str
+    article_num: int
+    target_origin: str
+    target_board: str
+    target_article_id: str
+    target_event_id: str
+    created_at: int
+
+
+@dataclass
+class JoinedOriginInfo:
+    """An origin this client has connected to. See list_joined_origins."""
+
+    origin: str
+    url: str
+    verify_tls: bool
+    identity: str
+    joined_at: int
+    last_used: int
+    active: bool
+
 
 mcp = FastMCP("Bonnet BBS", instructions=SERVER_INSTRUCTIONS)
 
@@ -246,15 +292,32 @@ def _default_origin() -> str:
     """The origin identifier to scope identity lookups by when a tool names
     none — the origin `connect`/`switch_origin` last made active.
 
-    Falls back to the configured URL when no origin has actually been
-    discovered yet. A bridge wired up entirely through $BONNET_URL and
-    $BONNET_IDENTITY never calls connect(), so nothing here ever learns the
-    origin's self-asserted identifier — the URL is the closest thing to
-    "which registrar" available without a network round trip, and identity
-    lookups need some key even in that configuration.
+    Falls back to the origin store's remembered active origin, then to the
+    configured URL when no origin has ever actually been discovered. The
+    store fallback is what keeps this agreeing with `_default_identity`
+    (which consults the same store) after a bare `disconnect()`: disconnect
+    clears `current_origin` but — by its own contract — forgets nothing, so
+    an identity lookup right after it must resolve against the same
+    remembered origin `_default_identity` just found, not the raw connection
+    URL. Falling straight to the URL here previously left the two disagreeing
+    about "the current origin," so `whoami()` right after `disconnect()`
+    looked up a real, still-held identity under the wrong key and reported it
+    missing.
+
+    The URL is only reached when the store has nothing either — a bridge
+    wired up entirely through $BONNET_URL and $BONNET_IDENTITY never calls
+    connect(), so nothing here ever learns the origin's self-asserted
+    identifier, and the URL is the closest thing to "which registrar"
+    available without a network round trip.
     """
     _ensure_origin_loaded()
-    return current_origin.get() or _current_url()
+    origin = current_origin.get()
+    if origin:
+        return origin
+    active = _get_origin_store().active()
+    if active is not None:
+        return active["origin"]
+    return _current_url()
 
 
 async def _unlock_origin_tools() -> list[str]:
@@ -1081,7 +1144,7 @@ async def register(username: str, password: str | None = None, origin: str | Non
 
 
 @mcp.tool
-async def list_joined_origins() -> list[dict]:
+async def list_joined_origins() -> list[JoinedOriginInfo]:
     """List origins this client has connected to, most recently used first.
 
     Each entry carries the `origin`, its `url`, the local `identity` last
@@ -1097,7 +1160,9 @@ async def list_joined_origins() -> list[dict]:
     store = _get_origin_store()
     active = store.active()
     active_origin = active["origin"] if active else None
-    return [{**o, "active": o["origin"] == active_origin} for o in store.list_origins()]
+    return [
+        JoinedOriginInfo(**o, active=o["origin"] == active_origin) for o in store.list_origins()
+    ]
 
 
 @mcp.tool
@@ -1334,7 +1399,7 @@ async def my_permissions(board: str = "", auth: str | None = None) -> dict:
 
 
 @mcp.tool
-async def list_identities(origin: str | None = None) -> list[dict]:
+async def list_identities(origin: str | None = None) -> list[IdentityInfo]:
     """List the signing identities this client holds for an origin.
 
     These are *your* keypairs, not board users — use list_users for those.
@@ -1367,7 +1432,10 @@ async def list_identities(origin: str | None = None) -> list[dict]:
     target_origin = origin if origin is not None else _default_origin()
     store = _get_identity_store()
     active = current_username.get() or _default_identity()
-    return [{**row, "active": row["username"] == active} for row in store.list_users(target_origin)]
+    return [
+        IdentityInfo(**row, active=row["username"] == active)
+        for row in store.list_users(target_origin)
+    ]
 
 
 @mcp.tool
@@ -2586,7 +2654,7 @@ async def event_range(
     start_seq: int = 1,
     max_count: int = 100,
     auth: str | None = None,
-) -> list[dict]:
+) -> list[EventSummary]:
     """Fetch firehose events from an origin starting at a sequence number.
 
     Returns a list of event summaries with origin_seq, kind, event_id,
@@ -2611,25 +2679,23 @@ async def event_range(
         origin = origin or client._server_origin or ""
         results = await client.get_event_range(origin, start_seq, max_count)
         return [
-            {
-                "origin_seq": rec.origin_seq,
-                "kind": rec.kind,
-                "event_id": rec.event_id.hex(),
-                "actor_pubkey": rec.actor_pubkey.hex(),
-                "actor_username": rec.actor_username,
-                "actor_registrar": rec.actor_registrar,
-                "board": rec.board,
-                "article_num": rec.article_num,
-                "target_origin": rec.target_origin,
-                "target_board": rec.target_board,
-                "target_article_id": rec.target_article_id.hex()
+            EventSummary(
+                origin_seq=rec.origin_seq,
+                kind=rec.kind,
+                event_id=rec.event_id.hex(),
+                actor_pubkey=rec.actor_pubkey.hex(),
+                actor_username=rec.actor_username,
+                actor_registrar=rec.actor_registrar,
+                board=rec.board,
+                article_num=rec.article_num,
+                target_origin=rec.target_origin,
+                target_board=rec.target_board,
+                target_article_id=rec.target_article_id.hex()
                 if rec.target_article_id != ZERO_ID
                 else "",
-                "target_event_id": rec.target_event_id.hex()
-                if rec.target_event_id != ZERO_ID
-                else "",
-                "created_at": rec.created_at,
-            }
+                target_event_id=rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else "",
+                created_at=rec.created_at,
+            )
             for rec, witness in results
         ]
     finally:
