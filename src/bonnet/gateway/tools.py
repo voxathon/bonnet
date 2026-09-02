@@ -72,7 +72,7 @@ import httpx
 from fastmcp import FastMCP
 
 from bonnet.core.crypto import Identity
-from bonnet.core.record import ZERO_ID
+from bonnet.core.record import MAX_BOARD, MAX_TEXT_FIELD, ZERO_ID
 from bonnet.core.trust import TrustStore
 from bonnet.gateway import cursor, tenancy, thread_view
 from bonnet.gateway import needs as needs_module
@@ -193,6 +193,15 @@ def _ensure_origin_loaded() -> None:
     whatever origin was connected last. With neither, the built-in default
     stands.
 
+    BONNET_URL overriding the *URL* does not mean throwing away everything
+    the store knows about that URL: a fresh process wired up entirely through
+    $BONNET_URL/$BONNET_IDENTITY never calls connect(), so without this,
+    _default_origin() falls back to the raw URL string as a stand-in origin
+    id — which does not match the real origin id (e.g. "localhost") that an
+    earlier session's connect() actually stored identities under. Looking up
+    the store by URL recovers that real id without touching the URL or TLS
+    setting the env variable dictates.
+
     Runs once per caller context and on first use rather than at import, so
     reading the state file is not a side effect of importing this module, and
     so an explicit `disconnect()` (which leaves this flag set) is not silently
@@ -201,7 +210,11 @@ def _ensure_origin_loaded() -> None:
     if _origin_loaded.get():
         return
     _origin_loaded.set(True)
-    if os.environ.get("BONNET_URL"):
+    env_url = os.environ.get("BONNET_URL")
+    if env_url:
+        matched = _get_origin_store().get_by_url(env_url.rstrip("/"))
+        if matched is not None:
+            current_origin.set(matched["origin"])
         return
     active = _get_origin_store().active()
     if active is None:
@@ -456,6 +469,23 @@ def _require_text_fields(**fields: str) -> None:
         if not isinstance(value, str):
             raise ValueError(f"{field} must be a string, got {type(value).__name__}")
         _reject_lone_surrogates(field, value)
+
+
+def _check_byte_len(field: str, value: str, max_bytes: int) -> None:
+    """Reject a text field before it reaches the wire encoder.
+
+    The encoder (core.record) enforces the same limit and raises a clean
+    message too, but only after `encode_intent` has already run — inside the
+    gateway process, not caught by any handler here, so it would otherwise
+    surface as an opaque tool error with the real cause visible only in the
+    server log. Checking here up front turns that into an actionable
+    ValueError naming the field, at the cost of measuring in the same UTF-8
+    bytes the wire format actually counts (not characters), so unicode input
+    can still be shorter than it looks and still trip this.
+    """
+    n = len(value.encode("utf-8"))
+    if n > max_bytes:
+        raise ValueError(f"{field} is too long: {n} bytes exceeds the {max_bytes}-byte limit")
 
 
 def _validate_pubkey(pubkey_hex: str) -> bytes:
@@ -929,6 +959,7 @@ async def register(username: str, password: str | None = None, origin: str | Non
     `registered_seq: null` to say no new registration record was published.
     """
     _reject_lone_surrogates("username", username)
+    _check_byte_len("username", username, MAX_TEXT_FIELD)
     target_origin = origin if origin is not None else _default_origin()
 
     origin_entry = _get_origin_store().get(target_origin)
@@ -1160,14 +1191,18 @@ async def where_am_i() -> dict:
     board = cursor.current_board.get()
     article_num = cursor.current_article_num.get()
 
-    if article_num is not None:
+    # Gated on has_origin first: board/article_num are cursor state that can
+    # outlive a disconnect (nothing clears them just because no origin is
+    # set), so without this a caller could see state:"in_board" alongside
+    # origin: null — a position that doesn't actually exist.
+    if not has_origin:
+        state = "disconnected"
+    elif article_num is not None:
         state = "reading_article"
     elif board is not None:
         state = "in_board"
-    elif has_origin:
-        state = "on_origin"
     else:
-        state = "disconnected"
+        state = "on_origin"
 
     # A pin decision outstanding is the one piece of state that can leave a
     # caller unable to proceed with no visible reason — the origin looks
@@ -1367,6 +1402,8 @@ async def create_board(
     display_name: optional human-readable board title.
     """
     _reject_lone_surrogates("display_name", display_name)
+    _check_byte_len("name", name, MAX_BOARD)
+    _check_byte_len("display_name", display_name, MAX_TEXT_FIELD)
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
@@ -1609,6 +1646,12 @@ async def search_articles(
         raise ValueError("offset must be non-negative")
     if limit < 1:
         raise ValueError("limit must be at least 1")
+    # subject and tags are each capped at MAX_TEXT_FIELD bytes, so a longer
+    # query could never match — and past that length SQLite's own LIKE
+    # pattern-complexity limit kicks in as an unhandled server-side error
+    # ("LIKE or GLOB pattern too complex") that never reaches the caller
+    # cleanly. Rejecting here keeps this an actionable ValueError instead.
+    _check_byte_len("query", query, MAX_TEXT_FIELD)
     client = _make_client()
     try:
         if auth:
@@ -1869,6 +1912,8 @@ async def publish_article(
     import os as _os
 
     _require_text_fields(subject=subject, content=content, tags=tags)
+    _check_byte_len("subject", subject, MAX_TEXT_FIELD)
+    _check_byte_len("tags", tags, MAX_TEXT_FIELD)
 
     board = cursor.resolve_board(board)
     article_id = _os.urandom(32)
@@ -1996,6 +2041,8 @@ async def supersede_article(
     import os as _os
 
     _require_text_fields(subject=subject, content=content, tags=tags)
+    _check_byte_len("subject", subject, MAX_TEXT_FIELD)
+    _check_byte_len("tags", tags, MAX_TEXT_FIELD)
 
     board = cursor.resolve_board(board)
     supersedes_id = _validate_article_id(target_article_id)
@@ -2354,6 +2401,13 @@ async def punish_ban(
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
+        assert client._identity is not None  # set by _connect_authenticated's client.connect()
+        if pubkey == client._identity.public_key:
+            raise ValueError(
+                "Cannot ban your own identity — this would lock you out of "
+                "moderation (the write gate has no self-carve-out) with no "
+                "way to self-revoke"
+            )
         result = await client.publish_punishment_ban(pubkey, reason, expires_at, board=board)
         return f"Ban issued until {expires_at} — event seq {result.origin_seq}"
     finally:
@@ -2377,6 +2431,12 @@ async def punish_permaban(
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
+        assert client._identity is not None  # set by _connect_authenticated's client.connect()
+        if pubkey == client._identity.public_key:
+            raise ValueError(
+                "Cannot permaban your own identity — this would lock you "
+                "out of moderation permanently with no way to self-revoke"
+            )
         result = await client.publish_punishment_permaban(pubkey, reason, board=board)
         return f"Permaban issued — event seq {result.origin_seq}"
     finally:
