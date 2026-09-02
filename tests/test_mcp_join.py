@@ -200,7 +200,7 @@ async def test_registering_two_usernames_holds_two_identities_on_one_origin(wire
     mod = await tools.register("mod")
 
     assert scout["public_key"] != mod["public_key"]
-    names = {i["username"] for i in await tools.list_identities()}
+    names = {i.username for i in await tools.list_identities()}
     assert names == {"scout", "mod"}
 
 
@@ -236,8 +236,8 @@ async def test_disconnect_forgets_nothing(wired):
     await tools.disconnect()
 
     origins = await tools.list_joined_origins()
-    assert any(o["origin"] == ORIGIN for o in origins)
+    assert any(o.origin == ORIGIN for o in origins)
 
     await tools.connect("https://bbs.test")
     identities = await tools.list_identities()
-    assert any(i["username"] == "scout" for i in identities)
+    assert any(i.username == "scout" for i in identities)

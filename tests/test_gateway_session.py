@@ -257,6 +257,48 @@ async def test_an_anonymous_session_still_gets_a_cursor(gw):
         assert (await _where(c))["board"] == "general"
 
 
+async def test_fresh_session_resolves_remembered_identity(gw):
+    """A brand-new session for a tenant that already registered elsewhere
+    must resolve that remembered identity without calling connect() first —
+    regression for the chaos-testing report's fresh-session finding."""
+    await _ready(gw)
+
+    async with _client(gw) as c:
+        await _connected(c, username="scout")
+
+    async with _client(gw) as fresh:
+        who = (await fresh.call_tool("whoami", {})).data
+        assert "scout" in who
+
+        ids = (await fresh.call_tool("list_identities", {})).data
+        assert len(ids) == 1
+        assert ids[0].username == "scout"
+        assert ids[0].active is True
+
+        joined = (await fresh.call_tool("list_joined_origins", {})).data
+        assert len(joined) == 1
+        assert joined[0].origin == "bbs.test"
+        assert joined[0].active is True
+
+
+async def test_whoami_after_disconnect_resolves_the_remembered_identity(gw):
+    """disconnect() forgets nothing on disk, so whoami() right after it must
+    still resolve the identity it just had — regression for the
+    chaos-testing report's disconnect/whoami finding. Previously
+    `_default_origin` fell back to the raw connection URL once `disconnect`
+    cleared `current_origin`, while `_default_identity` kept resolving the
+    origin store's remembered identity — the mismatch made a real, still-held
+    identity look missing."""
+    await _ready(gw)
+
+    async with _client(gw) as c:
+        await _connected(c, username="scout")
+        await c.call_tool("disconnect", {})
+
+        who = (await c.call_tool("whoami", {})).data
+        assert "scout" in who
+
+
 # --- concurrent calls in one session ----------------------------------------
 
 
