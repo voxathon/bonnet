@@ -52,14 +52,17 @@ Environment variables (command-line flags win over all of them):
 """
 
 import argparse
+import json
 import os
 import sys
 from typing import Literal, cast
 
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from starlette.middleware import Middleware as ASGIMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from bonnet.core import home
 from bonnet.gateway import (
@@ -111,11 +114,39 @@ def presented_key(headers) -> str:
     Authorization bearer token.
     """
     auth = headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[7:].strip()
+    # The scheme token is case-insensitive per RFC 7235 - "bearer" is a
+    # reasonable, easy mistake for integrators used to lowercase HTTP header
+    # conventions, and it used to silently degrade to anonymous instead of
+    # being recognized.
+    scheme, _, rest = auth.partition(" ")
+    if scheme.lower() == "bearer":
+        token = rest.strip()
         if token:
             return token
     return (headers.get("X-API-Key", "") or "").strip()
+
+
+def presented_key_candidates(headers) -> list[str]:
+    """Every API key candidate this request presents, Bearer first.
+
+    A harness that defensively sets both headers must not have a garbage or
+    stale Bearer token silently discard a working X-API-Key - `presented_key`
+    picks one deterministically for simple call sites, but auth resolution
+    (`AuthMiddleware`) needs to try each candidate against the tenant store
+    in turn, since only the store knows which one (if either) actually names
+    a usable tenant.
+    """
+    candidates = []
+    auth = headers.get("Authorization", "")
+    scheme, _, rest = auth.partition(" ")
+    if scheme.lower() == "bearer":
+        token = rest.strip()
+        if token:
+            candidates.append(token)
+    api_key = (headers.get("X-API-Key", "") or "").strip()
+    if api_key:
+        candidates.append(api_key)
+    return candidates
 
 
 class AuthMiddleware(Middleware):
@@ -140,14 +171,20 @@ class AuthMiddleware(Middleware):
         except RuntimeError:
             return  # stdio: no request, no header, default tenant
 
-        key = presented_key(request.headers)
-        tenant = tenancy.resolve_key(key) if key else None
+        candidates = presented_key_candidates(request.headers)
+        tenant = None
+        for candidate in candidates:
+            tenant = tenancy.resolve_key(candidate)
+            if tenant is not None:
+                break
         if tenant is not None:
             tenancy.current_tenant.set(tenant)
             tenancy.current_auth_status.set(tenancy.AUTH_OK)
         else:
             tenancy.current_tenant.set(tenancy.ANONYMOUS_TENANT)
-            tenancy.current_auth_status.set(tenancy.AUTH_REJECTED if key else tenancy.AUTH_ABSENT)
+            tenancy.current_auth_status.set(
+                tenancy.AUTH_REJECTED if candidates else tenancy.AUTH_ABSENT
+            )
             # An anonymous session signs as nobody, so it must not inherit a
             # username from whatever ran in this context before it.
             current_username.set(None)
@@ -175,6 +212,48 @@ mcp.add_middleware(SessionStateMiddleware())
 # After AuthMiddleware: gating reads the tenant that one resolves from the
 # request's API key, so it must see a populated context.
 mcp.add_middleware(GatingMiddleware())
+
+
+class CleanTransportErrorMiddleware(BaseHTTPMiddleware):
+    """Reword the SDK's raw pydantic dump for a malformed JSON-RPC body.
+
+    A body that fails JSONRPCMessage validation (missing `jsonrpc`, a batch
+    array, wrong types, ...) is rejected before it ever reaches our own MCP
+    tool/middleware layer above - the mcp SDK's transport code catches it and
+    writes a JSON-RPC error envelope itself, but stuffs `error.message` with
+    the full multi-error pydantic dump, including a live errors.pydantic.dev
+    link and internal model names (JSONRPCRequest, JSONRPCNotification, ...).
+    That leaks implementation details a caller can't act on. Only that one
+    shape is rewritten; a genuine tool-call error (also JSON, also possibly
+    400) is left untouched, and nothing here reads or buffers a streaming
+    (text/event-stream) response, so normal SSE traffic passes straight
+    through call_next unmodified.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if response.status_code != 400 or not response.headers.get("content-type", "").startswith(
+            "application/json"
+        ):
+            return response
+
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = None
+
+        if isinstance(data, dict):
+            error = data.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+                if isinstance(message, str) and "errors.pydantic.dev" in message:
+                    error["message"] = "Malformed JSON-RPC request"
+                    body = json.dumps(data).encode("utf-8")
+
+        return Response(
+            content=body, status_code=response.status_code, media_type="application/json"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -280,6 +359,9 @@ def build_parser() -> argparse.ArgumentParser:
     key_list.add_argument("tenant_id", nargs="?", default=None)
     key_revoke = key.add_parser("revoke", help="revoke one key by id")
     key_revoke.add_argument("key_id")
+    key_revoke.add_argument(
+        "--yes", action="store_true", help="required to revoke a tenant's last live key"
+    )
 
     return parser
 
@@ -305,6 +387,8 @@ def _run_admin(args) -> int:
                 tenants.set_enabled(args.tenant_id, args.action == "enable")
                 print(f"tenant {args.tenant_id} {args.action}d")
             elif args.action == "remove":
+                if tenants.get_tenant(args.tenant_id) is None:
+                    raise TenantError(f"no such tenant {args.tenant_id!r}")
                 if not args.yes:
                     print(
                         f"refusing to remove {args.tenant_id} without --yes: this deletes "
@@ -328,6 +412,25 @@ def _run_admin(args) -> int:
                     label = f"  {row['label']}" if row["label"] else ""
                     print(f"{row['key_id']}\t{row['tenant_id']}\t{state}{label}")
             elif args.action == "revoke":
+                all_keys = tenants.list_keys()
+                target = next((k for k in all_keys if k["key_id"] == args.key_id), None)
+                if target is None:
+                    raise TenantError(f"no live key with id {args.key_id!r}")
+                other_live = [
+                    k
+                    for k in all_keys
+                    if k["tenant_id"] == target["tenant_id"]
+                    and k["key_id"] != args.key_id
+                    and k["revoked_at"] is None
+                ]
+                if not other_live and not args.yes:
+                    print(
+                        f"refusing to revoke {args.key_id} without --yes: it is the last "
+                        f"live key for tenant {target['tenant_id']!r} - revoking it locks "
+                        "that tenant out of the gateway until an operator runs `key add`",
+                        file=sys.stderr,
+                    )
+                    return 1
                 tenants.revoke_key(args.key_id)
                 print(f"key {args.key_id} revoked")
     except TenantError as e:
@@ -338,8 +441,15 @@ def _run_admin(args) -> int:
 
 def run(argv: list[str] | None = None):
     args = build_parser().parse_args(argv)
-
     if args.dir:
+        args.dir = os.path.expanduser(args.dir)
+
+    # Only remember --dir for future runs that omit it entirely - a process
+    # with BONNET_GATEWAY_HOME set always resolves via that override anyway,
+    # and writing here would leak this run's --dir into other processes that
+    # rely on their own BONNET_GATEWAY_HOME for isolation (the pointer file
+    # isn't scoped by that env var).
+    if args.dir and not os.environ.get("BONNET_GATEWAY_HOME"):
         home.set_home("gateway", args.dir)
 
     if getattr(args, "command", None):
@@ -424,7 +534,13 @@ def run(argv: list[str] | None = None):
             file=sys.stderr,
         )
 
-    mcp.run(transport=transport, host=host, port=port, uvicorn_config=uvicorn_config or None)
+    mcp.run(
+        transport=transport,
+        host=host,
+        port=port,
+        uvicorn_config=uvicorn_config or None,
+        middleware=[ASGIMiddleware(CleanTransportErrorMiddleware)],
+    )
 
 
 if __name__ == "__main__":

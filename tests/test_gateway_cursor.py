@@ -112,6 +112,19 @@ async def test_open_board_makes_it_the_default(wired):
     assert listing.results[0].subject == "hello"
 
 
+async def test_open_board_rejects_nonexistent_board(wired):
+    """Regression for the chaos-testing report's #1.1: open_board on a board
+    that was never created used to succeed silently, with reads returning
+    empty results and the only failure surfacing later, on the first write."""
+    await tools.connect("https://bbs.test")
+    await tools.register("scout")
+
+    with pytest.raises(ValueError, match="does not exist"):
+        await tools.open_board("ghost-board")
+
+    assert cursor.current_board.get() is None
+
+
 async def test_explicit_board_overrides_the_open_one(wired):
     await _connect_register_and_create_board("general")
     await tools.create_board("other")

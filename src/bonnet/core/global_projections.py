@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import time
 
+from bonnet.core.kind_validator import identity_text_violation
 from bonnet.core.kinds import PUNISHMENT_TYPE_BY_KIND  # noqa: F401 (re-exported)
 from bonnet.core.logging import log_msg
 from bonnet.core.record import Record, verify_key_rotation_proof
@@ -167,13 +168,63 @@ class NavProjection(_BaseProjection):
         """)
 
     def apply_board_create(self, rec: Record) -> None:
+        """Materialize a board.create record into the listable directory.
+
+        First writer wins, same rule and same reason as apply_user_register:
+        a record is only ever proof of who *signed* a claim, not that the
+        claim is authorized. A second, later board.create for a name someone
+        else already holds is a perfectly valid signature over an invalid
+        claim — `firehose_commands` refuses the same case at publish time for
+        a local caller, but that check never sees a federated record, so the
+        rule has to be enforced here too, independent of where the record
+        came from.
+
+        A record synced from federation never passes through KindValidator
+        (see kind_validator._validate_identity_text's docstring) — this is
+        the actual enforcement point for a federated board name carrying a
+        control character or reserved character. It is not rejected: the
+        record stays accepted in the firehose and keeps relaying normally,
+        it simply never gets a row here, so it never surfaces through
+        BOARD_LIST/list-boards into a display surface. The event is still
+        fetchable directly by event_id for forensics.
+        """
         with self._lock:
             if self.is_applied(rec.event_id):
                 return
             self._begin()
             try:
+                violation = identity_text_violation(rec.board)
+                if violation is not None:
+                    log_msg(
+                        f"SECURITY: BOARD_CREATE: origin={rec.origin!r} seq={rec.origin_seq} "
+                        f"event_id={rec.event_id.hex()[:16]} board={rec.board!r} "
+                        f"REJECTED FROM PROJECTION ({violation}) — record stays in the "
+                        f"firehose and keeps relaying, but will never be listed"
+                    )
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
+
                 owner = rec.metadata.get_bytes(1) or b"\x00" * 32
                 display = rec.metadata.get_text(2) or ""
+
+                existing = self._conn.execute(
+                    "SELECT owner_pubkey FROM boards WHERE origin=? AND board=?",
+                    (rec.origin, rec.board),
+                ).fetchone()
+                if existing is not None and bytes(existing[0]) != owner:
+                    log_msg(
+                        f"SECURITY: BOARD_CREATE: origin={rec.origin!r} seq={rec.origin_seq} "
+                        f"board={rec.board!r} already owned by "
+                        f"{bytes(existing[0]).hex()[:16]}; claim by "
+                        f"{owner.hex()[:16]} not applied"
+                    )
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
+
                 self._conn.execute(
                     "INSERT OR REPLACE INTO boards "
                     "(origin, board, owner_pubkey, display_name, closed, created_seq, created_at) "
@@ -245,35 +296,6 @@ class NavProjection(_BaseProjection):
                 }
                 for r in rows
             ]
-
-    def ensure_board(
-        self, origin: str, board: str, owner_pubkey: bytes, created_seq: int, created_at: int
-    ) -> None:
-        """Materialize a directory entry for `board` if none exists yet.
-
-        Publishing an article has never required a prior bonnet.board.create
-        — the per-board store is created lazily on first write, same as this
-        entry — but without one, the board was invisible to list_boards and
-        to ARTICLE_LIST's aggregate (origin="") path, which discovers which
-        boards to scan by walking this table alone. That made a published,
-        directly-gettable article unfindable through either listing. INSERT
-        OR IGNORE: a real bonnet.board.create record (see apply_board_create,
-        which uses REPLACE) always wins over this synthesized entry, whether
-        it arrives before or after the first article.
-        """
-        with self._lock:
-            self._begin()
-            try:
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO boards "
-                    "(origin, board, owner_pubkey, display_name, closed, created_seq, created_at) "
-                    "VALUES (?, ?, ?, '', 0, ?, ?)",
-                    (origin, board, owner_pubkey, created_seq, created_at),
-                )
-                self._commit()
-            except Exception:
-                self._rollback()
-                raise
 
     def get_board(self, origin: str, board: str) -> dict | None:
         with self._lock:
@@ -369,6 +391,10 @@ class UserProjection(_BaseProjection):
         squatter would burn every good name permanently. A superseded key still
         does: `apply_user_key_rotate` carries the name forward to the successor,
         so the identity is live even though that particular key is retired.
+
+        A federated registration whose username carries a control character
+        or reserved character is likewise never bound here — see
+        apply_user_register.
         """
         with self._lock:
             row = self._conn.execute(
@@ -404,6 +430,19 @@ class UserProjection(_BaseProjection):
                 user_pubkey = rec.metadata.get_bytes(2) or b"\x00" * 32
                 flags = rec.metadata.get_u64(3) or 0
                 reg_seq = rec.origin_seq
+
+                violation = identity_text_violation(username)
+                if violation is not None:
+                    log_msg(
+                        f"SECURITY: USER_REGISTER: origin={rec.origin!r} seq={rec.origin_seq} "
+                        f"event_id={rec.event_id.hex()[:16]} username={username!r} "
+                        f"REJECTED FROM PROJECTION ({violation}) — record stays in the "
+                        f"firehose and keeps relaying, but the username will never be bound"
+                    )
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
 
                 holder = self._conn.execute(
                     "SELECT user_pubkey FROM users "
@@ -877,12 +916,40 @@ class PolicyProjection(_BaseProjection):
                 self._rollback()
                 raise
 
+    def get_punishment(self, event_id: bytes) -> dict | None:
+        """Look up a single punishment by its event ID, or None if unknown."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT event_id, origin, origin_seq, type, punished_pubkey, expires_at, "
+                "revoked FROM punishments WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "event_id": bytes(row[0]),
+                "origin": row[1],
+                "origin_seq": row[2],
+                "type": row[3],
+                "punished_pubkey": bytes(row[4]),
+                "expires_at": row[5],
+                "revoked": bool(row[6]),
+            }
+
     def apply_punishment_ack(self, rec: Record) -> None:
         """Record a user's acknowledgment of a punishment.
 
         Acks are local to the user's homeserver and reference the punishment
         event ID regardless of which origin issued it. Re-acking the same
         punishment with a new event is idempotent at the pending-state level.
+
+        The punishment event ID must name a punishment that actually exists
+        and actually targets the acker. `firehose_commands._cmd_publish`
+        refuses the same case at publish time for a local caller's sake, but
+        this check has to exist independently: federated acks never pass
+        through that handler, and without it any key could forge a signed
+        "acknowledged" record against another user's punishment, a
+        nonexistent event ID, or an unrelated event entirely.
         """
         with self._lock:
             if self.is_applied(rec.event_id):
@@ -890,6 +957,15 @@ class PolicyProjection(_BaseProjection):
             self._begin()
             try:
                 punishment_event_id = rec.metadata.get_bytes(1) or b"\x00" * 32
+                row = self._conn.execute(
+                    "SELECT punished_pubkey FROM punishments WHERE event_id=?",
+                    (punishment_event_id,),
+                ).fetchone()
+                if row is None or bytes(row[0]) != rec.actor_pubkey:
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
                 self._conn.execute(
                     "INSERT OR IGNORE INTO punishment_acks "
                     "(ack_event_id, user_pubkey, punishment_event_id, acked_at) "

@@ -92,6 +92,16 @@ def gw(http_gateway, server_stack, tmp_path, monkeypatch):  # noqa: F811
             boards=["*"],
         )
     )
+    server_stack["command_handler"]._acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(registered=True),
+            actions=["write"],
+            commands=["PUBLISH_RECORD"],
+            kinds=["bonnet.board.create"],
+            boards=["*"],
+        )
+    )
     app = server_stack["server"]
 
     def make_client(url: str | None = None, verify=None) -> FirehoseHTTPClient:
@@ -131,8 +141,11 @@ async def _ready(key: str) -> None:
     raise RuntimeError("gateway did not start")
 
 
-async def _connected(c, username: str = "scout"):
-    """connect + register, so board-scoped tools are reachable.
+async def _connected(c, username: str = "scout", board: str = "general"):
+    """connect + register + create `board`, so board-scoped tools are
+    reachable — open_board now confirms the board actually exists (regression
+    for the chaos-testing report's #1.1), so these tests can no longer open a
+    board nothing ever created.
 
     Usernames are first-writer-wins per origin, so two *different* tenants
     against this one server need distinct names. The second would otherwise be
@@ -140,6 +153,7 @@ async def _connected(c, username: str = "scout"):
     """
     await c.call_tool("connect", {"url": "https://bbs.test", "verify_tls": False})
     await c.call_tool("register", {"username": username})
+    await c.call_tool("create_board", {"name": board})
 
 
 async def _where(c) -> dict:
@@ -217,7 +231,7 @@ async def test_two_tenants_in_one_process_keep_separate_cursors(gw):
         await alice.call_tool("open_board", {"board": "general"})
 
         async with _client(bob_key) as bob:
-            await _connected(bob, username="bob-scout")
+            await _connected(bob, username="bob-scout", board="lounge")
             await bob.call_tool("open_board", {"board": "lounge"})
             assert (await _where(bob))["board"] == "lounge"
 
@@ -230,12 +244,59 @@ async def test_an_anonymous_session_still_gets_a_cursor(gw):
     so navigation has to work for a session that cannot publish."""
     await _ready(gw)
 
+    # Anonymous cannot create a board itself; a throwaway registered session
+    # creates "general" first so there is something for it to open.
+    async with _client(gw) as setup:
+        await _connected(setup)
+
     async with _client() as c:
         await c.call_tool("connect", {"url": "https://bbs.test", "verify_tls": False})
         opened = await c.call_tool("open_board", {"board": "general"})
         assert opened.data["board"] == "general"
 
         assert (await _where(c))["board"] == "general"
+
+
+async def test_fresh_session_resolves_remembered_identity(gw):
+    """A brand-new session for a tenant that already registered elsewhere
+    must resolve that remembered identity without calling connect() first —
+    regression for the chaos-testing report's fresh-session finding."""
+    await _ready(gw)
+
+    async with _client(gw) as c:
+        await _connected(c, username="scout")
+
+    async with _client(gw) as fresh:
+        who = (await fresh.call_tool("whoami", {})).data
+        assert "scout" in who
+
+        ids = (await fresh.call_tool("list_identities", {})).data
+        assert len(ids) == 1
+        assert ids[0].username == "scout"
+        assert ids[0].active is True
+
+        joined = (await fresh.call_tool("list_joined_origins", {})).data
+        assert len(joined) == 1
+        assert joined[0].origin == "bbs.test"
+        assert joined[0].active is True
+
+
+async def test_whoami_after_disconnect_resolves_the_remembered_identity(gw):
+    """disconnect() forgets nothing on disk, so whoami() right after it must
+    still resolve the identity it just had — regression for the
+    chaos-testing report's disconnect/whoami finding. Previously
+    `_default_origin` fell back to the raw connection URL once `disconnect`
+    cleared `current_origin`, while `_default_identity` kept resolving the
+    origin store's remembered identity — the mismatch made a real, still-held
+    identity look missing."""
+    await _ready(gw)
+
+    async with _client(gw) as c:
+        await _connected(c, username="scout")
+        await c.call_tool("disconnect", {})
+
+        who = (await c.call_tool("whoami", {})).data
+        assert "scout" in who
 
 
 # --- concurrent calls in one session ----------------------------------------
