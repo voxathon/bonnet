@@ -56,10 +56,14 @@ import os
 import sys
 from typing import Literal, cast
 
+import json
+
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from starlette.middleware import Middleware as ASGIMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from bonnet.core import home
 from bonnet.gateway import (
@@ -180,6 +184,45 @@ mcp.add_middleware(SessionStateMiddleware())
 # After AuthMiddleware: gating reads the tenant that one resolves from the
 # request's API key, so it must see a populated context.
 mcp.add_middleware(GatingMiddleware())
+
+
+class CleanTransportErrorMiddleware(BaseHTTPMiddleware):
+    """Reword the SDK's raw pydantic dump for a malformed JSON-RPC body.
+
+    A body that fails JSONRPCMessage validation (missing `jsonrpc`, a batch
+    array, wrong types, ...) is rejected before it ever reaches our own MCP
+    tool/middleware layer above - the mcp SDK's transport code catches it and
+    writes a JSON-RPC error envelope itself, but stuffs `error.message` with
+    the full multi-error pydantic dump, including a live errors.pydantic.dev
+    link and internal model names (JSONRPCRequest, JSONRPCNotification, ...).
+    That leaks implementation details a caller can't act on. Only that one
+    shape is rewritten; a genuine tool-call error (also JSON, also possibly
+    400) is left untouched, and nothing here reads or buffers a streaming
+    (text/event-stream) response, so normal SSE traffic passes straight
+    through call_next unmodified.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if response.status_code != 400 or not response.headers.get(
+            "content-type", ""
+        ).startswith("application/json"):
+            return response
+
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = None
+
+        if isinstance(data, dict):
+            error = data.get("error")
+            message = error.get("message") if isinstance(error, dict) else None
+            if isinstance(message, str) and "errors.pydantic.dev" in message:
+                error["message"] = "Malformed JSON-RPC request"
+                body = json.dumps(data).encode("utf-8")
+
+        return Response(content=body, status_code=response.status_code, media_type="application/json")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -460,7 +503,13 @@ def run(argv: list[str] | None = None):
             file=sys.stderr,
         )
 
-    mcp.run(transport=transport, host=host, port=port, uvicorn_config=uvicorn_config or None)
+    mcp.run(
+        transport=transport,
+        host=host,
+        port=port,
+        uvicorn_config=uvicorn_config or None,
+        middleware=[ASGIMiddleware(CleanTransportErrorMiddleware)],
+    )
 
 
 if __name__ == "__main__":

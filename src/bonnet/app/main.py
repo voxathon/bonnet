@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tomllib
@@ -95,6 +96,31 @@ def _load_and_validate_config(args) -> FirehoseConfig:
         print(f"warning: {warning}", file=sys.stderr)
 
     return config
+
+
+def _preflight_bind(host: str, port: int) -> None:
+    """Fail fast on an unbindable host:port before BonnetServer's __init__
+    does its side-effectful init pass - opening/creating the SQLite stores,
+    generating a server keypair if none exists yet, etc.
+
+    A second `bonnet server` pointed at a home dir/port a live process
+    already owns used to run that whole init pass first and only discover
+    the collision when uvicorn itself tried to bind, doing real filesystem
+    work against files the live process owns for nothing. This is a
+    best-effort check - there's an inherent bind-time race between this and
+    the real bind in BonnetServer.run() - but it catches the common case
+    (wrong host, or a port already in use) before any state is touched.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise OSError(f"cannot resolve {host!r}: {exc}") from exc
+    family, socktype, proto, _, sockaddr = infos[0]
+    sock = socket.socket(family, socktype, proto)
+    try:
+        sock.bind(sockaddr)
+    finally:
+        sock.close()
 
 
 def _acl_rule_warnings(config: FirehoseConfig) -> list[str]:
@@ -298,6 +324,13 @@ def main(argv: list[str] | None = None):
         )
 
     config = _load_and_validate_config(args)
+
+    try:
+        _preflight_bind(config.host, config.port)
+    except OSError as exc:
+        print(f"error: could not listen on {config.host}:{config.port}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
     server = BonnetServer(config)
 
     def handle_sigterm(signum, frame):
