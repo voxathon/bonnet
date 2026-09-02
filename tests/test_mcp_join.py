@@ -109,6 +109,25 @@ async def test_register_registers_and_reports_the_board(wired):
     assert result["username"] == "scout"
     assert len(result["public_key"]) == 64
     assert result["registered_seq"] > 0
+    assert result["already_registered"] is False
+    assert "message" not in result
+
+
+async def test_duplicate_register_reports_already_registered_explicitly(wired):
+    """Re-registering a (origin, username) this key already registered with
+    is a safe no-op, not a failure - but `registered_seq: null` alone reads
+    ambiguously, so the response also spells it out with a flag and a
+    message rather than leaving the caller to infer success-but-no-op from a
+    null sequence number."""
+    await tools.connect("https://bbs.test")
+    await tools.register("scout")
+
+    result = await tools.register("scout")
+
+    assert result["registered_seq"] is None
+    assert result["already_registered"] is True
+    assert "scout" in result["message"]
+    assert "already registered" in result["message"]
 
 
 async def test_register_actually_lands_a_registration_the_server_accepted(wired):

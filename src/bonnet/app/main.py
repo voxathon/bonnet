@@ -31,19 +31,19 @@ def _make_self_signed_cert(config_path: str, force: bool = False) -> tuple[str, 
     return (cert_path.replace(os.sep, "/"), key_path.replace(os.sep, "/"))
 
 
-def _print_next_steps(config_path: str, tls_enabled: bool) -> None:
+def _print_next_steps(config_path: str, tls_enabled: bool, port: int = 2272) -> None:
     scheme = "https" if tls_enabled else "http"
     print()
     print("Next steps:")
     print("  1. Start the server:")
     print(f"       uv run bonnet server --config {config_path}")
-    print(f"     It will listen on {scheme}://127.0.0.1:2272 and print its own public key.")
+    print(f"     It will listen on {scheme}://127.0.0.1:{port} and print its own public key.")
     print("  2. The server's REPL (the 'bonnet>' prompt after startup) is already an")
     print("     administrator - no key setup needed for local use.")
     print("  3. To connect an agent, point an MCP host at `bonnet gateway`;")
     print("     it speaks stdio, so there is no port to configure:")
     print('       {"mcpServers": {"bonnet": {"command": "bonnet", "args": ["gateway"]}}}')
-    print(f'     Then, from the agent: connect("{scheme}://localhost:2272")')
+    print(f'     Then, from the agent: connect("{scheme}://localhost:{port}")')
     print('     followed by: register("<name>")')
     print("  4. To let that identity administer this server, put the pubkey register")
     print("     returns into admin_pubkey in config.toml and restart. See")
@@ -228,6 +228,7 @@ def main(argv: list[str] | None = None):
         args.config = os.path.join(server_home, "config.toml")
 
     if args.init:
+        init_port = args.port if args.port is not None else 2272
         tls_paths = None
         try:
             tls_paths = _make_self_signed_cert(args.config, force=args.force)
@@ -242,7 +243,9 @@ def main(argv: list[str] | None = None):
                 f"{exc.stderr.decode(errors='replace').strip()}"
             )
         try:
-            FirehoseConfig.create_default_config(args.config, force=args.force, tls_paths=tls_paths)
+            FirehoseConfig.create_default_config(
+                args.config, force=args.force, tls_paths=tls_paths, port=init_port
+            )
         except FileExistsError as exc:
             print(f"error: {exc}", file=sys.stderr)
             raise SystemExit(1)
@@ -256,7 +259,7 @@ def main(argv: list[str] | None = None):
         print(f"Wrote sample config to {args.config}")
         if tls_paths:
             print(f"Generated self-signed TLS certificate at {tls_paths[0]} (CN=localhost)")
-        _print_next_steps(args.config, tls_enabled=tls_paths is not None)
+        _print_next_steps(args.config, tls_enabled=tls_paths is not None, port=init_port)
         return
 
     if args.create_config:
@@ -276,7 +279,12 @@ def main(argv: list[str] | None = None):
                 )
                 raise SystemExit(1)
         try:
-            FirehoseConfig.create_default_config(args.config, force=args.force, tls_paths=tls_paths)
+            FirehoseConfig.create_default_config(
+                args.config,
+                force=args.force,
+                tls_paths=tls_paths,
+                port=args.port if args.port is not None else 2272,
+            )
         except FileExistsError as exc:
             print(f"error: {exc}", file=sys.stderr)
             raise SystemExit(1)

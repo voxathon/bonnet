@@ -127,6 +127,29 @@ def presented_key(headers) -> str:
     return (headers.get("X-API-Key", "") or "").strip()
 
 
+def presented_key_candidates(headers) -> list[str]:
+    """Every API key candidate this request presents, Bearer first.
+
+    A harness that defensively sets both headers must not have a garbage or
+    stale Bearer token silently discard a working X-API-Key - `presented_key`
+    picks one deterministically for simple call sites, but auth resolution
+    (`AuthMiddleware`) needs to try each candidate against the tenant store
+    in turn, since only the store knows which one (if either) actually names
+    a usable tenant.
+    """
+    candidates = []
+    auth = headers.get("Authorization", "")
+    scheme, _, rest = auth.partition(" ")
+    if scheme.lower() == "bearer":
+        token = rest.strip()
+        if token:
+            candidates.append(token)
+    api_key = (headers.get("X-API-Key", "") or "").strip()
+    if api_key:
+        candidates.append(api_key)
+    return candidates
+
+
 class AuthMiddleware(Middleware):
     """Resolve which tenant a request belongs to, before gating reads it.
 
@@ -149,14 +172,20 @@ class AuthMiddleware(Middleware):
         except RuntimeError:
             return  # stdio: no request, no header, default tenant
 
-        key = presented_key(request.headers)
-        tenant = tenancy.resolve_key(key) if key else None
+        candidates = presented_key_candidates(request.headers)
+        tenant = None
+        for candidate in candidates:
+            tenant = tenancy.resolve_key(candidate)
+            if tenant is not None:
+                break
         if tenant is not None:
             tenancy.current_tenant.set(tenant)
             tenancy.current_auth_status.set(tenancy.AUTH_OK)
         else:
             tenancy.current_tenant.set(tenancy.ANONYMOUS_TENANT)
-            tenancy.current_auth_status.set(tenancy.AUTH_REJECTED if key else tenancy.AUTH_ABSENT)
+            tenancy.current_auth_status.set(
+                tenancy.AUTH_REJECTED if candidates else tenancy.AUTH_ABSENT
+            )
             # An anonymous session signs as nobody, so it must not inherit a
             # username from whatever ran in this context before it.
             current_username.set(None)
