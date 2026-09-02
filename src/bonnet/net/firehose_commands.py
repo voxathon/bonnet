@@ -13,6 +13,7 @@ from __future__ import annotations
 import struct
 import threading
 import time
+from contextlib import nullcontext
 
 from bonnet.core.acl import ACLEvaluator, AuthContext
 from bonnet.core.board_projection import BoardProjection, board_db_path
@@ -25,7 +26,13 @@ from bonnet.core.firehose import (
 )
 from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
 from bonnet.core.kind_validator import KindValidator, ValidationError
-from bonnet.core.kinds import ALL_KNOWN_KINDS, KIND_BOARD_CREATE, KIND_USER_REGISTER
+from bonnet.core.kinds import (
+    ALL_KNOWN_KINDS,
+    KIND_BOARD_CREATE,
+    KIND_PUNISHMENT_BAN,
+    KIND_PUNISHMENT_PERMABAN,
+    KIND_USER_REGISTER,
+)
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     SIG_SIZE,
@@ -273,6 +280,15 @@ class FirehoseCommandHandler:
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
         self._boards_lock = threading.Lock()
         self._max_body_size = max_body_size
+        # Serializes the check-then-append span for bonnet.user.register and
+        # bonnet.board.create: without it, two concurrent registrations for
+        # the same name can both read "no holder yet" before either appends,
+        # so both get appended as distinct signed records even though the
+        # projection later resolves only one of them as the winner. Held
+        # across the dispatcher call too (dispatch_origin runs synchronously
+        # here), so a blocked second registration re-checks against a
+        # projection that has already caught up with the first.
+        self._identity_lock = threading.Lock()
 
     def close(self) -> None:
         with self._boards_lock:
@@ -502,218 +518,249 @@ class FirehoseCommandHandler:
                     0x0004, "Only an administrator may register a username for another key"
                 )
 
-        # First writer wins on a username, within this origin. UserProjection
-        # enforces this too and has to, since federated registrations never
-        # reach this handler — but refusing here is what lets a local caller
-        # see why, which is the behaviour the gateway's register tool already
-        # documents ("the server rejects the registration and this reports the
-        # failure — pick another name").
-        if kind == KIND_USER_REGISTER:
-            requested = intent.metadata.get_text(1) or ""
-            subject = intent.metadata.get_bytes(2) or intent.actor_pubkey
-            holder = self._users.username_holder(intent.origin, requested)
-            if holder is not None and holder != subject:
-                return _error(0x0009, f"Username '{requested}' is already registered")
+        identity_guard = (
+            self._identity_lock if kind in (KIND_USER_REGISTER, KIND_BOARD_CREATE) else nullcontext()
+        )
+        with identity_guard:
+            # First writer wins on a username, within this origin. UserProjection
+            # enforces this too and has to, since federated registrations never
+            # reach this handler — but refusing here is what lets a local caller
+            # see why, which is the behaviour the gateway's register tool already
+            # documents ("the server rejects the registration and this reports the
+            # failure — pick another name").
+            if kind == KIND_USER_REGISTER:
+                requested = intent.metadata.get_text(1) or ""
+                subject = intent.metadata.get_bytes(2) or intent.actor_pubkey
+                holder = self._users.username_holder(intent.origin, requested)
+                if holder is not None and holder != subject:
+                    return _error(0x0009, f"Username '{requested}' is already registered")
 
-        # Same rule, same reason, for board names: first writer wins.
-        # NavProjection.apply_board_create enforces this too and has to,
-        # since a federated board.create never reaches this handler either —
-        # but refusing here is what lets a local caller see why, instead of
-        # a signed record that's silently accepted and then just never takes
-        # ownership.
-        if kind == KIND_BOARD_CREATE:
-            claimed_owner = intent.metadata.get_bytes(1) or intent.actor_pubkey
-            existing_board = self._nav.get_board(intent.origin, board)
-            if existing_board is not None and existing_board["owner_pubkey"] != claimed_owner:
-                return _error(0x0009, f"Board '{board}' is already owned by someone else")
+            # Same rule, same reason, for board names: first writer wins.
+            # NavProjection.apply_board_create enforces this too and has to,
+            # since a federated board.create never reaches this handler either —
+            # but refusing here is what lets a local caller see why, instead of
+            # a signed record that's silently accepted and then just never takes
+            # ownership.
+            if kind == KIND_BOARD_CREATE:
+                claimed_owner = intent.metadata.get_bytes(1) or intent.actor_pubkey
+                existing_board = self._nav.get_board(intent.origin, board)
+                if existing_board is not None and existing_board["owner_pubkey"] != claimed_owner:
+                    return _error(0x0009, f"Board '{board}' is already owned by someone else")
 
-        # The identity a record is published under is the registrar's to state,
-        # not the caller's to choose. Until now `actor_username` and
-        # `actor_registrar` were free text on every record: the actor binding
-        # above fixes the *key*, and the two fields a reader actually reads went
-        # unchecked, so any authenticated key could publish as anyone.
-        #
-        # Refusal rather than substitution, deliberately. Both fields sit inside
-        # the bytes the actor signed, so rewriting them server-side would
-        # invalidate the intent signature. Refusing keeps two properties at
-        # once: the author signed the name they published under, and the name is
-        # one this origin issued to that key.
-        #
-        # Empty stays legal — claiming nothing is honest. bonnet.user.register
-        # is exempt because it is the record that establishes the name; there is
-        # nothing to check it against yet.
-        if kind != KIND_USER_REGISTER:
-            if intent.actor_registrar and intent.actor_registrar != self._origin:
-                return _error(
-                    0x0004,
-                    f"actor_registrar must be '{self._origin}' on a record published here",
-                )
-            if intent.actor_username:
-                registered = self._users.get_user_by_pubkey(self._origin, intent.actor_pubkey)
-                if registered is None or registered["username"] != intent.actor_username:
+            # The identity a record is published under is the registrar's to state,
+            # not the caller's to choose. Until now `actor_username` and
+            # `actor_registrar` were free text on every record: the actor binding
+            # above fixes the *key*, and the two fields a reader actually reads went
+            # unchecked, so any authenticated key could publish as anyone.
+            #
+            # Refusal rather than substitution, deliberately. Both fields sit inside
+            # the bytes the actor signed, so rewriting them server-side would
+            # invalidate the intent signature. Refusing keeps two properties at
+            # once: the author signed the name they published under, and the name is
+            # one this origin issued to that key.
+            #
+            # Empty stays legal — claiming nothing is honest. bonnet.user.register
+            # is exempt because it is the record that establishes the name; there is
+            # nothing to check it against yet.
+            if kind != KIND_USER_REGISTER:
+                if intent.actor_registrar and intent.actor_registrar != self._origin:
                     return _error(
                         0x0004,
-                        "actor_username is not the name this origin issued to that key",
+                        f"actor_registrar must be '{self._origin}' on a record published here",
                     )
+                if intent.actor_username:
+                    registered = self._users.get_user_by_pubkey(self._origin, intent.actor_pubkey)
+                    if registered is None or registered["username"] != intent.actor_username:
+                        return _error(
+                            0x0004,
+                            "actor_username is not the name this origin issued to that key",
+                        )
 
-        # Write gate: administrators bypass; ack must pass so a
-        # punished user can acknowledge their warning.
-        if kind != KIND_PUNISHMENT_ACK and ctx.role != "administrator":
-            gate_error = self._punishment_gate_response(intent.actor_pubkey)
-            if gate_error is not None:
-                return gate_error
+            # An ack must name a real punishment that actually targets the
+            # acker — otherwise this signs a forged "acknowledged" record
+            # against another user's warning, a nonexistent event ID, or
+            # something that isn't a punishment at all.
+            # PolicyProjection.apply_punishment_ack enforces this too and has
+            # to, since a federated ack never reaches this handler either —
+            # but refusing here is what lets a local caller see why.
+            if kind == KIND_PUNISHMENT_ACK:
+                target_id = intent.metadata.get_bytes(1) or ZERO_ID
+                punishment = self._policy.get_punishment(target_id)
+                if punishment is None:
+                    return _error(0x0003, "No such punishment")
+                if punishment["punished_pubkey"] != intent.actor_pubkey:
+                    return _error(0x0004, "Cannot acknowledge a punishment issued to someone else")
 
-        if kind in (
-            KIND_ARTICLE_CANCEL,
-            KIND_ARTICLE_RESTORE,
-            KIND_ARTICLE_PURGE,
-            KIND_ARTICLE_PIN,
-            KIND_ARTICLE_UNPIN,
-            KIND_THREAD_CLOSE,
-            KIND_THREAD_REOPEN,
-        ):
-            if (
-                intent.target_article_id == ZERO_ID
-                or not intent.target_origin
-                or not intent.target_board
+            # A moderator who bans themself is locked out of every write —
+            # including the punish_revoke needed to undo it — by the same
+            # gate a few lines down (only an administrator bypasses it). A
+            # temporary ban expires eventually; a permaban does not, so a
+            # self-permaban would be permanently unrecoverable. Refused
+            # outright rather than trusted to a confirm prompt: nothing
+            # legitimate ever needs to target one's own key with either kind.
+            if kind in (KIND_PUNISHMENT_BAN, KIND_PUNISHMENT_PERMABAN):
+                target_pubkey = intent.metadata.get_bytes(1)
+                if target_pubkey == intent.actor_pubkey:
+                    return _error(0x0004, "Cannot ban your own identity")
+
+            # Write gate: administrators bypass; ack must pass so a
+            # punished user can acknowledge their warning.
+            if kind != KIND_PUNISHMENT_ACK and ctx.role != "administrator":
+                gate_error = self._punishment_gate_response(intent.actor_pubkey)
+                if gate_error is not None:
+                    return gate_error
+
+            if kind in (
+                KIND_ARTICLE_CANCEL,
+                KIND_ARTICLE_RESTORE,
+                KIND_ARTICLE_PURGE,
+                KIND_ARTICLE_PIN,
+                KIND_ARTICLE_UNPIN,
+                KIND_THREAD_CLOSE,
+                KIND_THREAD_REOPEN,
             ):
-                return _error(0x0006, "Control event requires complete target tuple")
+                if (
+                    intent.target_article_id == ZERO_ID
+                    or not intent.target_origin
+                    or not intent.target_board
+                ):
+                    return _error(0x0006, "Control event requires complete target tuple")
 
-            bp = self._get_board_projection(intent.target_origin, intent.target_board)
-            target = bp.get_article_by_id(
-                intent.target_origin,
-                intent.target_board,
-                intent.target_article_id,
-            )
-
-            if target is None:
-                return _error(0x0003, "Target article not found")
-
-            if kind == KIND_ARTICLE_CANCEL:
-                if target.author_pubkey != intent.actor_pubkey:
-                    if ctx.role != "administrator" and ctx.role != "moderator":
-                        return _error(
-                            0x0004, "Only the author or a moderator may cancel this article"
-                        )
-                if target.visibility == "cancelled":
-                    return _error(0x0009, "Article is already cancelled")
-                if target.visibility == "superseded":
-                    return _error(0x0009, "Cannot cancel a superseded article")
-            elif kind == KIND_ARTICLE_RESTORE:
-                if target.author_pubkey != intent.actor_pubkey:
-                    if ctx.role != "administrator" and ctx.role != "moderator":
-                        return _error(
-                            0x0004, "Only the author or a moderator may restore this article"
-                        )
-                if target.visibility != "cancelled":
-                    return _error(0x0009, "Article is not cancelled")
-                if target.body_state == "purged":
-                    return _error(0x0009, "Cannot restore a purged article")
-            elif kind == KIND_ARTICLE_PURGE:
-                if target.author_pubkey != intent.actor_pubkey:
-                    if ctx.role != "administrator" and ctx.role != "moderator":
-                        return _error(
-                            0x0004, "Only the author or a moderator may purge this article"
-                        )
-                if target.body_state == "purged":
-                    return _error(0x0009, "Article is already purged")
-            elif kind == KIND_ARTICLE_PIN:
-                if target.pin_state != "unpinned":
-                    return _error(0x0009, "Article is already pinned")
-            elif kind == KIND_ARTICLE_UNPIN:
-                if target.pin_state == "unpinned":
-                    return _error(0x0009, "Article is not pinned")
-            elif kind == KIND_THREAD_CLOSE:
-                if target.thread_state == "closed":
-                    return _error(0x0009, "Thread is already closed")
-            elif kind == KIND_THREAD_REOPEN:
-                if target.thread_state == "open":
-                    return _error(0x0009, "Thread is not closed")
-
-        if kind == KIND_ARTICLE:
-            supersedes_id = intent.metadata.get_bytes(7)
-            if supersedes_id and supersedes_id != ZERO_ID:
-                bp = self._get_board_projection(intent.origin, intent.board)
-                target = bp.get_article_by_id(intent.origin, intent.board, supersedes_id)
-                if target is None:
-                    return _error(0x0003, "Supersede target article not found")
-                if target.author_pubkey != intent.actor_pubkey:
-                    if ctx.role != "administrator" and ctx.role != "moderator":
-                        return _error(0x0004, "Only the original author may supersede an article")
-
-        if intent.body_size > 0:
-            if intent.body_size > self._max_body_size:
-                return _error(
-                    0x0006, f"Body size {intent.body_size} exceeds maximum {self._max_body_size}"
+                bp = self._get_board_projection(intent.target_origin, intent.target_board)
+                target = bp.get_article_by_id(
+                    intent.target_origin,
+                    intent.target_board,
+                    intent.target_article_id,
                 )
-            if len(body) != intent.body_size:
-                return _error(0x0006, "Body length mismatch")
-            actual_hash = compute_body_hash(body)
-            if actual_hash != intent.body_hash:
-                return _error(0x0006, "Body hash mismatch")
 
-        if intent.kind == KIND_ARTICLE and intent.body_size > 0:
-            self._body_store.stage_article_body(
-                intent.origin,
-                intent.board,
-                intent.event_id,
-                body,
-                intent.body_hash,
-                intent.body_size,
-            )
-        elif intent.body_size > 0:
-            self._body_store.write_event_body(
-                intent.origin,
-                intent.event_id,
-                body,
-                intent.body_hash,
-                intent.body_size,
-            )
+                if target is None:
+                    return _error(0x0003, "Target article not found")
 
-        try:
-            rec = self._firehose.append_record(
-                self._identity, intent, actor_sig, body, created_at=now
-            )
-        except Exception:
+                if kind == KIND_ARTICLE_CANCEL:
+                    if target.author_pubkey != intent.actor_pubkey:
+                        if ctx.role != "administrator" and ctx.role != "moderator":
+                            return _error(
+                                0x0004, "Only the author or a moderator may cancel this article"
+                            )
+                    if target.visibility == "cancelled":
+                        return _error(0x0009, "Article is already cancelled")
+                    if target.visibility == "superseded":
+                        return _error(0x0009, "Cannot cancel a superseded article")
+                elif kind == KIND_ARTICLE_RESTORE:
+                    if target.author_pubkey != intent.actor_pubkey:
+                        if ctx.role != "administrator" and ctx.role != "moderator":
+                            return _error(
+                                0x0004, "Only the author or a moderator may restore this article"
+                            )
+                    if target.visibility != "cancelled":
+                        return _error(0x0009, "Article is not cancelled")
+                    if target.body_state == "purged":
+                        return _error(0x0009, "Cannot restore a purged article")
+                elif kind == KIND_ARTICLE_PURGE:
+                    if target.author_pubkey != intent.actor_pubkey:
+                        if ctx.role != "administrator" and ctx.role != "moderator":
+                            return _error(
+                                0x0004, "Only the author or a moderator may purge this article"
+                            )
+                    if target.body_state == "purged":
+                        return _error(0x0009, "Article is already purged")
+                elif kind == KIND_ARTICLE_PIN:
+                    if target.pin_state != "unpinned":
+                        return _error(0x0009, "Article is already pinned")
+                elif kind == KIND_ARTICLE_UNPIN:
+                    if target.pin_state == "unpinned":
+                        return _error(0x0009, "Article is not pinned")
+                elif kind == KIND_THREAD_CLOSE:
+                    if target.thread_state == "closed":
+                        return _error(0x0009, "Thread is already closed")
+                elif kind == KIND_THREAD_REOPEN:
+                    if target.thread_state == "open":
+                        return _error(0x0009, "Thread is not closed")
+
+            if kind == KIND_ARTICLE:
+                supersedes_id = intent.metadata.get_bytes(7)
+                if supersedes_id and supersedes_id != ZERO_ID:
+                    bp = self._get_board_projection(intent.origin, intent.board)
+                    target = bp.get_article_by_id(intent.origin, intent.board, supersedes_id)
+                    if target is None:
+                        return _error(0x0003, "Supersede target article not found")
+                    if target.author_pubkey != intent.actor_pubkey:
+                        if ctx.role != "administrator" and ctx.role != "moderator":
+                            return _error(0x0004, "Only the original author may supersede an article")
+
+            if intent.body_size > 0:
+                if intent.body_size > self._max_body_size:
+                    return _error(
+                        0x0006, f"Body size {intent.body_size} exceeds maximum {self._max_body_size}"
+                    )
+                if len(body) != intent.body_size:
+                    return _error(0x0006, "Body length mismatch")
+                actual_hash = compute_body_hash(body)
+                if actual_hash != intent.body_hash:
+                    return _error(0x0006, "Body hash mismatch")
+
             if intent.kind == KIND_ARTICLE and intent.body_size > 0:
-                self._body_store.delete_staged_article_body(
-                    intent.origin, intent.board, intent.event_id
+                self._body_store.stage_article_body(
+                    intent.origin,
+                    intent.board,
+                    intent.event_id,
+                    body,
+                    intent.body_hash,
+                    intent.body_size,
                 )
             elif intent.body_size > 0:
-                self._body_store.delete_event_body(intent.origin, intent.event_id)
-            raise
+                self._body_store.write_event_body(
+                    intent.origin,
+                    intent.event_id,
+                    body,
+                    intent.body_hash,
+                    intent.body_size,
+                )
 
-        if intent.kind == KIND_ARTICLE and intent.body_size > 0:
-            self._body_store.finalize_article_body(
-                intent.origin,
-                intent.board,
-                intent.event_id,
-                rec.article_num,
+            try:
+                rec = self._firehose.append_record(
+                    self._identity, intent, actor_sig, body, created_at=now
+                )
+            except Exception:
+                if intent.kind == KIND_ARTICLE and intent.body_size > 0:
+                    self._body_store.delete_staged_article_body(
+                        intent.origin, intent.board, intent.event_id
+                    )
+                elif intent.body_size > 0:
+                    self._body_store.delete_event_body(intent.origin, intent.event_id)
+                raise
+
+            if intent.kind == KIND_ARTICLE and intent.body_size > 0:
+                self._body_store.finalize_article_body(
+                    intent.origin,
+                    intent.board,
+                    intent.event_id,
+                    rec.article_num,
+                )
+
+            if self._dispatcher:
+                self._dispatcher.dispatch_origin(self._origin)
+
+            encoded_rec = encode_record(rec)
+            event_hash = compute_event_hash(encoded_rec)
+
+            witness = make_origin_witness(
+                origin=self._origin,
+                event_id=rec.event_id,
+                event_hash=event_hash,
+                origin_identity=self._identity,
+                hostname=self._hostname,
+                seen_at=now,
             )
+            self._firehose.store_witness(witness)
+            encoded_witness = encode_witness(witness)
 
-        if self._dispatcher:
-            self._dispatcher.dispatch_origin(self._origin)
-
-        encoded_rec = encode_record(rec)
-        event_hash = compute_event_hash(encoded_rec)
-
-        witness = make_origin_witness(
-            origin=self._origin,
-            event_id=rec.event_id,
-            event_hash=event_hash,
-            origin_identity=self._identity,
-            hostname=self._hostname,
-            seen_at=now,
-        )
-        self._firehose.store_witness(witness)
-        encoded_witness = encode_witness(witness)
-
-        return _success(
-            struct.pack(">I", len(encoded_rec))
-            + encoded_rec
-            + struct.pack(">H", len(encoded_witness))
-            + encoded_witness
-        )
+            return _success(
+                struct.pack(">I", len(encoded_rec))
+                + encoded_rec
+                + struct.pack(">H", len(encoded_witness))
+                + encoded_witness
+            )
 
     # ------------------------------------------------------------------
     # EVENT_HEAD

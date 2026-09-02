@@ -657,7 +657,7 @@ effect = "allow"
 match.registered = true
 actions = ["write"]
 commands = ["PUBLISH_RECORD"]
-kinds = ["bonnet.article", "bonnet.board.create", "bonnet.report", "bonnet.user.key.rotate"]
+kinds = ["bonnet.article", "bonnet.board.create", "bonnet.report", "bonnet.user.key.rotate", "bonnet.punishment.ack"]
 boards = ["*"]
 
 # To grant a specific key full access (read/write, every command/kind/board):

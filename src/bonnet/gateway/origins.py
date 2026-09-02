@@ -90,6 +90,21 @@ class OriginStore:
         row = self._conn.execute("SELECT * FROM origins WHERE origin = ?", (origin,)).fetchone()
         return self._row_to_dict(row) if row else None
 
+    def get_by_url(self, url: str) -> dict | None:
+        """The joined origin last reached at exactly this URL, if any.
+
+        Lets a $BONNET_URL-only startup (no explicit connect()) recover the
+        origin's real self-asserted identifier — the key identities are
+        actually stored under — instead of falling back to the URL string
+        itself as a stand-in origin id. Most-recently-used wins if more than
+        one origin was ever joined at the same URL (e.g. after the origin
+        rotated its own identifier).
+        """
+        row = self._conn.execute(
+            "SELECT * FROM origins WHERE url = ? ORDER BY last_used DESC LIMIT 1", (url,)
+        ).fetchone()
+        return self._row_to_dict(row) if row else None
+
     def list_origins(self) -> list[dict]:
         rows = self._conn.execute("SELECT * FROM origins ORDER BY last_used DESC").fetchall()
         return [self._row_to_dict(r) for r in rows]

@@ -916,12 +916,40 @@ class PolicyProjection(_BaseProjection):
                 self._rollback()
                 raise
 
+    def get_punishment(self, event_id: bytes) -> dict | None:
+        """Look up a single punishment by its event ID, or None if unknown."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT event_id, origin, origin_seq, type, punished_pubkey, expires_at, "
+                "revoked FROM punishments WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "event_id": bytes(row[0]),
+                "origin": row[1],
+                "origin_seq": row[2],
+                "type": row[3],
+                "punished_pubkey": bytes(row[4]),
+                "expires_at": row[5],
+                "revoked": bool(row[6]),
+            }
+
     def apply_punishment_ack(self, rec: Record) -> None:
         """Record a user's acknowledgment of a punishment.
 
         Acks are local to the user's homeserver and reference the punishment
         event ID regardless of which origin issued it. Re-acking the same
         punishment with a new event is idempotent at the pending-state level.
+
+        The punishment event ID must name a punishment that actually exists
+        and actually targets the acker. `firehose_commands._cmd_publish`
+        refuses the same case at publish time for a local caller's sake, but
+        this check has to exist independently: federated acks never pass
+        through that handler, and without it any key could forge a signed
+        "acknowledged" record against another user's punishment, a
+        nonexistent event ID, or an unrelated event entirely.
         """
         with self._lock:
             if self.is_applied(rec.event_id):
@@ -929,6 +957,15 @@ class PolicyProjection(_BaseProjection):
             self._begin()
             try:
                 punishment_event_id = rec.metadata.get_bytes(1) or b"\x00" * 32
+                row = self._conn.execute(
+                    "SELECT punished_pubkey FROM punishments WHERE event_id=?",
+                    (punishment_event_id,),
+                ).fetchone()
+                if row is None or bytes(row[0]) != rec.actor_pubkey:
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
                 self._conn.execute(
                     "INSERT OR IGNORE INTO punishment_acks "
                     "(ack_event_id, user_pubkey, punishment_event_id, acked_at) "
