@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import socket
 import tomllib
 from dataclasses import dataclass
 
 from bonnet.core.acl import ACLEvaluator
-from bonnet.core.home import resolve_home
 from bonnet.core.record import normalize_origin
 
 
@@ -52,6 +52,24 @@ class PeerConfig:
 def _normalize_origin(origin: str) -> str:
     """Config's origin normalization, shared with the wire's lookup keys."""
     return normalize_origin(origin)
+
+
+# ASCII hostname (RFC 1123 labels) or dotted-quad IPv4. `origin` is a
+# federation identity, not just a display string — an unvalidated value
+# becomes this server's permanent identity, so garbage (embedded whitespace,
+# a "scheme://" fragment, non-ASCII that isn't punycode-encoded) needs to be
+# caught here rather than silently accepted and served.
+_HOSTNAME_RE = re.compile(
+    r"^[A-Za-z0-9]([A-Za-z0-9-]{0,62})?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62})?)*$"
+)
+
+
+def _validate_hostname_like(field: str, value: str) -> None:
+    if not _HOSTNAME_RE.match(value):
+        raise ValueError(
+            f"config: {field} {value!r} is not a valid hostname (use punycode for "
+            "non-ASCII names, and no scheme/path/whitespace)"
+        )
 
 
 def _as_bool(table: dict, key: str, section: str, default: bool) -> bool:
@@ -295,6 +313,9 @@ class FirehoseConfig:
         """Raise ValueError if configuration is invalid."""
         if not self.origin:
             raise ValueError("config: origin must not be empty")
+        _validate_hostname_like("origin", self.origin)
+        if self.hostname:
+            _validate_hostname_like("hostname", self.hostname)
         if not isinstance(self.port, int) or isinstance(self.port, bool):
             raise ValueError(f"config: port must be an integer, got {self.port!r}")
         if not (1 <= self.port <= 65535):
@@ -346,6 +367,9 @@ class FirehoseConfig:
         for peer in self.peers:
             if not peer.origin:
                 raise ValueError("config: peer origin must not be empty")
+            _validate_hostname_like(f"peer '{peer.origin}' origin", peer.origin)
+            if peer.hostname:
+                _validate_hostname_like(f"peer '{peer.origin}' hostname", peer.hostname)
             normalized_origin = _normalize_origin(peer.origin)
             if normalized_origin in seen_origins:
                 raise ValueError(f"config: duplicate peer origin '{peer.origin}'")
@@ -418,7 +442,20 @@ class FirehoseConfig:
         # an explicit config.toml value always wins, so a stray environment
         # variable can't silently relocate a deliberately configured server's
         # data.
-        server_home = resolve_home("server", "BONNET_SERVER_HOME")
+        #
+        # The fallback below is `base_dir` (this config file's own
+        # directory), not `resolve_home()`'s globally-remembered pointer.
+        # `resolve_home()`'s pointer file is process-wide per OS user, keyed
+        # by nothing this specific `--config PATH` chose — two concurrent
+        # `bonnet server` instances started with distinct `--config` paths
+        # but no `--dir`/`BONNET_SERVER_HOME` would otherwise silently share
+        # (and race on) whichever instance's `--dir`/`--init` last wrote that
+        # pointer. An explicit env var override still wins, matching the
+        # comment above; `--dir`/`--init` continue to work unchanged, since
+        # they set `args.config` to `<dir>/config.toml`, making `base_dir`
+        # equal to the directory they named.
+        env_server_home = os.environ.get("BONNET_SERVER_HOME")
+        server_home = os.path.expanduser(env_server_home) if env_server_home else base_dir
 
         def _storage_default(subdir: str) -> str:
             return os.path.join(server_home, subdir)

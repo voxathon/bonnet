@@ -130,6 +130,23 @@ async def test_duplicate_register_reports_already_registered_explicitly(wired):
     assert "already registered" in result["message"]
 
 
+async def test_register_collision_with_another_key_explains_the_fix(wired, tmp_path, monkeypatch):
+    """Regression for the chaos-testing report's #2.5: when `username` is
+    already held by a *different* key than this client's, the refusal used
+    to reach the caller bare, with nothing saying the fix is picking another
+    name. A second local identity store stands in for a different client
+    holding the name first."""
+    await tools.connect("https://bbs.test")
+    await tools.register("scout")
+
+    monkeypatch.setenv("BONNET_IDENTITIES_DB", str(tmp_path / "other-identities.db"))
+    tenancy.reset_store_cache()
+
+    with pytest.raises(ValueError, match="Pick a different username") as exc:
+        await tools.register("scout")
+    assert "scout" in str(exc.value)
+
+
 async def test_register_actually_lands_a_registration_the_server_accepted(wired):
     """The point of register is a real registration, so assert against the
     server's own user projection rather than the returned summary."""

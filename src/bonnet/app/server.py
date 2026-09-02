@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Protocol
+from typing import Any, Protocol
 
 from bonnet.app.cli import FirehoseLocalConnection
 from bonnet.app.console import OperatorConsole
@@ -42,6 +42,10 @@ class BonnetServer:
     def __init__(self, config: FirehoseConfig):
         self.config = config
         self._closed = False
+        # Set for real once run() binds (see run()'s startup()). Declared
+        # here so a signal handler racing with startup has something to
+        # check rather than an AttributeError.
+        self._uvicorn_server: Any = None
 
         os.makedirs(config.data_dir, exist_ok=True)
         os.makedirs(config.boards_dir, exist_ok=True)

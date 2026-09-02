@@ -543,11 +543,25 @@ class FirehoseCommandHandler:
             # but refusing here is what lets a local caller see why, instead of
             # a signed record that's silently accepted and then just never takes
             # ownership.
+            #
+            # Refused even when the *same* owner re-creates their own board:
+            # a second bonnet.board.create for a name that already exists is
+            # a spurious "I created this" claim minted into the append-only
+            # log for no effect (the projection dedupes it away silently, but
+            # the log itself now carries two creation claims with nothing to
+            # say either was a no-op). register()'s analogous re-registration
+            # case is genuinely different — the client-local IdentityStore
+            # already knows it holds that key, so the gateway tool can treat
+            # it as a clean no-op before ever publishing. There is no
+            # equivalent local state for a board name, so the honest answer
+            # here is a refusal, not a silent no-op.
             if kind == KIND_BOARD_CREATE:
                 claimed_owner = intent.metadata.get_bytes(1) or intent.actor_pubkey
                 existing_board = self._nav.get_board(intent.origin, board)
-                if existing_board is not None and existing_board["owner_pubkey"] != claimed_owner:
-                    return _error(0x0009, f"Board '{board}' is already owned by someone else")
+                if existing_board is not None:
+                    if existing_board["owner_pubkey"] != claimed_owner:
+                        return _error(0x0009, f"Board '{board}' is already owned by someone else")
+                    return _error(0x0009, f"Board '{board}' already exists")
 
             # The identity a record is published under is the registrar's to state,
             # not the caller's to choose. Until now `actor_username` and
