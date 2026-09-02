@@ -2,11 +2,13 @@
 dispatches to (see `bonnet.cli`). `--version` lives on the dispatcher now, not
 here — see tests/test_cli.py."""
 
+import asyncio
 import os
+import signal
 
 import pytest
 
-from bonnet.app.main import main
+from bonnet.app.main import _serve_until_signal, main
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +41,10 @@ def test_missing_config_prints_friendly_error(tmp_path, capsys, monkeypatch):
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert f"config file not found: {missing}" in err
+    # Regression for the chaos-testing report's #1.6: README's walkthrough
+    # only ever mentions --init, so the primary suggestion here has to match
+    # it rather than pointing exclusively at the lower-level --create-config.
+    assert "--init" in err
     assert "--create-config" in err
 
 
@@ -247,3 +253,98 @@ def test_dir_flag_persists_for_a_later_call_with_no_dir(tmp_path, capsys, monkey
 
     out = capsys.readouterr().out
     assert f"OK: {os.path.join(str(home_dir), 'config.toml')} is valid." in out
+
+
+# ---------------------------------------------------------------------------
+# SIGTERM handling
+# ---------------------------------------------------------------------------
+#
+# Regression for the chaos-testing report's #1.5: the prior SIGTERM handler
+# called `raise KeyboardInterrupt` directly from inside signal.signal's
+# synchronous callback, which Python delivers between arbitrary bytecode
+# instructions - including inside asyncio's own shutdown machinery. ~2 of 6
+# real `bonnet server` + SIGTERM runs produced "RuntimeError: coroutine
+# ignored GeneratorExit" / "Task was destroyed but it is pending!"; another
+# produced "RuntimeError: Event loop is closed". The process still exited,
+# but it read exactly like a crash on an ordinary shutdown.
+#
+# These exercise `_serve_until_signal` directly with a stub server, rather
+# than sending a real SIGTERM to a subprocess (which the project's test
+# suite has no existing pattern for, and which SIGTERM's semantics on
+# Windows make especially unreliable) - the property being tested is that
+# the signal callback only ever schedules an ordinary loop callback, never
+# raises into arbitrary code, which is fully exercised without the OS
+# actually delivering anything.
+
+
+class _StubArgs:
+    port = None
+    cert = None
+    key = None
+
+
+class _StubServerBeforeBind:
+    """Stands in for a BonnetServer whose run() hasn't reached startup()
+    yet - _uvicorn_server is still None, so SIGTERM has nothing bound to
+    stop gracefully and must cancel the run() coroutine instead."""
+
+    _uvicorn_server = None
+
+    async def run(self, port=None, ssl_certfile=None, ssl_keyfile=None):
+        await asyncio.sleep(10)
+        return True  # pragma: no cover - only reached if not cancelled
+
+
+class _StubUvicornServer:
+    def __init__(self):
+        self.should_exit = False
+
+
+class _StubServerAfterBind:
+    """Stands in for a BonnetServer whose run() has bound and is in its
+    main loop - SIGTERM must flip should_exit, the same flag uvicorn's own
+    signal handling would, and let run() notice it and return normally
+    rather than being cancelled out from under it."""
+
+    def __init__(self):
+        self._uvicorn_server = _StubUvicornServer()
+
+    async def run(self, port=None, ssl_certfile=None, ssl_keyfile=None):
+        for _ in range(200):
+            if self._uvicorn_server.should_exit:
+                return True
+            await asyncio.sleep(0.01)
+        raise AssertionError("should_exit was never observed")  # pragma: no cover
+
+
+async def test_sigterm_before_bind_cancels_cleanly():
+    server = _StubServerBeforeBind()
+    task = asyncio.ensure_future(_serve_until_signal(server, _StubArgs()))
+    await asyncio.sleep(0.05)
+
+    # signal.raise_signal, not os.kill(os.getpid(), ...): on Windows the
+    # latter calls TerminateProcess unconditionally for an arbitrary signum,
+    # bypassing any registered Python handler entirely rather than invoking
+    # it - this needs the handler to actually run, in-process, on both
+    # platforms.
+    signal.raise_signal(signal.SIGTERM)
+
+    result = await asyncio.wait_for(task, timeout=5)
+    assert result is True
+
+
+async def test_sigterm_after_bind_sets_should_exit_without_cancelling():
+    server = _StubServerAfterBind()
+    task = asyncio.ensure_future(_serve_until_signal(server, _StubArgs()))
+    await asyncio.sleep(0.05)
+
+    # signal.raise_signal, not os.kill(os.getpid(), ...): on Windows the
+    # latter calls TerminateProcess unconditionally for an arbitrary signum,
+    # bypassing any registered Python handler entirely rather than invoking
+    # it - this needs the handler to actually run, in-process, on both
+    # platforms.
+    signal.raise_signal(signal.SIGTERM)
+
+    result = await asyncio.wait_for(task, timeout=5)
+    assert result is True
+    assert server._uvicorn_server.should_exit is True
