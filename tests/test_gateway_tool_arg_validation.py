@@ -52,3 +52,19 @@ class TestPaginationArgTypes:
     async def test_search_articles_rejects_string_offset(self):
         with pytest.raises(ValueError, match="offset"):
             await tools.search_articles("q", board="general", offset="not-an-int")
+
+    async def test_search_articles_rejects_oversized_body_query(self):
+        """body_query reaches the same MAX_TEXT_FIELD cap as query — added
+        alongside wiring body_query through to the relay's ripgrep-backed
+        body search (chaos-testing report's #2.1: it used to be dropped
+        entirely, hardcoded to "")."""
+        with pytest.raises(ValueError, match="body_query"):
+            await tools.search_articles("q", board="general", body_query="x" * 5000)
+
+
+class TestReportArgTypes:
+    async def test_report_rejects_oversized_reason(self):
+        """Regression for the chaos-testing report's #2.2: report(reason=...)
+        had no length cap, unlike every other text field."""
+        with pytest.raises(ValueError, match="reason"):
+            await tools.report(reason="x" * 200_000, article_num=1)

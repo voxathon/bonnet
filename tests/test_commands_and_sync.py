@@ -303,6 +303,40 @@ class TestPublishRecord:
         resp = h.handle(req, _actor_ctx())
         assert resp[0] == 0
 
+    def test_publish_board_create_rejects_duplicate_by_same_owner(self, stack):
+        """A second bonnet.board.create for a name the *same* owner already
+        holds must be refused, not silently appended — a repeat "I created
+        this" claim on the append-only log with no indication it was a
+        no-op. Regression for the chaos-testing report's #1.2: create_board
+        used to accept the identical (origin, board, owner) twice."""
+        h = stack["handler"]
+        _create_board(h, "dupboard")
+
+        intent = Intent(
+            event_id=_rid(2),
+            kind="bonnet.board.create",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="dupboard",
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, ACTOR_PUB),
+                    metadata_text(2, "New Board"),
+                ]
+            ),
+        )
+        encoded_intent = encode_intent(intent)
+        actor_sig = sign_intent(ACTOR, encoded_intent)
+
+        req = struct.pack(">B", OP_PUBLISH_RECORD)
+        req += struct.pack(">I", len(encoded_intent)) + encoded_intent
+        req += actor_sig
+        req += struct.pack(">I", 0)
+
+        resp = h.handle(req, _actor_ctx())
+        assert resp[0] == 1
+        assert b"already exists" in resp.lower()
+
     def test_publish_rejects_acl_denied(self, stack):
         h = stack["handler"]
         stack["acl"] = ACLEvaluator([])  # deny all

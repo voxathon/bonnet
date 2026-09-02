@@ -69,6 +69,8 @@ def identity_text_violation(value: str) -> str | None:
     """
     if not value or not value.strip():
         return "empty or whitespace-only"
+    if value != value.strip():
+        return "has leading or trailing whitespace"
     for c in value:
         if ord(c) < 0x20:
             return "contains a control character"

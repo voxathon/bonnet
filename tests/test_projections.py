@@ -793,6 +793,27 @@ class TestNavProjection:
         assert nav_proj.list_boards("bbs.a") == []
         assert nav_proj.is_applied(rec.event_id)
 
+    def test_board_create_with_padding_whitespace_not_projected(self, nav_proj):
+        """Regression for the chaos-testing report's #2.3: a name padded with
+        leading/trailing whitespace ("  general  ") used to be accepted as a
+        distinct identifier from its trimmed form, visually indistinguishable
+        from it in most renderers. identity_text_violation's whitespace-only
+        check inspected the stripped string without ever using it, so padded
+        names slipped through the one check that did look at .strip()."""
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=1,
+            event_id=_rid(1),
+            kind="bonnet.board.create",
+            actor_pubkey=ACTOR_PUB,
+            board="  general  ",
+            metadata=MetadataMap([metadata_bytes(1, ACTOR_PUB)]),
+        )
+        nav_proj.apply_board_create(rec)
+        assert nav_proj.get_board("bbs.a", "  general  ") is None
+        assert nav_proj.list_boards("bbs.a") == []
+        assert nav_proj.is_applied(rec.event_id)
+
     def test_board_create_after_rejected_one_still_dispatches(self, nav_proj):
         """The rejected record must not stall subsequent records for the
         same origin — checkpoint/is_applied still advance past it."""
