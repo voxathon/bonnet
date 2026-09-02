@@ -1100,8 +1100,6 @@ class OperatorConsole:
 
         origin = ""
         board = parts[1]
-        offset = 0
-        limit = 50
 
         known_origins = set()
         try:
