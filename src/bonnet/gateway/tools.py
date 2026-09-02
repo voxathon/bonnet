@@ -614,6 +614,17 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
             f"connect requires an http:// or https:// URL, got {url!r} "
             "(e.g. https://bbs.example:2272)"
         )
+    # A path/query/fragment here has nowhere to go: the wire protocol's paths
+    # (/.well-known/untp, /command) are fixed and relative to the origin
+    # itself, so this client would otherwise silently append them after
+    # whatever the caller wrote — e.g. .../foo?bar=baz/.well-known/untp for
+    # url="https://host/foo?bar=baz" — and fail with an error that names a
+    # URL nobody typed. Reject before that ever gets built.
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise ValueError(
+            f"connect requires just an origin's scheme+host+port, got {url!r} "
+            "(e.g. https://bbs.example:2272, with no path, query or fragment)"
+        )
 
     previous = (current_origin_url.get(), current_origin_verify.get(), current_origin.get())
 
@@ -1011,7 +1022,21 @@ async def register(username: str, password: str | None = None, origin: str | Non
             except ProtocolError:
                 existing = None
             if existing is None or existing.username != username:
-                raise refusal from None
+                # Regression for the chaos-testing report's #2.5: raising
+                # `refusal` bare here left every later identity-scoped call
+                # in this session a dead end — the local keypair for
+                # `username` was already minted and is unrecoverable under
+                # this name (see below), and nothing said the fix was to
+                # pick a different one and register again. Say it here,
+                # at the one point that actually knows what happened.
+                raise ValueError(
+                    f"{refusal} — this client holds a different key than "
+                    f"whoever already registered '{username}' on "
+                    f"'{target_origin}'. Pick a different username and call "
+                    "register again; the keypair just minted for this "
+                    f"attempt is local-only and not lost, but '{username}' "
+                    "on this origin is not reachable from it."
+                ) from refusal
 
         store.mark_registered(target_origin, username)
     finally:

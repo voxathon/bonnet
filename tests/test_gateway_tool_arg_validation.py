@@ -40,6 +40,27 @@ class TestPublishArticleArgTypes:
             await tools.publish_article("subject", ["not", "a", "string"], board="general")
 
 
+class TestConnectArgValidation:
+    async def test_rejects_url_with_path(self):
+        """Regression for the chaos-testing report's #2.4: a URL carrying a
+        path/query used to be accepted verbatim and silently mangled into a
+        malformed discovery URL (.../foo?bar=baz/.well-known/untp) rather
+        than rejected up front."""
+        with pytest.raises(ValueError, match="scheme\\+host\\+port"):
+            await tools.connect("https://bbs.example:2272/foo?bar=baz")
+
+    async def test_rejects_url_with_bare_path(self):
+        with pytest.raises(ValueError, match="scheme\\+host\\+port"):
+            await tools.connect("https://bbs.example:2272/foo")
+
+    async def test_accepts_url_with_trailing_slash_only(self):
+        """A bare trailing slash is not a path component worth rejecting —
+        connect() already strips it before storing the origin URL."""
+        with pytest.raises(Exception) as exc:
+            await tools.connect("https://unreachable.invalid:2272/")
+        assert "scheme+host+port" not in str(exc.value)
+
+
 class TestPaginationArgTypes:
     async def test_list_articles_rejects_string_offset(self):
         with pytest.raises(ValueError, match="offset"):
