@@ -455,7 +455,7 @@ class FirehoseConfig:
             boards_dir=boards_dir,
             events_bodies_dir=events_bodies_dir,
             port=port,
-            tls_enabled=tls.get("enabled", False),
+            tls_enabled=_as_bool(tls, "enabled", "tls", False),
             tls_cert_path=tls.get("cert_path", ""),
             tls_key_path=tls.get("key_path", ""),
             tls_ca_bundle=tls.get("ca_bundle", True),

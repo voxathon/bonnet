@@ -404,6 +404,25 @@ import_permabans = 1
         FirehoseConfig.load(path)
 
 
+def test_tls_enabled_rejects_a_quoted_string(tmp_path):
+    """`enabled = "false"` (quoted, not bare) used to load as a Python string,
+    which is truthy for any non-empty value including "false" itself - a
+    server config trying to explicitly disable TLS by writing that would
+    silently run with TLS on instead, with no error or warning anywhere."""
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[tls]
+enabled = "false"
+""",
+    )
+    with pytest.raises(ValueError, match="tls.enabled"):
+        FirehoseConfig.load(path)
+
+
 # ---------------------------------------------------------------------------
 # Missing config behavior
 # ---------------------------------------------------------------------------
