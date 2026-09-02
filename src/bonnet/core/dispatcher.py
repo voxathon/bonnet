@@ -234,7 +234,23 @@ class Dispatcher:
         return AUTHOR_UNREGISTERED
 
     def _dispatch_article(self, rec: Record) -> None:
-        self._nav.ensure_board(rec.origin, rec.board, rec.actor_pubkey, rec.origin_seq, rec.created_at)
+        # An article needs a real bonnet.board.create on record - local or
+        # federated - before it is projected. Minting a board as a side
+        # effect of a bare publish, owned by whoever published first, was a
+        # way to spray-create/typosquat boards with zero authorization
+        # event, moderation step, or audit trail. A local publish to an
+        # unknown board is refused upfront in firehose_commands._cmd_publish
+        # (a clean error), so reaching here with no board means a federated
+        # record whose own origin never created one - it stays in the
+        # firehose and keeps relaying, it simply isn't queryable as an
+        # article until a board.create for it arrives.
+        if self._nav.get_board(rec.origin, rec.board) is None:
+            log_msg(
+                f"DISPATCH: origin='{rec.origin}' seq={rec.origin_seq} "
+                f"board={rec.board!r} has no bonnet.board.create on record - "
+                "article not projected"
+            )
+            return
         bp = self._get_board_projection(rec.origin, rec.board)
         bp.apply_article(rec, author_check=self._resolve_author_check(rec))
 

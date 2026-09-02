@@ -42,7 +42,7 @@ def resolve_home(component: str, env_var: str) -> str:
     """
     override = os.environ.get(env_var)
     if override:
-        return override
+        return os.path.expanduser(override)
 
     pointer = _pointer_path(component)
     try:
@@ -51,7 +51,7 @@ def resolve_home(component: str, env_var: str) -> str:
     except OSError:
         remembered = ""
     if remembered:
-        return remembered
+        return os.path.expanduser(remembered)
 
     return os.path.join(platformdirs.user_data_dir("bonnet", appauthor=False), component)
 
