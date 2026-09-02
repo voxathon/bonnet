@@ -36,6 +36,7 @@ from bonnet.net.firehose_wire import (
 from tests.test_commands_and_sync import (  # noqa: F401
     ACTOR,
     ACTOR_PUB,
+    _create_board,
     _publish_request,
     _rid,
     _user_ctx,
@@ -62,6 +63,7 @@ def _deny_reads_on_secret(stack):  # noqa: F811
 
 
 def _publish_article(stack):  # noqa: F811
+    _create_board(stack["handler"], SECRET)
     intent = Intent(
         event_id=_rid(1),
         kind="bonnet.article",
@@ -80,6 +82,7 @@ def _publish_article(stack):  # noqa: F811
 
 def _publish_report(stack):  # noqa: F811
     """A non-article kind carrying a board. Its body lands in the event store."""
+    _create_board(stack["handler"], SECRET)
     intent = Intent(
         event_id=_rid(3),
         kind="bonnet.report",
@@ -149,8 +152,9 @@ def test_event_range_walks_the_barred_board(stack):  # noqa: F811
     _publish_article(stack)
     _deny_reads_on_secret(stack)
 
+    # start_seq=2: seq 1 is _publish_article's own bonnet.board.create.
     req = bytes([OP_EVENT_RANGE]) + _enc_text16("bbs.test")
-    req += struct.pack(">Q", 1) + struct.pack(">H", 100) + struct.pack(">I", 0)
+    req += struct.pack(">Q", 2) + struct.pack(">H", 100) + struct.pack(">I", 0)
     resp = stack["handler"].handle(req, _user_ctx(ACTOR))
     assert resp[0] == 0x00
 
