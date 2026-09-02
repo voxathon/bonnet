@@ -1002,13 +1002,25 @@ async def register(username: str, password: str | None = None, origin: str | Non
     # so both the cache and the tool list need refreshing here.
     unlocked = await _unlock_origin_tools()
 
-    return {
+    already_registered = registered_seq is None
+    result = {
         "origin": target_origin,
         "username": username,
         "public_key": identity.public_key.hex(),
         "registered_seq": registered_seq,
+        # `registered_seq: null` alone is easy to read as "the register call
+        # didn't really do anything" - this spells out the same fact so a
+        # caller doesn't have to know that a null sequence number means
+        # success-but-no-op rather than failure.
+        "already_registered": already_registered,
         "tools_unlocked": unlocked,
     }
+    if already_registered:
+        result["message"] = (
+            f"'{username}' was already registered on this origin under this key - "
+            "re-selected the existing identity; no new registration record was published."
+        )
+    return result
 
 
 @mcp.tool

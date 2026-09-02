@@ -434,6 +434,22 @@ def test_create_default_config(tmp_path):
     assert len(config.acl._rules) == 0
 
 
+def test_create_default_config_honors_a_custom_port(tmp_path):
+    """--init/--create-config used to always write port = 2272 to the sample
+    file regardless of a --port override the caller passed at generation
+    time - the flag was silently ignored until the file was hand-edited."""
+    path = str(tmp_path / "config.toml")
+    config = FirehoseConfig.create_default_config(path, port=19273)
+
+    assert config.port == 19273
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    assert "port = 19273" in content
+
+    reloaded = FirehoseConfig.load(path)
+    assert reloaded.port == 19273
+
+
 def test_create_default_config_creates_parent_dir(tmp_path):
     path = str(tmp_path / "nested" / "deep" / "config.toml")
     FirehoseConfig.create_default_config(path)
