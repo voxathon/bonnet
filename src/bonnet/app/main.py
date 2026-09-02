@@ -82,6 +82,8 @@ def _load_and_validate_config(args) -> FirehoseConfig:
 
     if args.host:
         config.host = args.host
+    if args.port is not None:
+        config.port = args.port
 
     try:
         config.validate()
@@ -89,7 +91,44 @@ def _load_and_validate_config(args) -> FirehoseConfig:
         print(f"error: invalid configuration: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
+    for warning in _acl_rule_warnings(config):
+        print(f"warning: {warning}", file=sys.stderr)
+
     return config
+
+
+def _acl_rule_warnings(config: FirehoseConfig) -> list[str]:
+    """Flag ACL rule commands/kinds that can never match anything.
+
+    A rule's `commands`/`kinds` are free-form strings (acl.py has no
+    reference back to the real command/kind name sets - see ACLRule.from_dict),
+    so a typo silently produces a rule that never fires: on an allow it grants
+    nothing, on a deny it blocks nothing, and --check-config previously
+    reported the config fully valid either way. This is advisory, not fatal -
+    a newer command/kind name this build doesn't know about yet is not
+    actually wrong - so it warns rather than failing validation.
+    """
+    from bonnet.core.kinds import ALL_KNOWN_KINDS
+    from bonnet.net.firehose_commands import CMD_NAMES
+
+    known_commands = set(CMD_NAMES.values()) | {"*"}
+    known_kinds = set(ALL_KNOWN_KINDS) | {"*"}
+
+    warnings = []
+    for i, rule in enumerate(config.acl._rules):
+        for command in rule.commands or []:
+            if command not in known_commands:
+                warnings.append(
+                    f"acl rule [{i}] references unknown command '{command}' "
+                    "(this rule can never match anything)"
+                )
+        for kind in rule.kinds or []:
+            if kind not in known_kinds:
+                warnings.append(
+                    f"acl rule [{i}] references unknown kind '{kind}' "
+                    "(this rule can never match anything)"
+                )
+    return warnings
 
 
 def main(argv: list[str] | None = None):
@@ -142,8 +181,23 @@ def main(argv: list[str] | None = None):
     args = parser.parse_args(argv)
 
     if args.dir:
+        args.dir = os.path.expanduser(args.dir)
+    server_home = args.dir or resolve_home("server", "BONNET_SERVER_HOME")
+    if os.path.exists(server_home) and not os.path.isdir(server_home):
+        print(
+            f"error: server home '{server_home}' exists but is not a directory "
+            "(check BONNET_SERVER_HOME / --dir)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    # Only remember --dir for future runs that omit it entirely. A process
+    # with BONNET_SERVER_HOME set always resolves via that override anyway
+    # (see resolve_home) - writing to the pointer file here would only
+    # leak this run's --dir into other processes on the same machine that
+    # rely on their *own* BONNET_SERVER_HOME for isolation, since the
+    # pointer file isn't scoped by that env var.
+    if args.dir and not os.environ.get("BONNET_SERVER_HOME"):
         set_home("server", args.dir)
-    server_home = resolve_home("server", "BONNET_SERVER_HOME")
     if args.config is None:
         args.config = os.path.join(server_home, "config.toml")
 
@@ -165,6 +219,13 @@ def main(argv: list[str] | None = None):
             FirehoseConfig.create_default_config(args.config, force=args.force, tls_paths=tls_paths)
         except FileExistsError as exc:
             print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        except NotADirectoryError:
+            print(
+                f"error: cannot create {args.config} - a path component "
+                "already exists as a file, not a directory (check BONNET_SERVER_HOME / --dir)",
+                file=sys.stderr,
+            )
             raise SystemExit(1)
         print(f"Wrote sample config to {args.config}")
         if tls_paths:
@@ -193,6 +254,13 @@ def main(argv: list[str] | None = None):
         except FileExistsError as exc:
             print(f"error: {exc}", file=sys.stderr)
             raise SystemExit(1)
+        except NotADirectoryError:
+            print(
+                f"error: cannot create {args.config} - a path component "
+                "already exists as a file, not a directory (check BONNET_SERVER_HOME / --dir)",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
         print(f"Wrote sample config to {args.config}")
         if tls_paths:
             print(f"Generated self-signed TLS certificate at {tls_paths[0]}")
@@ -208,7 +276,7 @@ def main(argv: list[str] | None = None):
         print(f"OK: {args.config} is valid.")
         print(f"  origin: {config.origin}")
         print(
-            f"  listen: {config.host}:{args.port or config.port} "
+            f"  listen: {config.host}:{config.port} "
             f"({'tls' if config.tls_enabled else 'plaintext'})"
         )
         print(f"  peers: {len(config.peers)}")
@@ -237,12 +305,18 @@ def main(argv: list[str] | None = None):
 
     signal.signal(signal.SIGTERM, handle_sigterm)
 
+    started = False
     try:
-        asyncio.run(server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key))
+        started = asyncio.run(
+            server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key)
+        )
     except KeyboardInterrupt:
         print("\nShutting down...")
+        started = True
     finally:
         server.close()
+    if not started:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

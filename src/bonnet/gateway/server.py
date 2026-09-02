@@ -111,8 +111,13 @@ def presented_key(headers) -> str:
     Authorization bearer token.
     """
     auth = headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[7:].strip()
+    # The scheme token is case-insensitive per RFC 7235 - "bearer" is a
+    # reasonable, easy mistake for integrators used to lowercase HTTP header
+    # conventions, and it used to silently degrade to anonymous instead of
+    # being recognized.
+    scheme, _, rest = auth.partition(" ")
+    if scheme.lower() == "bearer":
+        token = rest.strip()
         if token:
             return token
     return (headers.get("X-API-Key", "") or "").strip()
@@ -280,6 +285,9 @@ def build_parser() -> argparse.ArgumentParser:
     key_list.add_argument("tenant_id", nargs="?", default=None)
     key_revoke = key.add_parser("revoke", help="revoke one key by id")
     key_revoke.add_argument("key_id")
+    key_revoke.add_argument(
+        "--yes", action="store_true", help="required to revoke a tenant's last live key"
+    )
 
     return parser
 
@@ -305,6 +313,8 @@ def _run_admin(args) -> int:
                 tenants.set_enabled(args.tenant_id, args.action == "enable")
                 print(f"tenant {args.tenant_id} {args.action}d")
             elif args.action == "remove":
+                if tenants.get_tenant(args.tenant_id) is None:
+                    raise TenantError(f"no such tenant {args.tenant_id!r}")
                 if not args.yes:
                     print(
                         f"refusing to remove {args.tenant_id} without --yes: this deletes "
@@ -328,6 +338,25 @@ def _run_admin(args) -> int:
                     label = f"  {row['label']}" if row["label"] else ""
                     print(f"{row['key_id']}\t{row['tenant_id']}\t{state}{label}")
             elif args.action == "revoke":
+                all_keys = tenants.list_keys()
+                target = next((k for k in all_keys if k["key_id"] == args.key_id), None)
+                if target is None:
+                    raise TenantError(f"no live key with id {args.key_id!r}")
+                other_live = [
+                    k
+                    for k in all_keys
+                    if k["tenant_id"] == target["tenant_id"]
+                    and k["key_id"] != args.key_id
+                    and k["revoked_at"] is None
+                ]
+                if not other_live and not args.yes:
+                    print(
+                        f"refusing to revoke {args.key_id} without --yes: it is the last "
+                        f"live key for tenant {target['tenant_id']!r} - revoking it locks "
+                        "that tenant out of the gateway until an operator runs `key add`",
+                        file=sys.stderr,
+                    )
+                    return 1
                 tenants.revoke_key(args.key_id)
                 print(f"key {args.key_id} revoked")
     except TenantError as e:
@@ -338,8 +367,15 @@ def _run_admin(args) -> int:
 
 def run(argv: list[str] | None = None):
     args = build_parser().parse_args(argv)
-
     if args.dir:
+        args.dir = os.path.expanduser(args.dir)
+
+    # Only remember --dir for future runs that omit it entirely - a process
+    # with BONNET_GATEWAY_HOME set always resolves via that override anyway,
+    # and writing here would leak this run's --dir into other processes that
+    # rely on their own BONNET_GATEWAY_HOME for isolation (the pointer file
+    # isn't scoped by that env var).
+    if args.dir and not os.environ.get("BONNET_GATEWAY_HOME"):
         home.set_home("gateway", args.dir)
 
     if getattr(args, "command", None):

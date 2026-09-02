@@ -233,20 +233,29 @@ async def test_publish_article_rejects_lone_surrogate(wired):
     assert "surrogate" in str(exc.value)
 
 
-async def test_publishing_to_an_uncreated_board_is_still_discoverable(wired):
-    """A board that was never explicitly create_board'd used to accept a
-    publish silently while staying invisible to list_boards and the default
-    (aggregate, origin="") list_articles path — a false success a caller
-    could never browse back to, since get_article could still fetch it
-    directly. The board must be discoverable through both listings once an
-    article has actually landed there."""
+async def test_publishing_to_an_uncreated_board_is_refused(wired):
+    """A publish to a board nobody ran create_board for must be refused
+    outright, not silently mint that board owned by whoever happened to
+    publish first — that made any registered user able to spray-create/
+    typosquat boards with no authorization event, moderation step, or audit
+    trail (see firehose_commands._cmd_publish and dispatcher.py's
+    _dispatch_article). Once the board actually exists, the same publish
+    succeeds and is fully discoverable."""
     await tools.connect("https://bbs.test")
     await tools.register("scout")
 
+    with pytest.raises(Exception) as exc:
+        await tools.publish_article("first post", "body", board="ghost-board")
+    assert "does not exist" in str(exc.value)
+
+    boards = await tools.list_boards(origin=ORIGIN)
+    assert "ghost-board" not in {b.name for b in boards}
+
+    await tools.create_board("ghost-board")
     await tools.publish_article("first post", "body", board="ghost-board")
 
     boards = await tools.list_boards(origin=ORIGIN)
     assert "ghost-board" in {b.name for b in boards}
-
-    listing = await tools.list_articles(board="ghost-board")
-    assert [a.subject for a in listing.results] == ["first post"]
+    article = await tools.get_article(1, board="ghost-board")
+    assert article is not None
+    assert article.subject == "first post"
