@@ -41,6 +41,67 @@ class ValidationError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Identity text (usernames, board names)
+# ---------------------------------------------------------------------------
+
+# Reserved characters for board/user identifiers, matched to the Windows
+# NTFS-forbidden set (also covers the '/' '\' half of the path-traversal
+# concern for any future feature that maps a board name onto a path).
+_RESERVED_IDENTITY_CHARS = frozenset('<>:"/\\|?*')
+
+
+def identity_text_violation(value: str) -> str | None:
+    """Why `value` is unfit as a username or board name, or None if it's fine.
+
+    Deliberately narrow, and deliberately not a spoofing filter: pubkeys,
+    not display strings, are this project's actual trust anchor (see
+    internal/NOTEBOOK.md section 14 — attribution, not adjudication, is the
+    stated guarantee), so bidi-override/zero-width/confusable characters are
+    accepted on purpose rather than blocked. This only blocks C0 control
+    bytes (kills embedded NUL and ANSI escape injection into a terminal that
+    renders these values raw) and the reserved-filename character set,
+    plus empty/whitespace-only names, which is a distinct concern from
+    spoofing and worth keeping regardless.
+
+    A predicate rather than a raiser so the projection layer (which must
+    never raise out of an apply_* — see global_projections.py) and the
+    creation-time validator (which must) can share one rule.
+    """
+    if not value or not value.strip():
+        return "empty or whitespace-only"
+    if value != value.strip():
+        return "has leading or trailing whitespace"
+    for c in value:
+        if ord(c) < 0x20:
+            return "contains a control character"
+        if c in _RESERVED_IDENTITY_CHARS:
+            return f"contains a reserved character: {c!r}"
+    return None
+
+
+def _validate_identity_text(field: str, value: str) -> None:
+    """Reject values unfit for a username or board name, at mint time only.
+
+    Called only from the two creation paths (bonnet.board.create,
+    bonnet.user.register) — never for a record merely referencing an
+    existing board/user by name, so an identifier that predates this rule
+    (locally, or via federation from a peer with looser policy) keeps
+    working everywhere it's just being pointed at, not re-minted.
+
+    A record that reaches this origin through federation sync never comes
+    through here at all (`accept_remote_range` doesn't run KindValidator —
+    see global_projections.py's use of `identity_text_violation`), which is
+    deliberate: rejecting a synced record outright would roll back its
+    entire sync batch and stall that peer's replication forever on retry,
+    not just decline the one bad name. The projection layer is where a
+    federated violation is actually handled — by not listing it.
+    """
+    reason = identity_text_violation(value)
+    if reason is not None:
+        raise ValidationError(f"{field} {reason}")
+
+
+# ---------------------------------------------------------------------------
 # Validator
 # ---------------------------------------------------------------------------
 
@@ -139,6 +200,7 @@ class KindValidator:
         self._require_empty_article_targets(intent)
 
         if intent.kind == KIND_BOARD_CREATE:
+            _validate_identity_text("board", intent.board)
             if intent.metadata.get_bytes(1) is None:
                 raise ValidationError(
                     "bonnet.board.create requires metadata field 1 (owner public key)"
@@ -169,8 +231,10 @@ class KindValidator:
         self._require_empty_article_targets(intent)
 
         m = intent.metadata
-        if m.get_text(1) is None:
+        username = m.get_text(1)
+        if username is None:
             raise ValidationError("bonnet.user.register requires metadata field 1 (username)")
+        _validate_identity_text("username", username)
         if m.get_bytes(2) is None:
             raise ValidationError(
                 "bonnet.user.register requires metadata field 2 (user public key)"

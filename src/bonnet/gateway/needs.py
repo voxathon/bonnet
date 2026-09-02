@@ -169,10 +169,15 @@ async def _permissions_for(board: str, auth: str | None = None) -> Permissions |
     client = _tools._make_client()
     try:
         if identity:
-            try:
-                await _tools._connect_authenticated(client, auth)
-            except ValueError:
-                await _tools._connect_anonymous(client)
+            # No anonymous fallback here: a named identity that fails to
+            # connect (bad/missing password, unknown local identity, ...)
+            # must not be answered for as anonymous — that would produce a
+            # confident denial cached under the *real* identity's key,
+            # exactly the wrong side of the None/False distinction this
+            # function documents. Let it fall to `except Exception` below
+            # and come back as None ("unavailable"), same as any other
+            # connection failure.
+            await _tools._connect_authenticated(client, auth)
         else:
             await _tools._connect_anonymous(client)
         perms = await client.get_permissions(board)

@@ -175,8 +175,8 @@ async def test_list_identities_marks_the_active_one(wired_store, monkeypatch):
     wired_store.register(origin, "everyday")
     wired_store.register(origin, "mod-hat")
 
-    rows = {row["username"]: row for row in await tools.list_identities(origin=origin)}
+    rows = {row.username: row for row in await tools.list_identities(origin=origin)}
 
-    assert rows["everyday"]["active"] is True
-    assert rows["mod-hat"]["active"] is False
-    assert rows["everyday"]["wrapped"] is False
+    assert rows["everyday"].active is True
+    assert rows["mod-hat"].active is False
+    assert rows["everyday"].wrapped is False

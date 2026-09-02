@@ -300,6 +300,39 @@ verify_tls = true
     assert c.peers[1].verify_tls is True
 
 
+def test_peer_allow_private_defaults_false(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "10.0.0.15"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.peers[0].allow_private is False
+
+
+def test_peer_allow_private_true(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "10.0.0.15"
+allow_private = true
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.peers[0].allow_private is True
+
+
 def test_peer_import_flags_default_to_false(tmp_path):
     path = _write_config(
         tmp_path,
@@ -371,6 +404,25 @@ import_permabans = 1
         FirehoseConfig.load(path)
 
 
+def test_tls_enabled_rejects_a_quoted_string(tmp_path):
+    """`enabled = "false"` (quoted, not bare) used to load as a Python string,
+    which is truthy for any non-empty value including "false" itself - a
+    server config trying to explicitly disable TLS by writing that would
+    silently run with TLS on instead, with no error or warning anywhere."""
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[tls]
+enabled = "false"
+""",
+    )
+    with pytest.raises(ValueError, match="tls.enabled"):
+        FirehoseConfig.load(path)
+
+
 # ---------------------------------------------------------------------------
 # Missing config behavior
 # ---------------------------------------------------------------------------
@@ -399,6 +451,22 @@ def test_create_default_config(tmp_path):
     assert os.path.exists(path)
     assert config.origin == "localhost"
     assert len(config.acl._rules) == 0
+
+
+def test_create_default_config_honors_a_custom_port(tmp_path):
+    """--init/--create-config used to always write port = 2272 to the sample
+    file regardless of a --port override the caller passed at generation
+    time - the flag was silently ignored until the file was hand-edited."""
+    path = str(tmp_path / "config.toml")
+    config = FirehoseConfig.create_default_config(path, port=19273)
+
+    assert config.port == 19273
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    assert "port = 19273" in content
+
+    reloaded = FirehoseConfig.load(path)
+    assert reloaded.port == 19273
 
 
 def test_create_default_config_creates_parent_dir(tmp_path):
@@ -483,6 +551,14 @@ def test_validate_rejects_bad_port():
         c.validate()
 
 
+def test_validate_rejects_non_int_port():
+    """A quoted port ("22721") in config.toml used to raise a bare
+    TypeError from `1 <= self.port <= 65535` instead of a clean ValueError."""
+    c = FirehoseConfig(port="22721")
+    with pytest.raises(ValueError, match="port must be an integer"):
+        c.validate()
+
+
 def test_validate_rejects_zero_limits():
     c = FirehoseConfig(max_request_size=0)
     with pytest.raises(ValueError, match="max_request_size"):
@@ -499,6 +575,33 @@ def test_validate_rejects_excessive_clock_skew():
     c = FirehoseConfig(clock_skew_seconds=60)
     with pytest.raises(ValueError, match="clock_skew"):
         c.validate()
+
+
+@pytest.mark.parametrize(
+    "bad_origin",
+    ["not a url ://bad", "bad host name", "has/slash", "üñîçødé.example"],
+)
+def test_validate_rejects_malformed_origin(bad_origin):
+    """Regression for the chaos-testing report's #1.4: origin/hostname used
+    to accept any non-empty string, so a typo'd origin passed --check-config
+    and became the server's permanent federation identity. Only emptiness
+    was checked; format never was."""
+    c = FirehoseConfig(origin=bad_origin)
+    with pytest.raises(ValueError, match="not a valid hostname"):
+        c.validate()
+
+
+def test_validate_rejects_malformed_hostname():
+    c = FirehoseConfig(origin="bbs.test", hostname="bad host name")
+    with pytest.raises(ValueError, match="not a valid hostname"):
+        c.validate()
+
+
+def test_validate_accepts_ip_literal_origin():
+    """config.example.toml models origin as an IP literal too - the format
+    check must not reject the dotted-quad shape it explicitly documents."""
+    c = FirehoseConfig(origin="10.0.0.15")
+    c.validate()
 
 
 def test_validate_rejects_duplicate_peers():
@@ -584,22 +687,51 @@ data_dir = "{explicit_data_dir.replace(os.sep, "/")}"
     assert c.events_bodies_dir == os.path.join(home, "event_bodies")
 
 
-def test_storage_paths_default_to_the_per_user_dir_without_bonnet_server_home(
-    tmp_path, monkeypatch
-):
-    """No more CWD-relative fallback — the per-user directory (core.home) is
-    always the default now, matching the gateway's existing model."""
+def test_storage_paths_default_to_the_loaded_configs_own_directory(tmp_path, monkeypatch):
+    """Without BONNET_SERVER_HOME, storage paths default next to *this*
+    config.toml — not core.home's globally-remembered `--dir`/`--init`
+    pointer. That pointer is a single file per OS user shared by every
+    `bonnet server` invocation regardless of which `--config` it was given,
+    so two concurrent instances started with distinct `--config` paths used
+    to silently share (and race on) whichever instance's `--dir`/`--init`
+    happened to write it last. Basing the default on the config file's own
+    directory makes each instance's storage follow the config it was
+    actually told to load. `--dir`/`--init` are unaffected: they set
+    `args.config` to `<dir>/config.toml`, so the config's own directory
+    already equals the directory named."""
     monkeypatch.delenv("BONNET_SERVER_HOME", raising=False)
     monkeypatch.setattr("platformdirs.user_config_dir", lambda *a, **k: str(tmp_path / "cfg"))
     monkeypatch.setattr("platformdirs.user_data_dir", lambda *a, **k: str(tmp_path / "data-root"))
-    path = _write_config(tmp_path, '[server]\norigin = "bbs.test"\n')
+    config_dir = tmp_path / "instance-a"
+    config_dir.mkdir()
+    path = _write_config(config_dir, '[server]\norigin = "bbs.test"\n')
 
     c = FirehoseConfig.load(path)
 
-    expected_home = str(tmp_path / "data-root" / "server")
-    assert c.data_dir == os.path.join(expected_home, "data")
-    assert c.boards_dir == os.path.join(expected_home, "boards")
-    assert c.events_bodies_dir == os.path.join(expected_home, "event_bodies")
+    assert c.data_dir == os.path.join(str(config_dir), "data")
+    assert c.boards_dir == os.path.join(str(config_dir), "boards")
+    assert c.events_bodies_dir == os.path.join(str(config_dir), "event_bodies")
+
+
+def test_storage_paths_do_not_collide_across_concurrent_configs(tmp_path, monkeypatch):
+    """Regression for the home-collision bug: two configs loaded in the same
+    process (standing in for two concurrent `bonnet server` instances) must
+    resolve independent storage paths purely from where each config lives —
+    neither may leak the other's directory via a shared global fallback."""
+    monkeypatch.delenv("BONNET_SERVER_HOME", raising=False)
+    monkeypatch.setattr("platformdirs.user_config_dir", lambda *a, **k: str(tmp_path / "cfg"))
+    monkeypatch.setattr("platformdirs.user_data_dir", lambda *a, **k: str(tmp_path / "data-root"))
+    (tmp_path / "instance-a").mkdir()
+    (tmp_path / "instance-b").mkdir()
+    path_a = _write_config(tmp_path / "instance-a", '[server]\norigin = "a.test"\n')
+    path_b = _write_config(tmp_path / "instance-b", '[server]\norigin = "b.test"\n')
+
+    c_a = FirehoseConfig.load(path_a)
+    c_b = FirehoseConfig.load(path_b)
+
+    assert c_a.data_dir == os.path.join(str(tmp_path / "instance-a"), "data")
+    assert c_b.data_dir == os.path.join(str(tmp_path / "instance-b"), "data")
+    assert c_a.data_dir != c_b.data_dir
 
 
 # ---------------------------------------------------------------------------

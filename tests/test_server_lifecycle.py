@@ -124,6 +124,149 @@ async def test_register_user_rebinds_server_identity(server):
     assert usernames == ["bob"]
 
 
+async def test_create_board_after_rename_succeeds(server, monkeypatch):
+    """Renaming the admin identity away from 'root' must not break
+    create-board/publish-article for the renamed identity.
+
+    Regression test: these commands used to hardcode actor_username="root"
+    when signing records locally, so after register-user renamed the
+    server's own key, the origin's own actor-username check
+    (firehose_commands.py) rejected every subsequent record it tried to
+    publish.
+    """
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+
+    console = OperatorConsole(server)
+    await console._repl_register_user(["chaosb"])
+
+    result = console._do_create_board(["testboard"])
+    assert "created" in result.lower()
+    assert "Error 0x0004" not in result
+
+
+def test_publish_article_oversized_subject_gives_clean_error(server, monkeypatch):
+    """An article subject over the wire's 4096-byte MAX_TEXT_FIELD used to
+    surface only as 'Error 0x0000: Internal error' - the actual reason
+    (LengthExceeded, a CodecError) fell outside the tuple of exceptions
+    firehose_commands.py's dispatch loop translated into a clean 0x0006
+    response, so it was swallowed into the generic internal-error branch
+    and logged server-side only.
+    """
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+
+    console = OperatorConsole(server)
+    console._do_create_board(["testboard"])
+
+    responses = iter(["x" * 5000, "", "hello", ""])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(responses))
+
+    result = console._do_publish_article(["testboard"])
+    assert "Internal error" not in result
+    assert "exceeds" in result.lower()
+
+
+def test_get_article_rejects_negative_article_num(server):
+    """A negative article number used to reach struct.pack('>Q', ...)
+    directly and raise its raw format-string error instead of a clean
+    usage message."""
+    console = OperatorConsole(server)
+    result = console._cmd_get_article(["get-article", "testboard", "-1"])
+    assert "format requires" not in result
+    assert "Invalid article number" in result
+
+
+def test_event_range_rejects_negative_start_and_oversized_count(server):
+    """Same struct.pack bug for event-range's start (packed '>Q') and
+    count (packed '>H')."""
+    console = OperatorConsole(server)
+
+    result = console._cmd_event_range(["event-range", "bbs.test", "-5", "-10"])
+    assert "format requires" not in result
+    assert "Invalid start" in result
+
+    result = console._cmd_event_range(["event-range", "bbs.test", "0", "999999999"])
+    assert "format requires" not in result
+    assert "Invalid count" in result
+
+
+def test_list_articles_rejects_negative_offset(server):
+    console = OperatorConsole(server)
+    result = console._cmd_list_articles(["list-articles", "testboard", "-1"])
+    assert "out of range" not in result
+    assert "Invalid offset" in result
+
+
+def test_get_article_strips_ansi_and_bidi_from_subject_and_body(server, monkeypatch):
+    """Article subject/content carry no character-class validation at
+    publish time (kind_validator.py's _validate_article only checks a
+    subject is present) - an embedded ANSI escape or Unicode bidi override
+    used to round-trip intact and render as a live terminal control
+    sequence in the REPL's own get-article/list-articles output."""
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    console = OperatorConsole(server)
+    console._do_create_board(["testboard"])
+
+    evil_subject = "hello\x1b[31mDANGER"
+    evil_body_lines = iter([evil_subject, "", "line one‮evil", ""])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(evil_body_lines))
+
+    result = console._do_publish_article(["testboard"])
+    assert "published" in result.lower()
+
+    view = console._cmd_get_article(["get-article", "testboard", "1"])
+    assert "\x1b" not in view
+    assert "‮" not in view
+    assert "DANGER" in view  # sanitized, not deleted wholesale
+    assert "evil" in view
+
+    listing = console._cmd_list_articles(["list-articles", "testboard"])
+    assert "\x1b" not in listing
+
+
+def test_publish_article_to_nonexistent_board_is_rejected(server, monkeypatch):
+    """publish-article used to silently auto-create the board projection
+    for any name (BoardProjection is lazily instantiated on first touch,
+    with no existence check anywhere in the write path), contradicting the
+    documented create-a-board-first flow."""
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "should not be prompted")
+
+    console = OperatorConsole(server)
+    result = console._do_publish_article(["never-created"])
+    assert "does not exist" in result
+    assert server.nav.get_board(server.config.origin, "never-created") is None
+
+
+def test_create_board_reports_existing_name(server, monkeypatch):
+    """create-board on a name that already exists used to re-report
+    'created' with no signal that nothing changed."""
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+
+    console = OperatorConsole(server)
+    first = console._do_create_board(["dup"])
+    assert "created" in first.lower()
+
+    second = console._do_create_board(["dup"])
+    assert "already exists" in second.lower()
+
+
+def test_list_boards_truncates_long_name_for_display(server, monkeypatch):
+    """A board name has no length policy beyond the wire's 4096-byte
+    MAX_TEXT_FIELD (kind_validator.py's identity_text_violation) - list-boards
+    must not flood the REPL with an unreadable line for one, but the
+    truncation is display-only and must not touch the stored/signed name."""
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+
+    console = OperatorConsole(server)
+    long_name = "b" * 200  # under MAX_BOARD (255) but over the display width
+
+    result = console._do_create_board([long_name])
+    assert "created" in result.lower()
+
+    result = console._cmd_list_boards(["list-boards"])
+    assert "…" in result
+    assert long_name not in result
+
+
 # ---------------------------------------------------------------------------
 # Close
 # ---------------------------------------------------------------------------

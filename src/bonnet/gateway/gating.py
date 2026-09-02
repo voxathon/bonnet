@@ -225,9 +225,7 @@ def _needs_identity(tool: Tool) -> bool:
     return NEEDS_IDENTITY in (tool.tags or set())
 
 
-async def _missing_for(
-    tool: Tool, board: str | None = None, auth: str | None = None
-) -> str | None:
+async def _missing_for(tool: Tool, board: str | None = None, auth: str | None = None) -> str | None:
     """What this caller lacks to call `tool` specifically, or None.
 
     Two layers, in order. The local heuristic (origin present? identity

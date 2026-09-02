@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tomllib
@@ -30,19 +31,19 @@ def _make_self_signed_cert(config_path: str, force: bool = False) -> tuple[str, 
     return (cert_path.replace(os.sep, "/"), key_path.replace(os.sep, "/"))
 
 
-def _print_next_steps(config_path: str, tls_enabled: bool) -> None:
+def _print_next_steps(config_path: str, tls_enabled: bool, port: int = 2272) -> None:
     scheme = "https" if tls_enabled else "http"
     print()
     print("Next steps:")
     print("  1. Start the server:")
     print(f"       uv run bonnet server --config {config_path}")
-    print(f"     It will listen on {scheme}://127.0.0.1:2272 and print its own public key.")
+    print(f"     It will listen on {scheme}://127.0.0.1:{port} and print its own public key.")
     print("  2. The server's REPL (the 'bonnet>' prompt after startup) is already an")
     print("     administrator - no key setup needed for local use.")
     print("  3. To connect an agent, point an MCP host at `bonnet gateway`;")
     print("     it speaks stdio, so there is no port to configure:")
     print('       {"mcpServers": {"bonnet": {"command": "bonnet", "args": ["gateway"]}}}')
-    print(f'     Then, from the agent: connect("{scheme}://localhost:2272")')
+    print(f'     Then, from the agent: connect("{scheme}://localhost:{port}")')
     print('     followed by: register("<name>")')
     print("  4. To let that identity administer this server, put the pubkey register")
     print("     returns into admin_pubkey in config.toml and restart. See")
@@ -65,7 +66,15 @@ def _load_and_validate_config(args) -> FirehoseConfig:
         config = FirehoseConfig.load(args.config)
     except FileNotFoundError:
         print(f"error: config file not found: {args.config}", file=sys.stderr)
-        print("run 'bonnet server --create-config' to generate a sample", file=sys.stderr)
+        # README's "Running a board" walkthrough only ever mentions --init
+        # (which also generates TLS certs and prints next steps); a first-run
+        # user following it literally used to be told about --create-config
+        # instead, which writes a config with no certs and no guidance.
+        print("run 'bonnet server --init' to generate a config and get started", file=sys.stderr)
+        print(
+            "(or 'bonnet server --create-config' for just a sample config, no TLS setup)",
+            file=sys.stderr,
+        )
         raise SystemExit(1)
     except IsADirectoryError:
         print(f"error: config path is a directory, not a file: {args.config}", file=sys.stderr)
@@ -82,6 +91,8 @@ def _load_and_validate_config(args) -> FirehoseConfig:
 
     if args.host:
         config.host = args.host
+    if args.port is not None:
+        config.port = args.port
 
     try:
         config.validate()
@@ -89,7 +100,69 @@ def _load_and_validate_config(args) -> FirehoseConfig:
         print(f"error: invalid configuration: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
+    for warning in _acl_rule_warnings(config):
+        print(f"warning: {warning}", file=sys.stderr)
+
     return config
+
+
+def _preflight_bind(host: str, port: int) -> None:
+    """Fail fast on an unbindable host:port before BonnetServer's __init__
+    does its side-effectful init pass - opening/creating the SQLite stores,
+    generating a server keypair if none exists yet, etc.
+
+    A second `bonnet server` pointed at a home dir/port a live process
+    already owns used to run that whole init pass first and only discover
+    the collision when uvicorn itself tried to bind, doing real filesystem
+    work against files the live process owns for nothing. This is a
+    best-effort check - there's an inherent bind-time race between this and
+    the real bind in BonnetServer.run() - but it catches the common case
+    (wrong host, or a port already in use) before any state is touched.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise OSError(f"cannot resolve {host!r}: {exc}") from exc
+    family, socktype, proto, _, sockaddr = infos[0]
+    sock = socket.socket(family, socktype, proto)
+    try:
+        sock.bind(sockaddr)
+    finally:
+        sock.close()
+
+
+def _acl_rule_warnings(config: FirehoseConfig) -> list[str]:
+    """Flag ACL rule commands/kinds that can never match anything.
+
+    A rule's `commands`/`kinds` are free-form strings (acl.py has no
+    reference back to the real command/kind name sets - see ACLRule.from_dict),
+    so a typo silently produces a rule that never fires: on an allow it grants
+    nothing, on a deny it blocks nothing, and --check-config previously
+    reported the config fully valid either way. This is advisory, not fatal -
+    a newer command/kind name this build doesn't know about yet is not
+    actually wrong - so it warns rather than failing validation.
+    """
+    from bonnet.core.kinds import ALL_KNOWN_KINDS
+    from bonnet.net.firehose_commands import CMD_NAMES
+
+    known_commands = set(CMD_NAMES.values()) | {"*"}
+    known_kinds = set(ALL_KNOWN_KINDS) | {"*"}
+
+    warnings = []
+    for i, rule in enumerate(config.acl._rules):
+        for command in rule.commands or []:
+            if command not in known_commands:
+                warnings.append(
+                    f"acl rule [{i}] references unknown command '{command}' "
+                    "(this rule can never match anything)"
+                )
+        for kind in rule.kinds or []:
+            if kind not in known_kinds:
+                warnings.append(
+                    f"acl rule [{i}] references unknown kind '{kind}' "
+                    "(this rule can never match anything)"
+                )
+    return warnings
 
 
 def main(argv: list[str] | None = None):
@@ -142,12 +215,28 @@ def main(argv: list[str] | None = None):
     args = parser.parse_args(argv)
 
     if args.dir:
+        args.dir = os.path.expanduser(args.dir)
+    server_home = args.dir or resolve_home("server", "BONNET_SERVER_HOME")
+    if os.path.exists(server_home) and not os.path.isdir(server_home):
+        print(
+            f"error: server home '{server_home}' exists but is not a directory "
+            "(check BONNET_SERVER_HOME / --dir)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    # Only remember --dir for future runs that omit it entirely. A process
+    # with BONNET_SERVER_HOME set always resolves via that override anyway
+    # (see resolve_home) - writing to the pointer file here would only
+    # leak this run's --dir into other processes on the same machine that
+    # rely on their *own* BONNET_SERVER_HOME for isolation, since the
+    # pointer file isn't scoped by that env var.
+    if args.dir and not os.environ.get("BONNET_SERVER_HOME"):
         set_home("server", args.dir)
-    server_home = resolve_home("server", "BONNET_SERVER_HOME")
     if args.config is None:
         args.config = os.path.join(server_home, "config.toml")
 
     if args.init:
+        init_port = args.port if args.port is not None else 2272
         tls_paths = None
         try:
             tls_paths = _make_self_signed_cert(args.config, force=args.force)
@@ -162,14 +251,23 @@ def main(argv: list[str] | None = None):
                 f"{exc.stderr.decode(errors='replace').strip()}"
             )
         try:
-            FirehoseConfig.create_default_config(args.config, force=args.force, tls_paths=tls_paths)
+            FirehoseConfig.create_default_config(
+                args.config, force=args.force, tls_paths=tls_paths, port=init_port
+            )
         except FileExistsError as exc:
             print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        except NotADirectoryError:
+            print(
+                f"error: cannot create {args.config} - a path component "
+                "already exists as a file, not a directory (check BONNET_SERVER_HOME / --dir)",
+                file=sys.stderr,
+            )
             raise SystemExit(1)
         print(f"Wrote sample config to {args.config}")
         if tls_paths:
             print(f"Generated self-signed TLS certificate at {tls_paths[0]} (CN=localhost)")
-        _print_next_steps(args.config, tls_enabled=tls_paths is not None)
+        _print_next_steps(args.config, tls_enabled=tls_paths is not None, port=init_port)
         return
 
     if args.create_config:
@@ -189,9 +287,21 @@ def main(argv: list[str] | None = None):
                 )
                 raise SystemExit(1)
         try:
-            FirehoseConfig.create_default_config(args.config, force=args.force, tls_paths=tls_paths)
+            FirehoseConfig.create_default_config(
+                args.config,
+                force=args.force,
+                tls_paths=tls_paths,
+                port=args.port if args.port is not None else 2272,
+            )
         except FileExistsError as exc:
             print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        except NotADirectoryError:
+            print(
+                f"error: cannot create {args.config} - a path component "
+                "already exists as a file, not a directory (check BONNET_SERVER_HOME / --dir)",
+                file=sys.stderr,
+            )
             raise SystemExit(1)
         print(f"Wrote sample config to {args.config}")
         if tls_paths:
@@ -208,7 +318,7 @@ def main(argv: list[str] | None = None):
         print(f"OK: {args.config} is valid.")
         print(f"  origin: {config.origin}")
         print(
-            f"  listen: {config.host}:{args.port or config.port} "
+            f"  listen: {config.host}:{config.port} "
             f"({'tls' if config.tls_enabled else 'plaintext'})"
         )
         print(f"  peers: {len(config.peers)}")
@@ -217,7 +327,16 @@ def main(argv: list[str] | None = None):
             print(f"  {len(config.unknown_keys)} unrecognized key(s) ignored (see warnings above)")
         return
 
-    log_dir = os.path.join(server_home, "logs")
+    # Logs live next to whatever config.toml this run actually loaded, not
+    # the globally-remembered `--dir`/`--init` pointer `server_home` falls
+    # back to (see core.config.from_toml's matching fix) — an explicit
+    # `--config PATH` with no `--dir`/`BONNET_SERVER_HOME` would otherwise
+    # log to a stale, unrelated prior invocation's home directory.
+    if args.dir or os.environ.get("BONNET_SERVER_HOME"):
+        log_home = server_home
+    else:
+        log_home = os.path.dirname(os.path.abspath(args.config))
+    log_dir = os.path.join(log_home, "logs")
     try:
         init_logging(log_dir)
     except OSError as exc:
@@ -230,19 +349,80 @@ def main(argv: list[str] | None = None):
         )
 
     config = _load_and_validate_config(args)
-    server = BonnetServer(config)
-
-    def handle_sigterm(signum, frame):
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, handle_sigterm)
 
     try:
-        asyncio.run(server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key))
+        _preflight_bind(config.host, config.port)
+    except OSError as exc:
+        print(f"error: could not listen on {config.host}:{config.port}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    server = BonnetServer(config)
+
+    started = False
+    try:
+        started = asyncio.run(_serve_until_signal(server, args))
     except KeyboardInterrupt:
+        # Ctrl+C's SIGINT, unrelated to the SIGTERM handling below - asyncio
+        # itself raises this one, out of _serve_until_signal's control.
         print("\nShutting down...")
+        started = True
     finally:
         server.close()
+    if not started:
+        raise SystemExit(1)
+
+
+async def _serve_until_signal(server: BonnetServer, args) -> bool:
+    """Run the server, stopping cleanly on SIGTERM.
+
+    A prior version's SIGTERM handler called `raise KeyboardInterrupt`
+    directly from inside `signal.signal`'s synchronous callback. Python only
+    delivers that between bytecode instructions, so it could land anywhere -
+    including inside asyncio's own shutdown machinery - and did,
+    intermittently: "RuntimeError: coroutine ignored GeneratorExit" and
+    "Task was destroyed but it is pending!" on ~2 of 6 runs in chaos
+    testing, "RuntimeError: Event loop is closed" on another. The process
+    still exited, but it read exactly like a crash on ordinary shutdown.
+
+    The fix is the standard asyncio-safe pattern: the handler only ever
+    schedules an ordinary callback (`should_exit = True`, or cancelling this
+    coroutine before the server has bound anything to stop gracefully) via
+    `call_soon_threadsafe`, run by the loop at a safe point between awaits -
+    never an exception thrown into whatever happened to be executing.
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.ensure_future(
+        server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key)
+    )
+    printed_shutting_down = False
+
+    def _stop() -> None:
+        nonlocal printed_shutting_down
+        if not printed_shutting_down:
+            print("\nShutting down...")
+            printed_shutting_down = True
+        if server._uvicorn_server is not None:
+            server._uvicorn_server.should_exit = True
+        else:
+            # Arrived before run() finished binding - nothing bound yet to
+            # stop gracefully, so cancel the whole attempt instead.
+            task.cancel()
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _stop)
+    except NotImplementedError:
+        # Windows: add_signal_handler isn't implemented for SIGTERM, but
+        # signal.signal(SIGTERM, ...) still runs for os.kill()-delivered
+        # signals. call_soon_threadsafe hands the same _stop callback to the
+        # loop instead of executing it inline in the signal callback, which
+        # is what keeps this safe even though it's still signal.signal under
+        # the hood.
+        signal.signal(signal.SIGTERM, lambda signum, frame: loop.call_soon_threadsafe(_stop))
+
+    try:
+        return await task
+    except asyncio.CancelledError:
+        return True
 
 
 if __name__ == "__main__":
