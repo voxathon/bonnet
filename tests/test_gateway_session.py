@@ -92,6 +92,16 @@ def gw(http_gateway, server_stack, tmp_path, monkeypatch):  # noqa: F811
             boards=["*"],
         )
     )
+    server_stack["command_handler"]._acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(registered=True),
+            actions=["write"],
+            commands=["PUBLISH_RECORD"],
+            kinds=["bonnet.board.create"],
+            boards=["*"],
+        )
+    )
     app = server_stack["server"]
 
     def make_client(url: str | None = None, verify=None) -> FirehoseHTTPClient:
@@ -131,8 +141,11 @@ async def _ready(key: str) -> None:
     raise RuntimeError("gateway did not start")
 
 
-async def _connected(c, username: str = "scout"):
-    """connect + register, so board-scoped tools are reachable.
+async def _connected(c, username: str = "scout", board: str = "general"):
+    """connect + register + create `board`, so board-scoped tools are
+    reachable — open_board now confirms the board actually exists (regression
+    for the chaos-testing report's #1.1), so these tests can no longer open a
+    board nothing ever created.
 
     Usernames are first-writer-wins per origin, so two *different* tenants
     against this one server need distinct names. The second would otherwise be
@@ -140,6 +153,7 @@ async def _connected(c, username: str = "scout"):
     """
     await c.call_tool("connect", {"url": "https://bbs.test", "verify_tls": False})
     await c.call_tool("register", {"username": username})
+    await c.call_tool("create_board", {"name": board})
 
 
 async def _where(c) -> dict:
@@ -217,7 +231,7 @@ async def test_two_tenants_in_one_process_keep_separate_cursors(gw):
         await alice.call_tool("open_board", {"board": "general"})
 
         async with _client(bob_key) as bob:
-            await _connected(bob, username="bob-scout")
+            await _connected(bob, username="bob-scout", board="lounge")
             await bob.call_tool("open_board", {"board": "lounge"})
             assert (await _where(bob))["board"] == "lounge"
 
@@ -229,6 +243,11 @@ async def test_an_anonymous_session_still_gets_a_cursor(gw):
     """Reduced capability is not no capability: reads are board-scoped too,
     so navigation has to work for a session that cannot publish."""
     await _ready(gw)
+
+    # Anonymous cannot create a board itself; a throwaway registered session
+    # creates "general" first so there is something for it to open.
+    async with _client(gw) as setup:
+        await _connected(setup)
 
     async with _client() as c:
         await c.call_tool("connect", {"url": "https://bbs.test", "verify_tls": False})

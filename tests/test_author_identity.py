@@ -44,7 +44,7 @@ from bonnet.core.record import (
 from bonnet.net.firehose_commands import FirehoseContext
 from bonnet.net.firehose_sync import SyncClient, SyncManager
 from bonnet.net.firehose_wire import OP_PUBLISH_RECORD
-from tests.test_commands_and_sync import firehose, stack  # noqa: F401  (fixtures)
+from tests.test_commands_and_sync import _create_board, firehose, stack  # noqa: F401  (fixtures)
 from tests.test_federation import _OriginServer
 from tests.test_registration_privilege import shipped_acl  # noqa: F401  (fixture)
 
@@ -56,6 +56,7 @@ def wired(stack, shipped_acl):  # noqa: F811
     """The stack under the ACL config.example.toml actually ships: unknown
     principals may register, registered ones may publish articles."""
     stack["handler"]._acl = shipped_acl
+    _create_board(stack["handler"], "general")
     return stack
 
 
@@ -391,6 +392,19 @@ async def test_a_foreign_claim_is_relayed_verbatim_and_marked(tmp_path):
 
         async def close(self):
             pass
+
+    nav.apply_board_create(
+        Record(
+            origin="evil.test",
+            origin_seq=0,
+            event_id=os.urandom(32),
+            kind="bonnet.board.create",
+            actor_pubkey=evil.identity.public_key,
+            board="general",
+            metadata=MetadataMap([metadata_bytes(1, evil.identity.public_key)]),
+            created_at=0,
+        )
+    )
 
     mgr = SyncManager(store, Identity.generate(), "myrelay.test", dispatcher=dispatcher)
     peer = Peer()

@@ -30,9 +30,18 @@ __all__ = [
     "revoke_key",
     "list_tenants",
     "list_keys",
+    "get_tenant",
     "set_enabled",
     "remove_tenant",
 ]
+
+
+def get_tenant(tenant_id: str, db_path: str | None = None) -> dict | None:
+    registry = Registry(db_path)
+    try:
+        return registry.get_tenant(tenant_id)
+    finally:
+        registry.close()
 
 
 def add_tenant(tenant_id: str, note: str = "", db_path: str | None = None) -> str:
