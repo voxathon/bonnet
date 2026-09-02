@@ -25,7 +25,7 @@ class RateLimiter:
 
     def check(self, key: str) -> bool:
         """Return True if the request is allowed, False if rate-limited."""
-        now = time.time()
+        now = time.monotonic()
         with self._lock:
             bucket = self._buckets.get(key)
             if bucket is None:
@@ -49,7 +49,7 @@ class RateLimiter:
 
     def cleanup(self) -> None:
         """Remove expired buckets to bound memory."""
-        now = time.time()
+        now = time.monotonic()
         with self._lock:
             stale = [k for k, v in self._buckets.items() if not v or now - v[0] >= self._window]
             for k in stale:

@@ -1,5 +1,6 @@
 """Firehose command handler, discovery, command transport, and federation sync."""
 
+import hashlib
 import struct
 import time
 
@@ -177,6 +178,7 @@ def _anon_ctx():
 class TestPublishRecord:
     def test_publish_article(self, stack):
         h = stack["handler"]
+        _create_board(h, "general")
         body = b"hello world"
         intent = Intent(
             event_id=_rid(1),
@@ -208,7 +210,7 @@ class TestPublishRecord:
         rec_len = struct.unpack(">I", resp[1:5])[0]
         rec_bytes = resp[5 : 5 + rec_len]
         rec = decode_record(rec_bytes)
-        assert rec.origin_seq == 1
+        assert rec.origin_seq == 2  # seq 1 is this test's own board.create
         assert rec.kind == "bonnet.article"
         assert rec.article_num == 1
 
@@ -334,6 +336,7 @@ class TestPublishRecord:
 
     def test_publish_rejects_oversized_body(self, stack):
         h = stack["handler"]
+        _create_board(h, "general")
         h._max_body_size = 100
 
         body = b"\x00" * 200
@@ -369,6 +372,28 @@ class TestPublishRecord:
 # ---------------------------------------------------------------------------
 # Punishment write gate + BAN_STATUS
 # ---------------------------------------------------------------------------
+
+
+def _create_board(handler, board, actor=None):
+    """Publish a real bonnet.board.create so a test can then publish articles
+    to `board` — see firehose_commands._cmd_publish, which now refuses an
+    article for a board nobody created. Idempotent: a no-op if the board
+    already exists, so call sites that may run for the same stack more than
+    once (e.g. an article and a report on the same board) don't collide."""
+    if handler._nav.get_board("bbs.test", board) is not None:
+        return
+    actor = actor or ACTOR
+    event_id = hashlib.sha256(f"test-board-create:{board}".encode()).digest()
+    intent = Intent(
+        event_id=event_id,
+        kind="bonnet.board.create",
+        origin="bbs.test",
+        actor_pubkey=actor.public_key,
+        board=board,
+        metadata=MetadataMap([metadata_bytes(1, actor.public_key)]),
+    )
+    resp = handler.handle(_publish_request(intent, actor), _user_ctx(actor))
+    assert resp[0] == 0x00, resp
 
 
 def _publish_request(intent, actor_identity, body=b""):
@@ -453,6 +478,7 @@ class TestPunishmentGate:
     def test_warn_blocks_publish(self, stack, punished):
         h = stack["handler"]
         self._grant_write_all(stack)
+        _create_board(h, "general")
         self._apply_punishment(stack["policy"], "bonnet.punishment.warn", punished.public_key, 1)
 
         req, _ = self._article_req(punished)
@@ -465,6 +491,7 @@ class TestPunishmentGate:
     def test_ack_clears_warning_then_publish_succeeds(self, stack, punished):
         h = stack["handler"]
         self._grant_write_all(stack)
+        _create_board(h, "general")
         self._apply_punishment(stack["policy"], "bonnet.punishment.warn", punished.public_key, 1)
 
         req, _ = self._article_req(punished)
@@ -487,6 +514,7 @@ class TestPunishmentGate:
     def test_active_ban_and_permaban_block(self, stack, punished):
         h = stack["handler"]
         self._grant_write_all(stack)
+        _create_board(h, "general")
         future = int(time.time()) + 3600
         self._apply_punishment(
             stack["policy"], "bonnet.punishment.ban", punished.public_key, 1, expires=future
@@ -508,6 +536,7 @@ class TestPunishmentGate:
     def test_expired_ban_does_not_block(self, stack, punished):
         h = stack["handler"]
         self._grant_write_all(stack)
+        _create_board(h, "general")
         past = int(time.time()) - 3600
         self._apply_punishment(
             stack["policy"], "bonnet.punishment.ban", punished.public_key, 1, expires=past
@@ -518,6 +547,7 @@ class TestPunishmentGate:
     def test_revoked_permaban_does_not_block(self, stack, punished):
         h = stack["handler"]
         self._grant_write_all(stack)
+        _create_board(h, "general")
         self._apply_punishment(
             stack["policy"], "bonnet.punishment.permaban", punished.public_key, 1
         )
@@ -539,6 +569,7 @@ class TestPunishmentGate:
     def test_administrator_bypasses_gate(self, stack, punished):
         h = stack["handler"]
         self._grant_write_all(stack)
+        _create_board(h, "general")
         self._apply_punishment(
             stack["policy"], "bonnet.punishment.permaban", punished.public_key, 1
         )
@@ -798,6 +829,7 @@ class TestProjectionReads:
         d = stack["dispatcher"]
         fh = stack["firehose"]
         bs = stack["body_store"]
+        _create_board(_h, "general")
 
         body = b"hello world"
         intent = Intent(
@@ -990,6 +1022,7 @@ class TestProjectionReads:
             intent2.body_hash,
             intent2.body_size,
         )
+        _create_board(stack["handler"], "some-other-board")
         fh.append_record(ORIGIN, intent2, sign_intent(ACTOR, encode_intent(intent2)), body2)
         stack["dispatcher"].dispatch_origin("bbs.test")
 
@@ -1114,7 +1147,10 @@ class TestFederationSync:
                 return head, encode_head(head)
 
             async def fetch_range(self, origin, start_seq, max_count):
-                return [(rec, origin_witness)]
+                return [(rec, [origin_witness])]
+
+            def peer_identity(self):
+                return ORIGIN_PUB, "bbs.test"
 
         relay_identity = Identity.from_private_key(bytes(range(20, 52)))
         sync_mgr = SyncManager(receiver_store, relay_identity, "relay.test")
@@ -1144,6 +1180,9 @@ class TestFederationSync:
 
             async def fetch_range(self, origin, start, count):
                 return []
+
+            def peer_identity(self):
+                return ORIGIN_PUB, "bbs.test"
 
         sync_mgr = SyncManager(receiver_store, ORIGIN, "bbs.test")
         result = sync_mgr.sync_manual("bbs.test", MockClient())
@@ -1201,7 +1240,14 @@ class TestFederationSync:
                 return head, encode_head(head)
 
             async def fetch_range(self, origin, start, count):
-                return [(rec, origin_w)]
+                return [(rec, [origin_w])]
+
+            def peer_identity(self):
+                # The mock peer here *is* the origin's own server, so the
+                # authenticated peer and the origin coincide - which is why
+                # these assertions read the same as before the witness stopped
+                # being copied from the upstream's self-description.
+                return ORIGIN_PUB, "bbs.test"
 
         sync_mgr = SyncManager(receiver_store, relay_identity, "relay.test")
         result = sync_mgr.sync_manual("bbs.test", MockClient())

@@ -287,8 +287,9 @@ keep that password somewhere the client cannot read.
 ## Testing
 
 ```sh
-make test        # parallel, excludes slow tests
-make test-all    # parallel, includes slow tests
+make test        # full suite, parallel
+make lint        # ruff check + format --check
+make typecheck   # mypy
 ```
 
 ## License

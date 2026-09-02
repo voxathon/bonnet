@@ -10,6 +10,7 @@ import os
 import struct
 
 from bonnet.core.crypto import Identity
+from bonnet.core.kind_validator import identity_text_violation
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     ZERO_ID,
@@ -24,6 +25,12 @@ from bonnet.core.record import (
     metadata_u64,
     sign_intent,
 )
+from bonnet.net.firehose_wire import (
+    ProtocolError,
+    _enc_text16,
+    _read_text16,
+    parse_response,
+)
 
 ROLE_FLAGS = {
     "admin": 0x01,
@@ -35,6 +42,73 @@ ROLE_FLAGS = {
 }
 
 DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+DISPLAY_TRUNCATE_WIDTH = 60
+
+
+def _truncate_display(s: str, width: int = DISPLAY_TRUNCATE_WIDTH) -> str:
+    """Elide a user-authored text field for a one-line REPL table row.
+
+    Usernames, board names, and subjects are only capped by the wire's own
+    4096-byte MAX_TEXT_FIELD - there is no stricter policy limit, deliberately
+    (this project treats names as attribution, not something to adjudicate
+    the reasonableness of - see kind_validator.py's identity_text_violation).
+    A field anywhere near that size would still
+    flood a listing with one unreadable line, so listings truncate for
+    display only; the stored/signed value is never touched.
+    """
+    return s if len(s) <= width else s[: width - 1] + "…"
+
+
+# Unicode bidi-override/embedding/isolate controls - reordering directional
+# marks (U+200E/U+200F) plus the LRE/RLE/PDF/LRO/RLO/LRI/RLI/FSI/PDI family.
+# Not blocked at publish time (kind_validator.py's identity_text_violation
+# deliberately allows these for usernames/board names - see its docstring),
+# but printing one raw to a terminal can visually reorder or hide text that
+# comes after it, so the REPL strips them at the display boundary instead.
+_BIDI_CONTROL_CHARS = "‎‏‪‫‬‭‮⁦⁧⁨⁩"
+
+
+def _sanitize_for_terminal(s: str) -> str:
+    """Strip characters unsafe to echo raw to an operator's terminal.
+
+    Article subjects, tags, content-types, and body content have no
+    character-class validation at publish time at all (kind_validator.py's
+    _validate_article only checks that a subject is present, not what's in
+    it) - so a C0 control byte (an ANSI escape sequence, e.g.) or a Unicode
+    bidi override embedded in any of those round-trips intact and would
+    otherwise render as a live terminal control sequence in a REPL command
+    that prints it raw. This is a rendering-safety fix, not a new identity
+    policy: the stored/signed bytes are never touched, only what a REPL
+    listing prints. \\n and \\t pass through unchanged.
+    """
+    out = []
+    for c in s:
+        if c in ("\n", "\t"):
+            out.append(c)
+        elif ord(c) < 0x20 or ord(c) == 0x7F:
+            continue
+        elif c in _BIDI_CONTROL_CHARS:
+            continue
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def _scoped_author(rec) -> str:
+    """Render a record's author as name@registrar, or as the key.
+
+    Never a bare username. A name is only an identity together with the origin
+    that issued it — two origins may hold the same name, and a record can claim
+    any registrar it likes — so a bare name is ambiguous at best and misleading
+    at worst. Falls back to the pubkey, which is the one field a signature
+    actually binds.
+    """
+    if rec.actor_username and rec.actor_registrar:
+        return f"{rec.actor_username}@{rec.actor_registrar}"
+    if rec.actor_username:
+        return f"{rec.actor_username}@? ({rec.actor_pubkey.hex()[:16]})"
+    return rec.actor_pubkey.hex()
 
 
 class OperatorConsole:
@@ -57,6 +131,8 @@ class OperatorConsole:
             try:
                 line = await loop.run_in_executor(None, lambda: input("bonnet> "))
             except EOFError:
+                if hasattr(self, "_uvicorn_server") and self._uvicorn_server:
+                    self._uvicorn_server.should_exit = True
                 break
 
             line = line.strip()
@@ -236,8 +312,10 @@ class OperatorConsole:
   purge-origin <origin>         Remove all firehose and projection data for an origin
   reset-key <origin>            Clear key epoch pinning for an origin
   rotate-key                    Rotate this server's own origin signing key
-                                (publishes bonnet.origin.key.rotate; restart
-                                required afterward)
+                                (publishes bonnet.origin.key.rotate; effective
+                                immediately, no restart needed - unless the
+                                admin ACL rule was hand-written in config.toml,
+                                in which case that file needs a manual update)
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:
@@ -250,12 +328,27 @@ class OperatorConsole:
     def _local_handle(self, body: bytes) -> bytes:
         return self.command_handler.handle(body, self.local_conn.to_context())
 
+    def _actor_username(self) -> str:
+        """The username currently registered to the server's own key.
+
+        Records published locally must claim the name this origin actually
+        issued to the server's key (firehose_commands.py enforces this), which
+        changes whenever an operator runs register-user. Falls back to
+        "root" only for the sliver of startup before the bootstrap
+        registration has landed.
+        """
+        existing = self.users.get_user_by_pubkey(
+            self.config.origin, self.server_identity.public_key
+        )
+        return existing["username"] if existing is not None else "root"
+
     def _parse_response_error(self, resp: bytes) -> str:
-        if resp[0] == 0x01:
-            code = struct.unpack(">H", resp[1:3])[0]
-            msg_len = struct.unpack(">H", resp[3:5])[0]
-            msg = resp[5 : 5 + msg_len].decode("utf-8", errors="replace")
-            return f"Error 0x{code:04x}: {msg}"
+        try:
+            parse_response(resp)
+        except ProtocolError as e:
+            if e.code is None:
+                return f"Malformed response: {e}"
+            return f"Error 0x{e.code:04x}: {e.detail}"
         return "Unknown error"
 
     def _sign_and_publish(
@@ -282,7 +375,7 @@ class OperatorConsole:
             kind=kind,
             origin=self.config.origin,
             actor_pubkey=self.server_identity.public_key,
-            actor_username="root",
+            actor_username=self._actor_username(),
             actor_registrar=self.config.origin,
             board=board,
             target_origin=target_origin,
@@ -320,6 +413,23 @@ class OperatorConsole:
         if len(pk) != 32:
             return None
         return pk
+
+    def _parse_uint_arg(self, s: str, bits: int) -> int | None:
+        """Parse an unsigned integer REPL argument, bounded for a struct.pack
+        field of the given width.
+
+        Without this, a negative or too-large value reaches struct.pack
+        directly and raises its raw format-string error ('argument out of
+        range', "'Q' format requires 0 <= number <= ...") instead of a clean
+        usage message.
+        """
+        try:
+            n = int(s)
+        except ValueError:
+            return None
+        if n < 0 or n > (2**bits - 1):
+            return None
+        return n
 
     def _extract_board_flag(self, tokens: list, default: str) -> tuple:
         board = default
@@ -528,15 +638,6 @@ class OperatorConsole:
             return f"Revoked punishment {parts[1]}."
         return self._parse_response_error(resp)
 
-    def _enc_text16(self, s: str) -> bytes:
-        encoded = s.encode("utf-8")
-        return struct.pack(">H", len(encoded)) + encoded
-
-    def _read_text16(self, data: bytes, offset: int) -> tuple[str, int]:
-        n = struct.unpack(">H", data[offset : offset + 2])[0]
-        offset += 2
-        return data[offset : offset + n].decode("utf-8"), offset + n
-
     # ------------------------------------------------------------------
     # create-board (interactive)
     # ------------------------------------------------------------------
@@ -550,6 +651,13 @@ class OperatorConsole:
             return "Usage: create-board <name>"
 
         board = parts[0]
+
+        violation = identity_text_violation(board)
+        if violation is not None:
+            return f"Invalid board name {board!r}: {violation}."
+
+        if self.nav.get_board(self.config.origin, board) is not None:
+            return f"Board '{board}' already exists."
 
         display_name = ""
         try:
@@ -574,7 +682,7 @@ class OperatorConsole:
             kind="bonnet.board.create",
             origin=self.config.origin,
             actor_pubkey=self.server_identity.public_key,
-            actor_username="root",
+            actor_username=self._actor_username(),
             actor_registrar=self.config.origin,
             board=board,
             metadata=m,
@@ -612,6 +720,9 @@ class OperatorConsole:
             return "Usage: publish-article <board> [reply-to-num] [supersede-num]"
 
         board = parts[0]
+
+        if self.nav.get_board(self.config.origin, board) is None:
+            return f"Error: Board '{board}' does not exist. Use create-board first."
 
         reply_to_num = 0
         if len(parts) >= 2:
@@ -706,7 +817,7 @@ class OperatorConsole:
             kind="bonnet.article",
             origin=self.config.origin,
             actor_pubkey=self.server_identity.public_key,
-            actor_username="root",
+            actor_username=self._actor_username(),
             actor_registrar=self.config.origin,
             board=board,
             article_id=article_id,
@@ -763,7 +874,7 @@ class OperatorConsole:
             kind="bonnet.user.register",
             origin=self.config.origin,
             actor_pubkey=self.server_identity.public_key,
-            actor_username="root",
+            actor_username=self._actor_username(),
             actor_registrar=self.config.origin,
             metadata=m,
         )
@@ -797,7 +908,7 @@ class OperatorConsole:
 
         from bonnet.net.firehose_commands import OP_BOARD_LIST
 
-        req = struct.pack(">B", OP_BOARD_LIST) + self._enc_text16(origin)
+        req = struct.pack(">B", OP_BOARD_LIST) + _enc_text16(origin)
         resp = self._local_handle(req)
 
         if resp[0] != 0x00:
@@ -808,14 +919,16 @@ class OperatorConsole:
         lines = []
         for _ in range(count):
             if aggregate:
-                board_origin, offset = self._read_text16(resp, offset)
-            name, offset = self._read_text16(resp, offset)
+                board_origin, offset = _read_text16(resp, offset)
+            name, offset = _read_text16(resp, offset)
             closed = resp[offset]
             offset += 1
             owner_len = resp[offset]
             offset += 1 + owner_len
-            display, offset = self._read_text16(resp, offset)
+            display, offset = _read_text16(resp, offset)
             status = " [closed]" if closed else ""
+            name = _truncate_display(_sanitize_for_terminal(name))
+            display = _truncate_display(_sanitize_for_terminal(display))
             if aggregate:
                 lines.append(f"  {board_origin}/{name}{status}  {display}")
             else:
@@ -851,16 +964,15 @@ class OperatorConsole:
             board = parts[2]
             article_num_str = parts[3]
 
-        try:
-            article_num = int(article_num_str)
-        except ValueError:
-            return "Invalid article number"
+        article_num = self._parse_uint_arg(article_num_str, 64)
+        if article_num is None:
+            return "Invalid article number (must be 0-18446744073709551615)"
 
         from bonnet.net.firehose_commands import OP_ARTICLE_GET
 
         req = struct.pack(">B", OP_ARTICLE_GET)
-        req += self._enc_text16(origin)
-        req += self._enc_text16(board)
+        req += _enc_text16(origin)
+        req += _enc_text16(board)
         req += struct.pack(">B", 0x01)  # by article_num
         req += struct.pack(">Q", article_num)
         req += struct.pack(">B", 1)  # include body
@@ -898,11 +1010,11 @@ class OperatorConsole:
         offset += 1
         author_pubkey = data[offset : offset + ap_len].hex()
         offset += ap_len
-        author_username, offset = self._read_text16(data, offset)
-        author_registrar, offset = self._read_text16(data, offset)
-        subject, offset = self._read_text16(data, offset)
-        tags, offset = self._read_text16(data, offset)
-        content_type, offset = self._read_text16(data, offset)
+        author_username, offset = _read_text16(data, offset)
+        author_registrar, offset = _read_text16(data, offset)
+        subject, offset = _read_text16(data, offset)
+        tags, offset = _read_text16(data, offset)
+        content_type, offset = _read_text16(data, offset)
 
         root_len = data[offset]
         offset += 1
@@ -919,8 +1031,8 @@ class OperatorConsole:
         replacement_id = data[offset : offset + 32].hex() if has_replacement else ""
         offset += 32 if has_replacement else 0
 
-        pin_state, offset = self._read_text16(data, offset)
-        thread_state, offset = self._read_text16(data, offset)
+        pin_state, offset = _read_text16(data, offset)
+        thread_state, offset = _read_text16(data, offset)
 
         body_len = struct.unpack(">I", data[offset : offset + 4])[0]
         offset += 4
@@ -935,13 +1047,18 @@ class OperatorConsole:
         vis_names = {0: "active", 1: "cancelled", 2: "superseded"}
         body_names = {0: "available", 1: "unavailable", 2: "purged"}
 
+        # A full article view, unlike the truncated listings above, prints
+        # subject/tags/content-type/author/body in full - but they carry no
+        # character-class validation at publish time (_validate_article only
+        # checks a subject is present), so each is sanitized before it ever
+        # reaches this operator's terminal raw.
         lines = [
             f"Article #{article_num} in /{board}",
-            f"Subject: {subject}",
+            f"Subject: {_sanitize_for_terminal(subject)}",
             f"Created: {ts}",
         ]
         if author_username and author_registrar:
-            lines.append(f"Author: {author_username}@{author_registrar}")
+            lines.append(f"Author: {_sanitize_for_terminal(author_username)}@{author_registrar}")
         else:
             lines.append(f"Author: {author_pubkey}")
         lines.extend(
@@ -953,9 +1070,9 @@ class OperatorConsole:
             ]
         )
         if tags:
-            lines.append(f"Tags: {tags}")
+            lines.append(f"Tags: {_sanitize_for_terminal(tags)}")
         if content_type:
-            lines.append(f"Content-Type: {content_type}")
+            lines.append(f"Content-Type: {_sanitize_for_terminal(content_type)}")
         if root_id:
             lines.append(f"Root: {root_id}")
         if reply_id:
@@ -968,7 +1085,7 @@ class OperatorConsole:
             lines.append(f"Thread: {thread_state}")
         lines.append("-" * 40)
         if body:
-            lines.append(body)
+            lines.append(_sanitize_for_terminal(body))
         else:
             lines.append("(body unavailable)")
         return "\n".join(lines)
@@ -983,8 +1100,6 @@ class OperatorConsole:
 
         origin = ""
         board = parts[1]
-        offset = 0
-        limit = 50
 
         known_origins = set()
         try:
@@ -998,19 +1113,26 @@ class OperatorConsole:
         if parts[1] in known_origins and len(parts) >= 3:
             origin = parts[1]
             board = parts[2]
-            offset = int(parts[3]) if len(parts) > 3 else 0
-            limit = int(parts[4]) if len(parts) > 4 else 50
+            offset_str = parts[3] if len(parts) > 3 else "0"
+            limit_str = parts[4] if len(parts) > 4 else "50"
         else:
-            offset = int(parts[2]) if len(parts) > 2 else 0
-            limit = int(parts[3]) if len(parts) > 3 else 50
+            offset_str = parts[2] if len(parts) > 2 else "0"
+            limit_str = parts[3] if len(parts) > 3 else "50"
+
+        offset = self._parse_uint_arg(offset_str, 32)
+        if offset is None:
+            return "Invalid offset (must be 0-4294967295)"
+        limit = self._parse_uint_arg(limit_str, 16)
+        if limit is None:
+            return "Invalid limit (must be 0-65535)"
 
         aggregate = origin == ""
 
         from bonnet.net.firehose_commands import OP_ARTICLE_LIST
 
         req = struct.pack(">B", OP_ARTICLE_LIST)
-        req += self._enc_text16(origin)
-        req += self._enc_text16(board)
+        req += _enc_text16(origin)
+        req += _enc_text16(board)
         req += struct.pack(">I", offset)
         req += struct.pack(">H", limit)
         req += struct.pack(">B", 0)
@@ -1024,7 +1146,7 @@ class OperatorConsole:
         lines = []
         for _ in range(count):
             if aggregate:
-                art_origin, offset = self._read_text16(resp, offset)
+                art_origin, offset = _read_text16(resp, offset)
             article_num = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             aid_len = resp[offset]
@@ -1043,11 +1165,11 @@ class OperatorConsole:
             offset += 8
             ap_len = resp[offset]
             offset += 1 + ap_len
-            author_username, offset = self._read_text16(resp, offset)
-            author_registrar, offset = self._read_text16(resp, offset)
-            subject, offset = self._read_text16(resp, offset)
-            tags, offset = self._read_text16(resp, offset)
-            content_type, offset = self._read_text16(resp, offset)
+            author_username, offset = _read_text16(resp, offset)
+            author_registrar, offset = _read_text16(resp, offset)
+            subject, offset = _read_text16(resp, offset)
+            tags, offset = _read_text16(resp, offset)
+            content_type, offset = _read_text16(resp, offset)
 
             root_id_len = resp[offset]
             offset += 1 + root_id_len
@@ -1057,14 +1179,15 @@ class OperatorConsole:
             offset += 1
             if has_replacement:
                 offset += 32
-            pin_state, offset = self._read_text16(resp, offset)
-            thread_state, offset = self._read_text16(resp, offset)
+            pin_state, offset = _read_text16(resp, offset)
+            thread_state, offset = _read_text16(resp, offset)
             body_len = struct.unpack(">I", resp[offset : offset + 4])[0]
             offset += 4 + body_len
 
             from datetime import datetime
 
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
+            subject = _truncate_display(_sanitize_for_terminal(subject))
             if aggregate:
                 lines.append(f"{art_origin} #{article_num:4} | {subject} | {ts}")
             else:
@@ -1105,10 +1228,10 @@ class OperatorConsole:
         from bonnet.net.firehose_commands import OP_ARTICLE_SEARCH
 
         req = struct.pack(">B", OP_ARTICLE_SEARCH)
-        req += self._enc_text16(origin)
-        req += self._enc_text16(board)
-        req += self._enc_text16(query)
-        req += self._enc_text16("")  # no body search
+        req += _enc_text16(origin)
+        req += _enc_text16(board)
+        req += _enc_text16(query)
+        req += _enc_text16("")  # no body search
         req += struct.pack(">I", 0)
         req += struct.pack(">H", 50)
         req += struct.pack(">B", 0)
@@ -1124,7 +1247,7 @@ class OperatorConsole:
         lines = []
         for _ in range(count):
             if aggregate:
-                result_origin, offset = self._read_text16(resp, offset)
+                result_origin, offset = _read_text16(resp, offset)
             article_num = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             aid_len = resp[offset]
@@ -1139,11 +1262,12 @@ class OperatorConsole:
             offset += 8
             _body_avail = resp[offset]
             offset += 1
-            excerpt, offset = self._read_text16(resp, offset)
+            excerpt, offset = _read_text16(resp, offset)
 
             from datetime import datetime
 
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
+            subject = _truncate_display(_sanitize_for_terminal(subject))
             if aggregate:
                 lines.append(f"{result_origin} #{article_num:4} | {subject} | {ts}")
             else:
@@ -1164,6 +1288,7 @@ class OperatorConsole:
         if len(parts) < 2:
             return (
                 "Usage: query-articles <board> [--author=<hex>] [--user=<name>] "
+                "[--registrar=<origin>] "
                 "[--tag=<tag>] [--since=<ts>] [--before=<ts>] "
                 "[--state=active|cancelled|superseded] "
                 "[--root] [--reply-to=<num>] [--pinned] "
@@ -1189,6 +1314,12 @@ class OperatorConsole:
             elif p.startswith("--user="):
                 val = p.split("=", 1)[1].encode("utf-8")
                 filters.append((0x02, 0x01, 0x02, val))
+            elif p.startswith("--registrar="):
+                # A username is only an identity together with the origin that
+                # issued it, so --user alone matches that name under any
+                # registrar. Pair them to ask for the one person.
+                val = p.split("=", 1)[1].encode("utf-8")
+                filters.append((0x03, 0x01, 0x02, val))
             elif p.startswith("--tag="):
                 val = p.split("=", 1)[1].encode("utf-8")
                 filters.append((0x04, 0x05, 0x02, val))
@@ -1222,10 +1353,10 @@ class OperatorConsole:
             elif p == "--pinned":
                 filters.append((0x09, 0x01, 0x04, b"\x01"))
             elif p.startswith("--offset="):
-                try:
-                    list_offset = int(p.split("=", 1)[1])
-                except ValueError:
-                    return "Invalid offset"
+                parsed_offset = self._parse_uint_arg(p.split("=", 1)[1], 32)
+                if parsed_offset is None:
+                    return "Invalid offset (must be 0-4294967295)"
+                list_offset = parsed_offset
             elif p.startswith("--limit="):
                 try:
                     limit = int(p.split("=", 1)[1])
@@ -1237,8 +1368,8 @@ class OperatorConsole:
                 return f"Unknown flag: {p}"
 
         req = struct.pack(">B", OP_ARTICLE_QUERY)
-        req += self._enc_text16(self.config.origin)
-        req += self._enc_text16(board)
+        req += _enc_text16(self.config.origin)
+        req += _enc_text16(board)
         req += struct.pack(">B", len(filters))
         for field_id, operator, value_type, value in filters:
             if isinstance(value, str):
@@ -1278,19 +1409,19 @@ class OperatorConsole:
             offset += 1
             author_pubkey = resp[offset : offset + ap_len]
             offset += ap_len
-            author_username, offset = self._read_text16(resp, offset)
-            author_registrar, offset = self._read_text16(resp, offset)
-            subject, offset = self._read_text16(resp, offset)
-            tags, offset = self._read_text16(resp, offset)
-            content_type, offset = self._read_text16(resp, offset)
+            author_username, offset = _read_text16(resp, offset)
+            author_registrar, offset = _read_text16(resp, offset)
+            subject, offset = _read_text16(resp, offset)
+            tags, offset = _read_text16(resp, offset)
+            content_type, offset = _read_text16(resp, offset)
             root_len = resp[offset]
             offset += 1 + root_len
             reply_len = resp[offset]
             offset += 1 + reply_len
             has_replacement = resp[offset]
             offset += 1 + (32 if has_replacement else 0)
-            pin_state, offset = self._read_text16(resp, offset)
-            thread_state, offset = self._read_text16(resp, offset)
+            pin_state, offset = _read_text16(resp, offset)
+            thread_state, offset = _read_text16(resp, offset)
 
             from datetime import datetime
 
@@ -1310,7 +1441,8 @@ class OperatorConsole:
             extra_str = f" [{', '.join(extras)}]" if extras else ""
 
             lines.append(
-                f"#{article_num:4} | {subject} | {author_display} | {ts_display}{extra_str}"
+                f"#{article_num:4} | {_truncate_display(_sanitize_for_terminal(subject))} | "
+                f"{_truncate_display(_sanitize_for_terminal(author_display))} | {ts_display}{extra_str}"
             )
 
         if not lines:
@@ -1326,7 +1458,7 @@ class OperatorConsole:
 
         from bonnet.net.firehose_commands import OP_USER_LIST
 
-        req = struct.pack(">B", OP_USER_LIST) + self._enc_text16(origin) + struct.pack(">B", 0)
+        req = struct.pack(">B", OP_USER_LIST) + _enc_text16(origin) + struct.pack(">B", 0)
 
         resp = self._local_handle(req)
         if resp[0] != 0x00:
@@ -1336,12 +1468,12 @@ class OperatorConsole:
         offset = 3
         lines = []
         for _ in range(count):
-            _origin, offset = self._read_text16(resp, offset)
+            _origin, offset = _read_text16(resp, offset)
             pk_len = resp[offset]
             offset += 1
             pubkey = resp[offset : offset + pk_len].hex()
             offset += pk_len
-            username, offset = self._read_text16(resp, offset)
+            username, offset = _read_text16(resp, offset)
             flags = struct.unpack(">Q", resp[offset : offset + 8])[0]
             offset += 8
             _reg_seq = struct.unpack(">Q", resp[offset : offset + 8])[0]
@@ -1357,7 +1489,7 @@ class OperatorConsole:
                 role += " [mod]"
             if revoked:
                 role += " [REVOKED]"
-            lines.append(f"  {username}  {pubkey}{role}")
+            lines.append(f"  {_truncate_display(_sanitize_for_terminal(username))}  {pubkey}{role}")
 
         if not lines:
             return "No users."
@@ -1404,7 +1536,7 @@ class OperatorConsole:
             offset += 32
             event_id = resp[offset : offset + 32].hex()
             offset += 32
-            origin, offset = self._read_text16(resp, offset)
+            origin, offset = _read_text16(resp, offset)
 
             ptype = type_names.get(type_code, f"unknown({type_code})")
             if expires_at > 0:
@@ -1473,7 +1605,11 @@ class OperatorConsole:
             # can be consulted; actor_pubkey there is signed, a projection
             # column would not be.
             rec = self.firehose.get_event_by_id(r["origin"], r["event_id"])
-            filer = (rec.actor_username or rec.actor_pubkey.hex()) if rec else "(record gone)"
+            # Scoped, never bare. A username means nothing without the origin
+            # that issued it — two origins may hold the same name — and this
+            # is a moderation surface, where a bare "filed by alice" invites
+            # acting against the wrong alice.
+            filer = _scoped_author(rec) if rec else "(record gone)"
             lines.append(
                 f"  {when}  seq {r['origin_seq']} on {r['origin']}\n"
                 f"    Filed by: {filer}\n"
@@ -1498,7 +1634,7 @@ class OperatorConsole:
 
         from bonnet.net.firehose_commands import OP_EVENT_HEAD
 
-        req = struct.pack(">B", OP_EVENT_HEAD) + self._enc_text16(origin)
+        req = struct.pack(">B", OP_EVENT_HEAD) + _enc_text16(origin)
 
         resp = self._local_handle(req)
         if resp[0] != 0x00:
@@ -1537,16 +1673,17 @@ class OperatorConsole:
             return "Usage: event-range <origin> <start> <count>"
 
         origin = parts[1]
-        try:
-            start = int(parts[2])
-            count = int(parts[3])
-        except ValueError:
-            return "Invalid start or count"
+        start = self._parse_uint_arg(parts[2], 64)
+        if start is None:
+            return "Invalid start (must be 0-18446744073709551615)"
+        count = self._parse_uint_arg(parts[3], 16)
+        if count is None:
+            return "Invalid count (must be 0-65535)"
 
         from bonnet.net.firehose_commands import OP_EVENT_RANGE
 
         req = struct.pack(">B", OP_EVENT_RANGE)
-        req += self._enc_text16(origin)
+        req += _enc_text16(origin)
         req += struct.pack(">Q", start)
         req += struct.pack(">H", count)
         req += struct.pack(">I", 0)
@@ -1593,7 +1730,7 @@ class OperatorConsole:
 
         from bonnet.net.firehose_commands import OP_EVENT_GET
 
-        req = struct.pack(">B", OP_EVENT_GET) + self._enc_text16(origin) + event_id
+        req = struct.pack(">B", OP_EVENT_GET) + _enc_text16(origin) + event_id
 
         resp = self._local_handle(req)
         if resp[0] != 0x00:
@@ -1606,11 +1743,21 @@ class OperatorConsole:
 
         rec = decode_record(resp[offset : offset + rec_len])
         offset += rec_len
-        w_len = struct.unpack(">H", resp[offset : offset + 2])[0]
-        offset += 2
-        from bonnet.core.record import decode_witness, is_origin_witness
+        from bonnet.core.record import (
+            decode_witness,
+            encode_unsigned_witness,
+            is_origin_witness,
+            verify_witness_signature,
+        )
 
-        witness = decode_witness(resp[offset : offset + w_len])
+        w_count = struct.unpack(">H", resp[offset : offset + 2])[0]
+        offset += 2
+        witnesses = []
+        for _ in range(w_count):
+            w_len = struct.unpack(">H", resp[offset : offset + 2])[0]
+            offset += 2
+            witnesses.append(decode_witness(resp[offset : offset + w_len]))
+            offset += w_len
 
         from datetime import datetime
 
@@ -1629,10 +1776,9 @@ class OperatorConsole:
             f"Pubkey:       {rec.actor_pubkey.hex()}",
         ]
 
-        if rec.actor_username:
-            lines.append(f"Username:     {rec.actor_username}")
-        if rec.actor_registrar:
-            lines.append(f"Registrar:    {rec.actor_registrar}")
+        if rec.actor_username or rec.actor_registrar:
+            lines.append(f"Claimed as:   {_scoped_author(rec)}")
+            lines.append("              (self-reported; the pubkey above is what is signed)")
 
         lines.extend(
             [
@@ -1714,24 +1860,31 @@ class OperatorConsole:
                 lines.append(f"  [{f.field_id}] {type_name}: {val}")
 
         zero_key = b"\x00" * 32
-        from_pubkey = (
-            witness.received_from_pubkey.hex()
-            if witness.received_from_pubkey != zero_key
-            else "(origin)"
-        )
-        lines.extend(
-            [
-                "",
-                "=== Witness ===",
-                f"Relay pubkey: {witness.relay_pubkey.hex()}",
-                f"Relay host:   {witness.relay_hostname}",
-                f"From pubkey:  {from_pubkey}",
-                f"From host:    {witness.received_from_hostname or '(origin)'}",
-                f"Seen at:      {datetime.fromtimestamp(witness.seen_at).strftime('%Y-%m-%d %H:%M:%S')}",
-                f"Origin term:  {'yes' if is_origin_witness(witness) else 'no'}",
-                f"Event hash:   {witness.event_hash.hex()}",
-            ]
-        )
+        lines.extend(["", f"=== Provenance ({len(witnesses)} witness(es)) ==="])
+        for w in witnesses:
+            from_pubkey = (
+                w.received_from_pubkey.hex() if w.received_from_pubkey != zero_key else "(origin)"
+            )
+            seen = datetime.fromtimestamp(w.seen_at).strftime("%Y-%m-%d %H:%M:%S")
+            valid = verify_witness_signature(
+                w.relay_pubkey, encode_unsigned_witness(w), w.relay_signature
+            )
+            lines.extend(
+                [
+                    f"  Relay pubkey: {w.relay_pubkey.hex()}",
+                    f"  Relay host:   {w.relay_hostname}",
+                    f"  From pubkey:  {from_pubkey}",
+                    f"  From host:    {w.received_from_hostname or '(origin)'}",
+                    f"  Seen at:      {seen}",
+                    f"  Origin term:  {'yes' if is_origin_witness(w) else 'no'}",
+                    f"  Event hash:   {w.event_hash.hex()}",
+                    # Each entry is that relay's own signed claim about who
+                    # handed it the record. A valid signature makes the claim
+                    # attributable to that key; it does not make it true.
+                    f"  Signature:    {'valid' if valid else 'INVALID'}",
+                    "",
+                ]
+            )
 
         return "\n".join(lines)
 

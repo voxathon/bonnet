@@ -300,6 +300,39 @@ verify_tls = true
     assert c.peers[1].verify_tls is True
 
 
+def test_peer_allow_private_defaults_false(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "10.0.0.15"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.peers[0].allow_private is False
+
+
+def test_peer_allow_private_true(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "10.0.0.15"
+allow_private = true
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.peers[0].allow_private is True
+
+
 def test_peer_import_flags_default_to_false(tmp_path):
     path = _write_config(
         tmp_path,
@@ -371,6 +404,25 @@ import_permabans = 1
         FirehoseConfig.load(path)
 
 
+def test_tls_enabled_rejects_a_quoted_string(tmp_path):
+    """`enabled = "false"` (quoted, not bare) used to load as a Python string,
+    which is truthy for any non-empty value including "false" itself - a
+    server config trying to explicitly disable TLS by writing that would
+    silently run with TLS on instead, with no error or warning anywhere."""
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[tls]
+enabled = "false"
+""",
+    )
+    with pytest.raises(ValueError, match="tls.enabled"):
+        FirehoseConfig.load(path)
+
+
 # ---------------------------------------------------------------------------
 # Missing config behavior
 # ---------------------------------------------------------------------------
@@ -383,6 +435,14 @@ def test_load_missing_config_raises(tmp_path):
         FirehoseConfig.load(path)
 
 
+def test_load_directory_path_raises_cleanly(tmp_path):
+    """Pointing --config at a directory raises IsADirectoryError, not a
+    raw open()-triggered traceback."""
+    path = str(tmp_path)  # tmp_path itself is a directory
+    with pytest.raises(IsADirectoryError):
+        FirehoseConfig.load(path)
+
+
 def test_create_default_config(tmp_path):
     """create_default_config writes a valid TOML file."""
     path = str(tmp_path / "config.toml")
@@ -391,6 +451,22 @@ def test_create_default_config(tmp_path):
     assert os.path.exists(path)
     assert config.origin == "localhost"
     assert len(config.acl._rules) == 0
+
+
+def test_create_default_config_honors_a_custom_port(tmp_path):
+    """--init/--create-config used to always write port = 2272 to the sample
+    file regardless of a --port override the caller passed at generation
+    time - the flag was silently ignored until the file was hand-edited."""
+    path = str(tmp_path / "config.toml")
+    config = FirehoseConfig.create_default_config(path, port=19273)
+
+    assert config.port == 19273
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    assert "port = 19273" in content
+
+    reloaded = FirehoseConfig.load(path)
+    assert reloaded.port == 19273
 
 
 def test_create_default_config_creates_parent_dir(tmp_path):
@@ -472,6 +548,14 @@ def test_validate_rejects_bad_port():
         c.validate()
     c = FirehoseConfig(port=99999)
     with pytest.raises(ValueError, match="port"):
+        c.validate()
+
+
+def test_validate_rejects_non_int_port():
+    """A quoted port ("22721") in config.toml used to raise a bare
+    TypeError from `1 <= self.port <= 65535` instead of a clean ValueError."""
+    c = FirehoseConfig(port="22721")
+    with pytest.raises(ValueError, match="port must be an integer"):
         c.validate()
 
 

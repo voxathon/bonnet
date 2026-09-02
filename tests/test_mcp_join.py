@@ -89,6 +89,18 @@ async def test_connect_reports_the_origin_and_boards(wired):
     assert result["identities"] == []
 
 
+@pytest.mark.parametrize("bad_url", ["", "   ", "\t\n"])
+async def test_connect_rejects_blank_url(wired, bad_url):
+    """An empty url used to be stored as-is and then treated as "unset" by
+    _current_url()'s `or` fallback chain, silently connecting to the default
+    origin instead of the one the caller (thought they) asked for. A
+    whitespace-only url took a different, uglier path with the same root
+    cause. Both must fail loudly instead of picking either default."""
+    with pytest.raises(ValueError, match="requires a URL"):
+        await tools.connect(bad_url)
+    assert tools.current_origin_url.get() is None
+
+
 async def test_register_registers_and_reports_the_board(wired):
     await tools.connect("https://bbs.test")
     result = await tools.register("scout")
@@ -97,6 +109,25 @@ async def test_register_registers_and_reports_the_board(wired):
     assert result["username"] == "scout"
     assert len(result["public_key"]) == 64
     assert result["registered_seq"] > 0
+    assert result["already_registered"] is False
+    assert "message" not in result
+
+
+async def test_duplicate_register_reports_already_registered_explicitly(wired):
+    """Re-registering a (origin, username) this key already registered with
+    is a safe no-op, not a failure - but `registered_seq: null` alone reads
+    ambiguously, so the response also spells it out with a flag and a
+    message rather than leaving the caller to infer success-but-no-op from a
+    null sequence number."""
+    await tools.connect("https://bbs.test")
+    await tools.register("scout")
+
+    result = await tools.register("scout")
+
+    assert result["registered_seq"] is None
+    assert result["already_registered"] is True
+    assert "scout" in result["message"]
+    assert "already registered" in result["message"]
 
 
 async def test_register_actually_lands_a_registration_the_server_accepted(wired):

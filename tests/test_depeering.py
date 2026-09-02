@@ -448,11 +448,20 @@ def test_rotate_key_http_server_signs_with_new_key(server):
     the new public key, an internally inconsistent response no client could
     verify."""
     console = OperatorConsole(server)
+    old_identity = server.server_identity
     console._cmd_rotate_key([])
 
     new_identity = server.server_identity
+    assert new_identity.private_key != old_identity.private_key
     assert server.http_server._signer._private_key == new_identity.private_key
-    assert server.http_server._signer._key_id == f"ed25519:{new_identity.public_key.hex()}"
+
+    # The keyid names the origin, not the key, so it is deliberately unchanged
+    # by a rotation: a client addresses a response by the name it pinned, and
+    # resolves that name to whatever key it currently holds. Which key signed
+    # is settled by the signature, not by the keyid — so the assertion above,
+    # on the private key the signer actually baked in, is the one carrying the
+    # weight here.
+    assert server.http_server._signer._key_id == f"origin:{server.config.origin}"
 
 
 def test_rotate_key_console_still_has_admin_access_after(server):
@@ -523,3 +532,23 @@ def test_list_users_parses_multi_user_response(server):
     bob_line = next(line for line in result.splitlines() if "bob" in line)
     assert "[admin]" in alice_line
     assert "[mod]" in bob_line
+
+
+def test_list_users_truncates_long_username_for_display(server):
+    """A username has no length policy beyond the wire's 4096-byte
+    MAX_TEXT_FIELD (see kind_validator.py's identity_text_violation) - a
+    long one must not flood the REPL with an unreadable line, but the
+    truncation is display-only and must not touch the stored value."""
+    console = OperatorConsole(server)
+    long_username = "a" * 500
+    pubkey = Identity.generate().public_key
+
+    result = console._cmd_grant_role(["grant-role", pubkey.hex(), "admin", long_username])
+    assert "Registered" in result
+
+    result = console._cmd_list_users(["list-users"])
+    assert "…" in result
+    assert long_username not in result
+
+    stored = server.users.get_user_by_pubkey(server.config.origin, pubkey)
+    assert stored["username"] == long_username

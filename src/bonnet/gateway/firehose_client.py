@@ -40,6 +40,7 @@ from bonnet.net.firehose_models import (
     SearchResponse,
     UserInfo,
 )
+from bonnet.net.firehose_sync import is_safe_dial_target
 from bonnet.net.firehose_transport import (
     FirehoseClientError,  # noqa: F401 — re-export
     FirehoseTransport,
@@ -77,7 +78,6 @@ from bonnet.net.firehose_wire import (
     parse_event_range_response,
     parse_permissions_response,
     parse_publish_response,
-    parse_publish_response_raw,
     parse_report_list_response,
     parse_user_get_response,
     parse_user_list_response,
@@ -188,17 +188,6 @@ class FirehoseHTTPClient(FirehoseTransport):
             event_id=event_id,
             supersedes_article_id=supersedes_article_id,
         )
-
-    async def publish_record(
-        self,
-        intent: Intent,
-        actor_sig: bytes,
-        body: bytes = b"",
-    ) -> tuple:
-        """Publish an arbitrary signed record. Returns (Record, Witness)."""
-        cmd = build_publish_record(intent, actor_sig, body)
-        resp = await self._send_command(cmd)
-        return parse_publish_response_raw(resp)
 
     async def publish_board_create(
         self,
@@ -734,9 +723,31 @@ class FirehoseHTTPClient(FirehoseTransport):
             resp = await self._send_command(cmd)
             return parse_article_body_response(resp)
         except BodyRedirectError as redirect:
+            # The hostname here was chosen by the relay, so it gets the same
+            # treatment as any other dial target named by someone else.
+            #
+            # Without this check a relay could point the client at loopback,
+            # a private range, or a link-local metadata address — and this
+            # client runs on the user's machine, next to their identity store.
+            # `is_safe_dial_target` already guarded federation sync's dials and
+            # simply was never applied on this path.
+            # Private targets are allowed only when this client is itself
+            # talking to one — a local test federation legitimately redirects
+            # between loopback ports, and a public relay has no business
+            # sending anyone there. Same reasoning, and same seam, as
+            # is_loopback's other two callers.
+            if not is_safe_dial_target(
+                redirect.hostname,
+                redirect.port,
+                allow_private=is_loopback(self._base_url),
+            ):
+                raise FirehoseClientError(
+                    f"refusing redirect to unsafe target {redirect.hostname}:{redirect.port}"
+                ) from None
             origin_client = FirehoseHTTPClient(
                 f"https://{redirect.hostname}:{redirect.port}",
-                verify=redirect.verify_tls,
+                # This client's own TLS policy, not the relay's suggestion.
+                verify=self._verify,
                 # A redirect hop is a connection to a different origin, and
                 # therefore exactly a case worth pinning: pass the store down
                 # rather than letting cross-origin fetches skip TOFU. The pin
@@ -771,65 +782,131 @@ class FirehoseHTTPClient(FirehoseTransport):
         resp = await self._send_command(cmd)
         return parse_event_body_response(resp)
 
+    def verify_record(self, rec) -> dict:
+        """Check a record's two signatures here, rather than trusting the relay.
+
+        Until now nothing on the reading side verified anything. `core.record`
+        exported the verifiers, the wire delivered both signatures, and no
+        client called them — while `get_article`'s docstring told callers to
+        use the event tools "when you need the signed artifact", which those
+        tools then dropped from their output.
+
+        The two checks are independent and answer different questions.
+
+        `author` verifies `actor_signature` over the intent reconstructed from
+        the record, under `actor_pubkey`. That needs no key lookup — the key is
+        in the record — so it always has an answer, and a valid one means this
+        content is what that key signed and cannot be repudiated. It says
+        nothing about who holds that key or whether the name beside it is
+        theirs; that is `author_check`'s question.
+
+        `origin` verifies `origin_signature` over the unsigned record, under
+        the key that was authoritative *at that sequence*. That needs the epoch
+        cache, because after a rotation the current pin is not the key that
+        countersigned seq 400. With no epoch covering the sequence the answer
+        is 'unverifiable', never 'invalid': a signature checked against the
+        wrong key fails exactly like a forgery does, and reporting the two the
+        same way would turn this client's own missing state into an accusation.
+        """
+        from bonnet.core.record import (
+            encode_intent,
+            encode_unsigned_record,
+            reconstruct_intent_from_record,
+            verify_intent_signature,
+            verify_record_signature,
+        )
+
+        author_ok = verify_intent_signature(
+            rec.actor_pubkey,
+            encode_intent(reconstruct_intent_from_record(rec)),
+            rec.actor_signature,
+        )
+
+        key = self.origin_key_for_seq(rec.origin, rec.origin_seq)
+        if key is None:
+            origin_state = "unverifiable"
+        elif verify_record_signature(key, encode_unsigned_record(rec), rec.origin_signature):
+            origin_state = "valid"
+        else:
+            origin_state = "invalid"
+
+        return {
+            "author": "valid" if author_ok else "invalid",
+            "origin": origin_state,
+            "origin_key_known_for_seq": key is not None,
+        }
+
     # ------------------------------------------------------------------
     # Relay tracing
     # ------------------------------------------------------------------
 
-    async def trace_event(self, origin: str, event_id: bytes, max_hops: int = 10) -> list[dict]:
-        """Trace an event back to its origin through relay witnesses.
+    async def trace_event(self, origin: str, event_id: bytes) -> list[dict]:
+        """Reassemble an event's provenance chain from the witnesses it carries.
 
-        Follows the witness chain by dialing each upstream server,
-        verifying its discovery key, and requesting the event.
+        One request. This used to dial each upstream hostname in turn, asking
+        every relay in the chain to confirm its own link - which made tracing
+        depend on all of them still being reachable *and* still willing to
+        answer, and by the protocol's own reasoning those two failures are
+        indistinguishable from outside. A relay that had gone quiet erased the
+        trail through it.
 
-        Returns a list of hop dictionaries:
-            {relay_pubkey, relay_hostname, received_from_pubkey,
-             received_from_hostname, seen_at, record_hash}
+        Now the chain travels with the record, so it is read rather than
+        chased. Every entry is a signed statement by the relay it names, and
+        the signature is checked here against `relay_pubkey`: a link only
+        counts if that relay really made it, and one that fails is reported
+        rather than dropped, because a forged link is itself the finding.
+
+        Ordered from the origin outward where the edges connect, with any
+        witness that does not join the chain listed after - a break or a fork
+        is what a reader most needs to see, so it is not smoothed away.
+
+        Returns hop dicts: {relay_pubkey, relay_hostname, received_from_pubkey,
+        received_from_hostname, seen_at, record_hash, signature_valid,
+        is_origin, linked}.
         """
-        hops = []
-        current_origin = origin
-        current_event_id = event_id
-        current_base_url = self._base_url
+        from bonnet.core.record import (
+            encode_unsigned_witness,
+            is_origin_witness,
+            verify_witness_signature,
+        )
 
-        for _ in range(max_hops):
-            try:
-                if current_base_url == self._base_url:
-                    rec, witness = await self.get_event(current_origin, current_event_id)
-                else:
-                    sub_client = FirehoseHTTPClient(
-                        current_base_url,
-                        verify=self._verify,
-                        trust_store_path=self._trust_store_path,
-                        pin_mode=self._pin_mode,
+        rec, witnesses = await self.get_event(origin, event_id)
+        event_hash = compute_event_hash(encode_record(rec))
+
+        def describe(w, linked: bool) -> dict:
+            return {
+                "relay_pubkey": w.relay_pubkey.hex(),
+                "relay_hostname": w.relay_hostname,
+                "received_from_pubkey": w.received_from_pubkey.hex(),
+                "received_from_hostname": w.received_from_hostname,
+                "seen_at": w.seen_at,
+                "record_hash": event_hash.hex(),
+                # A witness naming a different hash is a statement about some
+                # other record and cannot be part of this chain.
+                "signature_valid": (
+                    w.event_hash == event_hash
+                    and verify_witness_signature(
+                        w.relay_pubkey, encode_unsigned_witness(w), w.relay_signature
                     )
-                    await sub_client.connect_anonymous()
-                    try:
-                        rec, witness = await sub_client.get_event(current_origin, current_event_id)
-                    finally:
-                        await sub_client.close()
-            except Exception:
-                break
-
-            encoded = encode_record(rec) if hasattr(rec, "origin_seq") else b""
-            event_hash = compute_event_hash(encoded).hex() if encoded else ""
-
-            hop = {
-                "relay_pubkey": witness.relay_pubkey.hex(),
-                "relay_hostname": witness.relay_hostname,
-                "received_from_pubkey": witness.received_from_pubkey.hex(),
-                "received_from_hostname": witness.received_from_hostname,
-                "seen_at": witness.seen_at,
-                "record_hash": event_hash,
+                ),
+                "is_origin": is_origin_witness(w),
+                "linked": linked,
             }
-            hops.append(hop)
 
-            zero_key = b"\x00" * 32
-            if witness.received_from_pubkey == zero_key and not witness.received_from_hostname:
-                break
+        by_upstream: dict[bytes, list] = {}
+        for w in witnesses:
+            by_upstream.setdefault(w.received_from_pubkey, []).append(w)
 
-            upstream_hostname = witness.received_from_hostname
-            if not upstream_hostname:
-                break
+        hops: list[dict] = []
+        seen: set[bytes] = set()
+        frontier = [w for w in witnesses if is_origin_witness(w)]
+        while frontier:
+            w = frontier.pop(0)
+            if w.relay_pubkey in seen:
+                continue
+            seen.add(w.relay_pubkey)
+            hops.append(describe(w, linked=True))
+            frontier.extend(by_upstream.get(w.relay_pubkey, []))
 
-            current_base_url = f"https://{upstream_hostname}"
-
+        hops.extend(describe(w, linked=False) for w in witnesses if w.relay_pubkey not in seen)
         return hops

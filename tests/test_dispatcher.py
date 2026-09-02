@@ -2,6 +2,7 @@
 unknown-kind handling, and projection checkpoint invariants.
 """
 
+import hashlib
 import sqlite3
 
 import pytest
@@ -19,6 +20,7 @@ from bonnet.core.global_projections import (
 from bonnet.core.record import (
     Intent,
     MetadataMap,
+    Record,
     compute_body_hash,
     encode_intent,
     metadata_bytes,
@@ -117,6 +119,25 @@ def stack(tmp_path):
     firehose.close()
 
 
+def _create_board_direct(nav, origin, board, owner=ACTOR_PUB):
+    """Materialize `board` straight in the nav projection - no firehose
+    record, no origin_seq consumed - for tests that need a board to exist
+    before _dispatch_article will project an article to it (see
+    dispatcher.py), without disturbing their own seq/count assertions."""
+    nav.apply_board_create(
+        Record(
+            origin=origin,
+            origin_seq=0,
+            event_id=hashlib.sha256(f"test-board:{origin}:{board}".encode()).digest(),
+            kind="bonnet.board.create",
+            actor_pubkey=owner,
+            board=board,
+            metadata=MetadataMap([metadata_bytes(1, owner)]),
+            created_at=0,
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Checkpoint advancement on failure
 # ---------------------------------------------------------------------------
@@ -141,11 +162,11 @@ def test_checkpoint_advances_past_failed_record(stack):
     original_apply = BoardProjection.apply_article
     call_count = [0]
 
-    def failing_apply(self, rec):
+    def failing_apply(self, rec, **kwargs):
         call_count[0] += 1
         if call_count[0] == 2:
             raise RuntimeError("simulated projection failure")
-        original_apply(self, rec)
+        original_apply(self, rec, **kwargs)
 
     BoardProjection.apply_article = failing_apply
     try:
@@ -161,6 +182,7 @@ def test_checkpoint_advances_past_failed_record(stack):
 def test_later_records_still_dispatched_after_failure(stack):
     """A failure on one record must not block the records after it."""
     d, firehose, nav, users, policy, bs = stack
+    _create_board_direct(nav, "bbs.a", "general")
 
     for i in range(3):
         intent = _make_article_intent("bbs.a", _rid(i + 1), aid_seed=i + 10)
@@ -175,11 +197,11 @@ def test_later_records_still_dispatched_after_failure(stack):
     original_apply = BoardProjection.apply_article
     call_count = [0]
 
-    def failing_apply(self, rec):
+    def failing_apply(self, rec, **kwargs):
         call_count[0] += 1
         if call_count[0] == 2:
             raise RuntimeError("simulated projection failure")
-        original_apply(self, rec)
+        original_apply(self, rec, **kwargs)
 
     BoardProjection.apply_article = failing_apply
     try:
@@ -200,6 +222,7 @@ def test_retry_does_not_redispatch_skipped_record(stack):
     past — the checkpoint moved on, so it stays skipped until an explicit
     rebuild."""
     d, firehose, nav, users, policy, bs = stack
+    _create_board_direct(nav, "bbs.a", "general")
 
     for i in range(3):
         intent = _make_article_intent("bbs.a", _rid(i + 1), aid_seed=i + 10)
@@ -214,11 +237,11 @@ def test_retry_does_not_redispatch_skipped_record(stack):
     original_apply = BoardProjection.apply_article
     call_count = [0]
 
-    def failing_apply(self, rec):
+    def failing_apply(self, rec, **kwargs):
         call_count[0] += 1
         if call_count[0] == 2:
             raise RuntimeError("simulated projection failure")
-        original_apply(self, rec)
+        original_apply(self, rec, **kwargs)
 
     BoardProjection.apply_article = failing_apply
     try:
@@ -272,6 +295,7 @@ def test_rebuild_preserves_other_origins(stack):
 def test_dispatch_idempotent(stack):
     """Dispatching the same origin twice does not duplicate state."""
     d, firehose, nav, users, policy, bs = stack
+    _create_board_direct(nav, "bbs.a", "general")
 
     intent = _make_article_intent("bbs.a", _rid(1), body=b"idempotent")
     bs.stage_article_body(
@@ -336,6 +360,9 @@ def test_rebuild_restores_state(stack):
     """Rebuild clears projections and replays all records from the firehose."""
     d, firehose, nav, users, policy, bs = stack
 
+    board_create = _make_board_create_intent("bbs.a", _rid(0), "general", ACTOR_PUB)
+    _append(firehose, ORIGIN_A, board_create)
+
     for i in range(3):
         intent = _make_article_intent(
             "bbs.a", _rid(i + 1), body=f"body{i}".encode(), aid_seed=i + 10
@@ -353,7 +380,7 @@ def test_rebuild_restores_state(stack):
     assert bp.article_count("bbs.a", "general") == 3
 
     count = d.rebuild_all("bbs.a")
-    assert count == 3
+    assert count == 4  # the board.create plus the 3 articles
 
     bp2 = d._get_board_projection("bbs.a", "general")
     assert bp2.article_count("bbs.a", "general") == 3
@@ -362,6 +389,9 @@ def test_rebuild_restores_state(stack):
 def test_rebuild_is_idempotent(stack):
     """Rebuilding twice produces the same state."""
     d, firehose, nav, users, policy, bs = stack
+
+    board_create = _make_board_create_intent("bbs.a", _rid(0), "general", ACTOR_PUB)
+    _append(firehose, ORIGIN_A, board_create)
 
     intent = _make_article_intent("bbs.a", _rid(1), body=b"rebuild me")
     body = b"rebuild me"
@@ -376,8 +406,8 @@ def test_rebuild_is_idempotent(stack):
 
     count1 = d.rebuild_all("bbs.a")
     count2 = d.rebuild_all("bbs.a")
-    assert count1 == 1
-    assert count2 == 1
+    assert count1 == 2  # the board.create plus the article
+    assert count2 == 2
 
     bp = d._get_board_projection("bbs.a", "general")
     assert bp.article_count("bbs.a", "general") == 1
@@ -396,6 +426,9 @@ def test_rebuild_clears_uncached_board_projections(stack, tmp_path):
     the firehose checkpoint advances.
     """
     d, firehose, nav, users, policy, bs = stack
+
+    board_create = _make_board_create_intent("bbs.a", _rid(0), "general", ACTOR_PUB)
+    _append(firehose, ORIGIN_A, board_create)
 
     body = b"hello"
     aid = _rid(50)
@@ -442,7 +475,7 @@ def test_rebuild_clears_uncached_board_projections(stack, tmp_path):
     )
     try:
         count = d2.rebuild_all("bbs.a")
-        assert count == 2, f"rebuild should replay both records, got {count}"
+        assert count == 3, f"rebuild should replay the board.create and both records, got {count}"
 
         bp2 = d2._get_board_projection("bbs.a", "general")
         art2 = bp2.get_article_by_num("bbs.a", "general", 1)

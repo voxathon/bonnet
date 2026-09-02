@@ -23,6 +23,7 @@ from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     HEAD_FORMAT,
     MAX_U63,
+    MAX_WITNESS_SET,
     RECORD_FORMAT,
     WITNESS_FORMAT,
     ZERO_HASH,
@@ -39,6 +40,7 @@ from bonnet.core.record import (
     encode_record,
     encode_unsigned_head,
     encode_unsigned_record,
+    encode_unsigned_witness,
     reconstruct_intent_from_record,
     sign_head,
     sign_record,
@@ -46,6 +48,7 @@ from bonnet.core.record import (
     verify_intent_signature,
     verify_key_rotation_proof,
     verify_record_signature,
+    verify_witness_signature,
 )
 
 # ---------------------------------------------------------------------------
@@ -872,6 +875,19 @@ class FirehoseStore:
 
                 if anchored:
                     assert head is not None  # implied by anchored, spelled out for mypy
+
+                    # The head has to be about the origin we asked for. Every
+                    # record was checked against `origin` above; the head was
+                    # checked for hash, count and signature but never for whose
+                    # log it described. Its own origin field is inside the
+                    # signed bytes, so a mismatch here is not a forgery — it is
+                    # this origin signing a head for someone else's log, which
+                    # is not an anchor for this range.
+                    if head.origin != origin:
+                        self._conn.execute("ROLLBACK")
+                        raise HeadMismatch(
+                            f"head describes origin {head.origin!r}, expected {origin!r}"
+                        )
                     final_hash = expected_prev if records[-1].origin_seq == last_seq else None
                     if final_hash is None:
                         final_hash = compute_event_hash(encode_record(records[-1]))
@@ -1045,20 +1061,34 @@ class FirehoseStore:
             ).fetchone()
             return row[0] if row else 0
 
-    def get_next_article_num(self, origin: str, board: str) -> int:
-        """Return the next article number that will be allocated for this board."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT next_article_num FROM board_counters WHERE origin=? AND board=?",
-                (origin, board),
-            ).fetchone()
-            return row[0] if row else 1
-
     # -----------------------------------------------------------------------
     # Witness storage
     # -----------------------------------------------------------------------
 
-    def store_witness(self, w: Witness) -> None:
+    def store_witness(self, w: Witness) -> bool:
+        """Store a relay witness, if its signature holds. Returns whether it did.
+
+        Verification is unconditional and belongs here rather than at the call
+        sites, because the table is no longer only our own. Witnesses received
+        from a peer are retained and served onward, so an unverified row would
+        be a forgery this relay republishes — and republishing it is exactly
+        what would let a peer pin an event on a relay that never saw it.
+
+        This is the case internal/NOTEBOOK.md §18.4 ruled out, and it was right
+        to at the time: every witness here was one we minted, so checking it
+        meant checking our own signature with our own key. Retention is what
+        changes the answer. It costs one Ed25519 verify per event per relay,
+        not per read — `get_witness` returns the cached row.
+        """
+        if not verify_witness_signature(
+            w.relay_pubkey, encode_unsigned_witness(w), w.relay_signature
+        ):
+            log_msg(
+                f"WITNESS: rejecting unverifiable witness for "
+                f"{w.event_origin}/{w.event_id.hex()[:16]} claiming relay "
+                f"{w.relay_pubkey.hex()[:16]}"
+            )
+            return False
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO relay_witnesses "
@@ -1078,6 +1108,46 @@ class FirehoseStore:
                 ),
             )
             self._conn.commit()
+        return True
+
+    def get_witnesses(
+        self, event_origin: str, event_id: bytes, limit: int = MAX_WITNESS_SET
+    ) -> list[Witness]:
+        """Every witness held for an event, oldest observation first.
+
+        This is the provenance chain as far as it reached us: our own witness
+        plus each upstream one we retained and verified. It is a set to be
+        reassembled by matching relay_pubkey against received_from_pubkey, not
+        a sorted path — a broken or forked edge is the interesting finding, and
+        ordering the rows would hide it.
+
+        Every entry is a signed statement by the relay it names, so the chain
+        survives that relay going offline. That is the property retention buys
+        and a lookup-on-demand design cannot have.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT event_hash, relay_pubkey, relay_hostname, received_from_pubkey, "
+                "received_from_hostname, seen_at, relay_signature "
+                "FROM relay_witnesses WHERE event_origin=? AND event_id=? "
+                "ORDER BY seen_at, relay_pubkey LIMIT ?",
+                (event_origin, event_id, limit),
+            ).fetchall()
+        return [
+            Witness(
+                witness_format=WITNESS_FORMAT,
+                event_origin=event_origin,
+                event_id=event_id,
+                event_hash=bytes(r[0]),
+                relay_pubkey=bytes(r[1]),
+                relay_hostname=r[2],
+                received_from_pubkey=bytes(r[3]),
+                received_from_hostname=r[4],
+                seen_at=r[5],
+                relay_signature=bytes(r[6]),
+            )
+            for r in rows
+        ]
 
     def get_witness(
         self, event_origin: str, event_id: bytes, relay_pubkey: bytes
@@ -1198,6 +1268,105 @@ class FirehoseStore:
                 return False, recorded, None
             actual = compute_event_hash(bytes(erow[0]))
             return actual == recorded, recorded, actual
+
+    def derive_key_epochs(self, origin: str) -> list[tuple[int, int | None, bytes]] | None:
+        """Rebuild an origin's epoch table from the rotate records we hold.
+
+        The sibling of `check_tip`, for the other table maintained alongside
+        `events` rather than derived from it. `origin_key_epochs` is the more
+        load-bearing of the two — it decides *which key verifies which record* —
+        and it had no consistency check at all, while `origin_state` has had
+        one since the tip-drift incident.
+
+        Its failure mode is also worse. A drifted tip raises ChainBreak, which
+        `_diagnose_chain_break` recognises as ours and repairs. A drifted epoch
+        table raises SignatureInvalid, which looks exactly like a peer serving
+        forged records — so the relay blames an honest peer and retries forever.
+
+        Returns the epochs implied by epoch 1's key plus every stored rotate
+        record, or None when there is nothing to derive from. Epoch 1's key is
+        the TOFU anchor and cannot be re-derived: it entered from a head, not
+        from a record. So the question this answers is "given the anchor, does
+        the rest follow" — which is the same question `_derive_batch_keys` asks
+        of an incoming batch, run against stored history instead.
+        """
+        with self._lock:
+            first = self._conn.execute(
+                "SELECT start_seq, publickey FROM origin_key_epochs "
+                "WHERE origin=? ORDER BY start_seq LIMIT 1",
+                (origin,),
+            ).fetchone()
+            if not first or first[0] != 1:
+                return None
+            rows = self._conn.execute(
+                "SELECT encoded_record FROM events WHERE origin=? AND kind=? ORDER BY origin_seq",
+                (origin, KIND_ORIGIN_KEY_ROTATE),
+            ).fetchall()
+
+        current = bytes(first[1])
+        derived: list[tuple[int, int | None, bytes]] = []
+        start = 1
+        for row in rows:
+            rec = decode_record(bytes(row[0]))
+            new_key = rec.metadata.get_bytes(1)
+            proof = rec.metadata.get_bytes(2)
+            # A rotate that does not chain from the key we are holding, or
+            # whose signature or proof does not hold, is not a boundary we can
+            # derive through. Stop rather than guess: everything before it is
+            # still sound, and reporting a short table is honest where
+            # inventing the rest would not be.
+            if new_key is None or proof is None or rec.actor_pubkey != current:
+                break
+            if not verify_record_signature(
+                current, encode_unsigned_record(rec), rec.origin_signature
+            ):
+                break
+            if not verify_key_rotation_proof(new_key, origin, current, proof):
+                break
+            derived.append((start, rec.origin_seq, current))
+            start = rec.origin_seq + 1
+            current = new_key
+        derived.append((start, None, current))
+        return derived
+
+    def check_key_epochs(self, origin: str) -> tuple[bool, list, list]:
+        """Compare the stored epoch table against what the records imply.
+
+        Returns (consistent, stored, derived). Consistent when nothing can be
+        derived, since there is then nothing to disagree with.
+        """
+        derived = self.derive_key_epochs(origin)
+        stored = self.get_key_epochs(origin)
+        if derived is None:
+            return True, stored, []
+        return stored == derived, stored, derived
+
+    def repair_key_epochs(self, origin: str) -> bool:
+        """Rewrite the epoch table from the derivation. True if it changed.
+
+        Only `origin_key_epochs` is touched. The records it is derived from are
+        signed and are never rewritten here — same rule as `repair_tip`.
+        """
+        consistent, _stored, derived = self.check_key_epochs(origin)
+        if consistent or not derived:
+            return False
+        now = int(time.time())
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM origin_key_epochs WHERE origin=?", (origin,))
+                for start, end, pubkey in derived:
+                    self._conn.execute(
+                        "INSERT INTO origin_key_epochs "
+                        "(origin, start_seq, end_seq, publickey, first_seen) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (origin, start, end, pubkey, now),
+                    )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return True
 
     def repair_tip(self, origin: str) -> bool:
         """Reset the recorded tip to the stored record at highest_seq.

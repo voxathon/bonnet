@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import glob
 import os
+import socket
 import tomllib
 from dataclasses import dataclass
 
 from bonnet.core.acl import ACLEvaluator
 from bonnet.core.home import resolve_home
+from bonnet.core.record import normalize_origin
 
 
 @dataclass
@@ -30,6 +32,7 @@ class PeerConfig:
     hostname: str
     port: int = 2272
     verify_tls: bool = False
+    allow_private: bool = False
     import_warnings: bool = False
     import_temp_bans: bool = False
     import_permabans: bool = False
@@ -47,9 +50,8 @@ class PeerConfig:
 
 
 def _normalize_origin(origin: str) -> str:
-    if not origin:
-        return ""
-    return origin.strip().lower().rstrip(".")
+    """Config's origin normalization, shared with the wire's lookup keys."""
+    return normalize_origin(origin)
 
 
 def _as_bool(table: dict, key: str, section: str, default: bool) -> bool:
@@ -106,6 +108,7 @@ _PEER_KEYS = {
     "hostname",
     "port",
     "verify_tls",
+    "allow_private",
     "import_warnings",
     "import_temp_bans",
     "import_permabans",
@@ -292,8 +295,14 @@ class FirehoseConfig:
         """Raise ValueError if configuration is invalid."""
         if not self.origin:
             raise ValueError("config: origin must not be empty")
+        if not isinstance(self.port, int) or isinstance(self.port, bool):
+            raise ValueError(f"config: port must be an integer, got {self.port!r}")
         if not (1 <= self.port <= 65535):
             raise ValueError(f"config: port {self.port} out of range [1, 65535]")
+        try:
+            socket.getaddrinfo(self.host, None)
+        except socket.gaierror as exc:
+            raise ValueError(f"config: host {self.host!r} does not resolve: {exc}") from exc
         if self.max_request_size <= 0:
             raise ValueError(
                 f"config: max_request_size must be positive, got {self.max_request_size}"
@@ -341,6 +350,10 @@ class FirehoseConfig:
             if normalized_origin in seen_origins:
                 raise ValueError(f"config: duplicate peer origin '{peer.origin}'")
             seen_origins.add(normalized_origin)
+            if not isinstance(peer.port, int) or isinstance(peer.port, bool):
+                raise ValueError(
+                    f"config: peer '{peer.origin}' port must be an integer, got {peer.port!r}"
+                )
             if not (1 <= peer.port <= 65535):
                 raise ValueError(f"config: peer '{peer.origin}' port {peer.port} out of range")
             for flag in ("import_warnings", "import_temp_bans", "import_permabans"):
@@ -380,6 +393,8 @@ class FirehoseConfig:
     def load(path: str) -> FirehoseConfig:
         if not os.path.exists(path):
             raise FileNotFoundError(f"config file not found: {path}")
+        if os.path.isdir(path):
+            raise IsADirectoryError(f"config path is a directory, not a file: {path}")
 
         with open(path, "rb") as f:
             data = tomllib.load(f)
@@ -442,7 +457,7 @@ class FirehoseConfig:
             boards_dir=boards_dir,
             events_bodies_dir=events_bodies_dir,
             port=port,
-            tls_enabled=tls.get("enabled", False),
+            tls_enabled=_as_bool(tls, "enabled", "tls", False),
             tls_cert_path=tls.get("cert_path", ""),
             tls_key_path=tls.get("key_path", ""),
             tls_ca_bundle=tls.get("ca_bundle", True),
@@ -463,6 +478,7 @@ class FirehoseConfig:
                     hostname=p.get("hostname", ""),
                     port=p.get("port", 2272),
                     verify_tls=p.get("verify_tls", False),
+                    allow_private=_as_bool(p, "allow_private", "sync.peers", False),
                     import_warnings=_as_bool(p, "import_warnings", "sync.peers", False),
                     import_temp_bans=_as_bool(p, "import_temp_bans", "sync.peers", False),
                     import_permabans=_as_bool(p, "import_permabans", "sync.peers", False),
@@ -477,7 +493,10 @@ class FirehoseConfig:
 
     @staticmethod
     def create_default_config(
-        path: str, force: bool = False, tls_paths: tuple[str, str] | None = None
+        path: str,
+        force: bool = False,
+        tls_paths: tuple[str, str] | None = None,
+        port: int = 2272,
     ) -> FirehoseConfig:
         """Write a sample config file and return the default config.
 
@@ -493,15 +512,18 @@ class FirehoseConfig:
             raise FileExistsError(f"config file already exists: {path} (use --force to overwrite)")
         config = FirehoseConfig(
             acl=ACLEvaluator([]),
+            port=port,
             tls_enabled=tls_paths is not None,
             tls_cert_path=tls_paths[0] if tls_paths else "",
             tls_key_path=tls_paths[1] if tls_paths else "",
         )
-        config._write_default(path, tls_paths=tls_paths)
+        config._write_default(path, tls_paths=tls_paths, port=port)
         return config
 
     @staticmethod
-    def _write_default(path: str, tls_paths: tuple[str, str] | None = None) -> None:
+    def _write_default(
+        path: str, tls_paths: tuple[str, str] | None = None, port: int = 2272
+    ) -> None:
         if tls_paths:
             cert_path, key_path = tls_paths
             tls_section = f"""[tls]
@@ -536,7 +558,7 @@ hostname = ""
 # data_dir = "./data"
 # boards_dir = "./boards"
 # events_bodies_dir = "./event_bodies"
-port = 2272
+port = {port}
 # Bind address: 127.0.0.1 for local-only, 0.0.0.0 for all interfaces.
 # Change this deliberately once you're ready to accept remote connections.
 host = "127.0.0.1"
@@ -567,6 +589,9 @@ interval_seconds = 300
 # Firehose federation peers. Each entry starts a background sync loop.
 # The origin is the peer's Bonnet origin string; hostname/port is the dial address.
 # verify_tls should be false for self-signed certs (common on LAN).
+# allow_private permits dialing loopback/private/link-local addresses (e.g.
+# 127.0.0.1 or 10.0.0.15) - refused by default as an SSRF guard, so set this
+# to true for local testing or a real LAN-only federation deployment.
 # import_warnings, import_temp_bans, and import_permabans control which
 # punishment types this peer's moderation actions are enforced with locally.
 # Records are always stored and relayed regardless; these flags only govern
@@ -577,6 +602,7 @@ interval_seconds = 300
 # hostname = "10.0.0.15"
 # port = 2272
 # verify_tls = false
+# allow_private = true
 # import_warnings = true
 # import_temp_bans = true
 # import_permabans = false
@@ -631,7 +657,7 @@ effect = "allow"
 match.registered = true
 actions = ["write"]
 commands = ["PUBLISH_RECORD"]
-kinds = ["bonnet.article", "bonnet.board.create", "bonnet.report", "bonnet.user.key.rotate"]
+kinds = ["bonnet.article", "bonnet.board.create", "bonnet.report", "bonnet.user.key.rotate", "bonnet.punishment.ack"]
 boards = ["*"]
 
 # To grant a specific key full access (read/write, every command/kind/board):

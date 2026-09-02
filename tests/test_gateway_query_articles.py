@@ -71,7 +71,13 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
         target = url if url is not None else tools._current_url()
         if target != "https://bbs.test":
             raise httpx.ConnectError(f"no server at {target}")
-        client = FirehoseHTTPClient(target, verify=False)
+        # A trust store, as `tools._make_client` always builds one with: TOFU
+        # pinning is a no-op without it, and the pin is what the cached epoch
+        # table anchors on. Left at the default AUTO pin mode so first contact
+        # adopts silently rather than prompting.
+        client = FirehoseHTTPClient(
+            target, verify=False, trust_store_path=str(tmp_path / "trust.db")
+        )
         client._http = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url=target,
@@ -184,3 +190,72 @@ async def test_query_articles_sorts_oldest_first(wired):
     results = await tools.query_articles(board="general", origin=ORIGIN)
 
     assert [a.subject for a in results.results] == ["first", "second"]
+
+
+async def test_get_event_lets_a_reader_check_the_signatures(wired):
+    """End to end: connect caches the origin's key history, and get_event
+    returns both signatures plus this client's own verdict on them.
+
+    This is the escape hatch `get_article` has always pointed at — "use
+    get_event when you need the signed artifact" — which until now returned no
+    signatures and verified nothing.
+    """
+    await _connect_register_and_create_board("general")
+    await tools.publish_article("signed", "content", board="general")
+
+    events = await tools.event_range(origin=ORIGIN, start_seq=1, max_count=50)
+    article = [e for e in events if e["kind"] == "bonnet.article"][-1]
+
+    got = await tools.get_event(origin=ORIGIN, event_id_hex=article["event_id"])
+
+    assert len(got["actor_signature"]) == 128
+    assert len(got["origin_signature"]) == 128
+    # Both checkable: the author's key rides in the record, and the origin's
+    # key for this sequence came from the epoch table cached during connect.
+    assert got["verification"] == {
+        "author": "valid",
+        "origin": "valid",
+        "origin_key_known_for_seq": True,
+    }
+
+
+async def test_publish_article_rejects_lone_surrogate(wired):
+    """A lone UTF-16 surrogate in content used to hang the gateway rather
+    than fail cleanly: content.encode("utf-8") raised UnicodeEncodeError,
+    and something downstream of that failed a second time trying to
+    serialize a response, with nothing ever resolving the caller's
+    call_tool() future. Reject it up front instead."""
+    await _connect_register_and_create_board("general")
+
+    with pytest.raises(Exception) as exc:
+        await tools.publish_article("subject", "bad\ud800surrogate", board="general")
+
+    assert "surrogate" in str(exc.value)
+
+
+async def test_publishing_to_an_uncreated_board_is_refused(wired):
+    """A publish to a board nobody ran create_board for must be refused
+    outright, not silently mint that board owned by whoever happened to
+    publish first — that made any registered user able to spray-create/
+    typosquat boards with no authorization event, moderation step, or audit
+    trail (see firehose_commands._cmd_publish and dispatcher.py's
+    _dispatch_article). Once the board actually exists, the same publish
+    succeeds and is fully discoverable."""
+    await tools.connect("https://bbs.test")
+    await tools.register("scout")
+
+    with pytest.raises(Exception) as exc:
+        await tools.publish_article("first post", "body", board="ghost-board")
+    assert "does not exist" in str(exc.value)
+
+    boards = await tools.list_boards(origin=ORIGIN)
+    assert "ghost-board" not in {b.name for b in boards}
+
+    await tools.create_board("ghost-board")
+    await tools.publish_article("first post", "body", board="ghost-board")
+
+    boards = await tools.list_boards(origin=ORIGIN)
+    assert "ghost-board" in {b.name for b in boards}
+    article = await tools.get_article(1, board="ghost-board")
+    assert article is not None
+    assert article.subject == "first post"

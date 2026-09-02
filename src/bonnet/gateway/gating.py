@@ -168,8 +168,15 @@ def _origin_missing() -> str | None:
     )
 
 
-def _identity_missing() -> str | None:
-    """Why this caller has no identity to sign as, or None."""
+def _identity_missing(auth: str | None = None) -> str | None:
+    """Why this caller has no identity to sign as, or None.
+
+    `auth` is the call's own per-call identity override, checked ahead of
+    the session's default the same way `_tools._connect_authenticated`
+    already resolves it — a call naming `auth="alice"` must be judged on
+    whether alice is a known identity, not on whatever identity the session
+    otherwise defaults to.
+    """
     # Imported here, not at module scope: tools imports this module for the
     # NEEDS_ORIGIN/NEEDS_IDENTITY tags it decorates with, so a top-level
     # import would cycle.
@@ -180,7 +187,7 @@ def _identity_missing() -> str | None:
         current_username,
     )
 
-    name = current_username.get() or _default_identity()
+    name = auth or current_username.get() or _default_identity()
     if not name:
         return (
             "no identity selected: nothing says who to act as. Call "
@@ -194,19 +201,6 @@ def _identity_missing() -> str | None:
             f"it, or list_identities to see what is available."
         )
     return None
-
-
-def missing_prerequisite() -> str | None:
-    """What this caller lacks to use every origin-facing tool, or None.
-
-    The combined answer — both an origin and an identity. Individual tools
-    need less: a read tool tagged NEEDS_ORIGIN alone works from
-    _origin_missing alone, since it can fall back to the anonymous
-    principal. Gating checks each tool's actual tags via _missing_for; this
-    stays as the aggregate "is this caller fully set up" answer other code
-    can ask for.
-    """
-    return _origin_missing() or _identity_missing()
 
 
 def _has_origin() -> bool:
@@ -223,11 +217,6 @@ def _has_origin() -> bool:
     return current_origin_url.get() is not None
 
 
-def caller_is_ready() -> bool:
-    """True if the current caller can use every origin-facing tool."""
-    return missing_prerequisite() is None
-
-
 def _needs_origin(tool: Tool) -> bool:
     return NEEDS_ORIGIN in (tool.tags or set())
 
@@ -236,7 +225,7 @@ def _needs_identity(tool: Tool) -> bool:
     return NEEDS_IDENTITY in (tool.tags or set())
 
 
-async def _missing_for(tool: Tool, board: str | None = None) -> str | None:
+async def _missing_for(tool: Tool, board: str | None = None, auth: str | None = None) -> str | None:
     """What this caller lacks to call `tool` specifically, or None.
 
     Two layers, in order. The local heuristic (origin present? identity
@@ -259,6 +248,11 @@ async def _missing_for(tool: Tool, board: str | None = None) -> str | None:
     cursor the same way (see `cursor.resolve_board`). Without this, a call
     passing an explicit `board=` other than the open one would be checked
     against the wrong board's PERMISSIONS.
+
+    `auth` is likewise the call's own `auth=` argument, when the caller
+    passes one: gating must judge a call against the identity it will
+    actually sign as, not the session default, the same way my_permissions
+    already does.
     """
     if _needs_origin(tool):
         reason = _origin_missing()
@@ -266,12 +260,12 @@ async def _missing_for(tool: Tool, board: str | None = None) -> str | None:
             return reason
 
     if _needs_identity(tool):
-        reason = _identity_missing()
+        reason = _identity_missing(auth)
         if reason is not None:
             return reason
 
     effective_board = board or cursor.current_board.get() or ""
-    allowed = await needs_module.check(tool.name, effective_board)
+    allowed = await needs_module.check(tool.name, effective_board, auth)
     if allowed is False:
         return (
             f"{tool.name} is not permitted for this identity, per the relay's own "
@@ -312,7 +306,9 @@ class GatingMiddleware(Middleware):
                 # or absent falls through to the cursor inside _missing_for,
                 # same as cursor.resolve_board's own fallback.
                 arguments = context.message.arguments or {}
-                reason = await _missing_for(tool, arguments.get("board") or None)
+                reason = await _missing_for(
+                    tool, arguments.get("board") or None, arguments.get("auth") or None
+                )
             if reason is not None:
                 # Never a bare refusal: say what is missing and what fixes it,
                 # so a caller working from a stale tool list is redirected

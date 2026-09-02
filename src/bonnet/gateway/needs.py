@@ -125,23 +125,28 @@ def invalidate() -> None:
         del _cache[key]
 
 
-def _cache_key(board: str) -> tuple[str, str, str, str]:
+def _cache_key(board: str, auth: str | None = None) -> tuple[str, str, str, str]:
     """The cache key for the current tenant, origin, identity and board.
 
     One function rather than the expression written out at each use, so the
     two callers cannot drift apart — a `refresh` that computed a different
     key than `_permissions_for` would silently stop invalidating anything.
+
+    `auth`, when given, is a call's own per-call identity override — the same
+    parameter every origin-facing tool accepts — and takes priority over the
+    session's default identity, the same way `_tools._connect_authenticated`
+    already treats it.
     """
     # Imported here, not at module scope: tools imports this module for the
     # needs()/NEEDS registry it decorates with, so a top-level import would
     # cycle the same way gating.py's does.
     from bonnet.gateway import tools as _tools
 
-    identity = _tools.current_username.get() or _tools._default_identity() or ""
+    identity = auth or _tools.current_username.get() or _tools._default_identity() or ""
     return (tenancy.current_tenant.get(), _tools._current_url(), identity, board)
 
 
-async def _permissions_for(board: str) -> Permissions | None:
+async def _permissions_for(board: str, auth: str | None = None) -> Permissions | None:
     """Cached PERMISSIONS for the current origin, identity and board.
 
     None means the answer is unavailable — a denied PERMISSIONS call, an
@@ -151,7 +156,7 @@ async def _permissions_for(board: str) -> Permissions | None:
     """
     from bonnet.gateway import tools as _tools
 
-    key = _cache_key(board)
+    key = _cache_key(board, auth)
     entry = _cache.get(key)
     now = time.monotonic()
     if entry is not None and now - entry.fetched_at < _TTL_SECONDS:
@@ -164,10 +169,15 @@ async def _permissions_for(board: str) -> Permissions | None:
     client = _tools._make_client()
     try:
         if identity:
-            try:
-                await _tools._connect_authenticated(client, None)
-            except ValueError:
-                await _tools._connect_anonymous(client)
+            # No anonymous fallback here: a named identity that fails to
+            # connect (bad/missing password, unknown local identity, ...)
+            # must not be answered for as anonymous — that would produce a
+            # confident denial cached under the *real* identity's key,
+            # exactly the wrong side of the None/False distinction this
+            # function documents. Let it fall to `except Exception` below
+            # and come back as None ("unavailable"), same as any other
+            # connection failure.
+            await _tools._connect_authenticated(client, auth)
         else:
             await _tools._connect_anonymous(client)
         perms = await client.get_permissions(board)
@@ -191,8 +201,9 @@ async def refresh(board: str = "") -> Permissions | None:
     return await _permissions_for(board)
 
 
-async def check(tool_name: str, board: str = "") -> bool | None:
-    """Whether the current caller's PERMISSIONS satisfies `tool_name`'s Needs.
+async def check(tool_name: str, board: str = "", auth: str | None = None) -> bool | None:
+    """Whether the caller identified by `auth` (or the session default, if
+    `auth` is not given) satisfies `tool_name`'s declared Needs.
 
     True/False when PERMISSIONS answered; None when it could not be asked at
     all (see `_permissions_for`), which callers should treat as "fall back",
@@ -201,7 +212,7 @@ async def check(tool_name: str, board: str = "") -> bool | None:
     declared = NEEDS.get(tool_name)
     if declared is None:
         return None
-    perms = await _permissions_for(board)
+    perms = await _permissions_for(board, auth)
     if perms is None:
         return None
     return declared.satisfied_by(perms)

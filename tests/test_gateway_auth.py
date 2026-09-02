@@ -72,6 +72,18 @@ def test_bearer_and_x_api_key_are_equivalent(gw, monkeypatch):
     assert _resolve(monkeypatch, {"X-API-Key": key}) == ("alice", tenancy.AUTH_OK)
 
 
+def test_garbage_bearer_falls_back_to_a_valid_x_api_key(gw, monkeypatch):
+    """A harness that defensively sets both headers must not have a stale or
+    garbage Bearer token silently shadow a working X-API-Key - only the tenant
+    store knows which candidate (if either) actually resolves, so both must
+    be tried rather than picking Bearer unconditionally."""
+    key = gw["key"]
+    assert _resolve(monkeypatch, {"Authorization": "Bearer garbage", "X-API-Key": key}) == (
+        "alice",
+        tenancy.AUTH_OK,
+    )
+
+
 def test_no_header_is_anonymous_absent(gw, monkeypatch):
     assert _resolve(monkeypatch, {}) == (tenancy.ANONYMOUS_TENANT, tenancy.AUTH_ABSENT)
 
@@ -265,6 +277,29 @@ def test_presented_key_prefers_bearer_but_accepts_either():
     assert server.presented_key({"X-API-Key": "xyz"}) == "xyz"
     assert server.presented_key({"Authorization": "Bearer ", "X-API-Key": "xyz"}) == "xyz"
     assert server.presented_key({}) == ""
+
+
+def test_presented_key_scheme_is_case_insensitive():
+    """RFC 7235 makes the auth scheme token case-insensitive - lowercase
+    'bearer' used to silently miss the exact-case check and fall through to
+    X-API-Key (empty), degrading to anonymous with no signal that a
+    credential was even presented."""
+    assert server.presented_key({"Authorization": "bearer abc"}) == "abc"
+    assert server.presented_key({"Authorization": "BEARER abc"}) == "abc"
+    assert server.presented_key({"Authorization": "BeArEr abc"}) == "abc"
+
+
+def test_presented_key_candidates_orders_bearer_before_x_api_key():
+    assert server.presented_key_candidates({"Authorization": "Bearer abc", "X-API-Key": "xyz"}) == [
+        "abc",
+        "xyz",
+    ]
+    assert server.presented_key_candidates({"X-API-Key": "xyz"}) == ["xyz"]
+    assert server.presented_key_candidates({"Authorization": "Bearer abc"}) == ["abc"]
+    assert server.presented_key_candidates({"Authorization": "Bearer ", "X-API-Key": "xyz"}) == [
+        "xyz"
+    ]
+    assert server.presented_key_candidates({}) == []
 
 
 def test_gating_module_exposes_the_forbidden_set():

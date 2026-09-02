@@ -34,9 +34,16 @@ What a signature does and does not establish:
   friends return flattened projections; `_decode_article_view` reads no
   signature field, so a caller cannot check anything against `author_pubkey`.
   The relay verified the signatures at ingest and signs its response to the
-  caller under RFC 9421. Attribution on those tools is thus an assertion by
-  the relay, trustworthy exactly insofar as the relay is. The `event_*` tools
-  are the ones that carry signed records.
+  caller under RFC 9421 — a signature the client checks against the key it
+  pinned for that origin, so attribution on those tools is an assertion by
+  *that pinned origin*, trustworthy exactly insofar as it is.
+- `get_event` is where you can check for yourself. It returns both signatures
+  and a `verification` block: `author` is verified against the key carried in
+  the record, so it always has an answer, and `origin` against the key that
+  was authoritative at that sequence, which needs this client to have cached
+  the origin's key history. That history is fetched once, at connect, and kept
+  — so an origin's older records stay verifiable after the origin itself stops
+  answering.
 
 Fields carrying provenance, and their limits:
 
@@ -59,12 +66,13 @@ any downstream tool call.
 import contextvars
 import os
 import time
+from urllib.parse import urlsplit
 
 import httpx
 from fastmcp import FastMCP
 
 from bonnet.core.crypto import Identity
-from bonnet.core.record import ZERO_ID
+from bonnet.core.record import MAX_BOARD, MAX_TEXT_FIELD, ZERO_ID
 from bonnet.core.trust import TrustStore
 from bonnet.gateway import cursor, tenancy, thread_view
 from bonnet.gateway import needs as needs_module
@@ -185,6 +193,15 @@ def _ensure_origin_loaded() -> None:
     whatever origin was connected last. With neither, the built-in default
     stands.
 
+    BONNET_URL overriding the *URL* does not mean throwing away everything
+    the store knows about that URL: a fresh process wired up entirely through
+    $BONNET_URL/$BONNET_IDENTITY never calls connect(), so without this,
+    _default_origin() falls back to the raw URL string as a stand-in origin
+    id — which does not match the real origin id (e.g. "localhost") that an
+    earlier session's connect() actually stored identities under. Looking up
+    the store by URL recovers that real id without touching the URL or TLS
+    setting the env variable dictates.
+
     Runs once per caller context and on first use rather than at import, so
     reading the state file is not a side effect of importing this module, and
     so an explicit `disconnect()` (which leaves this flag set) is not silently
@@ -193,7 +210,11 @@ def _ensure_origin_loaded() -> None:
     if _origin_loaded.get():
         return
     _origin_loaded.set(True)
-    if os.environ.get("BONNET_URL"):
+    env_url = os.environ.get("BONNET_URL")
+    if env_url:
+        matched = _get_origin_store().get_by_url(env_url.rstrip("/"))
+        if matched is not None:
+            current_origin.set(matched["origin"])
         return
     active = _get_origin_store().active()
     if active is None:
@@ -410,6 +431,63 @@ async def _connect_anonymous(client: FirehoseHTTPClient) -> None:
     await client.connect_anonymous()
 
 
+def _reject_lone_surrogates(field: str, value: str) -> None:
+    """Refuse text containing an unpaired UTF-16 surrogate.
+
+    A lone surrogate is a legal Python str but not valid Unicode text: it
+    can't be UTF-8 encoded, and letting it reach the gateway's response
+    serialization has caused an unrecoverable hang there rather than a
+    clean error. Catching it here, before any encode/store/echo, keeps the
+    failure an ordinary ValueError.
+    """
+    if any(0xD800 <= ord(c) <= 0xDFFF for c in value):
+        raise ValueError(f"{field} contains invalid unicode (unpaired surrogate)")
+
+
+def _require_int(name: str, value: object) -> int:
+    """Type-check a pagination arg before it hits a bare comparison.
+
+    `offset < 0` and friends assume an int; a str/None/float arriving here
+    (a real risk since these tools are called directly, bypassing whatever
+    JSON-Schema coercion an MCP host would otherwise apply) throws a raw
+    TypeError instead of a clean, actionable ValueError.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer, got {type(value).__name__}")
+    return value
+
+
+def _require_text_fields(**fields: str) -> None:
+    """Type-check and surrogate-check a batch of string tool args.
+
+    Args arrive here straight from the caller, not from a validated schema —
+    a wrong-typed None/int/list must fail as a clean ValueError, not as
+    whatever AttributeError/TypeError the first .encode()/iteration downstream
+    happens to throw.
+    """
+    for field, value in fields.items():
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a string, got {type(value).__name__}")
+        _reject_lone_surrogates(field, value)
+
+
+def _check_byte_len(field: str, value: str, max_bytes: int) -> None:
+    """Reject a text field before it reaches the wire encoder.
+
+    The encoder (core.record) enforces the same limit and raises a clean
+    message too, but only after `encode_intent` has already run — inside the
+    gateway process, not caught by any handler here, so it would otherwise
+    surface as an opaque tool error with the real cause visible only in the
+    server log. Checking here up front turns that into an actionable
+    ValueError naming the field, at the cost of measuring in the same UTF-8
+    bytes the wire format actually counts (not characters), so unicode input
+    can still be shorter than it looks and still trip this.
+    """
+    n = len(value.encode("utf-8"))
+    if n > max_bytes:
+        raise ValueError(f"{field} is too long: {n} bytes exceeds the {max_bytes}-byte limit")
+
+
 def _validate_pubkey(pubkey_hex: str) -> bytes:
     try:
         pk = bytes.fromhex(pubkey_hex)
@@ -513,7 +591,29 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     federates with, and any identities already registered here by this
     client. Everything in that result except the identity list is the
     origin's own claim about itself.
+
+    `known_origins` is worth keeping: it is the set that `origin=""` aggregates
+    over on list_boards, list_articles and search_articles, and the set of
+    origin names those tools will accept. Anything outside it is refused.
+
+    `advertised_address` appears only when the origin says it lives somewhere
+    other than where this connection reached it — a moved or proxied relay.
+    Nothing follows it automatically; it is there so a stale configured
+    address can be noticed and fixed deliberately.
     """
+    if not url.strip():
+        raise ValueError(
+            "connect requires a URL (e.g. https://bbs.example:2272) - an empty "
+            "or whitespace-only value would silently fall back to the default "
+            "origin instead of connecting where you meant to"
+        )
+    parsed = urlsplit(url.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(
+            f"connect requires an http:// or https:// URL, got {url!r} "
+            "(e.g. https://bbs.example:2272)"
+        )
+
     previous = (current_origin_url.get(), current_origin_verify.get(), current_origin.get())
 
     resolved_url = url.rstrip("/")
@@ -535,9 +635,17 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         client = _make_client()
         await _connect_anonymous(client)
         origin = client.server_origin or ""
+        # First successful contact is when to learn this origin's key history,
+        # while it is answering. Cached, verification of its older records
+        # keeps working after it stops — and an origin that has gone quiet is
+        # indistinguishable from one refusing to answer, so a client that only
+        # fetched this on demand could not tell a forgery from an outage.
+        # Best-effort: a peer without KEY_EPOCHS is not a failed connection.
+        await client.refresh_epoch_cache(origin)
         boards = [b.name for b in await client.list_boards(origin="")]
         discovery = client.discovery
         known = list(discovery.known_origins) if discovery else []
+        advertised = client.advertised_address()
         identities = _get_identity_store().list_users(origin)
     except PinConfirmationRequired as pending:
         # Caught ahead of the generic handler, but restoring the same state:
@@ -579,7 +687,14 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         "origin": origin,
         "url": resolved_url,
         "boards": boards,
+        # Which origins this relay serves. Aggregate reads (origin="") span
+        # exactly this set, and it is built from the same peer list that gates
+        # them, so it states the scope rather than guessing at it.
         "known_origins": known,
+        # Set only when the origin says it lives somewhere other than where
+        # this connection reached it. Reported, never followed - see
+        # FirehoseTransport.advertised_address.
+        "advertised_address": advertised,
         "identities": [
             {
                 "username": i["username"],
@@ -625,6 +740,16 @@ _EVIDENCE_NOTE = {
     ),
 }
 
+_HOST_MISMATCH_NOTE = (
+    "Note that this server calls itself {origin} but was reached at {url}. That "
+    "is normal for a relay behind a proxy or one that has moved hosts, and the "
+    "origin name is the server's own claim either way. It matters here because "
+    "the key is about to be pinned under that name while TLS, if it is on, "
+    "certified the address instead — so the two are vouching for different "
+    "strings, and neither is checking the other. When they agree, accepting is "
+    "at least anchored to something a certificate authority saw."
+)
+
 
 def _decode_verify(stored: str) -> bool:
     """Read back a TLS verify setting recorded with a pending key.
@@ -646,7 +771,9 @@ def _pin_prompt(pending: PinConfirmationRequired, url: str) -> dict:
     body = (_PIN_PROMPT_NEW if pending.kind == "new" else _PIN_PROMPT_CHANGED).format(
         origin=pending.origin or url
     )
-    note = _EVIDENCE_NOTE.get(pending.evidence)
+    notes = [n for n in (_EVIDENCE_NOTE.get(pending.evidence),) if n]
+    if not pending.host_match:
+        notes.append(_HOST_MISMATCH_NOTE.format(origin=pending.origin or "?", url=url))
     return {
         "pin_required": True,
         "kind": pending.kind,
@@ -654,7 +781,8 @@ def _pin_prompt(pending: PinConfirmationRequired, url: str) -> dict:
         "url": url,
         "fingerprint": pending.fingerprint,
         "rotation_evidence": pending.evidence or None,
-        "message": body if note is None else f"{body}\n\n{note}",
+        "origin_matches_host": pending.host_match,
+        "message": "\n\n".join([body, *notes]),
         "next": (
             f"trust_origin_key(fingerprint='{pending.fingerprint}', decision='accept')"
             f" to accept, or decision='decline' to refuse. Nothing is trusted "
@@ -830,6 +958,8 @@ async def register(username: str, password: str | None = None, origin: str | Non
     registered is safe: it re-selects the identity and returns
     `registered_seq: null` to say no new registration record was published.
     """
+    _reject_lone_surrogates("username", username)
+    _check_byte_len("username", username, MAX_TEXT_FIELD)
     target_origin = origin if origin is not None else _default_origin()
 
     origin_entry = _get_origin_store().get(target_origin)
@@ -861,16 +991,26 @@ async def register(username: str, password: str | None = None, origin: str | Non
         try:
             result = await client.publish_user_register(username, identity.public_key, flags=0)
             registered_seq = result.origin_seq
-        except ProtocolError:
+        except ProtocolError as refusal:
             # Re-registering an origin this key already registered with. The
             # server is right to refuse: registration is granted to
             # `unknown` principals, and this key stopped being one the first
             # time. Treat it as registered if the origin agrees the key holds
             # this name, and re-raise otherwise so a genuine refusal is not
             # swallowed.
-            existing = await client.get_user(target_origin, identity.public_key)
+            #
+            # The confirming read can fail on its own account — an unknown
+            # principal may not be permitted USER_GET at all — and that must
+            # not substitute an unrelated error for the refusal the caller
+            # needs to see. A name already taken by someone else is a real
+            # outcome now that first-writer-wins is enforced, and "pick
+            # another name" is only actionable if that is what surfaces.
+            try:
+                existing = await client.get_user(target_origin, identity.public_key)
+            except ProtocolError:
+                existing = None
             if existing is None or existing.username != username:
-                raise
+                raise refusal from None
 
         store.mark_registered(target_origin, username)
     finally:
@@ -893,13 +1033,25 @@ async def register(username: str, password: str | None = None, origin: str | Non
     # so both the cache and the tool list need refreshing here.
     unlocked = await _unlock_origin_tools()
 
-    return {
+    already_registered = registered_seq is None
+    response: dict[str, list[str] | str | int | None] = {
         "origin": target_origin,
         "username": username,
         "public_key": identity.public_key.hex(),
         "registered_seq": registered_seq,
+        # `registered_seq: null` alone is easy to read as "the register call
+        # didn't really do anything" - this spells out the same fact so a
+        # caller doesn't have to know that a null sequence number means
+        # success-but-no-op rather than failure.
+        "already_registered": already_registered,
         "tools_unlocked": unlocked,
     }
+    if already_registered:
+        response["message"] = (
+            f"'{username}' was already registered on this origin under this key - "
+            "re-selected the existing identity; no new registration record was published."
+        )
+    return response
 
 
 @mcp.tool
@@ -1039,14 +1191,18 @@ async def where_am_i() -> dict:
     board = cursor.current_board.get()
     article_num = cursor.current_article_num.get()
 
-    if article_num is not None:
+    # Gated on has_origin first: board/article_num are cursor state that can
+    # outlive a disconnect (nothing clears them just because no origin is
+    # set), so without this a caller could see state:"in_board" alongside
+    # origin: null — a position that doesn't actually exist.
+    if not has_origin:
+        state = "disconnected"
+    elif article_num is not None:
         state = "reading_article"
     elif board is not None:
         state = "in_board"
-    elif has_origin:
-        state = "on_origin"
     else:
-        state = "disconnected"
+        state = "on_origin"
 
     # A pin decision outstanding is the one piece of state that can leave a
     # caller unable to proceed with no visible reason — the origin looks
@@ -1245,6 +1401,9 @@ async def create_board(
     name: board name (alphanumeric, hyphens, underscores).
     display_name: optional human-readable board title.
     """
+    _reject_lone_surrogates("display_name", display_name)
+    _check_byte_len("name", name, MAX_BOARD)
+    _check_byte_len("display_name", display_name, MAX_TEXT_FIELD)
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
@@ -1345,6 +1504,10 @@ async def get_article(
     include_body: whether to fetch the article body content.
     origin: origin to query (defaults to server's origin).
     """
+    article_num = _require_int("article_num", article_num)
+    if article_num < 0:
+        raise ValueError("article_num must be non-negative")
+
     board = cursor.resolve_board(board)
     client = _make_client()
     try:
@@ -1353,7 +1516,12 @@ async def get_article(
         else:
             await _connect_anonymous(client)
         origin = origin or client._server_origin or ""
-        view = await client.get_article(origin, board, article_num, include_body)
+        try:
+            view = await client.get_article(origin, board, article_num, include_body)
+        except ProtocolError as e:
+            if e.code == 0x0003:
+                return None
+            raise
         if view and include_body and view.body is None and view.body_size > 0:
             try:
                 body = await client.get_article_body(origin, board, article_num)
@@ -1415,6 +1583,8 @@ async def list_articles(
     origin: origin to query (empty = aggregate across all known origins).
     """
     board = cursor.resolve_board(board)
+    offset = _require_int("offset", offset)
+    limit = _require_int("limit", limit)
     if offset < 0:
         raise ValueError("offset must be non-negative")
     if limit < 1:
@@ -1470,10 +1640,18 @@ async def search_articles(
     origin: origin to query (empty = aggregate across all known origins).
     """
     board = cursor.resolve_board(board)
+    offset = _require_int("offset", offset)
+    limit = _require_int("limit", limit)
     if offset < 0:
         raise ValueError("offset must be non-negative")
     if limit < 1:
         raise ValueError("limit must be at least 1")
+    # subject and tags are each capped at MAX_TEXT_FIELD bytes, so a longer
+    # query could never match — and past that length SQLite's own LIKE
+    # pattern-complexity limit kicks in as an unhandled server-side error
+    # ("LIKE or GLOB pattern too complex") that never reaches the caller
+    # cleanly. Rejecting here keeps this an actionable ValueError instead.
+    _check_byte_len("query", query, MAX_TEXT_FIELD)
     client = _make_client()
     try:
         if auth:
@@ -1493,6 +1671,7 @@ async def query_articles(
     board: str = "",
     author_pubkey: str = "",
     username: str = "",
+    registrar: str = "",
     tag: str = "",
     state: str = "",
     root_only: bool = False,
@@ -1511,8 +1690,17 @@ async def query_articles(
 
     Filtering by username is a convenience, not an identity check: usernames
     are self-chosen at registration and scoped to the registrar that accepted
-    them, so two origins may host different users under the same name. Filter
-    by author_pubkey when you need the results to be one specific author.
+    them, so two origins may host different users under the same name. A bare
+    `username` therefore matches that name under *any* registrar — pass
+    `registrar` alongside it to ask for the one identity, the way an address is
+    a local part and a domain together. Filter by author_pubkey when you need
+    the results to be one specific author regardless of naming.
+
+    Neither narrows to *verified* names. `author_check` on each result reports
+    whether the naming origin actually issued that name to that key: 'registry'
+    yes, 'unregistered' no, 'foreign' the record credits a different origin and
+    this relay does not ask it, 'unchecked' no name claimed. Filters do not
+    consider it, and nothing is hidden on the strength of it.
 
     Threading. Every result carries `root_article_id` (the thread's opening
     article; zero for a root itself) and `reply_to_article_id` (its direct
@@ -1554,6 +1742,7 @@ async def query_articles(
     board: board name (defaults to the board open_board last set).
     author_pubkey: hex Ed25519 public key to filter by author.
     username: filter by author username.
+    registrar: filter by author registrar (the origin that issued the name).
     tag: filter by tag (substring match).
     state: filter by visibility (active, cancelled, superseded).
     root_only: only show root articles (not replies).
@@ -1565,6 +1754,8 @@ async def query_articles(
         here, unlike list_articles/search_articles).
     """
     board = cursor.resolve_board(board)
+    offset = _require_int("offset", offset)
+    limit = _require_int("limit", limit)
     if offset < 0:
         raise ValueError("offset must be non-negative")
     if limit < 1:
@@ -1575,6 +1766,8 @@ async def query_articles(
         filters.append((0x01, 0x01, 0x01, pk))
     if username:
         filters.append((0x02, 0x01, 0x02, username.encode("utf-8")))
+    if registrar:
+        filters.append((0x03, 0x01, 0x02, registrar.encode("utf-8")))
     if tag:
         filters.append((0x04, 0x05, 0x02, tag.encode("utf-8")))
     if state:
@@ -1646,6 +1839,7 @@ async def read_thread(
     origin: origin to query (defaults to server's origin).
     """
     board = cursor.resolve_board(board)
+    limit = _require_int("limit", limit)
     if limit < 1:
         raise ValueError("limit must be at least 1")
 
@@ -1716,6 +1910,10 @@ async def publish_article(
     reply_to_article_id: hex article ID of the article being replied to (optional).
     """
     import os as _os
+
+    _require_text_fields(subject=subject, content=content, tags=tags)
+    _check_byte_len("subject", subject, MAX_TEXT_FIELD)
+    _check_byte_len("tags", tags, MAX_TEXT_FIELD)
 
     board = cursor.resolve_board(board)
     article_id = _os.urandom(32)
@@ -1842,6 +2040,10 @@ async def supersede_article(
     """
     import os as _os
 
+    _require_text_fields(subject=subject, content=content, tags=tags)
+    _check_byte_len("subject", subject, MAX_TEXT_FIELD)
+    _check_byte_len("tags", tags, MAX_TEXT_FIELD)
+
     board = cursor.resolve_board(board)
     supersedes_id = _validate_article_id(target_article_id)
     article_id = _os.urandom(32)
@@ -1883,6 +2085,7 @@ async def cancel_article(
     origin: origin to query (defaults to server's origin).
     reason: optional human-readable cancellation reason.
     """
+    _reject_lone_surrogates("reason", reason)
     board = cursor.resolve_board(board)
     target_article_id = cursor.resolve_article_id(target_article_id, board)
     aid = _validate_article_id(target_article_id)
@@ -1913,6 +2116,7 @@ async def restore_article(
     board: board where the target article lives (defaults to the board
         open_board last set).
     """
+    _reject_lone_surrogates("reason", reason)
     board = cursor.resolve_board(board)
     target_article_id = cursor.resolve_article_id(target_article_id, board)
     aid = _validate_article_id(target_article_id)
@@ -1945,6 +2149,7 @@ async def purge_article(
     board: board where the target article lives (defaults to the board
         open_board last set).
     """
+    _reject_lone_surrogates("reason", reason)
     board = cursor.resolve_board(board)
     target_article_id = cursor.resolve_article_id(target_article_id, board)
     aid = _validate_article_id(target_article_id)
@@ -2056,6 +2261,10 @@ async def report(
     """
     if not reason.strip():
         raise ValueError("A report needs a reason — moderators act on the grounds, not the flag")
+    _reject_lone_surrogates("reason", reason)
+    article_num = _require_int("article_num", article_num)
+    if article_num < 0:
+        raise ValueError("article_num must be non-negative")
 
     board = cursor.resolve_board(board)
     article_num = cursor.resolve_article_num(article_num, board)
@@ -2072,9 +2281,17 @@ async def report(
             target_board=board,
             target_article_id=bytes.fromhex(view.article_id),
         )
+        # Scoped, never a bare username: a name without the origin that issued
+        # it does not identify anyone, and this line is confirming a moderation
+        # action against a specific person.
+        attributed = (
+            f"{view.author_username}@{view.author_registrar}"
+            if view.author_username and view.author_registrar
+            else view.author_pubkey[:16]
+        )
         return (
             f"Reported article #{article_num} in '{board}' by "
-            f"{view.author_username or view.author_pubkey[:16]} — event seq {result.origin_seq}"
+            f"{attributed} — event seq {result.origin_seq}"
         )
     finally:
         await client.close()
@@ -2154,6 +2371,7 @@ async def punish_warn(
     acknowledge_punishment; while pending it blocks their writes.
     """
     pubkey = _validate_pubkey(punished_pubkey_hex)
+    _reject_lone_surrogates("reason", reason)
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
@@ -2177,11 +2395,19 @@ async def punish_ban(
     expires_at: positive unix timestamp when the ban lapses.
     """
     pubkey = _validate_pubkey(punished_pubkey_hex)
+    _reject_lone_surrogates("reason", reason)
     if expires_at <= int(time.time()):
         raise ValueError("expires_at must be a future unix timestamp")
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
+        assert client._identity is not None  # set by _connect_authenticated's client.connect()
+        if pubkey == client._identity.public_key:
+            raise ValueError(
+                "Cannot ban your own identity — this would lock you out of "
+                "moderation (the write gate has no self-carve-out) with no "
+                "way to self-revoke"
+            )
         result = await client.publish_punishment_ban(pubkey, reason, expires_at, board=board)
         return f"Ban issued until {expires_at} — event seq {result.origin_seq}"
     finally:
@@ -2201,9 +2427,16 @@ async def punish_permaban(
     Permabans never expire; only punish_revoke can lift them.
     """
     pubkey = _validate_pubkey(punished_pubkey_hex)
+    _reject_lone_surrogates("reason", reason)
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
+        assert client._identity is not None  # set by _connect_authenticated's client.connect()
+        if pubkey == client._identity.public_key:
+            raise ValueError(
+                "Cannot permaban your own identity — this would lock you "
+                "out of moderation permanently with no way to self-revoke"
+            )
         result = await client.publish_punishment_permaban(pubkey, reason, board=board)
         return f"Permaban issued — event seq {result.origin_seq}"
     finally:
@@ -2219,6 +2452,7 @@ async def punish_revoke(
 ) -> str:
     """Revoke any punishment by its event ID. Requires moderator or administrator."""
     eid = _validate_event_id(punishment_event_id_hex)
+    _reject_lone_surrogates("reason", reason)
     client = _make_client()
     try:
         await _connect_authenticated(client, auth)
@@ -2351,7 +2585,37 @@ async def get_event(
     event_id_hex: str,
     auth: str | None = None,
 ) -> dict:
-    """Get a single event by ID with full details including witness.
+    """Get one event by ID: the record as published, and who carried it.
+
+    This is the substrate log entry, not a projection — it is a record of
+    something having been published, not a statement that it still stands. A
+    later event may have cancelled, superseded or purged it.
+
+    `actor_username` and `actor_registrar` are the author's own claim, signed
+    but not thereby true. The origin that published the record vouches for
+    neither unless it is also the named registrar. `author_pubkey` is the only
+    field a signature binds.
+
+    `verification` is this client checking the record's own signatures, rather
+    than relying on the relay having checked them at ingest. Two independent
+    answers:
+
+      author — `actor_signature` under `author_pubkey`. Always answerable, the
+        key being in the record. 'valid' means this content is what that key
+        signed and the author cannot deny writing it. It says nothing about
+        who holds the key, and nothing about whether the name beside it is
+        theirs — that is `actor_username` and the article tools' `author_check`.
+      origin — `origin_signature` under the key that was authoritative at this
+        sequence. 'unverifiable' means this client has no cached epoch covering
+        that sequence, usually because the origin rotated and its key history
+        was never fetched; it is not a failed check, and specifically not
+        evidence of forgery, since a signature checked against the wrong key
+        fails the same way a forged one does.
+
+    `witnesses` is the provenance chain: one entry per relay that carried the
+    event, each a signed statement by that relay about who handed it over. It
+    is not verified here — use trace_event, which checks every signature and
+    shows how the links join up.
 
     origin: origin that published the event.
     event_id_hex: hex event ID (64 chars).
@@ -2363,7 +2627,7 @@ async def get_event(
             await _connect_authenticated(client, auth)
         else:
             await _connect_anonymous(client)
-        rec, witness = await client.get_event(origin, eid)
+        rec, witnesses = await client.get_event(origin, eid)
         return {
             "origin": rec.origin,
             "origin_seq": rec.origin_seq,
@@ -2385,13 +2649,23 @@ async def get_event(
             "target_event_id": rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else "",
             "body_hash": rec.body_hash.hex(),
             "body_size": rec.body_size,
-            "witness": {
-                "relay_pubkey": witness.relay_pubkey.hex(),
-                "relay_hostname": witness.relay_hostname,
-                "received_from_pubkey": witness.received_from_pubkey.hex(),
-                "received_from_hostname": witness.received_from_hostname,
-                "seen_at": witness.seen_at,
-            },
+            # The signatures themselves, which this tool used to drop while
+            # get_article's docstring pointed callers here for "the signed
+            # artifact". Present so a caller can check them independently
+            # rather than take `verification` on faith.
+            "actor_signature": rec.actor_signature.hex(),
+            "origin_signature": rec.origin_signature.hex(),
+            "verification": client.verify_record(rec),
+            "witnesses": [
+                {
+                    "relay_pubkey": w.relay_pubkey.hex(),
+                    "relay_hostname": w.relay_hostname,
+                    "received_from_pubkey": w.received_from_pubkey.hex(),
+                    "received_from_hostname": w.received_from_hostname,
+                    "seen_at": w.seen_at,
+                }
+                for w in witnesses
+            ],
         }
     finally:
         await client.close()
@@ -2402,18 +2676,32 @@ async def get_event(
 async def trace_event(
     origin: str,
     event_id_hex: str,
-    max_hops: int = 10,
     auth: str | None = None,
 ) -> list[dict]:
-    """Trace an event back to its origin through relay witnesses.
+    """Show which relays carried an event, and who each says handed it to them.
 
-    Follows the witness chain hop-by-hop. Returns a list of hops with
-    relay pubkey, relay hostname, upstream pubkey, upstream hostname,
-    and seen_at timestamp.
+    One request. The chain travels with the record, so tracing does not depend
+    on the relays in it still being reachable or still willing to answer.
+
+    What a hop establishes, and what it does not. Each entry is a signed
+    statement by the relay named in `relay_pubkey`, checked here — that is what
+    `signature_valid` reports, and a false value means the entry is a forgery
+    by whoever served it, not a fact about that relay. A valid signature makes
+    the claim *attributable and non-repudiable*, not true: a relay can lie
+    about who handed it a record, it just cannot do so anonymously or deniably.
+    So read the chain as a set of accountable claims, where the earliest honest
+    link bounds where a lie could have entered.
+
+    `linked` marks hops that join the chain by matching `received_from_pubkey`
+    to another hop's `relay_pubkey`, ordered from the origin outward.
+    Unlinked hops are listed after: a gap or a fork is the interesting result
+    and is deliberately not smoothed over. `is_origin` marks the terminating
+    witness the origin signed for its own record.
+
+    Hostnames here are self-reported strings like any other record content.
 
     origin: origin that published the event.
     event_id_hex: hex event ID (64 chars).
-    max_hops: maximum hops to follow (default 10).
     """
     eid = _validate_event_id(event_id_hex)
     client = _make_client()
@@ -2422,7 +2710,7 @@ async def trace_event(
             await _connect_authenticated(client, auth)
         else:
             await _connect_anonymous(client)
-        return await client.trace_event(origin, eid, max_hops)
+        return await client.trace_event(origin, eid)
     finally:
         await client.close()
 
