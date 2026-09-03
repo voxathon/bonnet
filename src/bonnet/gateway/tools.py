@@ -600,7 +600,13 @@ async def login(username: str, password: str) -> str:
     set $BONNET_IDENTITY and omit `auth` entirely.
     """
     store = _get_identity_store()
-    if not store.verify_password(_default_origin() or "", username, password):
+    origin = _default_origin() or ""
+    if store.get_pubkey(origin, username) is not None and not store.is_wrapped(origin, username):
+        raise ValueError(
+            f"'{username}' has no password set — login() has nothing to check. "
+            f"Pass auth='{username}' directly instead, or omit auth entirely."
+        )
+    if not store.verify_password(origin, username, password):
         raise ValueError(f"Authentication failed: invalid credentials for '{username}'")
 
     token = os.urandom(32).hex()
@@ -664,6 +670,14 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     other than where this connection reached it — a moved or proxied relay.
     Nothing follows it automatically; it is there so a stale configured
     address can be noticed and fixed deliberately.
+
+    A `url` with no explicit port (e.g. `https://bbs.example`) implies 443.
+    If nothing answers there, this retries the same host on 2272 — Bonnet's
+    own default listen port — before giving up. `port_fallback` in the
+    result says whether that happened; `url` reflects whichever one worked.
+    Only a connect-level failure triggers it (DNS, refused, timeout); a real
+    HTTP response on 443, even an error one, means something is there and is
+    left alone.
     """
     if not url.strip():
         raise ValueError(
@@ -705,10 +719,31 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     # the client pointed where it was, or a connect that never reached its
     # origin silently redirects every subsequent tool call to an address that
     # does not answer.
+    #
+    # Fallback: a URL with no explicit port implies the scheme's standard one
+    # (443 for https) - fine for an origin sitting behind a reverse proxy or
+    # tunnel, but nothing for one running bare on Bonnet's own default port.
+    # Retried once, same host, on 2272, and only on a connect-level failure
+    # (DNS, refused, timeout) - a real response on 443 (even an error one)
+    # means something is there and answering, so it is left alone.
+    port_fallback_eligible = parsed.scheme == "https" and parsed.port is None
+    fell_back_to_2272 = False
     client = None
     try:
         client = _make_client()
-        await _connect_anonymous(client)
+        try:
+            await _connect_anonymous(client)
+        except FirehoseClientError as e:
+            if not port_fallback_eligible or "could not reach" not in str(e):
+                raise
+            await client.close()
+            resolved_url = f"{parsed.scheme}://{parsed.hostname}:2272"
+            resolved_verify = default_verify_tls(resolved_url) if verify_tls is None else verify_tls
+            current_origin_url.set(resolved_url)
+            current_origin_verify.set(resolved_verify)
+            fell_back_to_2272 = True
+            client = _make_client()
+            await _connect_anonymous(client)
         origin = client.server_origin or ""
         # First successful contact is when to learn this origin's key history,
         # while it is answering. Cached, verification of its older records
@@ -761,6 +796,8 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     return {
         "origin": origin,
         "url": resolved_url,
+        # True when the port-less URL given failed on 443 and this fell back
+        "port_fallback": fell_back_to_2272,
         "boards": boards,
         # Which origins this relay serves. Aggregate reads (origin="") span
         # exactly this set, and it is built from the same peer list that gates
