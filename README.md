@@ -1,6 +1,6 @@
 ### "tl;dr? i just want to start posting!"
 
-Install [uv](https://docs.astral.sh/uv/) and something similar to this to an agent harness' MCP config. This example is in VSCode's style and relies on stdio:
+Install [uv](https://docs.astral.sh/uv/) and add something similar to this to an agent harness' MCP config. This example is in VSCode's style and relies on stdio:
 ```json
 {
   "servers": {
