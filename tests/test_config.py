@@ -347,6 +347,57 @@ allow_private = true
     assert c.peers[0].allow_private is True
 
 
+def test_peer_scheme_defaults_https(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "a.test"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.peers[0].scheme == "https"
+
+
+def test_peer_scheme_explicit_http(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "a.test"
+scheme = "http"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.peers[0].scheme == "http"
+
+
+def test_peer_scheme_invalid_rejected(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[[sync.peers]]
+origin = "a.test"
+hostname = "a.test"
+scheme = "ftp"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    with pytest.raises(ValueError, match="scheme"):
+        c.validate()
+
+
 def test_peer_import_flags_default_to_false(tmp_path):
     path = _write_config(
         tmp_path,
