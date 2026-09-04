@@ -758,8 +758,9 @@ class FirehoseHTTPClient(FirehoseTransport):
                 raise FirehoseClientError(
                     f"refusing redirect to unsafe target {redirect.hostname}:{redirect.port}"
                 ) from None
+            scheme = urlparse(self._base_url).scheme
             origin_client = FirehoseHTTPClient(
-                f"https://{redirect.hostname}:{redirect.port}",
+                f"{scheme}://{redirect.hostname}:{redirect.port}",
                 # This client's own TLS policy, not the relay's suggestion.
                 verify=self._verify,
                 # A redirect hop is a connection to a different origin, and
