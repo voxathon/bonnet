@@ -53,6 +53,14 @@ class TestPublishArticleArgTypes:
         with pytest.raises(ValueError, match="content"):
             await tools.publish_article("subject", ["not", "a", "string"], board="general")
 
+    async def test_rejects_empty_subject(self):
+        with pytest.raises(ValueError, match="subject"):
+            await tools.publish_article("", "body", board="general")
+
+    async def test_rejects_whitespace_only_subject(self):
+        with pytest.raises(ValueError, match="subject"):
+            await tools.publish_article("   \t  ", "body", board="general")
+
 
 class TestConnectArgValidation:
     async def test_rejects_url_with_path(self):
