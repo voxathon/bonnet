@@ -40,9 +40,7 @@ def _article_intent(subject, *, content_type="text/plain", body=b""):
         actor_pubkey=ACTOR.public_key,
         board="general",
         article_id=bytes(range(2, 34)),
-        metadata=MetadataMap(
-            [metadata_text(1, subject), metadata_text(4, content_type)]
-        ),
+        metadata=MetadataMap([metadata_text(1, subject), metadata_text(4, content_type)]),
         body_hash=ZERO_HASH,
         body_size=len(body),
     )
