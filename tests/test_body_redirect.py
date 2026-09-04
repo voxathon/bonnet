@@ -103,6 +103,33 @@ async def test_a_loopback_client_may_still_be_redirected_locally(redirecting, mo
 
 
 @pytest.mark.anyio
+async def test_the_hop_inherits_this_client_s_scheme(redirecting, monkeypatch):
+    """Hardcoding https on the hop breaks a plaintext federation: the redirect
+    target speaks whatever this client's own connection speaks, not TLS
+    unconditionally, since BodyRedirectError never carries a scheme."""
+    captured = {}
+
+    class _Stub(FirehoseHTTPClient):
+        def __init__(self, base_url, **kwargs):
+            captured["base_url"] = base_url
+            super().__init__(base_url, **kwargs)
+
+        async def connect_anonymous(self):
+            return None
+
+        async def get_article_body(self, *a, **kw):
+            return b"x"
+
+    monkeypatch.setattr(fc, "FirehoseHTTPClient", _Stub)
+
+    client = redirecting("http://localhost:2272", "127.0.0.1", 2273)
+    await client.get_article_body("origin.test", "general", 1)
+
+    assert captured["base_url"] == "http://127.0.0.1:2273"
+    await client.close()
+
+
+@pytest.mark.anyio
 async def test_the_hop_inherits_this_client_s_tls_policy(redirecting, monkeypatch):
     """Previously the relay's reply chose it, so a relay could name a host
     *and* tell the client not to check that host's certificate."""
