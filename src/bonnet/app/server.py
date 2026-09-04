@@ -201,7 +201,8 @@ class BonnetServer:
         if config.peers:
             for peer in config.peers:
                 log_msg(
-                    f"INIT: configured peer '{peer.origin}' at {peer.hostname}:{peer.port} (verify_tls={peer.verify_tls})"
+                    f"INIT: configured peer '{peer.origin}' at "
+                    f"{peer.scheme}://{peer.hostname}:{peer.port} (verify_tls={peer.verify_tls})"
                 )
 
         peer_map = {peer.origin: peer for peer in config.peers}
@@ -632,7 +633,7 @@ class BonnetServer:
             print("No interactive terminal on stdin - operator REPL disabled, serving only.")
 
         for peer in self.config.peers:
-            base_url = f"https://{peer.hostname}:{peer.port}"
+            base_url = f"{peer.scheme}://{peer.hostname}:{peer.port}"
             try:
                 client = HttpSyncClient(
                     base_url, verify_tls=peer.verify_tls, allow_private_dial=peer.allow_private
