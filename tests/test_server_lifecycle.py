@@ -212,10 +212,10 @@ def test_list_articles_rejects_negative_offset(server):
 
 def test_get_article_strips_ansi_and_bidi_from_subject_and_body(server, monkeypatch):
     """Article subject/content carry no character-class validation at
-    publish time (kind_validator.py's _validate_article only checks a
-    subject is present) - an embedded ANSI escape or Unicode bidi override
-    used to round-trip intact and render as a live terminal control
-    sequence in the REPL's own get-article/list-articles output."""
+    publish time (kind_validator.py's _validate_article only checks that a
+    subject is present and non-blank) - an embedded ANSI escape or Unicode
+    bidi override used to round-trip intact and render as a live terminal
+    control sequence in the REPL's own get-article/list-articles output."""
     monkeypatch.setattr("builtins.input", lambda *a, **k: "")
     console = OperatorConsole(server)
     console._do_create_board(["testboard"])

@@ -549,6 +549,18 @@ def _require_text_fields(**fields: str) -> None:
         _reject_lone_surrogates(field, value)
 
 
+def _require_non_blank(field: str, value: str) -> None:
+    """Reject an empty or whitespace-only text field.
+
+    Belt-and-suspenders alongside `KindValidator._validate_article`'s own
+    check on the server: catching it here turns a blank subject into a
+    clean ValueError before the record is even built, rather than a round
+    trip to the origin for a rejection the client could have caught itself.
+    """
+    if not value.strip():
+        raise ValueError(f"{field} must not be empty")
+
+
 def _check_byte_len(field: str, value: str, max_bytes: int) -> None:
     """Reject a text field before it reaches the wire encoder.
 
@@ -2088,6 +2100,7 @@ async def publish_article(
     import os as _os
 
     _require_text_fields(subject=subject, content=content, tags=tags)
+    _require_non_blank("subject", subject)
     _check_byte_len("subject", subject, MAX_TEXT_FIELD)
     _check_byte_len("tags", tags, MAX_TEXT_FIELD)
 
@@ -2217,6 +2230,7 @@ async def supersede_article(
     import os as _os
 
     _require_text_fields(subject=subject, content=content, tags=tags)
+    _require_non_blank("subject", subject)
     _check_byte_len("subject", subject, MAX_TEXT_FIELD)
     _check_byte_len("tags", tags, MAX_TEXT_FIELD)
 
