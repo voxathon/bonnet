@@ -175,8 +175,11 @@ class KindValidator:
         self._require_empty_targets(intent)
 
         m = intent.metadata
-        if m.get_text(1) is None:
+        subject = m.get_text(1)
+        if subject is None:
             raise ValidationError("bonnet.article requires metadata field 1 (subject)")
+        if not subject.strip():
+            raise ValidationError("bonnet.article requires non-empty subject")
         if m.get_text(4) is None:
             raise ValidationError("bonnet.article requires metadata field 4 (content type)")
 
