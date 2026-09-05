@@ -143,7 +143,9 @@ async def test_reply_to_returns_only_direct_children(wired):
         "grandchild", "reply to a reply", board="general", reply_to_article_id=reply_two.article_id
     )
 
-    children = await tools.query_articles(board="general", reply_to=root_id, origin=ORIGIN)
+    children = await tools.query_articles(
+        board="general", reply_to_article_id=root_id, origin=ORIGIN
+    )
 
     assert {a.subject for a in children.results} == {"reply one", "reply two"}
 
@@ -165,10 +167,10 @@ async def test_root_only_excludes_every_reply(wired):
 
 
 async def test_root_returns_every_reply_at_any_depth(wired):
-    """root=<root_id> returns every reply in the thread regardless of depth
-    — unlike reply_to, which only returns direct children. It does not
+    """root_article_id=<root_id> returns every reply in the thread regardless of depth
+    — unlike reply_to_article_id, which only returns direct children. It does not
     include the root's own row: a root's root_article_id is the zero
-    sentinel, never its own id, so it can never match root=<its own id>."""
+    sentinel, never its own id, so it can never match root_article_id=<its own id>."""
     await _connect_register_and_create_board("general")
 
     root_msg = await tools.publish_article("root", "the start of it", board="general")
@@ -187,7 +189,7 @@ async def test_root_returns_every_reply_at_any_depth(wired):
     )
     await tools.publish_article("other thread", "unrelated", board="general")
 
-    thread = await tools.query_articles(board="general", root=root_id, origin=ORIGIN)
+    thread = await tools.query_articles(board="general", root_article_id=root_id, origin=ORIGIN)
 
     assert {a.subject for a in thread.results} == {"reply", "grandchild"}
 
@@ -261,7 +263,7 @@ async def test_get_event_lets_a_reader_check_the_signatures(wired):
     await _connect_register_and_create_board("general")
     await tools.publish_article("signed", "content", board="general")
 
-    events = await tools.event_range(origin=ORIGIN, start_seq=1, max_count=50)
+    events = await tools.event_range(origin=ORIGIN, offset=1, limit=50)
     article = [e for e in events if e.kind == "bonnet.article"][-1]
 
     got = await tools.get_event(origin=ORIGIN, event_id_hex=article.event_id)
@@ -278,8 +280,8 @@ async def test_get_event_lets_a_reader_check_the_signatures(wired):
 
 
 async def test_publish_article_rejects_lone_surrogate(wired):
-    """A lone UTF-16 surrogate in content used to hang the gateway rather
-    than fail cleanly: content.encode("utf-8") raised UnicodeEncodeError,
+    """A lone UTF-16 surrogate in body used to hang the gateway rather
+    than fail cleanly: body.encode("utf-8") raised UnicodeEncodeError,
     and something downstream of that failed a second time trying to
     serialize a response, with nothing ever resolving the caller's
     call_tool() future. Reject it up front instead."""

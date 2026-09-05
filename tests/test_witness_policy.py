@@ -225,6 +225,61 @@ def test_wire_max_truncation_deterministic(tmp_path):
     assert first.relay_pubkey == me.public_key
 
 
+def test_no_synthesised_origin_witness_for_a_remote_origin(tmp_path):
+    """_witness_set must not mint a terminating origin link for an event this
+    relay merely carries: an origin-shaped witness under a non-origin key
+    would seed trace_event's traversal as is_origin=True for an origin that
+    never signed it."""
+    from bonnet.core.acl import ACLEvaluator
+    from bonnet.core.board_projection import BoardProjection  # noqa: F401
+    from bonnet.core.bodies import BodyStore
+    from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
+    from bonnet.core.kind_validator import KindValidator
+    from bonnet.core.record import decode_witness, is_origin_witness
+    from bonnet.core.search import SearchService
+    from bonnet.net.firehose_commands import FirehoseCommandHandler
+
+    server, rec, eh = _origin_rec(tmp_path)
+    me = Identity.generate()
+    store = FirehoseStore(str(tmp_path / "h.db"))
+    # Only the genuine origin link is stored; this relay holds no statement
+    # of its own about the event.
+    store.store_witness(
+        make_origin_witness("origin.test", rec.event_id, eh, server.identity, "origin.test", 1)
+    )
+    handler = FirehoseCommandHandler(
+        firehose=store,
+        server_identity=me,
+        config_origin="me.test",
+        nav=NavProjection(str(tmp_path / "nav.db")),
+        users=UserProjection(str(tmp_path / "users.db")),
+        policy=PolicyProjection(str(tmp_path / "policy.db")),
+        body_store=BodyStore(boards_dir=str(tmp_path / "boards"), events_dir=str(tmp_path / "ev")),
+        boards_dir=str(tmp_path / "boards"),
+        acl=ACLEvaluator([]),
+        validator=KindValidator(),
+        search=SearchService(
+            boards_dir=str(tmp_path / "boards"),
+            body_store=BodyStore(
+                boards_dir=str(tmp_path / "boards"), events_dir=str(tmp_path / "ev")
+            ),
+        ),
+        hostname="me.test",
+        wire_max=3,
+    )
+
+    raw = handler._witness_set("origin.test", rec, eh)
+    count = struct.unpack(">H", raw[:2])[0]
+    assert count == 1
+    ln = struct.unpack(">H", raw[2:4])[0]
+    only = decode_witness(raw[4 : 4 + ln])
+    # The genuine origin link leads; nothing shaped like an origin
+    # attestation was minted under this relay's key.
+    assert only.relay_pubkey == server.identity.public_key
+    assert is_origin_witness(only)
+    assert store.get_witness("origin.test", rec.event_id, me.public_key) is None
+
+
 def test_config_validation(tmp_path):
     cfg = FirehoseConfig(witness=WitnessConfig(max_per_event=1))
     with pytest.raises(ValueError, match="max_per_event"):

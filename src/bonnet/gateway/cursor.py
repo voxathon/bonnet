@@ -21,7 +21,7 @@ Four states, reached without a wizard:
 - **on an origin** — origin set (connect/switch_origin), no board selected.
   Board-scoped tools still work here if `board=` is passed explicitly; the
   cursor is a default, not a lock.
-- **in a board** — `open_board(name)` was called, or a board-scoped tool was
+- **in a board** — `open_board(board)` was called, or a board-scoped tool was
   called with an explicit `board=`. That board becomes the default for
   later board-scoped calls that omit it.
 - **reading an article** — `get_article` returned something. The read itself
@@ -102,7 +102,7 @@ def resolve_board(explicit: str) -> str:
     if board:
         return board
     raise ValueError(
-        "no board given and none open: pass board=, or call open_board(name) "
+        "no board given and none open: pass board=, or call open_board(board=) "
         "first. list_boards shows what exists."
     )
 
@@ -126,19 +126,4 @@ def resolve_article_id(explicit: str, board: str) -> str:
         "no target_article_id given and no matching article open: pass "
         "target_article_id=, or call get_article(article_num, board=...) "
         "first to open one."
-    )
-
-
-def resolve_article_num(explicit: int, board: str) -> int:
-    """Like resolve_article_id, but for report's article_num selector."""
-    if explicit:
-        return explicit
-    if current_article_board.get() == board:
-        article_num = current_article_num.get()
-        if article_num is not None:
-            return article_num
-    raise ValueError(
-        "no article_num given and no matching article open: pass "
-        "article_num=, or call get_article(article_num, board=...) first "
-        "to open one."
     )

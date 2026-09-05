@@ -319,7 +319,7 @@ async def test_calling_a_hidden_tool_explains_the_fix(bridge):
     """A caller working from a stale list gets redirected, not refused."""
     async with Client(tools.mcp) as c:
         with pytest.raises(Exception) as exc:
-            await c.call_tool("publish_article", {"board": "b", "subject": "s", "content": "c"})
+            await c.call_tool("publish_article", {"board": "b", "subject": "s", "body": "c"})
 
     assert "connect" in str(exc.value)
 
@@ -497,7 +497,7 @@ async def test_call_time_gate_honors_the_calls_own_auth(bridge):
     async with Client(tools.mcp) as c:
         result = await c.call_tool(
             "publish_article",
-            {"board": "general", "subject": "s", "content": "c", "auth": "scout"},
+            {"board": "general", "subject": "s", "body": "c", "auth": "scout"},
         )
     assert result is not None
 

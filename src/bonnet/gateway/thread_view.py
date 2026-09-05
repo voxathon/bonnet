@@ -16,7 +16,7 @@
 
 Pure data transform, no network I/O — kept out of `tools.py` the same way
 `cursor.py`/`gating.py`/`needs.py` already separate concerns from it. Takes
-what `query_articles(root=...)` already returns and nests it by
+what `query_articles(root_article_id=...)` already returns and nests it by
 `reply_to_article_id`; nothing server-side pre-nests this, and nothing here
 talks to a relay.
 
@@ -86,7 +86,7 @@ def _node(item: _ArticleLike) -> ThreadNode:
 
 
 def build_tree(root: _ArticleLike, replies: list[ArticleListItem]) -> ThreadNode:
-    """Nest `replies` (query_articles(root=root.article_id)'s flat result —
+    """Nest `replies` (query_articles(root_article_id=root.article_id)'s flat result —
     every article in the thread *except* the root itself, since a root's own
     root_article_id is the zero sentinel and never equals its own id) under
     a node built from `root`.
