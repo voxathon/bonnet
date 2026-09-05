@@ -18,6 +18,8 @@ env/
 .ruff_cache/
 .pytype/
 .pyre/
+.complexipy_cache/
+.sonar/
 
 # Test artifacts
 .pytest_cache/
