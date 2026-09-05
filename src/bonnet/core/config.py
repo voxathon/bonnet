@@ -32,6 +32,22 @@ from bonnet.core.record import normalize_origin
 
 
 @dataclass
+class WitnessConfig:
+    """Provenance retention policy for relay witnesses (global).
+
+    Forensics-first defaults: retain everything, first verified statement
+    wins (immutable observation), unbounded storage, wire reads truncated
+    deterministically. Operators who care about disk opt into a cap via
+    max_per_event. Per-peer overrides deliberately not supported.
+    """
+
+    retain_upstream: bool = True
+    max_per_event: int = 0  # 0 = unbounded; otherwise >= 2 (origin + self)
+    update_policy: str = "first"  # "first" | "last"
+    wire_max: int = 32  # 1..MAX_WITNESS_SET frame ceiling
+
+
+@dataclass
 class PeerConfig:
     """Configuration for a firehose federation peer.
 
@@ -94,7 +110,7 @@ def _as_bool(table: dict, key: str, section: str, default: bool) -> bool:
     return value
 
 
-_TOP_LEVEL_KEYS = {"server", "limits", "search", "tls", "sync", "acl", "include"}
+_TOP_LEVEL_KEYS = {"server", "limits", "search", "tls", "sync", "acl", "include", "witnesses"}
 
 _INCLUDE_ALLOWED_TOP_KEYS = {"acl", "sync"}
 
@@ -134,6 +150,12 @@ _SECTION_KEYS = {
         "interval_seconds",
         "peers",
     },
+    "witnesses": {
+        "retain_upstream",
+        "max_per_event",
+        "update_policy",
+        "wire_max",
+    },
 }
 
 _PEER_KEYS = {
@@ -155,7 +177,7 @@ def _find_unknown_keys(data: dict) -> list[str]:
     for key in data:
         if key not in _TOP_LEVEL_KEYS:
             unknown.append(key)
-    for section_name in ("server", "limits", "search", "tls", "sync"):
+    for section_name in ("server", "limits", "search", "tls", "sync", "witnesses"):
         table = data.get(section_name)
         if not isinstance(table, dict):
             continue
@@ -297,6 +319,7 @@ class FirehoseConfig:
         admin_pubkey_hex: str = "",
         host: str = "127.0.0.1",
         unknown_keys: list = None,
+        witness: WitnessConfig = None,
     ):
         self.origin = _normalize_origin(origin)
         self.hostname = hostname or self.origin
@@ -324,6 +347,7 @@ class FirehoseConfig:
         self.admin_pubkey_hex = admin_pubkey_hex
         self.host = host
         self.unknown_keys = list(unknown_keys or [])
+        self.witness = witness or WitnessConfig()
 
     def validate(self) -> None:
         """Raise ValueError if configuration is invalid."""
@@ -405,6 +429,31 @@ class FirehoseConfig:
                 value = getattr(peer, flag)
                 if not isinstance(value, bool):
                     raise ValueError(f"config: peer '{peer.origin}' {flag} must be a boolean")
+        if self.witness.update_policy not in ("first", "last"):
+            raise ValueError(
+                f"config: witnesses.update_policy must be 'first' or 'last', "
+                f"got {self.witness.update_policy!r}"
+            )
+        if not isinstance(self.witness.max_per_event, int) or isinstance(
+            self.witness.max_per_event, bool
+        ):
+            raise ValueError(
+                f"config: witnesses.max_per_event must be an integer, "
+                f"got {self.witness.max_per_event!r}"
+            )
+        if self.witness.max_per_event < 0 or self.witness.max_per_event == 1:
+            raise ValueError(
+                "config: witnesses.max_per_event must be 0 (unbounded) or >= 2 "
+                f"(origin + self), got {self.witness.max_per_event}"
+            )
+        if not isinstance(self.witness.wire_max, int) or isinstance(self.witness.wire_max, bool):
+            raise ValueError(
+                f"config: witnesses.wire_max must be an integer, got {self.witness.wire_max!r}"
+            )
+        if not 1 <= self.witness.wire_max <= 32:
+            raise ValueError(
+                f"config: witnesses.wire_max must be in [1, 32], got {self.witness.wire_max}"
+            )
 
     @property
     def identity_path(self) -> str:
@@ -457,6 +506,9 @@ class FirehoseConfig:
         search = data.get("search", {})
         tls = data.get("tls", {})
         sync = data.get("sync", {})
+        witnesses = data.get("witnesses", {})
+        if not isinstance(witnesses, dict):
+            raise ValueError("config: [witnesses] must be a table")
 
         # BONNET_SERVER_HOME (or the per-user default, see core.home) only
         # supplies a *default* for storage paths left unset in config.toml —
@@ -548,6 +600,12 @@ class FirehoseConfig:
             admin_pubkey_hex=admin_pubkey_hex,
             host=server.get("host", "127.0.0.1"),
             unknown_keys=unknown_keys,
+            witness=WitnessConfig(
+                retain_upstream=_as_bool(witnesses, "retain_upstream", "witnesses", True),
+                max_per_event=witnesses.get("max_per_event", 0),
+                update_policy=witnesses.get("update_policy", "first"),
+                wire_max=witnesses.get("wire_max", 32),
+            ),
         )
 
     @staticmethod
@@ -641,6 +699,22 @@ timeout_seconds = 10
 result_limit = 100
 
 {tls_section}
+
+[witnesses]
+# Provenance retention for relay witnesses (global; no per-peer overrides).
+# retain_upstream = true keeps each peer's chain so it survives that peer
+# going offline; false stores only our own + the origin witness.
+# max_per_event = 0 keeps everything (~300B per witness: events x relays);
+# set N >= 2 to keep the origin witness + our own + the newest N-2 upstream
+# (oldest upstream evicted first, never the origin/own entries).
+# update_policy = "first" makes a relay's first verified statement about an
+# event immutable (forensics default); "last" keeps the current replace-on-
+# re-sign behavior. wire_max truncates reads deterministically
+# (own, origin, newest) without touching storage; must be in [1, 32].
+retain_upstream = true
+max_per_event = 0
+update_policy = "first"
+wire_max = 32
 
 [sync]
 interval_seconds = 300
