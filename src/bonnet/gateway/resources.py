@@ -39,43 +39,43 @@ async def list_boards_resource() -> list[BoardInfo]:
         await client.close()
 
 
-@mcp.resource("bonnet://boards/{board_name}")
-async def get_board_resource(board_name: str) -> BoardInfo:
+@mcp.resource("bonnet://boards/{board}")
+async def get_board_resource(board: str) -> BoardInfo:
     """Get board metadata by name, searching all known origins."""
     client = _make_client()
     try:
         await _connect_anonymous(client)
         boards = await client.list_boards("")
-        for board in boards:
-            if board.name == board_name:
-                return board
-        raise ValueError(f"Board not found: {board_name}")
+        for b in boards:
+            if b.name == board:
+                return b
+        raise ValueError(f"Board not found: {board}")
     finally:
         await client.close()
 
 
-@mcp.resource("bonnet://boards/{board_name}/articles")
-async def list_board_articles_resource(board_name: str) -> list[ArticleListItem]:
+@mcp.resource("bonnet://boards/{board}/articles")
+async def list_board_articles_resource(board: str) -> list[ArticleListItem]:
     """List active articles on a board."""
     client = _make_client()
     try:
         await _connect_anonymous(client)
         origin = client._server_origin or ""
-        return (await client.list_articles(origin, board_name)).results
+        return (await client.list_articles(origin, board)).results
     finally:
         await client.close()
 
 
-@mcp.resource("bonnet://boards/{board_name}/articles/{article_num}")
-async def get_article_resource(board_name: str, article_num: int) -> ArticleView:
-    """Get full article content by board and article number."""
+@mcp.resource("bonnet://boards/{board}/articles/{article_num}")
+async def get_article_resource(board: str, article_num: int) -> ArticleView:
+    """Get full article body by board and article number."""
     client = _make_client()
     try:
         await _connect_anonymous(client)
         origin = client._server_origin or ""
-        article = await client.get_article(origin, board_name, article_num, include_body=True)
+        article = await client.get_article(origin, board, article_num, include_body=True)
         if article is None:
-            raise ValueError(f"Article not found: {board_name}/{article_num}")
+            raise ValueError(f"Article not found: {board}/{article_num}")
         return article
     finally:
         await client.close()

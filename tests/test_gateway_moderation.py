@@ -247,8 +247,9 @@ async def test_pin_then_unpin_round_trips(wired):
 async def test_report_reaches_the_moderation_queue(wired):
     await _setup()
     await tools.publish_article("subject", "body")
+    view = await tools.get_article(1)
 
-    await tools.report("this is spam", article_num=1)
+    await tools.report("this is spam", target_article_id=view.article_id)
 
     queue = wired["policy"].list_reports(limit=10, offset=0)
     assert len(queue) == 1
