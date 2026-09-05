@@ -95,7 +95,11 @@ class BonnetServer:
         self.anonymous_identity = Identity.generate()
         log_msg(f"INIT: anonymous_key={self.anonymous_identity.public_key.hex()}")
 
-        self.firehose = FirehoseStore(config.events_db_path)
+        self.firehose = FirehoseStore(
+            config.events_db_path,
+            witness_max_per_event=config.witness.max_per_event,
+            witness_update_policy=config.witness.update_policy,
+        )
         self.firehose.init_origin_key(config.origin, self.server_identity.public_key)
         log_msg(f"INIT: FirehoseStore at {config.events_db_path}")
 
@@ -197,6 +201,7 @@ class BonnetServer:
             self.server_identity,
             config.hostname,
             dispatcher=self.dispatcher,
+            retain_upstream=config.witness.retain_upstream,
         )
         if config.peers:
             for peer in config.peers:
@@ -225,6 +230,7 @@ class BonnetServer:
             peer_map=peer_map,
             allowed_origins=allowed_origins,
             max_body_size=config.max_article_body_size,
+            wire_max=config.witness.wire_max,
         )
         log_msg("INIT: FirehoseCommandHandler initialized")
 
