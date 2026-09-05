@@ -991,13 +991,22 @@ class FirehoseCommandHandler:
         every hop: each relay downstream saw one entry and had no way to learn
         the rest.
 
+        The terminating origin link is only ever minted for this relay's own
+        origin. Minting one for another origin's event would put a witness
+        shaped exactly like an origin attestation (zero upstream key) under
+        this relay's key — and trace_event seeds its traversal from
+        origin-shaped links, so it would display as the chain's terminus,
+        `is_origin=True`, for an origin that never signed it. Carrying such
+        an event with no statement of our own, the honest answer is the
+        retained upstream chain as-is, even if that is empty.
+
         Truncation to wire_max is deterministic (own, origin witnesses, then
         newest upstream) and storage is untouched.
         """
         from bonnet.core.record import is_origin_witness as _is_origin
 
         own = self._firehose.get_witness(origin, rec.event_id, self._identity.public_key)
-        if own is None:
+        if own is None and origin == self._origin:
             own = make_origin_witness(
                 origin=origin,
                 event_id=rec.event_id,
@@ -1008,13 +1017,14 @@ class FirehoseCommandHandler:
             )
             self._firehose.store_witness(own, keep_pubkeys={self._identity.public_key})
 
+        lead = [own] if own is not None else []
         rest = [
             w
             for w in self._firehose.get_witnesses(origin, rec.event_id, limit=10_000)
-            if w.relay_pubkey != own.relay_pubkey
+            if w.relay_pubkey != self._identity.public_key
         ]
         rest.sort(key=lambda w: (not _is_origin(w), -w.seen_at, w.relay_pubkey))
-        chain = [own] + rest[: max(0, self._wire_max - 1)]
+        chain = lead + rest[: max(0, self._wire_max - len(lead))]
         out = struct.pack(">H", len(chain))
         for w in chain:
             encoded = encode_witness(w)
