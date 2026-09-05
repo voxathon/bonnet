@@ -167,7 +167,7 @@ async def _connected(c, username: str = "scout", board: str = "general"):
     """
     await c.call_tool("connect", {"url": "https://bbs.test", "verify_tls": False})
     await c.call_tool("register", {"username": username})
-    await c.call_tool("create_board", {"name": board})
+    await c.call_tool("create_board", {"board": board})
 
 
 async def _where(c) -> dict:
