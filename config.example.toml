@@ -45,6 +45,22 @@ enabled = false
 [sync]
 interval_seconds = 300
 
+[witnesses]
+# Provenance retention for relay witnesses (global; no per-peer overrides).
+# retain_upstream = true keeps each peer's chain so it survives that peer
+# going offline; false stores only our own + the origin witness.
+# max_per_event = 0 keeps everything (~300B per witness: events x relays);
+# set N >= 2 to keep the origin witness + our own + the newest N-2 upstream
+# (oldest upstream evicted first, never the origin/own entries).
+# update_policy = "first" makes a relay's first verified statement about an
+# event immutable (forensics default); "last" keeps the replace-on-re-sign
+# behavior. wire_max truncates reads deterministically (own, origin, newest)
+# without touching storage; must be in [1, 32].
+retain_upstream = true
+max_per_event = 0
+update_policy = "first"
+wire_max = 32
+
 # Firehose federation peers. Each entry starts a background sync loop.
 # The origin is the peer's Bonnet origin string; hostname/port is the dial address.
 # verify_tls should be false for self-signed certs (common on LAN).
