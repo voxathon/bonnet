@@ -148,6 +148,17 @@ class OperatorConsole:
                 if hasattr(self, "_uvicorn_server") and self._uvicorn_server:
                     self._uvicorn_server.should_exit = True
                 break
+            except OSError:
+                # A real I/O failure reading stdin - as opposed to a clean
+                # EOF - happens when the process backing this console loses
+                # its controlling terminal (e.g. `nohup bonnet server &`
+                # without redirecting stdin: SIGTTIN ends up ignored for a
+                # backgrounded job, so the read fails with EIO instead of
+                # blocking or hitting EOF). This is not an operator asking to
+                # shut down, so unlike EOFError it must not flip should_exit -
+                # only the console goes away, the server keeps serving.
+                log_msg("REPL: stdin I/O error, disabling operator console (server keeps serving)")
+                break
 
             line = line.strip()
             if not line:
