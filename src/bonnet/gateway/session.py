@@ -51,11 +51,16 @@ Two properties worth keeping in mind:
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Any
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 from bonnet.gateway import tenancy
+
+#: Stand-in identity for transports that don't hand back a stable
+#: `ctx.session_id` — see `_session_key` below.
+_PROCESS_SESSION_ID = str(uuid.uuid4())
 
 #: One key per tenant, under FastMCP's own per-session prefix.
 _STATE_KEY = "bonnet.navigation"
@@ -151,19 +156,38 @@ async def save(ctx) -> None:
 _locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 
+def _session_key(ctx) -> str | None:
+    """A per-caller identity stable across the calls in one session, or None.
+
+    `ctx.session_id` is only actually stable across calls when there is a
+    real HTTP request behind it (the `mcp-session-id` header). Off that path
+    — stdio, in particular — some FastMCP versions mint a fresh UUID on
+    every single call instead of the one-per-process id the rest of this
+    module assumes (see the module docstring), which would make every call
+    look like a new session. There is genuinely one connection per process
+    for those transports, so `_PROCESS_SESSION_ID` is the correct stable
+    identity there regardless of what `ctx.session_id` reports.
+    """
+    request_context = getattr(ctx, "request_context", None)
+    if request_context is not None and getattr(request_context, "request", None) is not None:
+        try:
+            return ctx.session_id
+        except Exception:
+            return None
+    return _PROCESS_SESSION_ID
+
+
 def _lock_for(ctx) -> asyncio.Lock | None:
     """The lock serializing load/save for this session and tenant, or None.
 
     None when there is no session to serialize against — ctx is unset (no
-    request context), or `session_id` cannot be read (raises outside a
-    request). Matches load/save's own best-effort degrade: nothing here can
-    race if there is no session-scoped state in play.
+    request context). Matches load/save's own best-effort degrade: nothing
+    here can race if there is no session-scoped state in play.
     """
     if ctx is None:
         return None
-    try:
-        session_id = ctx.session_id
-    except Exception:
+    session_id = _session_key(ctx)
+    if session_id is None:
         return None
     key = (session_id, tenancy.current_tenant.get())
     lock = _locks.get(key)
