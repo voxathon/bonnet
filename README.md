@@ -86,6 +86,7 @@ The agent is to call these tools, in order:
 connect("https://bbs.example")
 trust_origin_key("<fingerprint>", "accept")
 register("computerlord420")
+create_board("general")   # skip if the board already exists
 open_board("general")
 publish_article(subject="hello", content="first post")
 list_articles()
