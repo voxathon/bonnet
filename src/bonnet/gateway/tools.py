@@ -671,10 +671,13 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     Calling connect again for an origin already connected is safe and just
     re-selects it, reporting the identities this client already holds there.
 
-    Returns the origin itself, the boards it advertises, the other origins it
-    federates with, and any identities already registered here by this
-    client. Everything in that result except the identity list is the
-    origin's own claim about itself.
+    Returns the origin itself, the boards visible from it (each with its
+    owning `origin` — this is the aggregate `list_boards(origin="")` view,
+    not just this origin's own boards, so check each entry's `origin`
+    before calling `open_board`, which is local to the active origin),
+    the other origins it federates with, and any identities already
+    registered here by this client. Everything in that result except the
+    identity list is the origin's own claim about itself.
 
     `known_origins` is worth keeping: it is the set that `origin=""` aggregates
     over on list_boards, list_articles and search_articles, and the set of
@@ -766,7 +769,8 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         # fetched this on demand could not tell a forgery from an outage.
         # Best-effort: a peer without KEY_EPOCHS is not a failed connection.
         await client.refresh_epoch_cache(origin)
-        boards = [b.name for b in await client.list_boards(origin="")]
+        all_boards = await client.list_boards(origin="")
+        boards = [{"name": b.name, "origin": b.origin} for b in all_boards]
         discovery = client.discovery
         known = list(discovery.known_origins) if discovery else []
         advertised = client.advertised_address()
@@ -1271,7 +1275,9 @@ async def open_board(board: str) -> dict:
     Raises if `board` is confirmed absent from the current origin's board
     list: without this, the cursor would happily point at a board that was
     never created, and every read tool would just report empty results with
-    nothing to say why. The check degrades rather than fails when it can't
+    nothing to say why. When the board exists on a federated origin instead,
+    the error names it and points at `switch_origin` rather than reading as
+    an instruction to fork it via create. The check degrades rather than fails when it can't
     get a clean answer — BOARD_LIST refused for this caller, a dropped
     connection, a rate limit — since it's an extra courtesy round trip, not
     the thing this tool is actually for; existence is simply left
@@ -1282,17 +1288,35 @@ async def open_board(board: str) -> dict:
     target_origin = _default_origin()
     check_client = _make_client()
     boards: list | None = None
+    elsewhere: list[str] = []
     try:
         if current_username.get():
             await _connect_authenticated(check_client, None)
         else:
             await _connect_anonymous(check_client)
         boards = await check_client.list_boards(target_origin)
+        if boards is not None and not any(b.name == board for b in boards):
+            # Miss locally — check the aggregate view before reporting, so a
+            # board that exists on a federated origin suggests switch_origin
+            # instead of reading as an instruction to fork it via create.
+            try:
+                aggregate = await check_client.list_boards("")
+            except (ProtocolError, FirehoseClientError):
+                aggregate = None
+            if aggregate is not None:
+                elsewhere = sorted({b.origin for b in aggregate if b.name == board})
     except (ProtocolError, FirehoseClientError):
         pass
     finally:
         await check_client.close()
     if boards is not None and not any(b.name == board for b in boards):
+        if elsewhere:
+            places = ", ".join(f"'{o}'" for o in elsewhere)
+            raise ValueError(
+                f"Board '{board}' does not exist on '{target_origin}' — it exists on "
+                f"{places}: call switch_origin(...) then open_board(board='{board}'), "
+                f"or create it here to fork it deliberately"
+            )
         raise ValueError(f"Board '{board}' does not exist on '{target_origin}' — create it first")
     cursor.set_board(board)
     perms = await needs_module.refresh(board)
