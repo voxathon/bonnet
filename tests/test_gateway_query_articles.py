@@ -206,6 +206,50 @@ async def test_query_articles_sorts_oldest_first(wired):
     assert [a.subject for a in results.results] == ["first", "second"]
 
 
+async def test_anonymous_author_is_marked_unchecked_not_just_blank(wired):
+    """An article from a key that never claimed a name must come back from
+    the gateway with author_check='unchecked', not merely an empty
+    author_username indistinguishable from any other unverified state.
+
+    The dispatcher/board_projection layer has always computed author_check
+    correctly (see test_author_identity.py); this exercises the actual path
+    an MCP client uses — ARTICLE_GET and ARTICLE_QUERY over the wire — which
+    used to drop the field entirely during encoding.
+    """
+    import os
+
+    from bonnet.core.board_projection import AUTHOR_UNCHECKED
+    from bonnet.core.record import MetadataMap, Record, metadata_text
+
+    await _connect_register_and_create_board("general")
+
+    bp = wired["dispatcher"]._get_board_projection(ORIGIN, "general")
+    bp.apply_article(
+        Record(
+            origin=ORIGIN,
+            origin_seq=999,
+            event_id=os.urandom(32),
+            kind="bonnet.article",
+            actor_pubkey=os.urandom(32),
+            board="general",
+            article_id=os.urandom(32),
+            article_num=1,
+            metadata=MetadataMap([metadata_text(1, "quiet"), metadata_text(4, "text/plain")]),
+            created_at=1,
+        ),
+        author_check=AUTHOR_UNCHECKED,
+    )
+
+    got = await tools.get_article(1, board="general", origin=ORIGIN, include_body=False)
+    assert got.author_username == ""
+    assert got.author_check == "unchecked"
+
+    listed = await tools.query_articles(board="general", origin=ORIGIN)
+    anon = next(a for a in listed.results if a.subject == "quiet")
+    assert anon.author_username == ""
+    assert anon.author_check == "unchecked"
+
+
 async def test_get_event_lets_a_reader_check_the_signatures(wired):
     """End to end: connect caches the origin's key history, and get_event
     returns both signatures plus this client's own verdict on them.

@@ -628,6 +628,7 @@ def _decode_article_view(data: bytes) -> ArticleView:
 
     pin_state, offset = _read_text16(data, offset)
     thread_state, offset = _read_text16(data, offset)
+    author_check, offset = _read_text16(data, offset)
 
     body_bytes, offset = _read_blob32(data, offset)
 
@@ -646,6 +647,7 @@ def _decode_article_view(data: bytes) -> ArticleView:
         author_pubkey=author_pubkey.hex(),
         author_username=author_username,
         author_registrar=author_registrar,
+        author_check=author_check or "unchecked",
         subject=subject,
         tags=tags,
         content_type=content_type,
@@ -741,6 +743,7 @@ def _decode_article_list_item(data: bytes, offset: int) -> tuple[ArticleListItem
 
     pin_state, offset = _read_text16(data, offset)
     thread_state, offset = _read_text16(data, offset)
+    author_check, offset = _read_text16(data, offset)
 
     _, offset = _read_blob32(data, offset)
 
@@ -759,6 +762,7 @@ def _decode_article_list_item(data: bytes, offset: int) -> tuple[ArticleListItem
         author_pubkey=author_pubkey.hex(),
         author_username=author_username,
         author_registrar=author_registrar,
+        author_check=author_check or "unchecked",
         subject=subject,
         tags=tags,
         content_type=content_type,

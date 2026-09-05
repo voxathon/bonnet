@@ -1207,6 +1207,10 @@ class FirehoseCommandHandler:
         thread_bytes = thread_state.encode("utf-8")
         out += struct.pack(">H", len(thread_bytes)) + thread_bytes
 
+        author_check = getattr(art, "author_check", "unchecked") or "unchecked"
+        ac_bytes = author_check.encode("utf-8")
+        out += struct.pack(">H", len(ac_bytes)) + ac_bytes
+
         body_bytes = b""
         if include_body and art.body_state == "available" and art.body_size > 0:
             body_bytes = (
