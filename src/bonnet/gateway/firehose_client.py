@@ -663,7 +663,15 @@ class FirehoseHTTPClient(FirehoseTransport):
     async def list_boards(self, origin: str) -> list[BoardInfo]:
         cmd = build_board_list(origin)
         resp = await self._send_command(cmd)
-        return parse_board_list_response(resp, aggregate=(origin == ""))
+        boards = parse_board_list_response(resp, aggregate=(origin == ""))
+        if origin:
+            # Explicit-origin queries omit the per-row origin prefix on the
+            # wire (it would repeat the request value); fill it back in so
+            # callers see the same BoardInfo.shape as aggregate reads.
+            for b in boards:
+                if not b.origin:
+                    b.origin = origin
+        return boards
 
     async def get_article(
         self, origin: str, board: str, article_num: int, include_body: bool = False

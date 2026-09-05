@@ -52,7 +52,7 @@ before this file existed.
 
 Environment variables (command-line flags win over all of them):
     BONNET_GATEWAY_HOME — all durable state (default: OS per-user data dir);
-                          --dir sets this for future runs too, see core.home
+                           --dir overrides it for this run (process-local)
     BONNET_URL         — server URL (default: https://localhost:2272)
     BONNET_VERIFY_TLS  — TLS verification (default: true, except loopback
                           BONNET_URL hosts, which default to false)
@@ -78,7 +78,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 
-from bonnet.core import home
 from bonnet.gateway import (
     gateway_config,
     paths,
@@ -280,7 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "This gateway's home directory (gateway.toml, registry.db, tenant "
-            "state). Remembered for future runs — see BONNET_GATEWAY_HOME below."
+            "state). Process-local: overrides BONNET_GATEWAY_HOME for this run only."
         ),
     )
     parser.add_argument(
@@ -458,13 +457,11 @@ def run(argv: list[str] | None = None):
     if args.dir:
         args.dir = os.path.expanduser(args.dir)
 
-    # Only remember --dir for future runs that omit it entirely - a process
-    # with BONNET_GATEWAY_HOME set always resolves via that override anyway,
-    # and writing here would leak this run's --dir into other processes that
-    # rely on their own BONNET_GATEWAY_HOME for isolation (the pointer file
-    # isn't scoped by that env var).
-    if args.dir and not os.environ.get("BONNET_GATEWAY_HOME"):
-        home.set_home("gateway", args.dir)
+    # --dir is process-local and wins over the environment: each agent on one
+    # machine gets its own home via its own launcher args, and no run leaks
+    # its directory into another process's future runs.
+    if args.dir:
+        os.environ["BONNET_GATEWAY_HOME"] = args.dir
 
     if getattr(args, "command", None):
         raise SystemExit(_run_admin(args))

@@ -45,12 +45,12 @@ class TestPublishArticleArgTypes:
         with pytest.raises(ValueError, match="subject"):
             await tools.publish_article(12345, "body", board="general")
 
-    async def test_rejects_none_content(self):
-        with pytest.raises(ValueError, match="content"):
+    async def test_rejects_none_body(self):
+        with pytest.raises(ValueError, match="body"):
             await tools.publish_article("subject", None, board="general")
 
-    async def test_rejects_list_content(self):
-        with pytest.raises(ValueError, match="content"):
+    async def test_rejects_list_body(self):
+        with pytest.raises(ValueError, match="body"):
             await tools.publish_article("subject", ["not", "a", "string"], board="general")
 
     async def test_rejects_empty_subject(self):
@@ -110,4 +110,4 @@ class TestReportArgTypes:
         """Regression for the chaos-testing report's #2.2: report(reason=...)
         had no length cap, unlike every other text field."""
         with pytest.raises(ValueError, match="reason"):
-            await tools.report(reason="x" * 200_000, article_num=1)
+            await tools.report(reason="x" * 200_000, target_article_id="ab" * 32)

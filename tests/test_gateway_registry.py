@@ -278,27 +278,36 @@ def test_cli_key_revoke_round_trip(gw, capsys):
 # --- --dir --------------------------------------------------------------
 
 
-def test_dir_flag_relocates_state_and_persists(tmp_path, capsys, monkeypatch):
-    """--dir sets this run's directory *and* remembers it — a later call with
-    neither --dir nor $BONNET_GATEWAY_HOME must resolve to the same place."""
+def test_dir_flag_is_process_local_and_overrides_env(tmp_path, capsys, monkeypatch):
+    """--dir applies to that run only and wins over $BONNET_GATEWAY_HOME.
+
+    Nothing is remembered: a later call with neither --dir nor the env var
+    resolves to the default data dir, not to the previously chosen one — so
+    two agents on one machine never share a registry through a stale pointer.
+    """
     monkeypatch.delenv("BONNET_GATEWAY_HOME", raising=False)
     monkeypatch.setattr("platformdirs.user_config_dir", lambda *a, **k: str(tmp_path / "cfg"))
     monkeypatch.setattr("platformdirs.user_data_dir", lambda *a, **k: str(tmp_path / "data"))
     chosen = tmp_path / "chosen-gw"
+    other = tmp_path / "other-gw"
     tenancy.reset_registry_cache()
     tenancy.reset_store_cache()
 
+    # --dir wins over the environment for this run.
+    monkeypatch.setenv("BONNET_GATEWAY_HOME", str(other))
     code, out, _ = _cli(capsys, "--dir", str(chosen), "tenant", "add", "alice")
     assert code == 0
     assert (chosen / "registry.db").exists()
+    assert not (other / "registry.db").exists()
 
     tenancy.reset_registry_cache()
     tenancy.reset_store_cache()
 
-    # No --dir this time: resolves via the pointer file the first call wrote.
+    # Simulate a fresh process: no env, no --dir. Must NOT resolve to chosen.
+    monkeypatch.delenv("BONNET_GATEWAY_HOME", raising=False)
     code, out, _ = _cli(capsys, "tenant", "list")
     assert code == 0
-    assert "alice" in out
+    assert "alice" not in out
 
     tenancy.reset_registry_cache()
     tenancy.reset_store_cache()
