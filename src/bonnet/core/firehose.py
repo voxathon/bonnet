@@ -128,8 +128,16 @@ class FirehoseStore:
     Remote ranges are verified and accepted atomically.
     """
 
-    def __init__(self, db_path: str):
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        witness_max_per_event: int = 0,
+        witness_update_policy: str = "first",
+    ):
         self._db_path = db_path
+        self._witness_max_per_event = witness_max_per_event
+        self._witness_update_policy = witness_update_policy
         self._lock = threading.RLock()
         db_dir = os.path.dirname(db_path)
         if db_dir:
@@ -1079,7 +1087,21 @@ class FirehoseStore:
     # Witness storage
     # -----------------------------------------------------------------------
 
-    def store_witness(self, w: Witness) -> bool:
+    def configure_witnesses(self, max_per_event: int, update_policy: str) -> None:
+        """Update the witness retention policy (global [witnesses] section)."""
+        if update_policy not in ("first", "last"):
+            raise ValueError(
+                f"witness update_policy must be 'first' or 'last', got {update_policy!r}"
+            )
+        if max_per_event < 0 or max_per_event == 1:
+            raise ValueError(
+                f"witness max_per_event must be 0 (unbounded) or >= 2, got {max_per_event}"
+            )
+        with self._lock:
+            self._witness_max_per_event = max_per_event
+            self._witness_update_policy = update_policy
+
+    def store_witness(self, w: Witness, keep_pubkeys: set[bytes] | None = None) -> bool:
         """Store a relay witness, if its signature holds. Returns whether it did.
 
         Verification is unconditional and belongs here rather than at the call
@@ -1093,6 +1115,12 @@ class FirehoseStore:
         meant checking our own signature with our own key. Retention is what
         changes the answer. It costs one Ed25519 verify per event per relay,
         not per read — `get_witness` returns the cached row.
+
+        update_policy "first" (forensics default) keeps the first verified
+        statement per (origin, event, relay) and drops later re-signs;
+        "last" keeps the historical REPLACE behavior. keep_pubkeys names
+        relays that must never be evicted by the max_per_event cap
+        (caller passes its own key; origin witnesses are always pinned).
         """
         if not verify_witness_signature(
             w.relay_pubkey, encode_unsigned_witness(w), w.relay_signature
@@ -1104,25 +1132,88 @@ class FirehoseStore:
             )
             return False
         with self._lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO relay_witnesses "
-                "(event_origin, event_id, event_hash, relay_pubkey, relay_hostname, "
-                "received_from_pubkey, received_from_hostname, seen_at, relay_signature) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    w.event_origin,
-                    w.event_id,
-                    w.event_hash,
-                    w.relay_pubkey,
-                    w.relay_hostname,
-                    w.received_from_pubkey,
-                    w.received_from_hostname,
-                    w.seen_at,
-                    w.relay_signature,
-                ),
-            )
+            if self._witness_update_policy == "first":
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO relay_witnesses "
+                    "(event_origin, event_id, event_hash, relay_pubkey, relay_hostname, "
+                    "received_from_pubkey, received_from_hostname, seen_at, relay_signature) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        w.event_origin,
+                        w.event_id,
+                        w.event_hash,
+                        w.relay_pubkey,
+                        w.relay_hostname,
+                        w.received_from_pubkey,
+                        w.received_from_hostname,
+                        w.seen_at,
+                        w.relay_signature,
+                    ),
+                )
+                if cur.rowcount == 0:
+                    return True
+            else:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO relay_witnesses "
+                    "(event_origin, event_id, event_hash, relay_pubkey, relay_hostname, "
+                    "received_from_pubkey, received_from_hostname, seen_at, relay_signature) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        w.event_origin,
+                        w.event_id,
+                        w.event_hash,
+                        w.relay_pubkey,
+                        w.relay_hostname,
+                        w.received_from_pubkey,
+                        w.received_from_hostname,
+                        w.seen_at,
+                        w.relay_signature,
+                    ),
+                )
+            self._enforce_witness_cap_locked(w.event_origin, w.event_id, keep_pubkeys)
             self._conn.commit()
         return True
+
+    def _enforce_witness_cap_locked(
+        self, event_origin: str, event_id: bytes, keep_pubkeys: set[bytes] | None
+    ) -> None:
+        """Evict oldest upstream witnesses beyond max_per_event. Caller holds lock."""
+        cap = self._witness_max_per_event
+        if cap == 0:
+            return
+        keep = set(keep_pubkeys or set())
+        count = self._conn.execute(
+            "SELECT COUNT(*) FROM relay_witnesses WHERE event_origin=? AND event_id=?",
+            (event_origin, event_id),
+        ).fetchone()[0]
+        if count <= cap:
+            return
+        over = count - cap
+        zero_key = b"\x00" * 32
+        if keep:
+            placeholders = ",".join("?" for _ in keep)
+            rows = self._conn.execute(
+                "SELECT rowid FROM relay_witnesses "
+                "WHERE event_origin=? AND event_id=? "
+                f"AND relay_pubkey NOT IN ({placeholders}) "
+                "AND NOT (received_from_pubkey=? AND received_from_hostname='') "
+                "ORDER BY seen_at ASC, relay_pubkey ASC LIMIT ?",
+                (event_origin, event_id, *keep, zero_key, over),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT rowid FROM relay_witnesses "
+                "WHERE event_origin=? AND event_id=? "
+                "AND NOT (received_from_pubkey=? AND received_from_hostname='') "
+                "ORDER BY seen_at ASC, relay_pubkey ASC LIMIT ?",
+                (event_origin, event_id, zero_key, over),
+            ).fetchall()
+        if rows:
+            placeholders = ",".join("?" for _ in rows)
+            self._conn.execute(
+                f"DELETE FROM relay_witnesses WHERE rowid IN ({placeholders})",
+                tuple(r[0] for r in rows),
+            )
 
     def get_witnesses(
         self, event_origin: str, event_id: bytes, limit: int = MAX_WITNESS_SET

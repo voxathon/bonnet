@@ -274,6 +274,7 @@ class FirehoseCommandHandler:
         peer_map: dict = None,
         allowed_origins: set = None,
         max_body_size: int = 1024 * 1024,
+        wire_max: int = 32,
     ):
         self._firehose = firehose
         self._identity = server_identity
@@ -294,6 +295,7 @@ class FirehoseCommandHandler:
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
         self._boards_lock = threading.Lock()
         self._max_body_size = max_body_size
+        self._wire_max = max(1, wire_max)
         # Serializes the check-then-append span for bonnet.user.register and
         # bonnet.board.create: without it, two concurrent registrations for
         # the same name can both read "no holder yet" before either appends,
@@ -785,7 +787,7 @@ class FirehoseCommandHandler:
                 hostname=self._hostname,
                 seen_at=now,
             )
-            self._firehose.store_witness(witness)
+            self._firehose.store_witness(witness, keep_pubkeys={self._identity.public_key})
             encoded_witness = encode_witness(witness)
 
             return _success(
@@ -988,7 +990,12 @@ class FirehoseCommandHandler:
         Serving only our own link, as this did before, meant the chain died at
         every hop: each relay downstream saw one entry and had no way to learn
         the rest.
+
+        Truncation to wire_max is deterministic (own, origin witnesses, then
+        newest upstream) and storage is untouched.
         """
+        from bonnet.core.record import is_origin_witness as _is_origin
+
         own = self._firehose.get_witness(origin, rec.event_id, self._identity.public_key)
         if own is None:
             own = make_origin_witness(
@@ -999,13 +1006,15 @@ class FirehoseCommandHandler:
                 hostname=self._hostname,
                 seen_at=rec.created_at,
             )
-            self._firehose.store_witness(own)
+            self._firehose.store_witness(own, keep_pubkeys={self._identity.public_key})
 
-        chain = [own] + [
+        rest = [
             w
-            for w in self._firehose.get_witnesses(origin, rec.event_id)
+            for w in self._firehose.get_witnesses(origin, rec.event_id, limit=10_000)
             if w.relay_pubkey != own.relay_pubkey
         ]
+        rest.sort(key=lambda w: (not _is_origin(w), -w.seen_at, w.relay_pubkey))
+        chain = [own] + rest[: max(0, self._wire_max - 1)]
         out = struct.pack(">H", len(chain))
         for w in chain:
             encoded = encode_witness(w)

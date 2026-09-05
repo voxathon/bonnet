@@ -265,11 +265,14 @@ class SyncManager:
         server_identity: Identity,
         hostname: str,
         dispatcher=None,
+        *,
+        retain_upstream: bool = True,
     ):
         self._firehose = firehose
         self._identity = server_identity
         self._hostname = hostname
         self._dispatcher = dispatcher
+        self._retain_upstream_enabled = retain_upstream
         self._lock = threading.RLock()
         self._running = False
         self._tasks: dict[str, asyncio.Task] = {}
@@ -552,7 +555,8 @@ class SyncManager:
                     event_hash = compute_event_hash(encode_record(rec))
                     self._retain_upstream(rec, event_hash, upstream)
                     self._firehose.store_witness(
-                        self._create_local_witness(rec, event_hash, peer_pubkey, peer_hostname)
+                        self._create_local_witness(rec, event_hash, peer_pubkey, peer_hostname),
+                        keep_pubkeys={self._identity.public_key},
                     )
 
                 if result.conflicts:
@@ -808,7 +812,12 @@ class SyncManager:
         Retention is what makes the chain worth anything: a signed statement
         outlives its signer, so a relay that later goes offline - or simply
         stops answering us - does not erase the trail that ran through it.
+
+        Disabled entirely when retain_upstream is false (global [witnesses]
+        section): only our own + the origin witness are stored.
         """
+        if not self._retain_upstream_enabled:
+            return 0
         kept = 0
         for w in upstream:
             if w.event_origin != rec.origin or w.event_id != rec.event_id:
@@ -817,7 +826,7 @@ class SyncManager:
                 continue
             if w.relay_pubkey == self._identity.public_key:
                 continue
-            if self._firehose.store_witness(w):
+            if self._firehose.store_witness(w, keep_pubkeys={self._identity.public_key}):
                 kept += 1
         return kept
 
