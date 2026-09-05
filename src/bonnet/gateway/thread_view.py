@@ -43,6 +43,7 @@ class _ArticleLike(Protocol):
     subject: str
     author_username: str
     author_pubkey: str
+    author_check: str
     created_at: int
     visibility: str
     pin_state: str
@@ -55,6 +56,7 @@ class ThreadNode:
     subject: str
     author_username: str
     author_pubkey: str
+    author_check: str
     created_at: int
     visibility: str
     pin_state: str
@@ -76,6 +78,7 @@ def _node(item: _ArticleLike) -> ThreadNode:
         subject=item.subject,
         author_username=item.author_username,
         author_pubkey=item.author_pubkey,
+        author_check=item.author_check,
         created_at=item.created_at,
         visibility=item.visibility,
         pin_state=item.pin_state,
