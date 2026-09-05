@@ -465,6 +465,7 @@ class TestArticleGet:
         out += struct.pack(">B", 0)  # no replacement
         out += _enc_text16("unpinned")  # pin_state
         out += _enc_text16("open")  # thread_state
+        out += _enc_text16("registry")  # author_check
         body = b"hello world"
         out += struct.pack(">I", len(body)) + body
         resp = _success(out)
@@ -480,6 +481,7 @@ class TestArticleGet:
         assert art.author_registrar == "bbs.test"
         assert art.pin_state == "unpinned"
         assert art.thread_state == "open"
+        assert art.author_check == "registry"
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +537,7 @@ class TestArticleList:
         item += struct.pack(">B", 0)  # no replacement
         item += _enc_text16("unpinned")
         item += _enc_text16("open")
+        item += _enc_text16("unchecked")  # author_check
         item += struct.pack(">I", 0)  # body blob (empty for list)
 
         resp = _success(struct.pack(">H", 1) + item)
@@ -542,6 +545,7 @@ class TestArticleList:
         assert len(articles.results) == 1
         assert articles.results[0].article_num == 1
         assert articles.results[0].subject == "Subject"
+        assert articles.results[0].author_check == "unchecked"
 
 
 # ---------------------------------------------------------------------------

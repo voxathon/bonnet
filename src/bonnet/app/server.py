@@ -201,7 +201,8 @@ class BonnetServer:
         if config.peers:
             for peer in config.peers:
                 log_msg(
-                    f"INIT: configured peer '{peer.origin}' at {peer.hostname}:{peer.port} (verify_tls={peer.verify_tls})"
+                    f"INIT: configured peer '{peer.origin}' at "
+                    f"{peer.scheme}://{peer.hostname}:{peer.port} (verify_tls={peer.verify_tls})"
                 )
 
         peer_map = {peer.origin: peer for peer in config.peers}
@@ -626,13 +627,22 @@ class BonnetServer:
             )
 
         tasks = [asyncio.create_task(self._sweep_staged_bodies_periodically())]
-        if sys.stdin.isatty():
+        try:
+            # A closed fd 0 (common under systemd/Docker when stdin isn't
+            # attached at all, as opposed to being open on /dev/null) can
+            # raise OSError here rather than just answering False - this must
+            # never take the whole server down over an operator console it's
+            # about to decide it doesn't want anyway.
+            stdin_is_tty = sys.stdin.isatty()
+        except (OSError, ValueError):
+            stdin_is_tty = False
+        if stdin_is_tty:
             tasks.append(asyncio.create_task(OperatorConsole(self).repl_loop()))
         else:
             print("No interactive terminal on stdin - operator REPL disabled, serving only.")
 
         for peer in self.config.peers:
-            base_url = f"https://{peer.hostname}:{peer.port}"
+            base_url = f"{peer.scheme}://{peer.hostname}:{peer.port}"
             try:
                 client = HttpSyncClient(
                     base_url, verify_tls=peer.verify_tls, allow_private_dial=peer.allow_private
@@ -657,6 +667,13 @@ class BonnetServer:
                     await task
                 except asyncio.CancelledError:
                     pass
+                except Exception as e:
+                    # A background task (the staged-body sweep, the operator
+                    # REPL) failing on its own account must not take the
+                    # shutdown path down with it - that would turn an
+                    # unrelated bug into the whole process crashing instead
+                    # of a clean exit.
+                    log_msg(f"SHUTDOWN: background task raised during teardown: {e!r}")
             await self.sync_manager.stop_all()
             await server.shutdown()
         return True

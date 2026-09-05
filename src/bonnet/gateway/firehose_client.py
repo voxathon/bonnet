@@ -235,12 +235,27 @@ class FirehoseHTTPClient(FirehoseTransport):
     async def publish_user_register(
         self,
         username: str,
-        user_pubkey: bytes,
+        user_pubkey: bytes | None = None,
         flags: int = 0,
     ) -> PublishResult:
-        """Register a user identity."""
+        """Register a user identity.
+
+        `user_pubkey` defaults to this client's own connected identity - the
+        only key this client can actually sign a registration for - so a
+        caller registering itself doesn't need to hand back a key it already
+        gave `connect()`. Pass it explicitly only when registering some other
+        key (an admin registering a user on their behalf, say).
+
+        On success, this client's own actor_username updates to `username` so
+        every later publish from this connection (publish_article included)
+        attributes to it automatically - a caller that registered but never
+        passed `username=` to `connect()` would otherwise keep publishing
+        with an empty actor_username indefinitely.
+        """
         if self._identity is None or self._server_origin is None:
             raise FirehoseClientError("not connected")
+        if user_pubkey is None:
+            user_pubkey = self._identity.public_key
         eid = os.urandom(32)
         m = MetadataMap(
             [
@@ -262,7 +277,10 @@ class FirehoseHTTPClient(FirehoseTransport):
         actor_sig = sign_intent(self._identity, encode_intent(intent))
         cmd = build_publish_record(intent, actor_sig, b"")
         resp = await self._send_command(cmd)
-        return parse_publish_response(resp)
+        result = parse_publish_response(resp)
+        if user_pubkey == self._identity.public_key:
+            self._username = username
+        return result
 
     async def publish_user_key_rotate(self, new_identity: Identity) -> PublishResult:
         """Succeed this connection's actor key with `new_identity`.
@@ -758,8 +776,9 @@ class FirehoseHTTPClient(FirehoseTransport):
                 raise FirehoseClientError(
                     f"refusing redirect to unsafe target {redirect.hostname}:{redirect.port}"
                 ) from None
+            scheme = urlparse(self._base_url).scheme
             origin_client = FirehoseHTTPClient(
-                f"https://{redirect.hostname}:{redirect.port}",
+                f"{scheme}://{redirect.hostname}:{redirect.port}",
                 # This client's own TLS policy, not the relay's suggestion.
                 verify=self._verify,
                 # A redirect hop is a connection to a different origin, and
