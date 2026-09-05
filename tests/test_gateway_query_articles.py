@@ -189,9 +189,7 @@ async def test_root_returns_every_reply_at_any_depth(wired):
     )
     await tools.publish_article("other thread", "unrelated", board="general")
 
-    thread = await tools.query_articles(
-        board="general", root_article_id=root_id, origin=ORIGIN
-    )
+    thread = await tools.query_articles(board="general", root_article_id=root_id, origin=ORIGIN)
 
     assert {a.subject for a in thread.results} == {"reply", "grandchild"}
 

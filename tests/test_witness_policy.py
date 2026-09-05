@@ -245,9 +245,7 @@ def test_no_synthesised_origin_witness_for_a_remote_origin(tmp_path):
     # Only the genuine origin link is stored; this relay holds no statement
     # of its own about the event.
     store.store_witness(
-        make_origin_witness(
-            "origin.test", rec.event_id, eh, server.identity, "origin.test", 1
-        )
+        make_origin_witness("origin.test", rec.event_id, eh, server.identity, "origin.test", 1)
     )
     handler = FirehoseCommandHandler(
         firehose=store,
