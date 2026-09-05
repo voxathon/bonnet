@@ -71,6 +71,21 @@ class ArticleView:
     unique only within the registrar that accepted them. author_pubkey is the
     only durable identity.
 
+    author_check reports whether the naming origin actually issued
+    author_username to author_pubkey — it does not gate anything, only
+    describes it:
+      - 'unchecked':     no name was claimed. This is the anonymous-key case:
+                         author_username is '' and there is nothing to check.
+      - 'registry':      the naming origin's own registration log credits this
+                         name to this key.
+      - 'unregistered':  the naming origin is the publishing origin, and its
+                         registration log does not back the claim.
+      - 'foreign':       the record credits a *different* origin as registrar;
+                         this relay does not ask that origin to confirm it.
+    An empty author_username with author_check='unchecked' is the only
+    distinction between "this author never claimed a name" and any other
+    unverified state — treat the two as different findings.
+
     Note: visibility and body_state are independent dimensions. A purged
     article has visibility='active' and body_state='purged'. Clients MUST
     check body_state alongside visibility to determine body availability.
@@ -124,6 +139,7 @@ class ArticleView:
     thread_state: str = "open"
     body: bytes | None = None
     body_check: str = "unchecked"  # unchecked, matched, mismatched
+    author_check: str = "unchecked"  # unchecked, unregistered, registry, foreign
 
 
 @dataclass
@@ -145,6 +161,7 @@ class ArticleListItem:
     author_pubkey: str
     author_username: str = ""
     author_registrar: str = ""
+    author_check: str = "unchecked"  # unchecked, unregistered, registry, foreign — see ArticleView
     subject: str = ""
     tags: str = ""
     content_type: str = ""
