@@ -45,6 +45,7 @@ class PeerConfig:
     origin: str
     hostname: str
     port: int = 2272
+    scheme: str = "https"
     verify_tls: bool = False
     allow_private: bool = False
     import_warnings: bool = False
@@ -139,6 +140,7 @@ _PEER_KEYS = {
     "origin",
     "hostname",
     "port",
+    "scheme",
     "verify_tls",
     "allow_private",
     "import_warnings",
@@ -394,6 +396,11 @@ class FirehoseConfig:
                 )
             if not (1 <= peer.port <= 65535):
                 raise ValueError(f"config: peer '{peer.origin}' port {peer.port} out of range")
+            if peer.scheme not in ("http", "https"):
+                raise ValueError(
+                    f"config: peer '{peer.origin}' scheme must be 'http' or 'https', "
+                    f"got {peer.scheme!r}"
+                )
             for flag in ("import_warnings", "import_temp_bans", "import_permabans"):
                 value = getattr(peer, flag)
                 if not isinstance(value, bool):
@@ -528,6 +535,7 @@ class FirehoseConfig:
                     origin=p.get("origin", ""),
                     hostname=p.get("hostname", ""),
                     port=p.get("port", 2272),
+                    scheme=p.get("scheme", "https"),
                     verify_tls=p.get("verify_tls", False),
                     allow_private=_as_bool(p, "allow_private", "sync.peers", False),
                     import_warnings=_as_bool(p, "import_warnings", "sync.peers", False),
@@ -639,7 +647,9 @@ interval_seconds = 300
 
 # Firehose federation peers. Each entry starts a background sync loop.
 # The origin is the peer's Bonnet origin string; hostname/port is the dial address.
-# verify_tls should be false for self-signed certs (common on LAN).
+# scheme selects how the peer is dialed ("https", the default, or "http" for
+# a peer running with TLS disabled entirely). verify_tls only matters when
+# scheme is "https": set it false for self-signed certs (common on LAN).
 # allow_private permits dialing loopback/private/link-local addresses (e.g.
 # 127.0.0.1 or 10.0.0.15) - refused by default as an SSRF guard, so set this
 # to true for local testing or a real LAN-only federation deployment.
@@ -652,6 +662,7 @@ interval_seconds = 300
 # origin = "10.0.0.15"
 # hostname = "10.0.0.15"
 # port = 2272
+# scheme = "https"
 # verify_tls = false
 # allow_private = true
 # import_warnings = true
