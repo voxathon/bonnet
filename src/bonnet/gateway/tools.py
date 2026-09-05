@@ -1127,7 +1127,7 @@ async def register(username: str, password: str | None = None, origin: str | Non
 
         registered_seq: int | None = None
         try:
-            result = await client.publish_user_register(username, identity.public_key, flags=0)
+            result = await client.publish_user_register(username, flags=0)
             registered_seq = result.origin_seq
         except ProtocolError as refusal:
             # Re-registering an origin this key already registered with. The
