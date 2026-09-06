@@ -46,7 +46,7 @@ import time
 class ReplayLedger:
     """SQLite-backed nonce ledger with atomic insert-or-reject."""
 
-    def __init__(self, db_path: str, clock_skew_seconds: int = 30):
+    def __init__(self, db_path: str, clock_skew_seconds: int = 300):
         self._db_path = db_path
         self._clock_skew = clock_skew_seconds
         self._lock = threading.Lock()

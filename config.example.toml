@@ -9,6 +9,14 @@
 [server]
 origin = "bbs.example"
 hostname = "bbs.example"
+# HTTP signature freshness (Kerberos-style symmetric 5 min tolerance).
+# signature_lifetime_seconds caps how long a signed request/response is valid;
+# clock_skew_seconds allows for unsynced clocks (VM suspend, W32Time drift).
+# Replay window is roughly lifetime + 2*skew (~15 min worst case at defaults).
+# No upper cap is enforced: a permissive node only weakens itself, since every
+# peer verifies with its own limits. Tighten for stricter deployments.
+# signature_lifetime_seconds = 300
+# clock_skew_seconds = 300
 # Storage paths. Default to data, boards, event_bodies under this server's
 # home directory ($BONNET_SERVER_HOME if set, else the OS per-user data dir —
 # see `bonnet server -h`). Uncomment to pin an explicit path regardless.

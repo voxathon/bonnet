@@ -485,7 +485,7 @@ class TestRejections:
     async def test_expired_signature(self, keypair, key_resolver, request_msg, valid_nonce):
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        old = int(time.time()) - 120
+        old = int(time.time()) - 700
         await signer.sign_request(request_msg, nonce=valid_nonce, created=old, expires=old + 1)
         verifier = BonnetVerifier(key_resolver=key_resolver)
         with pytest.raises(ExpiredSignature):
@@ -495,7 +495,7 @@ class TestRejections:
     async def test_future_signature(self, keypair, key_resolver, request_msg, valid_nonce):
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
-        future = int(time.time()) + 120
+        future = int(time.time()) + 400
         await signer.sign_request(request_msg, nonce=valid_nonce, created=future)
         verifier = BonnetVerifier(key_resolver=key_resolver)
         with pytest.raises(FutureSignature):

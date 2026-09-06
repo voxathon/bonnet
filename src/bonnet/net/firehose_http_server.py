@@ -116,7 +116,7 @@ class FirehoseHTTPServer:
 
         self._replay_ledger = replay_ledger or ReplayLedger(
             config.replay_db_path,
-            clock_skew_seconds=getattr(config, "clock_skew_seconds", 30),
+            clock_skew_seconds=getattr(config, "clock_skew_seconds", 300),
         )
 
         self._rate_limiter = rate_limiter or RateLimiter(
@@ -129,8 +129,8 @@ class FirehoseHTTPServer:
         self._verifier = BonnetVerifier(
             key_resolver=FirehoseKeyResolver(),
             tag=UNTP_TAG,
-            max_lifetime=getattr(config, "signature_lifetime_seconds", 60),
-            clock_skew=getattr(config, "clock_skew_seconds", 30),
+            max_lifetime=getattr(config, "signature_lifetime_seconds", 300),
+            clock_skew=getattr(config, "clock_skew_seconds", 300),
             request_required_components=REQUEST_REQUIRED_COMPONENTS,
             response_required_components=RESPONSE_REQUIRED_COMPONENTS,
         )
