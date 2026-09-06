@@ -61,9 +61,12 @@ Environment variables (command-line flags win over all of them):
     MCP_TRANSPORT      — "stdio" (default), "http" or "sse"
     MCP_HOST           — http bind address (default: 127.0.0.1)
     MCP_PORT           — http port (default: 8080)
+    MCP_PATH           — http endpoint path (default: FastMCP's /mcp/; e.g. "/" or "/blah")
     MCP_TLS_CERT       — TLS certificate path (http only, optional)
     MCP_TLS_KEY        — TLS key path (http only, optional)
-"""
+
+    BONNET_URL may also come from `gateway.toml` ([gateway] url) when the
+    environment does not set it — env still wins when both are present."""
 
 import argparse
 import json
@@ -330,12 +333,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="http port (default: $MCP_PORT, else gateway.toml, else 8080)",
     )
     parser.add_argument(
+        "--path",
+        default=None,
+        help="http endpoint path (default: $MCP_PATH, else gateway.toml, else FastMCP's /mcp/; e.g. '/' or '/blah')",
+    )
+    parser.add_argument(
         "--no-gating",
         action="store_true",
         help=(
             "Show every tool regardless of state. Without this, board-facing "
             "tools stay hidden until a board is joined (also BONNET_GATING=off)"
         ),
+    )
+    parser.add_argument(
+        "--create-config", action="store_true", help="Write a sample gateway.toml and exit"
+    )
+    parser.add_argument(
+        "--init",
+        action="store_true",
+        help=(
+            "One-shot first-run setup: write a sample gateway.toml and print "
+            "next steps. Exits without starting the gateway."
+        ),
+    )
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="Validate gateway.toml and exit, without starting the gateway",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="With --create-config or --init, overwrite an existing gateway.toml",
     )
 
     # Tenant administration. Deliberately here and not as MCP tools: every
@@ -452,6 +481,114 @@ def _run_admin(args) -> int:
     return 0
 
 
+def _normalize_mcp_path(raw: str) -> str:
+    """Normalize an operator-supplied MCP endpoint path, or raise SystemExit.
+
+    Ensures a leading `/`, strips a trailing `/` (except root), and refuses
+    values that would shadow the gateway's own root routes (`/health`,
+    `/.well-known/untp`).
+    """
+    path = raw.strip()
+    if not path:
+        print("error: invalid MCP path '' (expected e.g. '/', '/mcp' or '/blah')", file=sys.stderr)
+        raise SystemExit(1)
+    if not path.startswith("/"):
+        path = "/" + path
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+    if path in ("/health", "/.well-known/untp"):
+        print(
+            f"error: MCP path {path!r} collides with the gateway's own route; "
+            "pick another (e.g. '/', '/mcp' or '/blah')",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if any(c.isspace() for c in path):
+        print(f"error: invalid MCP path {raw!r} (whitespace is not allowed)", file=sys.stderr)
+        raise SystemExit(1)
+    return path
+
+
+def _validate_origin_url(raw: str) -> str:
+    """Validate a [gateway] url the same way connect() validates its own.
+
+    Only scheme+host+port — no path, query or fragment, since the wire
+    protocol's paths are fixed relative to the origin itself.
+    """
+    from urllib.parse import urlsplit
+
+    url = raw.strip()
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        print(
+            f"error: invalid gateway url {raw!r} (expected e.g. https://bbs.example:2272)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        print(
+            f"error: gateway url takes just scheme+host+port, got {raw!r} "
+            "(e.g. https://bbs.example:2272, with no path, query or fragment)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return url.rstrip("/")
+
+
+def _print_gateway_next_steps(config_path: str) -> None:
+    print()
+    print("Next steps:")
+    print("  1. Edit the sample (everything is commented; uncomment deliberately):")
+    print(f"       {config_path}")
+    print("     Set url to your board server, host/port/path for how this")
+    print("     gateway is reached, tls_cert/tls_key to serve TLS directly")
+    print("     (or leave them unset behind a reverse proxy).")
+    print("  2. Start the gateway:")
+    print("       bonnet gateway --http")
+    print("     Or pin the upstream for every tenant in this shell instead:")
+    print("       BONNET_URL=https://bbs.example:2272 bonnet gateway --http")
+    print("     ($BONNET_URL wins over the file's url when both are set.)")
+    print("  3. Create an account (out of band — there is no MCP tool for this):")
+    print("       bonnet gateway tenant add alice")
+    print("     Hand out the printed API key once; clients send it as")
+    print("     `Authorization: Bearer bnt_...` or `X-API-Key: bnt_...`.")
+    print("     No/bad key degrades to read-only anonymous, never a 401.")
+    print("  4. From the agent, then: connect(url), trust_origin_key(...),")
+    print('     register("<name>"), and publish.')
+
+
+def _run_check_config(config_path: str) -> None:
+    """Validate gateway.toml and print the resolved effective config."""
+    import tomllib
+
+    try:
+        cfg = gateway_config.load(config_path)
+    except IsADirectoryError:
+        print(f"error: config path is a directory, not a file: {config_path}", file=sys.stderr)
+        raise SystemExit(1)
+    except tomllib.TOMLDecodeError as exc:
+        print(f"error: could not parse {config_path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    if cfg is None:
+        print(f"error: config file not found: {config_path}", file=sys.stderr)
+        print("run 'bonnet gateway --init' to generate a sample config", file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        gateway_config.validate(cfg)
+    except ValueError as exc:
+        print(f"error: invalid configuration in {config_path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    for key in cfg.unknown_keys:
+        print(f"warning: unrecognized config key '{key}' (ignored)", file=sys.stderr)
+    print(f"OK: {config_path} is valid.")
+    print(f"  transport: {cfg.transport or '(default: stdio)'}")
+    print(f"  listen: {cfg.host or '(default: 127.0.0.1)'}:{cfg.port or '(default: 8080)'}")
+    print(f"  path: {cfg.path or '(default: /mcp/)'}")
+    print(f"  url: {cfg.url or '(default: $BONNET_URL or https://localhost:2272)'}")
+    print(f"  tls: {'yes' if cfg.tls_cert and cfg.tls_key else 'no'}")
+    print(f"  gating: {'off' if cfg.gating is False else 'on'}")
+
+
 def run(argv: list[str] | None = None):
     args = build_parser().parse_args(argv)
     if args.dir:
@@ -463,6 +600,29 @@ def run(argv: list[str] | None = None):
     if args.dir:
         os.environ["BONNET_GATEWAY_HOME"] = args.dir
 
+    config_path = paths.config_path()
+    if getattr(args, "command", None) and (args.init or args.create_config or args.check_config):
+        print(
+            "error: cannot combine tenant/key subcommand with --init/--create-config/--check-config",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if args.init or args.create_config:
+        try:
+            gateway_config.create_default_config(config_path, force=args.force)
+        except FileExistsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"Wrote sample config to {config_path}")
+        if args.init:
+            _print_gateway_next_steps(config_path)
+        return
+
+    if args.check_config:
+        _run_check_config(config_path)
+        return
+
     if getattr(args, "command", None):
         raise SystemExit(_run_admin(args))
 
@@ -470,7 +630,37 @@ def run(argv: list[str] | None = None):
     # touches this. Absent entirely on a fresh install; every field is then
     # None and every line below falls straight through to $MCP_*/built-ins,
     # unchanged from before this file existed.
-    gw_config = gateway_config.load(paths.config_path())
+    import tomllib
+
+    try:
+        gw_config = gateway_config.load(paths.config_path())
+    except IsADirectoryError:
+        print(
+            f"error: config path is a directory, not a file: {paths.config_path()}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    except tomllib.TOMLDecodeError as exc:
+        print(f"error: could not parse {paths.config_path()}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    if gw_config:
+        for key in gw_config.unknown_keys:
+            print(f"warning: unrecognized config key '{key}' (ignored)", file=sys.stderr)
+        try:
+            gateway_config.validate(gw_config)
+        except ValueError as exc:
+            print(
+                f"error: invalid configuration in {paths.config_path()}: {exc}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+    # [gateway] url fills $BONNET_URL only when the environment did not set
+    # it: an operator who exports BONNET_URL means it, and a file must not
+    # quietly override that. This covers tools._current_url and the
+    # /.well-known/untp proxy, which both read the env var.
+    if not os.environ.get("BONNET_URL") and gw_config and gw_config.url:
+        os.environ["BONNET_URL"] = _validate_origin_url(gw_config.url)
 
     if args.no_gating or (gw_config and gw_config.gating is False):
         os.environ["BONNET_GATING"] = "off"
@@ -510,6 +700,8 @@ def run(argv: list[str] | None = None):
         port = int(port_env) if port_env else (gw_config.port if gw_config else None) or 8080
     ssl_certfile = os.environ.get("MCP_TLS_CERT") or (gw_config.tls_cert if gw_config else None)
     ssl_keyfile = os.environ.get("MCP_TLS_KEY") or (gw_config.tls_key if gw_config else None)
+    raw_path = args.path or os.environ.get("MCP_PATH") or (gw_config.path if gw_config else None)
+    mcp_path = _normalize_mcp_path(raw_path) if raw_path else None
 
     uvicorn_config: dict = {}
     if ssl_certfile and ssl_keyfile:
@@ -549,6 +741,7 @@ def run(argv: list[str] | None = None):
         transport=transport,
         host=host,
         port=port,
+        path=mcp_path,
         uvicorn_config=uvicorn_config or None,
         middleware=[ASGIMiddleware(CleanTransportErrorMiddleware)],
     )
