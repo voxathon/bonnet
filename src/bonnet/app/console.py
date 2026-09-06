@@ -24,6 +24,7 @@ import os
 import struct
 
 from bonnet.core.crypto import Identity
+from bonnet.core.hostname import normalize_hostname
 from bonnet.core.kind_validator import identity_text_violation
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
@@ -1894,12 +1895,29 @@ class OperatorConsole:
             valid = verify_witness_signature(
                 w.relay_pubkey, encode_unsigned_witness(w), w.relay_signature
             )
+            # Raw hostnames are the relay's signed claims — shown verbatim,
+            # with the canonical form alongside when it differs.
+            relay_norm = normalize_hostname(w.relay_hostname)
+            relay_shown = (
+                w.relay_hostname
+                if relay_norm == w.relay_hostname
+                else f"{w.relay_hostname} (= {relay_norm})"
+            )
+            from_raw = w.received_from_hostname or "(origin)"
+            from_norm = (
+                normalize_hostname(w.received_from_hostname) if w.received_from_hostname else ""
+            )
+            from_shown = (
+                from_raw
+                if not from_norm or from_norm == w.received_from_hostname
+                else f"{from_raw} (= {from_norm})"
+            )
             lines.extend(
                 [
                     f"  Relay pubkey: {w.relay_pubkey.hex()}",
-                    f"  Relay host:   {w.relay_hostname}",
+                    f"  Relay host:   {relay_shown}",
                     f"  From pubkey:  {from_pubkey}",
-                    f"  From host:    {w.received_from_hostname or '(origin)'}",
+                    f"  From host:    {from_shown}",
                     f"  Seen at:      {seen}",
                     f"  Origin term:  {'yes' if is_origin_witness(w) else 'no'}",
                     f"  Event hash:   {w.event_hash.hex()}",

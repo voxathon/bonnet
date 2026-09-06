@@ -653,7 +653,7 @@ def test_validate_rejects_negative_clock_skew():
 
 @pytest.mark.parametrize(
     "bad_origin",
-    ["not a url ://bad", "bad host name", "has/slash", "üñîçødé.example"],
+    ["not a url ://bad", "bad host name", "has/slash"],
 )
 def test_validate_rejects_malformed_origin(bad_origin):
     """Regression for the chaos-testing report's #1.4: origin/hostname used
@@ -663,6 +663,20 @@ def test_validate_rejects_malformed_origin(bad_origin):
     c = FirehoseConfig(origin=bad_origin)
     with pytest.raises(ValueError, match="not a valid hostname"):
         c.validate()
+
+
+def test_validate_accepts_unicode_origin_as_punycode():
+    """Non-ASCII origins are accepted and converted via UTS46, matching the
+    signing path's `@authority` normalization."""
+    c = FirehoseConfig(origin="münchen.de")
+    c.validate()
+    assert c.origin == "xn--mnchen-3ya.de"
+
+
+def test_validate_accepts_unicode_hostname_as_punycode():
+    c = FirehoseConfig(origin="bbs.test", hostname="München.de.")
+    c.validate()
+    assert c.hostname == "xn--mnchen-3ya.de"
 
 
 def test_validate_rejects_malformed_hostname():

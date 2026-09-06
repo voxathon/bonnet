@@ -39,6 +39,7 @@ from urllib.parse import urlparse
 import httpx
 
 from bonnet.core.crypto import Identity
+from bonnet.core.hostname import normalize_hostname
 from bonnet.core.kinds import KIND_ORIGIN_KEY_ROTATE
 from bonnet.core.record import (
     encode_unsigned_record,
@@ -383,8 +384,8 @@ class FirehoseTransport:
         pinned under, and when they do not, the caller should know that before
         accepting.
         """
-        host = (urlparse(self._base_url).hostname or "").lower()
-        claimed = (self._server_origin or "").lower().rstrip(".")
+        host = normalize_hostname(urlparse(self._base_url).hostname or "")
+        claimed = normalize_origin(self._server_origin or "")
         return bool(claimed) and host == claimed
 
     def advertised_address(self) -> str | None:
@@ -412,7 +413,7 @@ class FirehoseTransport:
         advertised = normalize_origin(self._discovery.hostname)
         if not advertised:
             return None
-        dialed = (urlparse(self._base_url).hostname or "").lower()
+        dialed = normalize_hostname(urlparse(self._base_url).hostname or "")
         return advertised if advertised != dialed else None
 
     async def refresh_epoch_cache(self, origin: str | None = None) -> bool:

@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 from bonnet.gateway.paths import origins_db_path
+from bonnet.net.http_auth import canonicalize_url
 
 _ACTIVE_ORIGIN = "active_origin"
 
@@ -113,9 +114,23 @@ class OriginStore:
         itself as a stand-in origin id. Most-recently-used wins if more than
         one origin was ever joined at the same URL (e.g. after the origin
         rotated its own identifier).
+
+        Falls back to the canonicalized URL (default-port stripped, host
+        lowercased, trailing dot removed, IDNA-encoded), so spellings like
+        `https://h:443` and `https://H.` find the row stored under
+        `https://h`. Exact match wins; no migration needed — old rows heal
+        on next connect, which re-remembers the canonical URL.
         """
         row = self._conn.execute(
             "SELECT * FROM origins WHERE url = ? ORDER BY last_used DESC LIMIT 1", (url,)
+        ).fetchone()
+        if row:
+            return self._row_to_dict(row)
+        canonical = canonicalize_url(url)
+        if canonical == url:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM origins WHERE url = ? ORDER BY last_used DESC LIMIT 1", (canonical,)
         ).fetchone()
         return self._row_to_dict(row) if row else None
 

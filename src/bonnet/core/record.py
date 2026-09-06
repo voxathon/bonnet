@@ -28,6 +28,7 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from bonnet.core.crypto import Identity
+from bonnet.core.hostname import normalize_hostname
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -55,13 +56,15 @@ MAX_RANGE_RESPONSE = 1 << 24
 
 
 def normalize_origin(origin: str) -> str:
-    """Canonical form of an origin name: trimmed, lowercased, no trailing dot.
+    """Canonical form of an origin name: trimmed, lowercased, no trailing dot, A-label.
 
     Hostnames are case-insensitive and `bbs.example.` is the same name as
     `bbs.example`, so these are one origin spelled three ways. Config has
     normalized its own strings since it was written; nothing on the wire did,
     which meant a caller asking for `BBS.Example` looked up a different key
     than the one everything is stored under and quietly got nothing.
+    Unicode names convert to punycode via UTS46 (`münchen.de` → A-label),
+    sharing `core.hostname.normalize_hostname`.
 
     **Use this on lookup keys only — never on an origin read out of a record.**
     A record's origin is inside the bytes its signatures cover, so the
@@ -73,7 +76,7 @@ def normalize_origin(origin: str) -> str:
     """
     if not origin:
         return ""
-    return origin.strip().lower().rstrip(".")
+    return normalize_hostname(origin.strip())
 
 
 #: Witnesses carried with one event. The provenance chain grows by one entry

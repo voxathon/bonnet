@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import functools
 import hashlib
 import time
 import urllib.parse
@@ -40,6 +39,8 @@ from dataclasses import dataclass, field
 
 import nacl.exceptions
 import nacl.signing
+
+from bonnet.core.hostname import normalize_hostname as _normalize_host
 
 UNTP_TAG = "untp-1"
 UNTP_LABEL = "untp"
@@ -379,29 +380,6 @@ def _split_authority(authority: str) -> tuple[str, int | None]:
 
 
 DEFAULT_PORTS = {"http": 80, "https": 443}
-
-
-@functools.lru_cache(maxsize=1024)
-def _normalize_host(host: str) -> str:
-    """Lowercase, strip one trailing dot, IDNA-encode via UTS46/WHATWG.
-
-    IPv6 literals (`[...]`) pass through lowercased. On any IDNA failure
-    (or missing `uts46` package) falls closed to the lowered, dot-stripped
-    input — never raises, so signing/verification always has an answer and
-    both sides fall back identically.
-    """
-    lowered = host.lower()
-    if lowered.startswith("["):
-        return lowered
-    stripped = lowered[:-1] if lowered.endswith(".") and len(lowered) > 1 else lowered
-    try:
-        from uts46.whatwg import domain_to_ascii
-    except ImportError:
-        return stripped
-    try:
-        return domain_to_ascii(stripped, be_strict=True, transitional=False)
-    except Exception:
-        return stripped
 
 
 def normalize_authority(authority: str, scheme: str) -> str:

@@ -89,6 +89,7 @@ import httpx
 from fastmcp import FastMCP
 
 from bonnet.core.crypto import Identity
+from bonnet.core.hostname import normalize_hostname
 from bonnet.core.record import MAX_BOARD, MAX_TEXT_FIELD, ZERO_ID
 from bonnet.core.trust import TrustStore
 from bonnet.gateway import cursor, tenancy, thread_view
@@ -121,6 +122,7 @@ from bonnet.net.firehose_transport import (
     PinConfirmationRequired,
 )
 from bonnet.net.firehose_wire import ProtocolError
+from bonnet.net.http_auth import canonicalize_url
 
 SERVER_INSTRUCTIONS = """\
 Bonnet is a federated bulletin board. Its read tools may return content published
@@ -724,7 +726,11 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
 
     previous = (current_origin_url.get(), current_origin_verify.get(), current_origin.get())
 
-    resolved_url = url.rstrip("/")
+    # Canonicalize (default-port stripped, host lowercased/dot-stripped/IDNA)
+    # so `https://h:443` and `https://H.` share one stored origin instead of
+    # flapping the remembered URL and stranding identities. Same socket either
+    # way — only the signed bytes and the store key change.
+    resolved_url = canonicalize_url(url.rstrip("/"))
     resolved_verify = default_verify_tls(resolved_url) if verify_tls is None else verify_tls
     current_origin_url.set(resolved_url)
     current_origin_verify.set(resolved_verify)
@@ -756,7 +762,7 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
             if not port_fallback_eligible or "could not reach" not in str(e):
                 raise
             await client.close()
-            resolved_url = f"{parsed.scheme}://{parsed.hostname}:2272"
+            resolved_url = canonicalize_url(f"{parsed.scheme}://{parsed.hostname}:2272")
             resolved_verify = default_verify_tls(resolved_url) if verify_tls is None else verify_tls
             current_origin_url.set(resolved_url)
             current_origin_verify.set(resolved_verify)
@@ -2917,8 +2923,14 @@ async def get_event(
                 {
                     "relay_pubkey": w.relay_pubkey.hex(),
                     "relay_hostname": w.relay_hostname,
+                    "relay_hostname_normalized": normalize_hostname(w.relay_hostname),
                     "received_from_pubkey": w.received_from_pubkey.hex(),
                     "received_from_hostname": w.received_from_hostname,
+                    "received_from_hostname_normalized": (
+                        normalize_hostname(w.received_from_hostname)
+                        if w.received_from_hostname
+                        else ""
+                    ),
                     "seen_at": w.seen_at,
                 }
                 for w in witnesses

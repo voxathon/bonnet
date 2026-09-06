@@ -40,6 +40,7 @@ from bonnet.core.firehose import (
     FirehoseStore,
     SignatureInvalid,
 )
+from bonnet.core.hostname import normalize_hostname
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     Head,
@@ -73,10 +74,16 @@ def is_safe_dial_target(hostname: str | None, port: int, allow_private: bool = F
     development or LAN federation. hostname may be None — urlparse(...).hostname
     is None for a URL with no host — and that is rejected here rather than
     pushed onto every caller as a pre-check.
+
+    The hostname is canonicalized (lower, trailing dot, IDNA) before any
+    check, so the address validated is the address dialed.
     """
     if not hostname:
         return False
     if port < 1 or port > 65535:
+        return False
+    hostname = normalize_hostname(hostname)
+    if not hostname:
         return False
 
     try:
