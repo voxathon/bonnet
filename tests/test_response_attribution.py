@@ -59,8 +59,8 @@ def _verifier(pinned_key: bytes, origin: str = ORIGIN) -> BonnetVerifier:
     return BonnetVerifier(
         key_resolver=_ServerKeyResolver(pinned_key, origin),
         tag=UNTP_TAG,
-        max_lifetime=60,
-        clock_skew=30,
+        max_lifetime=300,
+        clock_skew=300,
     )
 
 

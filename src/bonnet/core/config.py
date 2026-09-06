@@ -307,8 +307,8 @@ class FirehoseConfig:
         max_article_body_size: int = 1024 * 1024,
         rate_limit_requests: int = 100,
         rate_limit_window: int = 1,
-        signature_lifetime_seconds: int = 60,
-        clock_skew_seconds: int = 30,
+        signature_lifetime_seconds: int = 300,
+        clock_skew_seconds: int = 300,
         search_max_count: int = 1000,
         search_timeout_seconds: int = 10,
         search_result_limit: int = 100,
@@ -380,13 +380,18 @@ class FirehoseConfig:
             raise ValueError(
                 f"config: rate_limit_window must be positive, got {self.rate_limit_window}"
             )
-        if self.signature_lifetime_seconds > 60:
+        # No upper cap on signature_lifetime_seconds / clock_skew_seconds:
+        # a permissive node only weakens itself (receiver-side verification
+        # contains the blast radius). Defaults ship Kerberos-style 300/300;
+        # operators who need more accept a wider replay window explicitly.
+        # Non-positive values are still rejected below via _positive checks.
+        if self.signature_lifetime_seconds <= 0:
             raise ValueError(
-                f"config: signature_lifetime_seconds must not exceed 60, got {self.signature_lifetime_seconds}"
+                f"config: signature_lifetime_seconds must be positive, got {self.signature_lifetime_seconds}"
             )
-        if self.clock_skew_seconds > 30:
+        if self.clock_skew_seconds < 0:
             raise ValueError(
-                f"config: clock_skew_seconds must not exceed 30, got {self.clock_skew_seconds}"
+                f"config: clock_skew_seconds must not be negative, got {self.clock_skew_seconds}"
             )
         if (
             self.search_max_count <= 0
@@ -575,8 +580,8 @@ class FirehoseConfig:
             max_article_body_size=limits.get("max_article_body_size", 1024 * 1024),
             rate_limit_requests=limits.get("rate_limit_requests", 100),
             rate_limit_window=limits.get("rate_limit_window", 1),
-            signature_lifetime_seconds=server.get("signature_lifetime_seconds", 60),
-            clock_skew_seconds=server.get("clock_skew_seconds", 30),
+            signature_lifetime_seconds=server.get("signature_lifetime_seconds", 300),
+            clock_skew_seconds=server.get("clock_skew_seconds", 300),
             search_max_count=search.get("max_count", 1000),
             search_timeout_seconds=search.get("timeout_seconds", 10),
             search_result_limit=search.get("result_limit", 100),

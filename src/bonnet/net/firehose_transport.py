@@ -167,6 +167,8 @@ class FirehoseTransport:
         verify: bool | str = True,
         trust_store_path: str = None,
         pin_mode: str = PIN_MODE_AUTO,
+        max_lifetime: int = 300,
+        clock_skew: int = 300,
     ):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
@@ -186,6 +188,10 @@ class FirehoseTransport:
         if trust_store_path:
             self._trust_store = TrustStore(trust_store_path)
         self._username: str = ""
+        # Kerberos-style symmetric tolerance: discovery + response freshness
+        # window. Configurable so strict deployments can tighten it again.
+        self._max_lifetime = max_lifetime
+        self._clock_skew = clock_skew
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -242,8 +248,8 @@ class FirehoseTransport:
         self._verifier = BonnetVerifier(
             key_resolver=_ServerKeyResolver(self._server_pubkey, self._server_origin),
             tag=UNTP_TAG,
-            max_lifetime=60,
-            clock_skew=30,
+            max_lifetime=self._max_lifetime,
+            clock_skew=self._clock_skew,
             request_required_components=frozenset(
                 {
                     "@method",

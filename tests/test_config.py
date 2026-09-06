@@ -64,8 +64,8 @@ def test_defaults():
     assert c.max_article_body_size == 1024 * 1024
     assert c.rate_limit_requests == 100
     assert c.rate_limit_window == 1
-    assert c.signature_lifetime_seconds == 60
-    assert c.clock_skew_seconds == 30
+    assert c.signature_lifetime_seconds == 300
+    assert c.clock_skew_seconds == 300
     assert c.peers == []
     assert isinstance(c.acl, ACLEvaluator)
 
@@ -630,14 +630,23 @@ def test_validate_rejects_zero_limits():
         c.validate()
 
 
-def test_validate_rejects_excessive_lifetime():
-    c = FirehoseConfig(signature_lifetime_seconds=120)
+def test_validate_allows_generous_lifetime_and_skew():
+    # No upper cap: a permissive node only weakens itself (receiver-side
+    # verification). Operators accept the wider replay window explicitly.
+    c = FirehoseConfig(signature_lifetime_seconds=3600, clock_skew_seconds=3600)
+    c.validate()
+    assert c.signature_lifetime_seconds == 3600
+    assert c.clock_skew_seconds == 3600
+
+
+def test_validate_rejects_nonpositive_lifetime():
+    c = FirehoseConfig(signature_lifetime_seconds=0)
     with pytest.raises(ValueError, match="signature_lifetime"):
         c.validate()
 
 
-def test_validate_rejects_excessive_clock_skew():
-    c = FirehoseConfig(clock_skew_seconds=60)
+def test_validate_rejects_negative_clock_skew():
+    c = FirehoseConfig(clock_skew_seconds=-1)
     with pytest.raises(ValueError, match="clock_skew"):
         c.validate()
 
