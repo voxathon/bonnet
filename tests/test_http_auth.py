@@ -713,7 +713,7 @@ class TestFormatCompatibility:
 
 
 # ---------------------------------------------------------------------------
-# Default-port authority normalization (v1)
+# Default-port authority normalization (v1) + host slop (v2)
 # ---------------------------------------------------------------------------
 
 
@@ -731,6 +731,21 @@ class TestAuthorityNormalization:
         assert normalize_authority("H.EXAMPLE:443", "https") == "h.example"
         assert normalize_authority("[::1]:443", "https") == "[::1]"
         assert normalize_authority("[::1]:2272", "https") == "[::1]:2272"
+
+    def test_trailing_dot(self):
+        assert normalize_authority("h.example.", "https") == "h.example"
+        assert normalize_authority("H.EXAMPLE.:443", "https") == "h.example"
+        assert normalize_authority("h.example.:2272", "https") == "h.example:2272"
+
+    def test_idna(self):
+        assert normalize_authority("münchen.de", "https") == "xn--mnchen-3ya.de"
+        assert normalize_authority("münchen.de.:443", "https") == "xn--mnchen-3ya.de"
+        # Already-punycode passes through.
+        assert normalize_authority("xn--mnchen-3ya.de", "https") == "xn--mnchen-3ya.de"
+
+    def test_idna_fallback_never_raises(self):
+        # Invalid labels fail closed to the lowered input instead of raising.
+        assert normalize_authority("bad_underscore-.example", "https") == "bad_underscore-.example"
 
     def test_canonicalize_url_preserves_path(self):
         assert canonicalize_url("https://h.example:443/command") == "https://h.example/command"
@@ -762,6 +777,32 @@ class TestAuthorityNormalization:
         assert resolve_component("@target-uri", with_port) == resolve_component(
             "@target-uri", without_port
         )
+
+    def test_resolvers_agree_dot_and_idna(self, valid_nonce):
+        body = b"\x11"
+
+        def msg_for(url: str) -> HTTPMessage:
+            return HTTPMessage(
+                method="POST",
+                url=url,
+                headers={
+                    "Content-Type": "application/vnd.bonnet.command",
+                    "Content-Digest": compute_content_digest(body),
+                    "Untp-Version": "1",
+                    "Untp-Nonce": valid_nonce,
+                },
+                body=body,
+            )
+
+        canonical = resolve_component("@authority", msg_for("https://h.example/command"))
+        assert canonical == "h.example"
+        assert resolve_component("@authority", msg_for("https://h.example./command")) == canonical
+        assert (
+            resolve_component("@authority", msg_for("https://H.EXAMPLE:443/command")) == canonical
+        )
+        idna = resolve_component("@authority", msg_for("https://münchen.de/command"))
+        assert idna == "xn--mnchen-3ya.de"
+        assert resolve_component("@authority", msg_for("https://münchen.de.:443/command")) == idna
 
     def test_alternate_url(self):
         assert (

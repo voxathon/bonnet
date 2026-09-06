@@ -201,6 +201,7 @@ dependencies = [
     { name = "platformdirs" },
     { name = "pynacl" },
     { name = "ripgrep" },
+    { name = "uts46" },
     { name = "uvicorn" },
 ]
 
@@ -222,6 +223,7 @@ requires-dist = [
     { name = "platformdirs", specifier = ">=4.0.0" },
     { name = "pynacl", specifier = ">=1.5.0" },
     { name = "ripgrep", specifier = ">=14.1.0" },
+    { name = "uts46", specifier = ">=0.2.0,<1" },
     { name = "uvicorn", specifier = ">=0.30.0" },
 ]
 
@@ -1610,6 +1612,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/02/7c/b5b7d8136f872e3f13b0584e576886de0489d7213a12de6bebf29ff6ebfc/uncalled_for-0.2.0.tar.gz", hash = "sha256:b4f8fdbcec328c5a113807d653e041c5094473dd4afa7c34599ace69ccb7e69f", size = 49488 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ff/7f/4320d9ce3be404e6310b915c3629fe27bf1e2f438a1a7a3cb0396e32e9a9/uncalled_for-0.2.0-py3-none-any.whl", hash = "sha256:2c0bd338faff5f930918f79e7eb9ff48290df2cb05fcc0b40a7f334e55d4d85f", size = 11351 },
+]
+
+[[package]]
+name = "uts46"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/23/11/a9b7f1378a55adc48bcaf8ad4598c94a69e5ba1abfa777ee453e7f86c25f/uts46-0.2.0.tar.gz", hash = "sha256:64a992b4ed2ba2b07c7f66159e914b04566a8d064da6315336d56fb11a13c2c8", size = 67729 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/f9/d4a33ea9c418614a24aa4a6e2ff48c1fd6fbdadfc09d4d4b7aeafb0d8c2c/uts46-0.2.0-py3-none-any.whl", hash = "sha256:78faa09204bba3496b12178ddae48e547393afddc591f3c42fe273a10ba8a6a3", size = 56001 },
 ]
 
 [[package]]

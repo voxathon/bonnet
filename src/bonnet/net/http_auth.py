@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import hashlib
 import time
 import urllib.parse
@@ -380,19 +381,44 @@ def _split_authority(authority: str) -> tuple[str, int | None]:
 DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
-def normalize_authority(authority: str, scheme: str) -> str:
-    """Lowercase host, strip default port for `scheme`.
+@functools.lru_cache(maxsize=1024)
+def _normalize_host(host: str) -> str:
+    """Lowercase, strip one trailing dot, IDNA-encode via UTS46/WHATWG.
 
-    `https://h:443` and `https://h` sign the same `@authority`; non-default
-    ports (`:2272`), IPv6 brackets, and unknown schemes pass through
-    (lowercased). Ports-only slop for v1 — no IDNA/trailing-dot handling.
+    IPv6 literals (`[...]`) pass through lowercased. On any IDNA failure
+    (or missing `uts46` package) falls closed to the lowered, dot-stripped
+    input — never raises, so signing/verification always has an answer and
+    both sides fall back identically.
     """
-    lowered = authority.lower()
-    host_part, port = _split_authority(lowered)
+    lowered = host.lower()
+    if lowered.startswith("["):
+        return lowered
+    stripped = lowered[:-1] if lowered.endswith(".") and len(lowered) > 1 else lowered
+    try:
+        from uts46.whatwg import domain_to_ascii
+    except ImportError:
+        return stripped
+    try:
+        return domain_to_ascii(stripped, be_strict=True, transitional=False)
+    except Exception:
+        return stripped
+
+
+def normalize_authority(authority: str, scheme: str) -> str:
+    """Lowercase host, strip one trailing dot, IDNA-encode, strip default port.
+
+    `https://h:443`, `https://h`, and `https://h.` sign the same `@authority`;
+    `münchen.de` signs as its A-label. Non-default ports (`:2272`), IPv6
+    brackets, and unknown schemes pass through (normalized host only).
+    """
+    host_part, port = _split_authority(authority.lower())
+    host = _normalize_host(host_part)
     default = DEFAULT_PORTS.get(scheme.lower())
     if port is not None and default is not None and port == default:
-        return host_part
-    return lowered
+        return host
+    if port is not None:
+        return f"{host}:{port}"
+    return host
 
 
 def canonicalize_url(url: str) -> str:
@@ -415,15 +441,16 @@ def alternate_authority_url(url: str) -> str | None:
     if default is None:
         return None
     host_part, port = _split_authority(parts.netloc)
+    host = _normalize_host(host_part)
     if port == default:
         return urllib.parse.urlunsplit(
-            (parts.scheme, host_part.lower(), parts.path, parts.query, parts.fragment)
+            (parts.scheme, host, parts.path, parts.query, parts.fragment)
         )
     if port is None:
         return urllib.parse.urlunsplit(
             (
                 parts.scheme,
-                f"{host_part.lower()}:{default}",
+                f"{host}:{default}",
                 parts.path,
                 parts.query,
                 parts.fragment,
