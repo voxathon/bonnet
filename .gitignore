@@ -55,6 +55,7 @@ logs/
 *.pem
 *.crt
 test_client_id
+certs/
 
 # IDE state
 .vs/
