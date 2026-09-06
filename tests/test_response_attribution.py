@@ -186,6 +186,7 @@ def test_keyid_forms_are_asymmetric_by_direction():
         ("https://bbs.example:2272", "bbs.example", True),
         ("https://bbs.example", "BBS.Example", True),
         ("https://bbs.example", "bbs.example.", True),
+        ("https://xn--mnchen-3ya.de", "münchen.de", True),
         ("https://cdn-edge-7.example", "bbs.example", False),
         ("https://bbs.example", "", False),
     ],
@@ -209,6 +210,7 @@ def test_origin_is_compared_to_the_dialed_host(url, origin, expected):
     [
         ("https://bbs.example", "bbs.example", None),
         ("https://bbs.example", "BBS.Example.", None),
+        ("https://xn--mnchen-3ya.de", "münchen.de.", None),
         ("https://old.example", "new.example", "new.example"),
         ("https://bbs.example", "", None),
     ],

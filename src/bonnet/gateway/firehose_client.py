@@ -26,6 +26,7 @@ import os
 from urllib.parse import urlparse
 
 from bonnet.core.crypto import Identity
+from bonnet.core.hostname import normalize_hostname
 from bonnet.core.record import (
     ZERO_ID,
     Intent,
@@ -107,8 +108,11 @@ def is_loopback(url: str) -> bool:
     relax on loopback, for the same underlying reason — there is no
     independent anchor to check against and no attacker positioned between
     a process and itself. Keeping it in one place stops the two drifting.
+
+    Host is canonicalized first, so `localhost.` and case variants take the
+    loopback path instead of looking remote.
     """
-    return (urlparse(url).hostname or "").lower() in _LOOPBACK_HOSTS
+    return normalize_hostname(urlparse(url).hostname or "") in _LOOPBACK_HOSTS
 
 
 def default_verify_tls(url: str) -> bool:
@@ -901,9 +905,13 @@ class FirehoseHTTPClient(FirehoseTransport):
         witness that does not join the chain listed after - a break or a fork
         is what a reader most needs to see, so it is not smoothed away.
 
-        Returns hop dicts: {relay_pubkey, relay_hostname, received_from_pubkey,
-        received_from_hostname, seen_at, record_hash, signature_valid,
-        is_origin, linked}.
+        Returns hop dicts: {relay_pubkey, relay_hostname,
+        relay_hostname_normalized, received_from_pubkey,
+        received_from_hostname, received_from_hostname_normalized, seen_at,
+        record_hash, signature_valid, is_origin, linked}.
+
+        Hostname `_normalized` fields are display/comparison aids only — the
+        raw strings are the relay's signed claims and are never rewritten.
         """
         from bonnet.core.record import (
             encode_unsigned_witness,
@@ -918,8 +926,12 @@ class FirehoseHTTPClient(FirehoseTransport):
             return {
                 "relay_pubkey": w.relay_pubkey.hex(),
                 "relay_hostname": w.relay_hostname,
+                "relay_hostname_normalized": normalize_hostname(w.relay_hostname),
                 "received_from_pubkey": w.received_from_pubkey.hex(),
                 "received_from_hostname": w.received_from_hostname,
+                "received_from_hostname_normalized": (
+                    normalize_hostname(w.received_from_hostname) if w.received_from_hostname else ""
+                ),
                 "seen_at": w.seen_at,
                 "record_hash": event_hash.hex(),
                 # A witness naming a different hash is a statement about some

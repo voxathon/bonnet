@@ -28,6 +28,7 @@ import tomllib
 from dataclasses import dataclass
 
 from bonnet.core.acl import ACLEvaluator
+from bonnet.core.hostname import normalize_hostname
 from bonnet.core.record import normalize_origin
 
 
@@ -85,11 +86,12 @@ def _normalize_origin(origin: str) -> str:
     return normalize_origin(origin)
 
 
-# ASCII hostname (RFC 1123 labels) or dotted-quad IPv4. `origin` is a
-# federation identity, not just a display string — an unvalidated value
-# becomes this server's permanent identity, so garbage (embedded whitespace,
-# a "scheme://" fragment, non-ASCII that isn't punycode-encoded) needs to be
-# caught here rather than silently accepted and served.
+# ASCII hostname (RFC 1123 labels) or dotted-quad IPv4, after UTS46
+# normalization. `origin` is a federation identity, not just a display
+# string — an unvalidated value becomes this server's permanent identity, so
+# garbage (embedded whitespace, a "scheme://" fragment) needs to be caught
+# here rather than silently accepted and served. Non-ASCII names are accepted
+# and converted to punycode by normalization before this check runs.
 _HOSTNAME_RE = re.compile(
     r"^[A-Za-z0-9]([A-Za-z0-9-]{0,62})?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62})?)*$"
 )
@@ -98,8 +100,7 @@ _HOSTNAME_RE = re.compile(
 def _validate_hostname_like(field: str, value: str) -> None:
     if not _HOSTNAME_RE.match(value):
         raise ValueError(
-            f"config: {field} {value!r} is not a valid hostname (use punycode for "
-            "non-ASCII names, and no scheme/path/whitespace)"
+            f"config: {field} {value!r} is not a valid hostname (no scheme/path/whitespace)"
         )
 
 
@@ -322,7 +323,7 @@ class FirehoseConfig:
         witness: WitnessConfig = None,
     ):
         self.origin = _normalize_origin(origin)
-        self.hostname = hostname or self.origin
+        self.hostname = normalize_hostname(hostname) or self.origin
         self.data_dir = data_dir
         self.boards_dir = boards_dir
         self.events_bodies_dir = events_bodies_dir
@@ -589,8 +590,8 @@ class FirehoseConfig:
             sync_interval_seconds=sync.get("interval_seconds", 300),
             peers=[
                 PeerConfig(
-                    origin=p.get("origin", ""),
-                    hostname=p.get("hostname", ""),
+                    origin=_normalize_origin(p.get("origin", "")),
+                    hostname=normalize_hostname(p.get("hostname", "")),
                     port=p.get("port", 2272),
                     scheme=p.get("scheme", "https"),
                     verify_tls=p.get("verify_tls", False),

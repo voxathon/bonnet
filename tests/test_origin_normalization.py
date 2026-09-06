@@ -46,6 +46,7 @@ from tests.test_commands_and_sync import _anon_ctx, firehose, stack  # noqa: F40
         ("BBS.Example", "bbs.example"),
         ("bbs.example.", "bbs.example"),
         ("  BBS.EXAMPLE.  ", "bbs.example"),
+        ("münchen.de", "xn--mnchen-3ya.de"),
         ("", ""),
     ],
 )
