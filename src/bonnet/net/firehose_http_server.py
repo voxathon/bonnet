@@ -47,6 +47,8 @@ from bonnet.net.http_auth import (
     MalformedSignature,
     MissingComponent,
     SignatureError,
+    alternate_authority_url,
+    canonicalize_url,
     compute_content_digest,
     validate_content_digest,
 )
@@ -383,7 +385,7 @@ class FirehoseHTTPServer:
         # plaintext listener fail verification — which is the shipped default,
         # since config.example.toml starts with tls.enabled = false.
         scheme = scope.get("scheme", "https")
-        url = f"{scheme}://{authority}/command"
+        url = canonicalize_url(f"{scheme}://{authority}/command")
 
         req_msg = HTTPMessage(
             method="POST",
@@ -394,6 +396,34 @@ class FirehoseHTTPServer:
 
         try:
             verify_result = await self._verifier.verify_request(req_msg, require_components=True)
+        except InvalidSignature:
+            # Back-compat: old clients signed the raw authority with an
+            # explicit default port (`h:443`). New clients sign normalized,
+            # and normalization above already converges proxied `Host`
+            # (stripped) with direct dials — this second attempt only accepts
+            # the old form during rollout. Other failures (expired, future,
+            # missing component) are not retried.
+            alternate = alternate_authority_url(url)
+            if alternate is None:
+                error_desc = self._signature_error_desc(
+                    InvalidSignature("Signature verification failed")
+                )
+                await self._send_protocol_error(send, 401, error_desc, remote_addr, "")
+                return
+            req_msg = HTTPMessage(
+                method="POST",
+                url=alternate,
+                headers=headers,
+                body=body,
+            )
+            try:
+                verify_result = await self._verifier.verify_request(
+                    req_msg, require_components=True
+                )
+            except SignatureError as e:
+                error_desc = self._signature_error_desc(e)
+                await self._send_protocol_error(send, 401, error_desc, remote_addr, "")
+                return
         except SignatureError as e:
             error_desc = self._signature_error_desc(e)
             await self._send_protocol_error(send, 401, error_desc, remote_addr, "")

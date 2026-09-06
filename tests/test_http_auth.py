@@ -41,8 +41,11 @@ from bonnet.net.http_auth import (
     VerifyResult,
     _validate_keyid,
     _validate_nonce,
+    alternate_authority_url,
     build_signature_base,
+    canonicalize_url,
     compute_content_digest,
+    normalize_authority,
     parse_signature,
     parse_signature_input,
     resolve_component,
@@ -707,3 +710,94 @@ class TestFormatCompatibility:
         b64_part = sig[len("untp=:") : -1]
         raw = base64.b64decode(b64_part)
         assert len(raw) == 64
+
+
+# ---------------------------------------------------------------------------
+# Default-port authority normalization (v1)
+# ---------------------------------------------------------------------------
+
+
+class TestAuthorityNormalization:
+    def test_strip_default_ports(self):
+        assert normalize_authority("h.example:443", "https") == "h.example"
+        assert normalize_authority("h.example:80", "http") == "h.example"
+
+    def test_keep_non_default_ports(self):
+        assert normalize_authority("h.example:2272", "https") == "h.example:2272"
+        assert normalize_authority("h.example:443", "http") == "h.example:443"
+        assert normalize_authority("h.example", "https") == "h.example"
+
+    def test_lowercase_and_ipv6(self):
+        assert normalize_authority("H.EXAMPLE:443", "https") == "h.example"
+        assert normalize_authority("[::1]:443", "https") == "[::1]"
+        assert normalize_authority("[::1]:2272", "https") == "[::1]:2272"
+
+    def test_canonicalize_url_preserves_path(self):
+        assert canonicalize_url("https://h.example:443/command") == "https://h.example/command"
+        assert (
+            canonicalize_url("https://h.example:2272/command") == "https://h.example:2272/command"
+        )
+
+    def test_resolvers_agree_with_and_without_port(self, valid_nonce):
+        body = b"\x11"
+        with_port = HTTPMessage(
+            method="POST",
+            url="https://bonnet.example.com:443/v2/command",
+            headers={
+                "Content-Type": "application/vnd.bonnet.command",
+                "Content-Digest": compute_content_digest(body),
+                "Untp-Version": "1",
+                "Untp-Nonce": valid_nonce,
+            },
+            body=body,
+        )
+        without_port = HTTPMessage(
+            method="POST",
+            url="https://bonnet.example.com/v2/command",
+            headers=dict(with_port.headers),
+            body=body,
+        )
+        assert resolve_component("@authority", with_port) == "bonnet.example.com"
+        assert resolve_component("@authority", without_port) == "bonnet.example.com"
+        assert resolve_component("@target-uri", with_port) == resolve_component(
+            "@target-uri", without_port
+        )
+
+    def test_alternate_url(self):
+        assert (
+            alternate_authority_url("https://h.example/command") == "https://h.example:443/command"
+        )
+        assert (
+            alternate_authority_url("https://h.example:443/command") == "https://h.example/command"
+        )
+        assert alternate_authority_url("https://h.example:2272/command") is None
+        assert alternate_authority_url("http://h.example/command") == "http://h.example:80/command"
+
+    @pytest.mark.asyncio
+    async def test_sign_verify_roundtrip_explicit_port(self, keypair, key_resolver, valid_nonce):
+        priv, pub = keypair
+        body = b"\x11"
+        signed = HTTPMessage(
+            method="POST",
+            url="https://bonnet.example.com:443/v2/command",
+            headers={
+                "Content-Type": "application/vnd.bonnet.command",
+                "Content-Digest": compute_content_digest(body),
+                "Untp-Version": "1",
+                "Untp-Nonce": valid_nonce,
+            },
+            body=body,
+        )
+        signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
+        now = int(time.time())
+        await signer.sign_request(signed, nonce=valid_nonce, created=now, expires=now + 60)
+        # Verify against the bare-host URL, as a proxied server would rebuild it.
+        stripped = HTTPMessage(
+            method="POST",
+            url="https://bonnet.example.com/v2/command",
+            headers=dict(signed.headers),
+            body=body,
+        )
+        verifier = BonnetVerifier(key_resolver=key_resolver)
+        result = await verifier.verify_request(stripped)
+        assert result.keyid == "ed25519:" + pub.hex()

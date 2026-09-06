@@ -354,6 +354,84 @@ def resolve_component(component_id: str, msg: HTTPMessage) -> str:
     return msg.header(component_id)
 
 
+def _split_authority(authority: str) -> tuple[str, int | None]:
+    """Split `host[:port]` into (host_part, port or None).
+
+    `host_part` keeps IPv6 brackets (e.g. `[::1]`). Returns port as int
+    when the suffix after the last colon is all digits, else None. Never
+    raises — unparseable input yields (authority, None).
+    """
+    if authority.startswith("["):
+        end = authority.find("]")
+        if end < 0:
+            return authority, None
+        host_part = authority[: end + 1]
+        rest = authority[end + 1 :]
+        if rest.startswith(":") and rest[1:].isdigit():
+            return host_part, int(rest[1:])
+        return host_part, None
+    if ":" in authority:
+        host_part, _, port_str = authority.rpartition(":")
+        if port_str.isdigit() and host_part:
+            return host_part, int(port_str)
+    return authority, None
+
+
+DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def normalize_authority(authority: str, scheme: str) -> str:
+    """Lowercase host, strip default port for `scheme`.
+
+    `https://h:443` and `https://h` sign the same `@authority`; non-default
+    ports (`:2272`), IPv6 brackets, and unknown schemes pass through
+    (lowercased). Ports-only slop for v1 — no IDNA/trailing-dot handling.
+    """
+    lowered = authority.lower()
+    host_part, port = _split_authority(lowered)
+    default = DEFAULT_PORTS.get(scheme.lower())
+    if port is not None and default is not None and port == default:
+        return host_part
+    return lowered
+
+
+def canonicalize_url(url: str) -> str:
+    """Normalize scheme/authority default ports, preserve path/query/fragment."""
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme.lower()
+    authority = normalize_authority(parts.netloc, scheme)
+    return urllib.parse.urlunsplit((scheme, authority, parts.path, parts.query, parts.fragment))
+
+
+def alternate_authority_url(url: str) -> str | None:
+    """The other default-port form of `url`, or None when N/A.
+
+    Explicit `:443`/`:80` -> stripped; bare default-scheme host -> explicit.
+    Non-default ports and unknown schemes yield None (nothing to retry with).
+    """
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme.lower()
+    default = DEFAULT_PORTS.get(scheme)
+    if default is None:
+        return None
+    host_part, port = _split_authority(parts.netloc)
+    if port == default:
+        return urllib.parse.urlunsplit(
+            (parts.scheme, host_part.lower(), parts.path, parts.query, parts.fragment)
+        )
+    if port is None:
+        return urllib.parse.urlunsplit(
+            (
+                parts.scheme,
+                f"{host_part.lower()}:{default}",
+                parts.path,
+                parts.query,
+                parts.fragment,
+            )
+        )
+    return None
+
+
 def _get_method(msg: HTTPMessage) -> str:
     if msg.is_response:
         raise MalformedSignature("@method not valid for response signatures")
@@ -361,11 +439,12 @@ def _get_method(msg: HTTPMessage) -> str:
 
 
 def _get_target_uri(msg: HTTPMessage) -> str:
-    return msg.url
+    return canonicalize_url(msg.url)
 
 
 def _get_authority(msg: HTTPMessage) -> str:
-    return urllib.parse.urlsplit(msg.url).netloc.lower()
+    parts = urllib.parse.urlsplit(msg.url)
+    return normalize_authority(parts.netloc, parts.scheme)
 
 
 def _get_scheme(msg: HTTPMessage) -> str:

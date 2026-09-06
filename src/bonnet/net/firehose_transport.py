@@ -63,6 +63,8 @@ from bonnet.net.http_auth import (
     InvalidParameter,
     KeyResolver,
     SignatureError,
+    alternate_authority_url,
+    canonicalize_url,
     compute_content_digest,
 )
 
@@ -613,17 +615,39 @@ class FirehoseTransport:
     # ------------------------------------------------------------------
 
     async def send_command(self, cmd_bytes: bytes) -> bytes:
-        """Sign and send a command, verify the response, return the payload."""
+        """Sign and send a command, verify the response, return the payload.
+
+        Signs with the default-port-normalized authority first, so
+        `https://h:443` and `https://h` agree even when a proxy strips the
+        port from `Host`. On a 401 reporting `Signature verification failed`
+        only, retries once with the alternate default-port form (for old
+        servers that verify the raw authority). Fresh nonce/timestamps per
+        attempt; `cmd_bytes` are identical across attempts.
+        """
         if self._signer is None:
             raise FirehoseClientError("not connected — call connect() or connect_anonymous() first")
 
+        sign_url = canonicalize_url(f"{self._base_url}/command")
+        try:
+            return await self._post_signed(cmd_bytes, sign_url)
+        except FirehoseClientError as e:
+            if "Signature verification failed" not in str(e):
+                raise
+            alternate = alternate_authority_url(sign_url)
+            if alternate is None or alternate == sign_url:
+                raise
+            return await self._post_signed(cmd_bytes, alternate)
+
+    async def _post_signed(self, cmd_bytes: bytes, sign_url: str) -> bytes:
+        if self._signer is None:
+            raise FirehoseClientError("not connected — call connect() or connect_anonymous() first")
         nonce = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
         now = int(time.time())
         expires = now + 60
 
         msg = HTTPMessage(
             method="POST",
-            url=f"{self._base_url}/command",
+            url=sign_url,
             headers={
                 "Content-Type": "application/vnd.bonnet.command",
                 "Content-Digest": compute_content_digest(cmd_bytes),
