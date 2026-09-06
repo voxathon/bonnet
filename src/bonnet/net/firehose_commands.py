@@ -390,6 +390,21 @@ class FirehoseCommandHandler:
         )
         return _error(0x000A, msg)
 
+    def _log_write_denial(self, cmd_name: str, ctx: FirehoseContext, result: bytes) -> None:
+        """Log a write rejected by the ACL, a validator, or a domain rule.
+
+        A headless server otherwise records nothing past startup — every
+        acceptance already lands in events.db, but a denial never does, so
+        without this an operator has no way to see one happen at all.
+        """
+        if not result or result[0:1] != b"\x01":
+            return
+        code = struct.unpack(">H", result[1:3])[0]
+        msg_len = struct.unpack(">H", result[3:5])[0]
+        reason = result[5 : 5 + msg_len].decode("utf-8", errors="replace")
+        actor = ctx.peer_pubkey.hex() if ctx.peer_pubkey else "-"
+        log_msg(f"DENIED: {cmd_name} actor={actor} code=0x{code:04x} reason={reason}")
+
     def handle(self, body: bytes, ctx: FirehoseContext) -> bytes:
         if not body:
             return _error(0x0005, "Empty request")
@@ -409,7 +424,9 @@ class FirehoseCommandHandler:
 
         try:
             if opcode == OP_PUBLISH_RECORD:
-                return self._cmd_publish(data, ctx)
+                result = self._cmd_publish(data, ctx)
+                self._log_write_denial(cmd_name, ctx, result)
+                return result
             elif opcode == OP_EVENT_HEAD:
                 return self._cmd_event_head(data, ctx)
             elif opcode == OP_EVENT_RANGE:
@@ -789,6 +806,11 @@ class FirehoseCommandHandler:
             )
             self._firehose.store_witness(witness, keep_pubkeys={self._identity.public_key})
             encoded_witness = encode_witness(witness)
+
+            log_msg(
+                f"EVENT: seq={rec.origin_seq} kind={intent.kind} "
+                f"actor={intent.actor_pubkey.hex()} board={intent.board or '-'}"
+            )
 
             return _success(
                 struct.pack(">I", len(encoded_rec))
@@ -1537,6 +1559,16 @@ class FirehoseCommandHandler:
             art.body_size,
         )
         if body is None:
+            # A file that exists but fails size/hash verification is a
+            # distinct outcome from one that was never stored: the former is
+            # an integrity failure worth surfacing as such, not silently
+            # folded into the generic "unavailable" case below.
+            if self._body_store.article_body_exists(origin, board, article_num):
+                log_msg(
+                    f"INTEGRITY: body failed size/hash check "
+                    f"origin={origin} board={board} article_num={article_num}"
+                )
+                return _error(0x0007, "Body failed integrity check")
             if origin != self._origin:
                 peer = self._peer_map.get(origin)
                 if peer:

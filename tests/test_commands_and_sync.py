@@ -233,6 +233,82 @@ class TestPublishRecord:
         witness = decode_witness(witness_bytes)
         assert is_origin_witness(witness)
 
+    def test_publish_logs_accepted_event(self, stack, monkeypatch):
+        """A headless server has no other per-event record short of querying
+        events.db over MCP — see firehose_commands._cmd_publish's log_msg
+        call, added so an operator can watch a running board in the log."""
+        import bonnet.net.firehose_commands as fc
+
+        logged = []
+        monkeypatch.setattr(fc, "log_msg", logged.append)
+
+        h = stack["handler"]
+        _create_board(h, "general")
+        logged.clear()
+        body = b"hello world"
+        intent = Intent(
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
+        )
+        encoded_intent = encode_intent(intent)
+        actor_sig = sign_intent(ACTOR, encoded_intent)
+
+        req = struct.pack(">B", OP_PUBLISH_RECORD)
+        req += struct.pack(">I", len(encoded_intent)) + encoded_intent
+        req += actor_sig
+        req += struct.pack(">I", len(body)) + body
+
+        resp = h.handle(req, _actor_ctx())
+        assert resp[0] == 0
+
+        assert any("EVENT:" in m and "kind=bonnet.article" in m for m in logged)
+
+    def test_publish_logs_denial(self, stack, monkeypatch):
+        import bonnet.net.firehose_commands as fc
+
+        logged = []
+        monkeypatch.setattr(fc, "log_msg", logged.append)
+
+        h = stack["handler"]
+        intent = Intent(
+            event_id=_rid(1),
+            kind="bonnet.article",
+            origin="bbs.evil",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            article_id=_rid(2),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Test"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+        )
+        encoded_intent = encode_intent(intent)
+        actor_sig = sign_intent(ACTOR, encoded_intent)
+
+        req = struct.pack(">B", OP_PUBLISH_RECORD)
+        req += struct.pack(">I", len(encoded_intent)) + encoded_intent
+        req += actor_sig
+        req += struct.pack(">I", 0)
+
+        resp = h.handle(req, _actor_ctx())
+        assert resp[0] == 1
+
+        assert any("DENIED:" in m and "Origin mismatch" in m for m in logged)
+
     def test_publish_rejects_wrong_origin(self, stack):
         h = stack["handler"]
         intent = Intent(
@@ -1015,6 +1091,34 @@ class TestProjectionReads:
         body_len = struct.unpack(">I", resp[1:5])[0]
         assert body_len == len(b"hello world")
         assert resp[5 : 5 + body_len] == b"hello world"
+
+    def test_article_body_reports_integrity_failure_distinctly(self, stack, monkeypatch):
+        """A body that exists on disk but fails its size/hash check must not
+        be reported the same way as a body that was never stored — see the
+        0x0007 branch in _cmd_article_body."""
+        import bonnet.net.firehose_commands as fc
+
+        logged = []
+        monkeypatch.setattr(fc, "log_msg", logged.append)
+
+        self._publish_and_dispatch(stack)
+        h = stack["handler"]
+        bs = stack["body_store"]
+
+        path = bs._article_body_path("bbs.test", "general", 1)
+        with open(path, "wb") as f:
+            f.write(b"corrupted!!!")
+
+        req = struct.pack(">B", OP_ARTICLE_BODY)
+        req += _enc_text16("bbs.test")
+        req += _enc_text16("general")
+        req += struct.pack(">Q", 1)
+
+        resp = h.handle(req, _anon_ctx())
+        assert resp[0] == 1
+        code = struct.unpack(">H", resp[1:3])[0]
+        assert code == 0x0007
+        assert any("INTEGRITY:" in m for m in logged)
 
     def test_article_search_metadata(self, stack):
         self._publish_and_dispatch(stack)
