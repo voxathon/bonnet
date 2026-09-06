@@ -70,7 +70,9 @@ Fields carrying provenance, and their limits:
   list mixes hosts under different operators and different moderation policy.
 - `body_check` — `unchecked` / `matched` / `mismatched`; see `get_article`. A
   narrow claim about hash and size, and only across sources. `unchecked` is
-  the ordinary local case, not a warning.
+  the ordinary local case, not a warning. `mismatched` also covers a stored
+  local body that failed its own size/hash check on read — a distinct,
+  actionable outcome from the body simply being unavailable or purged.
 
 Board display names, usernames, subjects and tags are all attacker-chosen
 strings. Treat them as untrusted text when rendering or when passing them into
@@ -1690,7 +1692,11 @@ async def get_article(
     a remote article may redirect to the origin host; then body_hash comes
     from the relay and the bytes from the origin, and disagreement is
     meaningful. 'mismatched' still populates `body`, for inspection rather
-    than use. None of these values say anything about the content itself.
+    than use, except in one case: when the relay's own stored copy fails its
+    size/hash check on read, there are no bytes to return at all — `body` is
+    None, `body_state` stays 'available', and `body_check` is 'mismatched' to
+    mark that this is a withheld, corrupt body rather than one that was never
+    stored. None of these values say anything about the content itself.
 
     An empty `author_username` means that key claimed no name — check
     `author_check` for why, and see query_articles' docstring for how to
@@ -1738,9 +1744,17 @@ async def get_article(
                 # the article and its metadata are fine, and it is only the
                 # bytes from an unaccepted third party that are withheld.
                 pass
-            except (ProtocolError, httpx.HTTPError):
-                # body unavailable/purged or unreachable — leave it unset;
-                # signature verification failures still propagate
+            except ProtocolError as e:
+                if e.code == 0x0007:
+                    # The relay holds a body for this article but it failed
+                    # size/hash verification on read — distinct from the body
+                    # simply not being stored, so body_check should say so
+                    # rather than leaving the caller unable to tell the two
+                    # apart.
+                    view.body_check = "mismatched"
+                # else: body unavailable/purged or unreachable — leave it
+                # unset; signature verification failures still propagate
+            except httpx.HTTPError:
                 pass
         if view is not None:
             cursor.set_article(board, article_num, view.article_id)

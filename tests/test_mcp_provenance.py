@@ -62,9 +62,10 @@ def _make_view(body, body_bytes_for_hash, body_state="available"):
 
 
 class FakeClient:
-    def __init__(self, view, body_result=None):
+    def __init__(self, view, body_result=None, body_error=None):
         self._view = view
         self._body_result = body_result
+        self._body_error = body_error
         self._server_origin = "bbs.test"
         self.body_fetched = False
 
@@ -76,6 +77,8 @@ class FakeClient:
 
     async def get_article_body(self, origin, board, article_num):
         self.body_fetched = True
+        if self._body_error is not None:
+            raise self._body_error
         return self._body_result
 
     async def close(self):
@@ -153,6 +156,40 @@ async def test_mismatched_is_distinguishable_from_unchecked(patch_client):
 
 def test_article_view_default_is_unchecked():
     assert ArticleView.__dataclass_fields__["body_check"].default == "unchecked"
+
+
+async def test_locally_corrupt_body_is_mismatched_not_unchecked(patch_client):
+    """A body that fails the relay's own size/hash check on disk is a
+    distinct outcome from one that was simply never stored — see
+    firehose_commands._cmd_article_body's 0x0007 branch. Before that branch
+    existed, this looked identical to a routine 'no body' response: body is
+    None, but body_check stayed 'unchecked' instead of flagging the failure.
+    """
+    from bonnet.net.firehose_wire import ProtocolError
+
+    honest = b"hello world"
+    view_in = _make_view(None, honest)
+    patch_client(FakeClient(view_in, body_error=ProtocolError("nope", code=0x0007)))
+
+    view = await tools.get_article(1, board="b")
+
+    assert view.body is None
+    assert view.body_check == "mismatched"
+
+
+async def test_missing_body_stays_unchecked(patch_client):
+    """A body that was genuinely never stored (or is purged) must not be
+    confused with the integrity-failure case above."""
+    from bonnet.net.firehose_wire import ProtocolError
+
+    honest = b"hello world"
+    view_in = _make_view(None, honest)
+    patch_client(FakeClient(view_in, body_error=ProtocolError("gone", code=0x0003)))
+
+    view = await tools.get_article(1, board="b")
+
+    assert view.body is None
+    assert view.body_check == "unchecked"
 
 
 # ---------------------------------------------------------------------------
