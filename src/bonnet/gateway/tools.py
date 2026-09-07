@@ -782,6 +782,17 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         discovery = client.discovery
         known = list(discovery.known_origins) if discovery else []
         advertised = client.advertised_address()
+        peer_lifetime = int(discovery.signature_lifetime_seconds) if discovery is not None else 300
+        peer_skew = int(discovery.clock_skew_seconds) if discovery is not None else 300
+        peer_replay = peer_lifetime + 2 * peer_skew
+        time_warning = None
+        if peer_lifetime < 60:
+            time_warning = (
+                f"peer max lifetime {peer_lifetime}s < this client's default "
+                "60s request lifetime; requests will shrink-retry"
+            )
+        elif peer_replay > 3600:
+            time_warning = f"peer allows replay window ~{peer_replay}s; jank-together is your call"
         identities = _get_identity_store().list_users(origin)
     except PinConfirmationRequired as pending:
         # Caught ahead of the generic handler, but restoring the same state:
@@ -833,6 +844,14 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         # this connection reached it. Reported, never followed - see
         # FirehoseTransport.advertised_address.
         "advertised_address": advertised,
+        # Peer's advisory clock tolerance (from its manifest). Receiver-side
+        # enforcement is unchanged; this just makes the window visible.
+        "signature_lifetime_seconds": peer_lifetime,
+        "clock_skew_seconds": peer_skew,
+        "replay_window_seconds": peer_replay,
+        # Set when the peer window looks strict (< our 60s request lifetime)
+        # or very loose (>1h replay). Advisory, never gating.
+        "time_warning": time_warning,
         "identities": [
             {
                 "username": i["username"],

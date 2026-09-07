@@ -257,7 +257,14 @@ class BanStatus:
 
 @dataclass
 class DiscoveryInfo:
-    """Server discovery document."""
+    """Server discovery document.
+
+    signature_lifetime_seconds / clock_skew_seconds are the server's own
+    Kerberos-style tolerance, advisory only: the receiver always enforces
+    its own limits, so these just make a peer's jank-together window
+    legible (replay ~ lifetime + 2*skew). Defaults cover old servers that
+    omit the fields.
+    """
 
     protocol: str
     origin: str
@@ -268,6 +275,8 @@ class DiscoveryInfo:
     command_endpoint: str
     capabilities: list[str]
     known_origins: list = field(default_factory=list)
+    signature_lifetime_seconds: int = 300
+    clock_skew_seconds: int = 300
 
 
 @dataclass

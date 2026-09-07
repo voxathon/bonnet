@@ -15,6 +15,8 @@ hostname = "bbs.example"
 # Replay window is roughly lifetime + 2*skew (~15 min worst case at defaults).
 # No upper cap is enforced: a permissive node only weakens itself, since every
 # peer verifies with its own limits. Tighten for stricter deployments.
+# Both values are advertised on /.well-known/untp (advisory only) so peers
+# can see your window and shrink their request lifetime to fit.
 # signature_lifetime_seconds = 300
 # clock_skew_seconds = 300
 # Storage paths. Default to data, boards, event_bodies under this server's

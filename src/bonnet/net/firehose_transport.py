@@ -74,6 +74,26 @@ class FirehoseClientError(Exception):
     pass
 
 
+def _coerce_window(value: object, *, default: int, minimum: int) -> int:
+    """Tolerant int parse for advisory discovery windows.
+
+    The manifest is advisory, so a corrupt value must never break pinning:
+    anything unparseable or below `minimum` falls back to `default`.
+    """
+    try:
+        v = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return default
+    if v < minimum:
+        return default
+    return v
+
+
+def replay_window_seconds(lifetime: int, skew: int) -> int:
+    """Approximate worst-case replay window: lifetime + 2*skew."""
+    return int(lifetime) + 2 * int(skew)
+
+
 #: Adopt any key on first contact, and any change a rotation chain connects.
 #: The historical behaviour, and what every non-gateway caller wants.
 PIN_MODE_AUTO = "auto"
@@ -195,6 +215,10 @@ class FirehoseTransport:
         # window. Configurable so strict deployments can tighten it again.
         self._max_lifetime = max_lifetime
         self._clock_skew = clock_skew
+        # In-memory hint from the peer's discovery document (advisory only,
+        # never trusted for verification). Used solely to shrink our request
+        # lifetime on retry against strict peers. Not persisted.
+        self._peer_max_lifetime: int | None = None
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -241,7 +265,14 @@ class FirehoseTransport:
             command_endpoint=data.get("command_endpoint", "/command"),
             capabilities=data.get("capabilities", []),
             known_origins=data.get("known_origins", []),
+            signature_lifetime_seconds=_coerce_window(
+                data.get("signature_lifetime_seconds", 300), default=300, minimum=1
+            ),
+            clock_skew_seconds=_coerce_window(
+                data.get("clock_skew_seconds", 300), default=300, minimum=0
+            ),
         )
+        self._peer_max_lifetime = info.signature_lifetime_seconds
         self._server_pubkey = bytes.fromhex(info.public_key)
         self._server_origin = info.origin
         self._anonymous_key = bytes.fromhex(info.anonymous_key)
@@ -294,6 +325,7 @@ class FirehoseTransport:
             self._server_origin = None
             self._discovery = None
             self._verifier = None
+            self._peer_max_lifetime = None
             raise FirehoseClientError(f"Discovery response signature verification failed: {e}")
 
         await self._pin_server_key(info.origin, self._server_pubkey)
@@ -622,8 +654,12 @@ class FirehoseTransport:
         `https://h:443` and `https://h` agree even when a proxy strips the
         port from `Host`. On a 401 reporting `Signature verification failed`
         only, retries once with the alternate default-port form (for old
-        servers that verify the raw authority). Fresh nonce/timestamps per
-        attempt; `cmd_bytes` are identical across attempts.
+        servers that verify the raw authority). On a 401 reporting a
+        lifetime rejection (`exceeds max`), retries once with a shrunk
+        lifetime — shrink-only, never expanded beyond the default 60s, so a
+        peer can only talk us into *shorter-lived* signatures. Fresh
+        nonce/timestamps per attempt; `cmd_bytes` are identical across
+        attempts.
         """
         if self._signer is None:
             raise FirehoseClientError("not connected — call connect() or connect_anonymous() first")
@@ -632,19 +668,27 @@ class FirehoseTransport:
         try:
             return await self._post_signed(cmd_bytes, sign_url)
         except FirehoseClientError as e:
-            if "Signature verification failed" not in str(e):
-                raise
-            alternate = alternate_authority_url(sign_url)
-            if alternate is None or alternate == sign_url:
-                raise
-            return await self._post_signed(cmd_bytes, alternate)
+            msg = str(e)
+            if "Signature verification failed" in msg:
+                alternate = alternate_authority_url(sign_url)
+                if alternate is None or alternate == sign_url:
+                    raise
+                return await self._post_signed(cmd_bytes, alternate)
+            if "exceeds max" in msg:
+                # Strict peer: its max_lifetime < our default 60s request
+                # lifetime. Shrink once; cap at 10s so a lying manifest
+                # (advertising lifetime=1) only costs one cheap retry.
+                hint = self._peer_max_lifetime or 10
+                shrunk = max(1, min(hint, 10))
+                return await self._post_signed(cmd_bytes, sign_url, lifetime=shrunk)
+            raise
 
-    async def _post_signed(self, cmd_bytes: bytes, sign_url: str) -> bytes:
+    async def _post_signed(self, cmd_bytes: bytes, sign_url: str, lifetime: int = 60) -> bytes:
         if self._signer is None:
             raise FirehoseClientError("not connected — call connect() or connect_anonymous() first")
         nonce = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
         now = int(time.time())
-        expires = now + 60
+        expires = now + max(1, int(lifetime))
 
         msg = HTTPMessage(
             method="POST",
