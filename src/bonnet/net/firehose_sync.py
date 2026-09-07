@@ -183,6 +183,10 @@ class HttpSyncClient(SyncClient):
             raise ValueError(f"unsafe dial target: {self._dial_host}:{self._dial_port}")
         self._client = FirehoseTransport(base_url, verify=verify_tls)
         self._connected = False
+        # Last-seen advisory time window per peer, in-memory only. First
+        # sighting logs, repeats stay silent, changes log. Restart re-logs
+        # once, which is the acceptable baseline.
+        self._last_window: tuple[int, int] | None = None
 
     async def _ensure_connected(self) -> None:
         if not is_safe_dial_target(
@@ -198,6 +202,7 @@ class HttpSyncClient(SyncClient):
             log_msg(
                 f"SYNC_CLIENT: connected to server origin='{self._client._server_origin}' pubkey={server_pubkey.hex()[:16]}..."
             )
+            self._maybe_log_time_window()
 
     async def fetch_head(self, origin: str) -> tuple[Head, bytes]:
         await self._ensure_connected()
@@ -241,6 +246,37 @@ class HttpSyncClient(SyncClient):
         except ProtocolError as e:
             log_msg(f"SYNC_CLIENT: malformed KEY_EPOCHS response from '{origin}': {e}")
             return None
+
+    def _maybe_log_time_window(self) -> None:
+        """Log the peer's advertised clock window on first sight and on change.
+
+        Advisory only — the manifest is self-asserted, so this is ops
+        visibility ("this peer runs loose windows"), never an input to
+        verification. Repeats stay silent to avoid log spam.
+        """
+        from bonnet.net.firehose_transport import replay_window_seconds
+
+        info = self._client.discovery
+        if info is None:
+            return
+        window = (int(info.signature_lifetime_seconds), int(info.clock_skew_seconds))
+        origin = self._client._server_origin or "?"
+        if self._last_window is None:
+            self._last_window = window
+            log_msg(
+                f"SYNC: peer '{origin}' time window "
+                f"lifetime={window[0]}s skew={window[1]}s "
+                f"(replay ~{replay_window_seconds(*window)}s)"
+            )
+        elif window != self._last_window:
+            old = self._last_window
+            self._last_window = window
+            log_msg(
+                f"SYNC: peer '{origin}' time window changed "
+                f"{old[0]}/{old[1]} -> {window[0]}/{window[1]} "
+                f"(replay ~{replay_window_seconds(*old)}s "
+                f"-> ~{replay_window_seconds(*window)}s)"
+            )
 
     async def close(self) -> None:
         await self._client.close()

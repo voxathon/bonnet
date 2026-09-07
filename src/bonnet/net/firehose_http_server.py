@@ -301,6 +301,14 @@ class FirehoseHTTPServer:
                 "command_endpoint": "/command",
                 "known_origins": known_origins,
                 "capabilities": self._capabilities(),
+                # Advisory clock tolerance: what this server will accept.
+                # Receiver-side enforcement is unchanged; this just makes
+                # the replay window (~lifetime + 2*skew) visible so peers
+                # don't silently jank together.
+                "signature_lifetime_seconds": getattr(
+                    self._config, "signature_lifetime_seconds", 300
+                ),
+                "clock_skew_seconds": getattr(self._config, "clock_skew_seconds", 300),
             }
         ).encode("utf-8")
 
