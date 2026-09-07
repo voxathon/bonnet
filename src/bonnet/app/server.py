@@ -92,8 +92,26 @@ class BonnetServer:
 
         log_msg(f"INIT: server_identity pubkey={self.server_identity.public_key.hex()}")
 
-        self.anonymous_identity = Identity.generate()
-        log_msg(f"INIT: anonymous_key={self.anonymous_identity.public_key.hex()}")
+        # The anonymous keypair is public by design (both halves are served
+        # on discovery so callers can sign without registering), but it must
+        # still be stable across reboots: a fresh key every boot silently
+        # invalidates every cached anonymous credential on each restart.
+        # Delete data_dir/anonymous_identity + restart to rotate (compromise
+        # rotation is meaningless for a public key, so no live command).
+        anonymous_identity_path = config.anonymous_identity_path
+        if os.path.exists(anonymous_identity_path):
+            with open(anonymous_identity_path, "rb") as f:
+                anonymous_key_bytes = f.read()
+            # Fail loud on corrupt files: silently regenerating would desync
+            # every cached client with no diagnosable cause. from_private_key
+            # rejects wrong-length bytes; anything else wrong here raises too.
+            self.anonymous_identity = Identity.from_private_key(anonymous_key_bytes)
+            log_msg(f"INIT: anonymous_key={self.anonymous_identity.public_key.hex()} (loaded)")
+        else:
+            self.anonymous_identity = Identity.generate()
+            with open(anonymous_identity_path, "wb") as f:
+                f.write(self.anonymous_identity.private_key)
+            log_msg(f"INIT: generated new anonymous identity at {anonymous_identity_path}")
 
         self.firehose = FirehoseStore(
             config.events_db_path,

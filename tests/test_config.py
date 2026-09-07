@@ -73,6 +73,7 @@ def test_defaults():
 def test_path_properties(tmp_path):
     c = FirehoseConfig(data_dir=str(tmp_path / "data"))
     assert c.identity_path == os.path.join(str(tmp_path / "data"), "identity")
+    assert c.anonymous_identity_path == os.path.join(str(tmp_path / "data"), "anonymous_identity")
     assert c.events_db_path == os.path.join(str(tmp_path / "data"), "events.db")
     assert c.nav_db_path == os.path.join(str(tmp_path / "data"), "nav.db")
     assert c.users_db_path == os.path.join(str(tmp_path / "data"), "users.db")
