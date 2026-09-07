@@ -83,6 +83,44 @@ def test_server_identity_persisted(server, config):
     assert saved_key == server.server_identity.private_key
 
 
+def test_anonymous_identity_persisted(server, config):
+    """Anonymous identity is persisted to disk, not minted fresh per boot."""
+    anonymous_identity_path = config.anonymous_identity_path
+    assert os.path.exists(anonymous_identity_path)
+
+    with open(anonymous_identity_path, "rb") as f:
+        saved_key = f.read()
+    assert saved_key == server.anonymous_identity.private_key
+
+
+def test_anonymous_identity_stable_across_restart(server, config):
+    """Restarting the server keeps the same anonymous key."""
+    anonymous_pubkey = server.anonymous_identity.public_key
+
+    from bonnet.app.server import BonnetServer
+
+    server2 = BonnetServer(config)
+    try:
+        assert server2.anonymous_identity.public_key == anonymous_pubkey
+    finally:
+        server2.close()
+
+
+def test_anonymous_identity_corrupt_file_fails_loud(config):
+    """A corrupt anonymous identity file fails startup instead of silently rotating."""
+    os.makedirs(config.data_dir, exist_ok=True)
+    os.makedirs(config.boards_dir, exist_ok=True)
+    os.makedirs(config.events_bodies_dir, exist_ok=True)
+
+    with open(config.anonymous_identity_path, "wb") as f:
+        f.write(b"too-short")
+
+    from bonnet.app.server import BonnetServer
+
+    with pytest.raises(ValueError):
+        BonnetServer(config)
+
+
 # ---------------------------------------------------------------------------
 # Root registration
 # ---------------------------------------------------------------------------

@@ -466,6 +466,10 @@ class FirehoseConfig:
         return os.path.join(self.data_dir, "identity")
 
     @property
+    def anonymous_identity_path(self) -> str:
+        return os.path.join(self.data_dir, "anonymous_identity")
+
+    @property
     def events_db_path(self) -> str:
         return os.path.join(self.data_dir, "events.db")
 
