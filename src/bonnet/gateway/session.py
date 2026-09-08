@@ -79,6 +79,12 @@ def snapshot() -> dict[str, Any]:
     what distinguishes "no origin yet, go and adopt the remembered one" from
     "this session deliberately disconnected", and without it `disconnect`
     silently undoes itself on the next request.
+
+    `manifest_url`/`manifest` carry the session's cached UNTP manifest (see
+    `tools._manifest_cache_*`): the verified discovery document is plain
+    str/int/list values, so it round-trips through the session store like
+    the cursor does. A missing entry is simply a cache miss on the next
+    request — never an error.
     """
     from bonnet.gateway import cursor, tools
 
@@ -92,6 +98,8 @@ def snapshot() -> dict[str, Any]:
         "article_board": cursor.current_article_board.get(),
         "article_num": cursor.current_article_num.get(),
         "article_id": cursor.current_article_id.get(),
+        "manifest_url": tools._cached_manifest_url.get(),
+        "manifest": tools._cached_manifest.get(),
     }
 
 
@@ -117,6 +125,20 @@ def restore(state: dict[str, Any] | None) -> None:
     cursor.current_article_board.set(state.get("article_board"))
     cursor.current_article_num.set(state.get("article_num"))
     cursor.current_article_id.set(state.get("article_id"))
+    # Manifest cache: restore only a well-formed entry (URL + origin +
+    # public key); anything else — older snapshots, corrupt state — is a
+    # clean miss, and a miss just means the next call fetches fresh.
+    manifest_url = state.get("manifest_url")
+    manifest = state.get("manifest")
+    if (
+        isinstance(manifest_url, str)
+        and manifest_url
+        and isinstance(manifest, dict)
+        and manifest.get("origin")
+        and manifest.get("public_key")
+    ):
+        tools._cached_manifest_url.set(manifest_url)
+        tools._cached_manifest.set(dict(manifest))
 
 
 async def load(ctx) -> None:

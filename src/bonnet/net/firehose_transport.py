@@ -229,6 +229,11 @@ class FirehoseTransport:
         return self._server_origin
 
     @property
+    def base_url(self) -> str:
+        """The canonical base URL this transport dials (no trailing slash)."""
+        return self._base_url
+
+    @property
     def discovery(self) -> DiscoveryInfo | None:
         """The parsed discovery document, or None before discovery."""
         return self._discovery
@@ -279,8 +284,44 @@ class FirehoseTransport:
         self._anonymous_private_key = bytes.fromhex(info.anonymous_private_key)
         self._discovery = info
 
-        self._verifier = BonnetVerifier(
-            key_resolver=_ServerKeyResolver(self._server_pubkey, self._server_origin),
+        self._verifier = self._build_verifier(self._server_pubkey, self._server_origin)
+
+        try:
+            resp_msg = HTTPMessage(
+                method="GET",
+                url=str(resp.url),
+                headers=dict(resp.headers),
+                status_code=resp.status_code,
+                body=resp.content,
+            )
+            await self._verifier.verify_response(
+                resp_msg,
+                expected_origin=info.origin,
+                require_components=False,
+            )
+        except SignatureError as e:
+            self._server_pubkey = None
+            self._server_origin = None
+            self._discovery = None
+            self._verifier = None
+            self._peer_max_lifetime = None
+            raise FirehoseClientError(f"Discovery response signature verification failed: {e}")
+
+        await self._pin_server_key(info.origin, self._server_pubkey)
+
+        return info
+
+    def _build_verifier(self, server_pubkey: bytes, server_origin: str) -> BonnetVerifier:
+        """Construct the response verifier for a pinned server key.
+
+        Factored out of `discover()` so a cached manifest can rebuild the
+        exact same verifier without a network round trip — see
+        `apply_cached_discovery()`. The construction is deterministic in
+        (pubkey, origin, max_lifetime, clock_skew); nothing here touches
+        the network or the trust store.
+        """
+        return BonnetVerifier(
+            key_resolver=_ServerKeyResolver(server_pubkey, server_origin),
             tag=UNTP_TAG,
             max_lifetime=self._max_lifetime,
             clock_skew=self._clock_skew,
@@ -307,29 +348,86 @@ class FirehoseTransport:
             ),
         )
 
+    def export_discovery(self) -> dict:
+        """Serialize the verified discovery state as JSON-safe values.
+
+        Only meaningful after a successful `discover()` (or
+        `apply_cached_discovery()`); returns an empty dict before that.
+        The gateway session cache stores this per MCP session so later
+        tool calls in the same session can skip the `/.well-known/untp`
+        fetch. Every value is a str/int/list — safe for FastMCP's
+        session `set_state` store.
+        """
+        if self._discovery is None or self._server_pubkey is None:
+            return {}
+        info = self._discovery
+        return {
+            "protocol": info.protocol,
+            "origin": info.origin,
+            "hostname": info.hostname,
+            "public_key": info.public_key,
+            "anonymous_key": info.anonymous_key,
+            "anonymous_private_key": info.anonymous_private_key,
+            "command_endpoint": info.command_endpoint,
+            "capabilities": list(info.capabilities or []),
+            "known_origins": list(info.known_origins or []),
+            "signature_lifetime_seconds": int(info.signature_lifetime_seconds),
+            "clock_skew_seconds": int(info.clock_skew_seconds),
+            "peer_max_lifetime": int(self._peer_max_lifetime)
+            if self._peer_max_lifetime is not None
+            else int(info.signature_lifetime_seconds),
+        }
+
+    def apply_cached_discovery(self, cached: dict) -> DiscoveryInfo:
+        """Hydrate this transport from a previously verified manifest.
+
+        Rebuilds `_discovery`, the server/anonymous keys, the peer-lifetime
+        hint and the verifier — the same state `discover()` would leave
+        behind, minus the pinning step. Pinning is deliberately *not*
+        repeated here: the entry was verified and pinned when first
+        fetched (in `connect()`), and every response verified against it
+        still fails closed on rotation via `_verify_response`, which the
+        gateway client overrides to refresh exactly once.
+
+        Raises `FirehoseClientError` on malformed entries; callers treat
+        that as a cache miss (clear and fetch fresh).
+        """
         try:
-            resp_msg = HTTPMessage(
-                method="GET",
-                url=str(resp.url),
-                headers=dict(resp.headers),
-                status_code=resp.status_code,
-                body=resp.content,
+            info = DiscoveryInfo(
+                protocol=cached.get("protocol", ""),
+                origin=cached["origin"],
+                hostname=cached.get("hostname", ""),
+                public_key=cached["public_key"],
+                anonymous_key=cached["anonymous_key"],
+                anonymous_private_key=cached["anonymous_private_key"],
+                command_endpoint=cached.get("command_endpoint", "/command"),
+                capabilities=list(cached.get("capabilities", [])),
+                known_origins=list(cached.get("known_origins", [])),
+                signature_lifetime_seconds=_coerce_window(
+                    cached.get("signature_lifetime_seconds", 300), default=300, minimum=1
+                ),
+                clock_skew_seconds=_coerce_window(
+                    cached.get("clock_skew_seconds", 300), default=300, minimum=0
+                ),
             )
-            await self._verifier.verify_response(
-                resp_msg,
-                expected_origin=info.origin,
-                require_components=False,
-            )
-        except SignatureError as e:
-            self._server_pubkey = None
-            self._server_origin = None
-            self._discovery = None
-            self._verifier = None
-            self._peer_max_lifetime = None
-            raise FirehoseClientError(f"Discovery response signature verification failed: {e}")
-
-        await self._pin_server_key(info.origin, self._server_pubkey)
-
+            server_pubkey = bytes.fromhex(info.public_key)
+            anonymous_key = bytes.fromhex(info.anonymous_key)
+            anonymous_private_key = bytes.fromhex(info.anonymous_private_key)
+        except (KeyError, TypeError, ValueError) as e:
+            raise FirehoseClientError(f"cached manifest is malformed: {e}") from e
+        if not info.origin or not server_pubkey:
+            raise FirehoseClientError("cached manifest is malformed: missing origin/key")
+        self._server_pubkey = server_pubkey
+        self._server_origin = info.origin
+        self._anonymous_key = anonymous_key
+        self._anonymous_private_key = anonymous_private_key
+        self._discovery = info
+        peer_lifetime = cached.get("peer_max_lifetime", info.signature_lifetime_seconds)
+        try:
+            self._peer_max_lifetime = int(peer_lifetime)
+        except (TypeError, ValueError):
+            self._peer_max_lifetime = info.signature_lifetime_seconds
+        self._verifier = self._build_verifier(server_pubkey, info.origin)
         return info
 
     async def _pin_server_key(self, origin: str, public_key: bytes) -> None:

@@ -59,6 +59,7 @@ from bonnet.net.firehose_sync import is_safe_dial_target
 from bonnet.net.firehose_transport import (
     FirehoseClientError,  # noqa: F401 — re-export
     FirehoseTransport,
+    PinConfirmationRequired,
 )
 from bonnet.net.firehose_wire import (
     SELECTOR_BY_ID,
@@ -130,6 +131,73 @@ def default_verify_tls(url: str) -> bool:
 
 class FirehoseHTTPClient(FirehoseTransport):
     """Typed client API over the shared signed-HTTP transport."""
+
+    # ------------------------------------------------------------------
+    # Session manifest cache: fail-closed refresh
+    # ------------------------------------------------------------------
+
+    async def _verify_response(self, resp, request_nonce: str) -> None:
+        """Verify a response, refreshing a stale session manifest once.
+
+        The gateway reuses the verified manifest per MCP session (see
+        `tools._make_client`), so after a rotation the cached verifier
+        rejects the new key — fail-closed, as designed. On exactly that
+        signal (`Response signature verification failed`), and at most
+        once per client, re-fetch the manifest: `discover()` re-verifies
+        its signature and re-runs pinning (raising `PinConfirmationRequired`
+        on a changed key in CONFIRM mode — propagated, never auto-accepted),
+        the session cache is updated, and the *already received* response
+        is re-verified under the fresh key. No request is re-sent, so a
+        mutation is never replayed: reads recover transparently, writes
+        recover only if the stored response was genuinely the rotated
+        server's answer.
+
+        A still-failing re-verification (forgery, corruption) raises under
+        the fresh key; a failed refresh keeps the original error, which
+        describes the operation that actually failed.
+        """
+        try:
+            await super()._verify_response(resp, request_nonce)
+            return
+        except FirehoseClientError as original:
+            if "Response signature verification failed" not in str(original):
+                raise
+            if getattr(self, "_manifest_refreshed", False):
+                raise
+            self._manifest_refreshed = True
+            try:
+                await self.discover()
+            except PinConfirmationRequired:
+                # The key changed and needs an operator decision: drop the
+                # stale session entry so nothing keeps hydrating from it,
+                # then surface the prompt.
+                try:
+                    from bonnet.gateway import tools as _tools
+
+                    _tools._manifest_cache_clear()
+                except Exception:
+                    pass
+                raise
+            except FirehoseClientError:
+                raise original from None
+            try:
+                from bonnet.gateway import tools as _tools
+
+                payload = self.export_discovery()
+                if payload:
+                    _tools._manifest_cache_store(self.base_url, payload)
+            except Exception:
+                pass
+            # Re-verify the already-received response under the fresh key.
+            # No request is re-sent, so a mutation is never replayed. A
+            # failure here is under the current key and speaks for itself.
+            await super()._verify_response(resp, request_nonce)
+            try:
+                from bonnet.core.logging import log_info
+
+                log_info("GATEWAY manifest refresh ok", url=self.base_url)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Publication

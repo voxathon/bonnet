@@ -252,6 +252,67 @@ _origin_loaded: contextvars.ContextVar[bool] = contextvars.ContextVar(
 auth_tokens: dict[tuple[str, str], dict] = {}
 TOKEN_EXPIRY_SECONDS = 24 * 60 * 60
 
+#: Session-scoped UNTP manifest cache: the verified discovery document for
+#: the session's active origin URL, populated once by `connect()` and reused
+#: by every later tool call in the same MCP session.
+#:
+#: Why ContextVars: one gateway process serves many callers, and
+#: `session.py` already persists ContextVars per (session, tenant) across
+#: HTTP requests — so the cache inherits session+tenant isolation and the
+#: load -> run -> save serialization without new locks or stores. The
+#: single-slot shape (one URL + one manifest) is enough because a session
+#: has one active origin at a time; a URL mismatch is simply a miss.
+#: `register` against a non-active origin passes an explicit different URL
+#: and bypasses the cache by construction.
+_cached_manifest_url: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "manifest_url", default=None
+)
+_cached_manifest: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "manifest", default=None
+)
+
+
+def _manifest_cache_get(target_url: str) -> dict | None:
+    """The cached manifest for `target_url`, or None on miss.
+
+    Misses on: empty cache, URL mismatch (canonicalized — `https://h:443`
+    and `https://h` share one entry, same socket either way), or a
+    non-dict/corrupt entry (treated as a miss, never as an error).
+    """
+    try:
+        cached_url = _cached_manifest_url.get()
+        cached = _cached_manifest.get()
+    except LookupError:
+        return None
+    if not cached_url or not isinstance(cached, dict):
+        return None
+    try:
+        if canonicalize_url(target_url) != canonicalize_url(cached_url):
+            return None
+    except Exception:
+        return None
+    if not cached.get("origin") or not cached.get("public_key"):
+        return None
+    return cached
+
+
+def _manifest_cache_store(url: str, payload: dict) -> None:
+    """Remember `payload` (from `export_discovery()`) under `url`.
+
+    Empty payloads are refused — storing them would turn every later call
+    into a hydration failure instead of a clean miss.
+    """
+    if not payload or not payload.get("origin") or not payload.get("public_key"):
+        return
+    _cached_manifest_url.set(url)
+    _cached_manifest.set(dict(payload))
+
+
+def _manifest_cache_clear() -> None:
+    """Drop the session's cached manifest (disconnect/switch/refresh)."""
+    _cached_manifest_url.set(None)
+    _cached_manifest.set(None)
+
 
 def _get_identity_store() -> IdentityStore:
     """This request's tenant's identity store."""
@@ -393,14 +454,29 @@ def _make_client(url: str | None = None, verify: bool | str | None = None) -> Fi
     connection would be a first contact and a substituted origin key would
     never be noticed. The store is what makes the "use" in trust-on-first-use
     mean anything.
+
+    Session manifest cache: a cached manifest for the target URL hydrates
+    the transport so `connect()` on it skips the `/.well-known/untp` fetch.
+    `connect()` itself always fetches fresh (it stashes and clears the cache
+    up front, then stores the verified result). A corrupt entry is cleared
+    and treated as a miss, never as an error.
     """
     target = url if url is not None else _current_url()
-    return FirehoseHTTPClient(
+    client = FirehoseHTTPClient(
         target,
         verify=verify if verify is not None else _current_verify(),
         trust_store_path=tenant_trust_db_path(),
         pin_mode=_pin_mode_for(target),
     )
+    cached = _manifest_cache_get(target)
+    if cached is not None:
+        try:
+            client.apply_cached_discovery(cached)
+        except FirehoseClientError:
+            _manifest_cache_clear()
+        except Exception:
+            _manifest_cache_clear()
+    return client
 
 
 def _gw_log(op: str, ok: bool = True, **fields) -> None:
@@ -526,17 +602,37 @@ async def _connect_authenticated(client: FirehoseHTTPClient, auth: str | None) -
     """
     if tenancy.is_anonymous():
         await client.connect_anonymous()
-        return
-    username, password = _resolve_auth(auth)
-    store = _get_identity_store()
-    private_key = store.get_private_key(_default_origin() or "", username, password)
-    identity = Identity.from_private_key(private_key)
-    await client.connect(identity, username=username)
+    else:
+        username, password = _resolve_auth(auth)
+        store = _get_identity_store()
+        private_key = store.get_private_key(_default_origin() or "", username, password)
+        identity = Identity.from_private_key(private_key)
+        await client.connect(identity, username=username)
+    _store_manifest_after_first_use(client)
 
 
 async def _connect_anonymous(client: FirehoseHTTPClient) -> None:
     """Connect using the server's anonymous key."""
     await client.connect_anonymous()
+    _store_manifest_after_first_use(client)
+
+
+def _store_manifest_after_first_use(client: FirehoseHTTPClient) -> None:
+    """Store-on-first-use for the session manifest cache.
+
+    `connect()` stores explicitly; every other path (first tool call after
+    `switch_origin`, a cache miss, a `BONNET_URL`-only session that never
+    calls `connect()`) lands here: if this client fetched its manifest
+    fresh (no cache hit) and ended up with a verified discovery, remember
+    it so the session's next call skips the fetch. Best-effort — a store
+    failure must never break the operation that just succeeded.
+    """
+    try:
+        payload = client.export_discovery()
+        if payload:
+            _manifest_cache_store(client.base_url, payload)
+    except Exception:
+        pass
 
 
 def _reject_lone_surrogates(field: str, value: str) -> None:
@@ -791,6 +887,13 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     # means something is there and answering, so it is left alone.
     port_fallback_eligible = parsed.scheme == "https" and parsed.port is None
     fell_back_to_2272 = False
+    # Establishing a connection always re-fetches the manifest: stash the
+    # session entry aside and clear it so `_make_client` below cannot
+    # hydrate from it. The verified result is stored on success; the stash
+    # is restored on every failure path alongside the origin vars, so a
+    # failed connect never poisons (or loses) the session's cache.
+    stashed_manifest = (_cached_manifest_url.get(), _cached_manifest.get())
+    _manifest_cache_clear()
     client = None
     try:
         client = _make_client()
@@ -818,6 +921,14 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         all_boards = await client.list_boards(origin="")
         boards = [{"name": b.name, "origin": b.origin} for b in all_boards]
         discovery = client.discovery
+        # First establishment in this session: remember the verified
+        # manifest under the final (post-fallback) URL so later tool calls
+        # skip the discovery fetch. Stored only on success — a failed
+        # connect (including pin_required, handled above) caches nothing.
+        try:
+            _manifest_cache_store(resolved_url, client.export_discovery())
+        except Exception:
+            pass
         known = list(discovery.known_origins) if discovery else []
         advertised = client.advertised_address()
         peer_lifetime = int(discovery.signature_lifetime_seconds) if discovery is not None else 300
@@ -840,12 +951,16 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         current_origin_url.set(previous[0])
         current_origin_verify.set(previous[1])
         current_origin.set(previous[2])
+        _cached_manifest_url.set(stashed_manifest[0])
+        _cached_manifest.set(stashed_manifest[1])
         _gw_log("connect", ok=True, url=resolved_url, pin_required=True)
         return _pin_prompt(pending, resolved_url)
     except Exception as e:
         current_origin_url.set(previous[0])
         current_origin_verify.set(previous[1])
         current_origin.set(previous[2])
+        _cached_manifest_url.set(stashed_manifest[0])
+        _cached_manifest.set(stashed_manifest[1])
         _gw_log("connect", ok=False, url=resolved_url, err=type(e).__name__)
         raise
     finally:
@@ -1120,6 +1235,7 @@ async def disconnect() -> dict:
     current_origin_verify.set(None)
     current_origin.set(None)
     current_username.set(None)
+    _manifest_cache_clear()
     cursor.clear_board()
     await announce_tool_change()
     return {"state": "disconnected"}
@@ -1312,6 +1428,11 @@ async def switch_origin(origin: str) -> dict:
     current_origin.set(entry["origin"])
     _origin_loaded.set(True)
     current_username.set(entry["identity"] or None)
+    # No manifest-cache clear here: the cache is keyed by URL, so the
+    # previous origin's entry simply misses while this one is active (and
+    # hits again if the session switches back). The first tool call for
+    # the newly active origin fetches fresh and re-stores via the
+    # store-on-first-use in `_connect_authenticated/_connect_anonymous`.
     # A board open on the origin just left may not even exist here.
     cursor.clear_board()
 
