@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 
 from bonnet.core.crypto import Identity
 from bonnet.core.kinds import KIND_ARTICLE, KIND_ORIGIN_KEY_ROTATE
-from bonnet.core.logging import log_msg
+from bonnet.core.logging import log_msg, log_warning
 from bonnet.core.record import (
     HEAD_FORMAT,
     MAX_U63,
@@ -295,6 +295,7 @@ class FirehoseStore:
         """
         encoded_intent = encode_intent(intent)
         if not verify_intent_signature(intent.actor_pubkey, encoded_intent, actor_signature):
+            log_warning("APPEND deny reason=bad-actor-sig", kind=intent.kind, origin=intent.origin)
             raise SignatureInvalid("actor signature verification failed")
 
         body_hash = intent.body_hash
@@ -304,6 +305,7 @@ class FirehoseStore:
 
             actual_hash = compute_body_hash(body)
             if actual_hash != body_hash or len(body) != body_size:
+                log_warning("APPEND deny reason=body-mismatch", kind=intent.kind)
                 raise FirehoseError("body hash or size mismatch")
 
         with self._lock:

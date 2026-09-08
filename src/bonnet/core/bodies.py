@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import threading
 
+from bonnet.core.logging import log_debug, log_warning
 from bonnet.core.record import compute_body_hash
 
 
@@ -111,8 +112,10 @@ class BodyStore:
         the article number, call finalize_article_body to move it.
         """
         if len(body) != expected_size:
+            log_warning("BODY deny reason=size", expected=expected_size, got=len(body))
             raise BodyError(f"body size {len(body)} != expected {expected_size}")
         if compute_body_hash(body) != expected_hash:
+            log_warning("BODY deny reason=hash-mismatch", board=board)
             raise BodyError("body hash mismatch")
 
         origin_hex = _safe_path_component(origin)
@@ -149,6 +152,7 @@ class BodyStore:
             final_dir = os.path.dirname(final_path)
             os.makedirs(final_dir, exist_ok=True)
             os.replace(staging_path, final_path)
+            log_debug("BODY finalize", board=board, article=article_num)
             return True
 
     def delete_staged_article_body(

@@ -26,7 +26,7 @@ import struct
 from bonnet.core.crypto import Identity
 from bonnet.core.hostname import normalize_hostname
 from bonnet.core.kind_validator import identity_text_violation
-from bonnet.core.logging import log_msg
+from bonnet.core.logging import log_info, log_msg, log_warning
 from bonnet.core.record import (
     ZERO_ID,
     Intent,
@@ -168,6 +168,9 @@ class OperatorConsole:
             log_msg(f"REPL: input='{line}'")
             parts = line.split()
             cmd = parts[0].lower() if parts else ""
+            import time as _time
+
+            _start = _time.time()
 
             result: str | None
             if cmd == "publish-article":
@@ -193,6 +196,12 @@ class OperatorConsole:
 
             if result is None:
                 break
+
+            ms = int((_time.time() - _start) * 1000)
+            ok = not str(result or "").startswith("Error:")
+            log_info("REPL done", cmd=cmd or "?", ok=ok, ms=ms)
+            if not ok:
+                log_warning("REPL error", cmd=cmd or "?", err=str(result)[:160])
 
             if result:
                 print(result)

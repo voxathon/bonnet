@@ -195,7 +195,13 @@ async def _permissions_for(board: str, auth: str | None = None) -> Permissions |
         else:
             await _tools._connect_anonymous(client)
         perms = await client.get_permissions(board)
-    except Exception:
+    except Exception as e:
+        try:
+            from bonnet.core.logging import log_debug
+
+            log_debug("NEEDS perms unavailable", board=board, err=type(e).__name__)
+        except Exception:
+            pass
         return None
     finally:
         await client.close()

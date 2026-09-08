@@ -317,7 +317,22 @@ class ACLEvaluator:
             return False
         if any(rule.effect == "deny" for rule in candidates):
             return False
-        return any(rule.effect == "allow" for rule in candidates)
+        allowed = any(rule.effect == "allow" for rule in candidates)
+        try:
+            from bonnet.core.logging import log_debug
+
+            log_debug(
+                "ACL check",
+                action=action,
+                command=command or "-",
+                kind=kind or "-",
+                board=board or "-",
+                allowed=allowed,
+                candidates=len(candidates),
+            )
+        except Exception:
+            pass
+        return allowed
 
     @staticmethod
     def from_toml(data: dict) -> ACLEvaluator:

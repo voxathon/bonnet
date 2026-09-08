@@ -56,6 +56,7 @@ from typing import Any
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
+from bonnet.core.logging import log_debug
 from bonnet.gateway import tenancy
 
 #: Stand-in identity for transports that don't hand back a stable
@@ -130,7 +131,8 @@ async def load(ctx) -> None:
         return
     try:
         restore(await ctx.get_state(_key()))
-    except Exception:
+    except Exception as e:
+        log_debug("SESSION load degrade", err=f"{type(e).__name__}")
         return
 
 
@@ -140,7 +142,8 @@ async def save(ctx) -> None:
         return
     try:
         await ctx.set_state(_key(), snapshot())
-    except Exception:
+    except Exception as e:
+        log_debug("SESSION save degrade", err=f"{type(e).__name__}")
         return
 
 
