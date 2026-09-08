@@ -247,10 +247,15 @@ def test_a_second_key_cannot_take_a_live_name(wired):
     assert wired["users"].get_user_by_pubkey(ORIGIN, first.public_key)["username"] == "alice"
 
 
-def test_the_same_key_may_re_register_its_own_name(wired):
+def test_the_same_key_may_not_spam_its_own_name(wired):
     alice = Identity.generate()
     assert _register(wired, alice, "alice")[0] == 0
-    assert _register(wired, alice, "alice")[0] == 0
+    # Exact duplicate (same key, same name, same flags) is refused so repeat
+    # connect+register loops map to already_registered instead of appending
+    # a new seq. Role updates (changed flags by an admin) still pass.
+    resp = _register(wired, alice, "alice")
+    assert resp[0] == 1
+    assert b"already registered to this key" in resp
 
 
 def test_the_projection_enforces_it_independently_of_the_handler(wired):
