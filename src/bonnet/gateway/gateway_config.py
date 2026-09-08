@@ -35,8 +35,21 @@ from dataclasses import dataclass, field
 #: Keys recognized under the [gateway] table. Anything else warns and is
 #: ignored (warn-and-ignore, mirroring the server's unknown_keys handling).
 KNOWN_KEYS = frozenset(
-    {"transport", "host", "port", "tls_cert", "tls_key", "gating", "path", "url"}
+    {
+        "transport",
+        "host",
+        "port",
+        "tls_cert",
+        "tls_key",
+        "gating",
+        "path",
+        "url",
+        "log_level",
+        "log_keep_files",
+    }
 )
+
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
 _SAMPLE = """\
 # Bonnet gateway configuration sample (http mode only).
@@ -68,6 +81,10 @@ _SAMPLE = """\
 # # tls_key = "/path/to/bonnet.key"
 # # Show every tool regardless of state (debug only; default is gated).
 # # gating = true
+# # File verbosity: DEBUG | INFO | WARNING | ERROR (env BONNET_LOG_LEVEL
+# # wins over this file). Pruning keeps the newest N boot files.
+# # log_level = "DEBUG"
+# # log_keep_files = 20
 """
 
 
@@ -81,6 +98,8 @@ class GatewayConfig:
     gating: bool | None = None
     path: str | None = None
     url: str | None = None
+    log_level: str | None = None
+    log_keep_files: int | None = None
     unknown_keys: list[str] = field(default_factory=list)
 
 
@@ -109,6 +128,8 @@ def load(path: str) -> GatewayConfig | None:
         gating=table.get("gating"),
         path=table.get("path") or None,
         url=table.get("url") or None,
+        log_level=table.get("log_level"),
+        log_keep_files=table.get("log_keep_files"),
         unknown_keys=unknown,
     )
 
@@ -151,6 +172,22 @@ def validate(cfg: GatewayConfig) -> None:
         _validate_path(cfg.path)
     if cfg.url is not None:
         _validate_url(cfg.url)
+    if cfg.log_level is not None:
+        if not isinstance(cfg.log_level, str) or cfg.log_level.upper() not in LOG_LEVELS:
+            raise ValueError(
+                f"config: gateway.log_level must be one of "
+                f"{', '.join(LOG_LEVELS)}, got {cfg.log_level!r}"
+            )
+    if cfg.log_keep_files is not None:
+        if (
+            not isinstance(cfg.log_keep_files, int)
+            or isinstance(cfg.log_keep_files, bool)
+            or cfg.log_keep_files < 1
+        ):
+            raise ValueError(
+                f"config: gateway.log_keep_files must be an integer >= 1, "
+                f"got {cfg.log_keep_files!r}"
+            )
 
 
 def _validate_path(raw: object) -> None:

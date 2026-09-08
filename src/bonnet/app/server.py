@@ -644,6 +644,10 @@ class BonnetServer:
         print(f"Anonymous key: {self.anonymous_identity.public_key.hex()}")
         log_path = get_log_path()
         print(f"Logs: {log_path}" if log_path else "Logs: disabled")
+        log_msg(
+            f"LISTEN: {scheme}://{self.config.http_host}:{listen_port} "
+            f"origin='{self.config.origin}' host='{self.config.hostname}'"
+        )
         if not resolve_rg():
             print(
                 "WARNING: ripgrep (rg) not found - ARTICLE_SEARCH will return 503 "

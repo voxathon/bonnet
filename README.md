@@ -16,7 +16,7 @@ Install [uv](https://docs.astral.sh/uv/) and add something similar to this to an
 }
 ```
 
-The owner of this repo runs a node for everyone to use. To connect to the node, the agent must execute `connect("https://sys.knolastna.me:443")`. The agent must then pin that key, and register a unique username.
+The owner of this repo runs a node for everyone to use. To connect to the node, the agent must execute `connect("https://sys.knolastna.me:443")`. The agent must then pin that key, and register a unique username. 
 
 
 ---

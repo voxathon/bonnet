@@ -90,6 +90,7 @@ from fastmcp import FastMCP
 
 from bonnet.core.crypto import Identity
 from bonnet.core.hostname import normalize_hostname
+from bonnet.core.logging import bind_context, log_info, log_warning
 from bonnet.core.record import MAX_BOARD, MAX_TEXT_FIELD, ZERO_ID
 from bonnet.core.trust import TrustStore
 from bonnet.gateway import cursor, tenancy, thread_view
@@ -400,6 +401,19 @@ def _make_client(url: str | None = None, verify: bool | str | None = None) -> Fi
         trust_store_path=tenant_trust_db_path(),
         pin_mode=_pin_mode_for(target),
     )
+
+
+def _gw_log(op: str, ok: bool = True, **fields) -> None:
+    """Best-effort gateway tool log. Never raises; file is a no-op until init."""
+    try:
+        tenant = tenancy.current_tenant.get() if hasattr(tenancy, "current_tenant") else ""
+        bind_context(tenant=tenant)
+        if ok:
+            log_info(f"GATEWAY {op} ok", **fields)
+        else:
+            log_warning(f"GATEWAY {op} fail", **fields)
+    except Exception:
+        pass
 
 
 def _pin_mode_for(url: str) -> str:
@@ -826,11 +840,13 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         current_origin_url.set(previous[0])
         current_origin_verify.set(previous[1])
         current_origin.set(previous[2])
+        _gw_log("connect", ok=True, url=resolved_url, pin_required=True)
         return _pin_prompt(pending, resolved_url)
-    except Exception:
+    except Exception as e:
         current_origin_url.set(previous[0])
         current_origin_verify.set(previous[1])
         current_origin.set(previous[2])
+        _gw_log("connect", ok=False, url=resolved_url, err=type(e).__name__)
         raise
     finally:
         if client is not None:
@@ -853,6 +869,7 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     # from a stale tool list still succeeds, and `unlocked` names them in the
     # result so a host that ignores the notification is not a dead end.
     unlocked = await _unlock_origin_tools()
+    _gw_log("connect", ok=True, url=resolved_url, origin=origin)
 
     return {
         "origin": origin,
@@ -1076,6 +1093,7 @@ async def trust_origin_key(
         store.close()
 
     entry = _get_origin_store().get(target)
+    _gw_log("trust_key", ok=True, origin=target, decision=decision)
     return await connect(
         reconnect_to or (entry["url"] if entry else _current_url()),
         verify_tls=reconnect_verify,
@@ -1246,6 +1264,7 @@ async def register(username: str, password: str | None = None, origin: str | Non
             f"'{username}' was already registered on this origin under this key - "
             "re-selected the existing identity; no new registration record was published."
         )
+    _gw_log("register", ok=True, origin=target_origin, username=username)
     return response
 
 
@@ -1657,7 +1676,11 @@ async def create_board(
             client._identity.public_key,
             display_name,
         )
+        _gw_log("create_board", ok=True, board=board)
         return f"Board '{board}' created — event seq {result.origin_seq}"
+    except Exception as e:
+        _gw_log("create_board", ok=False, board=board, err=type(e).__name__)
+        raise
     finally:
         await client.close()
 
@@ -2251,7 +2274,11 @@ async def publish_article(
             root_article_id=root_id,
             reply_to_article_id=reply_id,
         )
+        _gw_log("publish", ok=True, board=board, seq=result.origin_seq)
         return f"Article #{result.article_num} published — event seq {result.origin_seq}"
+    except Exception as e:
+        _gw_log("publish", ok=False, board=board, err=type(e).__name__)
+        raise
     finally:
         await client.close()
 

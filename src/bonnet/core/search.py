@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from bonnet.core.board_projection import BoardProjection
 from bonnet.core.bodies import BodyStore
+from bonnet.core.logging import log_debug
 
 # ---------------------------------------------------------------------------
 # Search result
@@ -95,6 +96,9 @@ class SearchService:
         Uses SQL-level filtering for text and actor — only matching rows
         are loaded into Python, bounded by limit.
         """
+        import time as _time
+
+        _start = _time.time()
         articles, total = projection.search_metadata(
             origin,
             board,
@@ -135,6 +139,8 @@ class SearchService:
                     excerpt=excerpt,
                 )
             )
+        ms = int((_time.time() - _start) * 1000)
+        log_debug("SEARCH metadata", board=board, hits=len(results), total=total, ms=ms)
         return SearchResults(results=results, total=total, truncated=(offset + limit) < total)
 
     def search_bodies(

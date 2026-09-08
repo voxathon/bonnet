@@ -191,7 +191,14 @@ def resolve_key(presented: str) -> str | None:
     tenant, and telling an unauthenticated caller which one it was would only
     help someone probing for valid key ids.
     """
-    return _registry().resolve(presented)
+    tenant = _registry().resolve(presented)
+    try:
+        from bonnet.core.logging import log_debug
+
+        log_debug("TENANCY resolve", ok=tenant is not None)
+    except Exception:
+        pass
+    return tenant
 
 
 def reset_registry_cache() -> None:

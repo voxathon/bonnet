@@ -31,7 +31,14 @@ import time
 
 from bonnet.core.binutil import resolve_rg
 from bonnet.core.crypto import Identity
-from bonnet.core.logging import log_msg
+from bonnet.core.logging import (
+    bind_context,
+    clear_context,
+    log_debug,
+    log_info,
+    log_msg,
+    log_warning,
+)
 from bonnet.net.http_auth import (
     UNTP_LABEL,
     UNTP_TAG,
@@ -340,19 +347,28 @@ class FirehoseHTTPServer:
     # ------------------------------------------------------------------
 
     async def _handle_command(self, scope, receive, send):
+        import os as _os
+
         remote_addr = self._get_remote_addr(scope)
+        req_id = _os.urandom(8).hex()[:8]
+        start = time.time()
+        opcode = -1
+        bind_context(req_id=req_id, origin=self._config.origin)
 
         body = None
         try:
             body = await self._read_body(receive, self._max_request_size)
         except _BodyTooLarge:
+            log_warning("REQ deny reason=request-too-large", remote=remote_addr)
             await self._send_protocol_error(send, 413, "Request too large", remote_addr, "")
             return
         if body is None:
+            log_warning("REQ deny reason=read-fail", remote=remote_addr)
             await self._send_protocol_error(send, 400, "Failed to read body", remote_addr, "")
             return
 
         if len(body) == 0:
+            log_warning("REQ deny reason=empty-body", remote=remote_addr)
             await self._send_protocol_error(send, 400, "Empty command body", remote_addr, "")
             return
 
@@ -365,24 +381,29 @@ class FirehoseHTTPServer:
         untp_nonce = headers.get("untp-nonce", "")
 
         if untp_version != "1":
+            log_warning("REQ deny reason=bad-version", remote=remote_addr, version=untp_version)
             await self._send_protocol_error(send, 426, "Unsupported protocol", remote_addr, "")
             return
 
         if content_type != "application/vnd.bonnet.command":
+            log_warning("REQ deny reason=bad-content-type", remote=remote_addr, ctype=content_type)
             await self._send_protocol_error(send, 415, "Unsupported content type", remote_addr, "")
             return
 
         if not content_digest:
+            log_warning("REQ deny reason=missing-digest", remote=remote_addr)
             await self._send_protocol_error(send, 400, "Missing Content-Digest", remote_addr, "")
             return
 
         try:
             validate_content_digest(body, content_digest)
         except DigestMismatch:
+            log_warning("REQ deny reason=digest-mismatch", remote=remote_addr)
             await self._send_protocol_error(send, 400, "Content-Digest mismatch", remote_addr, "")
             return
 
         if not sig_input or not sig:
+            log_warning("REQ deny reason=missing-signature", remote=remote_addr)
             await self._send_protocol_error(send, 401, "Missing signature", remote_addr, "")
             return
 
@@ -416,6 +437,7 @@ class FirehoseHTTPServer:
                 error_desc = self._signature_error_desc(
                     InvalidSignature("Signature verification failed")
                 )
+                log_warning("REQ deny reason=bad-signature", remote=remote_addr, err=error_desc)
                 await self._send_protocol_error(send, 401, error_desc, remote_addr, "")
                 return
             req_msg = HTTPMessage(
@@ -430,16 +452,19 @@ class FirehoseHTTPServer:
                 )
             except SignatureError as e:
                 error_desc = self._signature_error_desc(e)
+                log_warning("REQ deny reason=bad-signature-alt", remote=remote_addr, err=error_desc)
                 await self._send_protocol_error(send, 401, error_desc, remote_addr, "")
                 return
         except SignatureError as e:
             error_desc = self._signature_error_desc(e)
+            log_warning("REQ deny reason=bad-signature", remote=remote_addr, err=error_desc)
             await self._send_protocol_error(send, 401, error_desc, remote_addr, "")
             return
 
         peer_public_key = bytes.fromhex(verify_result.keyid[8:])
         nonce = verify_result.nonce or untp_nonce
         request_nonce = nonce
+        bind_context(actor=peer_public_key.hex())
 
         is_anonymous = peer_public_key == self._anonymous_public_key
 
@@ -448,6 +473,12 @@ class FirehoseHTTPServer:
             if expires is None:
                 expires = int(time.time()) + 60
             if not self._replay_ledger.check_and_insert(peer_public_key, nonce, int(expires)):
+                log_warning(
+                    "REPLAY deny",
+                    remote=remote_addr,
+                    key=peer_public_key.hex()[:16],
+                    nonce=str(nonce)[:16],
+                )
                 await self._send_protocol_error(
                     send, 409, "Replay detected", remote_addr, request_nonce
                 )
@@ -459,6 +490,11 @@ class FirehoseHTTPServer:
             rl_key = self._rate_limiter.identity_key(peer_public_key)
 
         if not self._rate_limiter.check(rl_key):
+            log_warning(
+                "RATE_LIMIT deny",
+                remote=remote_addr,
+                key=peer_public_key.hex()[:16] if not is_anonymous else "anon",
+            )
             await self._send_protocol_error(
                 send, 429, "Too many requests", remote_addr, request_nonce
             )
@@ -515,12 +551,25 @@ class FirehoseHTTPServer:
         )
 
         try:
+            if body:
+                opcode = body[0]
+            log_debug(
+                "REQ start",
+                remote=remote_addr,
+                opcode=f"0x{opcode:02x}" if opcode >= 0 else "?",
+                size=len(body or b""),
+                role=role or ("anon" if is_anonymous else ("reg" if is_registered else "unknown")),
+            )
             response_body = await asyncio.to_thread(self._handler.handle, body, ctx)
         except Exception as e:
             log_msg(f"HTTP_COMMAND: dispatch error: {type(e).__name__}: {e}")
             msg = b"Internal error"
             response_body = b"\x01" + struct.pack(">H", 0) + struct.pack(">H", len(msg)) + msg
 
+        ms = int((time.time() - start) * 1000)
+        ok = not (len(response_body) >= 1 and response_body[0:1] == b"\x01")
+        log_info("REQ done", opcode=f"0x{opcode:02x}" if opcode >= 0 else "?", ok=ok, ms=ms)
+        clear_context()
         await self._send_signed_response(send, response_body, request_nonce)
 
     # ------------------------------------------------------------------

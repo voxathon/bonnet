@@ -47,7 +47,7 @@ from bonnet.core.kinds import (
     KIND_PUNISHMENT_PERMABAN,
     KIND_USER_REGISTER,
 )
-from bonnet.core.logging import log_msg
+from bonnet.core.logging import log_debug, log_info, log_msg, log_warning
 from bonnet.core.record import (
     SIG_SIZE,
     ZERO_ID,
@@ -433,18 +433,29 @@ class FirehoseCommandHandler:
         cmd_name = CMD_NAMES.get(opcode, f"UNKNOWN_{opcode:02x}")
 
         if opcode not in CMD_NAMES:
+            log_warning("COMMAND deny reason=unknown-opcode", opcode=f"0x{opcode:02x}")
             return _error(0x0005, f"Unknown opcode 0x{opcode:02x}")
 
         action = "write" if opcode in WRITE_OPS else "read"
 
         if action == "read":
             if not self._acl.check(ctx.to_auth_context(), action, command=cmd_name):
+                log_warning(
+                    "COMMAND deny",
+                    cmd=cmd_name,
+                    actor=ctx.peer_pubkey.hex()[:16] if ctx.peer_pubkey else "-",
+                )
                 return _error(0x0004, "Command not permitted")
 
         try:
             if opcode == OP_PUBLISH_RECORD:
                 result = self._cmd_publish(data, ctx)
                 self._log_write_denial(cmd_name, ctx, result)
+                if result and result[0:1] == b"\x00":
+                    log_info(
+                        "PUBLISH ok",
+                        actor=ctx.peer_pubkey.hex()[:16] if ctx.peer_pubkey else "-",
+                    )
                 return result
             elif opcode == OP_EVENT_HEAD:
                 return self._cmd_event_head(data, ctx)
@@ -515,14 +526,21 @@ class FirehoseCommandHandler:
         intent = decode_intent(encoded_intent)
 
         if intent.origin != self._origin:
+            log_warning("PUBLISH deny reason=origin-mismatch", kind=intent.kind)
             return _error(0x0004, "Origin mismatch")
 
         if intent.actor_pubkey != ctx.peer_pubkey:
+            log_warning(
+                "PUBLISH deny reason=actor-mismatch",
+                kind=intent.kind,
+                actor=intent.actor_pubkey.hex()[:16],
+            )
             return _error(0x0004, "Actor pubkey does not match authenticated key")
 
         try:
             self._validator.validate(intent)
         except ValidationError as e:
+            log_warning("PUBLISH deny reason=validation", kind=intent.kind, err=str(e)[:120])
             return _error(0x0006, f"Validation error: {e}")
 
         kind = intent.kind
@@ -530,6 +548,12 @@ class FirehoseCommandHandler:
         if not self._acl.check(
             ctx.to_auth_context(), "write", command="PUBLISH_RECORD", kind=kind, board=board or None
         ):
+            log_warning(
+                "PUBLISH deny reason=acl",
+                kind=kind,
+                board=board or "-",
+                actor=ctx.peer_pubkey.hex()[:16] if ctx.peer_pubkey else "-",
+            )
             return _error(0x0004, "Not permitted")
 
         # An article needs a real board to land in - see
@@ -538,6 +562,7 @@ class FirehoseCommandHandler:
         # caller gets a clean error instead of a "successful" publish that
         # then never surfaces as a queryable article.
         if kind == KIND_ARTICLE and self._nav.get_board(intent.origin, board) is None:
+            log_warning("PUBLISH deny reason=no-board", board=board)
             return _error(0x0003, f"Board '{board}' does not exist - create it first")
 
         # Registration gates: privilege, and subject.
@@ -849,8 +874,16 @@ class FirehoseCommandHandler:
 
             log_msg(
                 f"EVENT: seq={rec.origin_seq} kind={intent.kind} "
-                f"actor={intent.actor_pubkey.hex()} board={intent.board or '-'}"
+                f"actor={intent.actor_pubkey.hex()[:16]} board={intent.board or '-'}"
                 f"{self._register_subject_suffix(intent)}"
+            )
+            log_debug(
+                "PUBLISH stored",
+                seq=rec.origin_seq,
+                kind=intent.kind,
+                board=intent.board or "-",
+                article=rec.article_num,
+                event=rec.event_id.hex()[:16],
             )
 
             return _success(

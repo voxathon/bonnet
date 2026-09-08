@@ -342,7 +342,13 @@ async def _lookup(context: MiddlewareContext) -> Tool | None:
         return None
     try:
         return await ctx.fastmcp._get_tool(context.message.name)
-    except Exception:
+    except Exception as e:
+        try:
+            from bonnet.core.logging import log_debug
+
+            log_debug("GATING lookup miss", err=type(e).__name__)
+        except Exception:
+            pass
         return None
 
 
@@ -359,5 +365,11 @@ async def announce_tool_change() -> None:
         from mcp.types import ToolListChangedNotification
 
         await get_context().send_notification(ToolListChangedNotification())
-    except Exception:
+    except Exception as e:
+        try:
+            from bonnet.core.logging import log_debug
+
+            log_debug("GATING announce skip", err=type(e).__name__)
+        except Exception:
+            pass
         return

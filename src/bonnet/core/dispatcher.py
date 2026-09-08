@@ -65,7 +65,7 @@ from bonnet.core.kinds import (
     PUNISHMENT_ISSUE_KINDS,
     PUNISHMENT_TYPE_BY_KIND,
 )
-from bonnet.core.logging import log_msg
+from bonnet.core.logging import log_debug, log_info, log_msg
 from bonnet.core.record import ZERO_ID, Record
 
 
@@ -188,6 +188,9 @@ class Dispatcher:
                 # non-policy records into believing the projection is stale.
                 self._policy.set_checkpoint(origin, rec.origin_seq)
                 count += 1
+                log_debug("DISPATCH ok", origin=origin, seq=rec.origin_seq, kind=rec.kind)
+            if count:
+                log_info("DISPATCH done", origin=origin, count=count)
             return count
 
     def _dispatch_record(self, rec: Record) -> None:

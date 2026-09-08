@@ -587,6 +587,8 @@ def _run_check_config(config_path: str) -> None:
     print(f"  url: {cfg.url or '(default: $BONNET_URL or https://localhost:2272)'}")
     print(f"  tls: {'yes' if cfg.tls_cert and cfg.tls_key else 'no'}")
     print(f"  gating: {'off' if cfg.gating is False else 'on'}")
+    print(f"  log_level: {cfg.log_level or '(default: $BONNET_LOG_LEVEL or DEBUG)'}")
+    print(f"  log_keep_files: {cfg.log_keep_files or '(default: 20)'}")
 
 
 def run(argv: list[str] | None = None):
@@ -683,6 +685,24 @@ def run(argv: list[str] | None = None):
         )
         raise SystemExit(1)
     transport = cast(Literal["stdio", "http", "sse"], transport)
+    try:
+        from bonnet.core.logging import init_logging, log_info
+
+        # Precedence: BONNET_LOG_LEVEL > gateway.toml log_level > DEBUG.
+        # init_logging resolves env itself when level=None.
+        if os.environ.get("BONNET_LOG_LEVEL"):
+            gw_level = None
+        elif gw_config and gw_config.log_level:
+            gw_level = gw_config.log_level
+        else:
+            gw_level = "DEBUG"
+        gw_keep = (
+            gw_config.log_keep_files if gw_config and gw_config.log_keep_files is not None else 20
+        )
+        init_logging(os.path.join(paths.gateway_dir(), "logs"), level=gw_level, keep_files=gw_keep)
+        log_info("GATEWAY start", transport=transport)
+    except Exception:
+        pass
     if transport == "stdio":
         # stdout carries the MCP framing; the banner would corrupt it.
         mcp.run(transport="stdio", show_banner=False)

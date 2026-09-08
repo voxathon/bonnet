@@ -226,6 +226,11 @@ def main(argv: list[str] | None = None):
         action="store_true",
         help="Validate the config file (including ACL rules and peers) and exit, without starting the server",
     )
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        help="Log verbosity: DEBUG, INFO, WARNING or ERROR (wins over BONNET_LOG_LEVEL and [logging] level)",
+    )
     args = parser.parse_args(argv)
 
     if args.dir:
@@ -337,9 +342,23 @@ def main(argv: list[str] | None = None):
         )
         print(f"  peers: {len(config.peers)}")
         print(f"  acl rules: {len(config.acl._rules)}")
+        print(
+            f"  logging: level={config.log_level} keep_files={config.log_keep_files} "
+            f"max_bytes={config.log_max_bytes} backup_count={config.log_backup_count}"
+        )
         if config.unknown_keys:
             print(f"  {len(config.unknown_keys)} unrecognized key(s) ignored (see warnings above)")
         return
+
+    config = _load_and_validate_config(args)
+
+    if args.log_level is not None and args.log_level.upper() not in FirehoseConfig.LOG_LEVELS:
+        print(
+            f"error: --log-level must be one of "
+            f"{', '.join(FirehoseConfig.LOG_LEVELS)}, got {args.log_level!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
     # Logs live next to whatever config.toml this run actually loaded, not
     # the globally-remembered `--dir`/`--init` pointer `server_home` falls
@@ -351,8 +370,23 @@ def main(argv: list[str] | None = None):
     else:
         log_home = os.path.dirname(os.path.abspath(args.config))
     log_dir = os.path.join(log_home, "logs")
+    # Precedence: --log-level > BONNET_LOG_LEVEL > [logging] level.
+    # init_logging resolves env itself when level=None, so only pass the
+    # TOML value when neither CLI nor env said anything.
+    if args.log_level is not None:
+        eff_level: str | None = args.log_level
+    elif os.environ.get("BONNET_LOG_LEVEL"):
+        eff_level = None
+    else:
+        eff_level = config.log_level
     try:
-        init_logging(log_dir)
+        init_logging(
+            log_dir,
+            level=eff_level,
+            max_bytes=config.log_max_bytes,
+            backup_count=config.log_backup_count,
+            keep_files=config.log_keep_files,
+        )
     except OSError as exc:
         # File logging is not critical to serving requests; degrade loudly
         # instead of either crashing or silently running with no logs.
@@ -361,8 +395,6 @@ def main(argv: list[str] | None = None):
             f"'{log_dir}': {exc}. Continuing without file logs.",
             file=sys.stderr,
         )
-
-    config = _load_and_validate_config(args)
 
     try:
         _preflight_bind(config.host, config.port)

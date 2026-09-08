@@ -111,7 +111,17 @@ def _as_bool(table: dict, key: str, section: str, default: bool) -> bool:
     return value
 
 
-_TOP_LEVEL_KEYS = {"server", "limits", "search", "tls", "sync", "acl", "include", "witnesses"}
+_TOP_LEVEL_KEYS = {
+    "server",
+    "limits",
+    "search",
+    "tls",
+    "sync",
+    "acl",
+    "include",
+    "witnesses",
+    "logging",
+}
 
 _INCLUDE_ALLOWED_TOP_KEYS = {"acl", "sync"}
 
@@ -156,6 +166,12 @@ _SECTION_KEYS = {
         "max_per_event",
         "update_policy",
         "wire_max",
+    },
+    "logging": {
+        "level",
+        "keep_files",
+        "max_bytes",
+        "backup_count",
     },
 }
 
@@ -292,6 +308,8 @@ def _resolve_includes(data: dict, base_dir: str) -> tuple[list, list, list]:
 class FirehoseConfig:
     """Configuration for a Bonnet server."""
 
+    LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+
     def __init__(
         self,
         origin: str = "localhost",
@@ -321,6 +339,10 @@ class FirehoseConfig:
         host: str = "127.0.0.1",
         unknown_keys: list = None,
         witness: WitnessConfig = None,
+        log_level: str = "DEBUG",
+        log_keep_files: int = 20,
+        log_max_bytes: int = 10 * 1024 * 1024,
+        log_backup_count: int = 5,
     ):
         self.origin = _normalize_origin(origin)
         self.hostname = normalize_hostname(hostname) or self.origin
@@ -346,6 +368,10 @@ class FirehoseConfig:
         self.peers = peers or []
         self.acl = acl or ACLEvaluator([])
         self.admin_pubkey_hex = admin_pubkey_hex
+        self.log_level = str(log_level).upper()
+        self.log_keep_files = log_keep_files
+        self.log_max_bytes = log_max_bytes
+        self.log_backup_count = log_backup_count
         self.host = host
         self.unknown_keys = list(unknown_keys or [])
         self.witness = witness or WitnessConfig()
@@ -403,6 +429,33 @@ class FirehoseConfig:
         if self.sync_interval_seconds <= 0:
             raise ValueError(
                 f"config: sync_interval_seconds must be positive, got {self.sync_interval_seconds}"
+            )
+        if self.log_level not in self.LOG_LEVELS:
+            raise ValueError(
+                f"config: logging.level must be one of {', '.join(self.LOG_LEVELS)}, "
+                f"got {self.log_level!r}"
+            )
+        if not isinstance(self.log_keep_files, int) or isinstance(self.log_keep_files, bool):
+            raise ValueError(
+                f"config: logging.keep_files must be an integer, got {self.log_keep_files!r}"
+            )
+        if self.log_keep_files < 1:
+            raise ValueError(f"config: logging.keep_files must be >= 1, got {self.log_keep_files}")
+        if not isinstance(self.log_max_bytes, int) or isinstance(self.log_max_bytes, bool):
+            raise ValueError(
+                f"config: logging.max_bytes must be an integer, got {self.log_max_bytes!r}"
+            )
+        if self.log_max_bytes < 1024 * 1024:
+            raise ValueError(
+                f"config: logging.max_bytes must be >= 1048576, got {self.log_max_bytes}"
+            )
+        if not isinstance(self.log_backup_count, int) or isinstance(self.log_backup_count, bool):
+            raise ValueError(
+                f"config: logging.backup_count must be an integer, got {self.log_backup_count!r}"
+            )
+        if not 0 <= self.log_backup_count <= 10:
+            raise ValueError(
+                f"config: logging.backup_count must be 0-10, got {self.log_backup_count}"
             )
         if self.tls_enabled:
             if self.tls_cert_path and not os.path.exists(self.tls_cert_path):
@@ -516,6 +569,9 @@ class FirehoseConfig:
         search = data.get("search", {})
         tls = data.get("tls", {})
         sync = data.get("sync", {})
+        logging_cfg = data.get("logging", {})
+        if not isinstance(logging_cfg, dict):
+            raise ValueError("config: [logging] must be a table")
         witnesses = data.get("witnesses", {})
         if not isinstance(witnesses, dict):
             raise ValueError("config: [witnesses] must be a table")
@@ -610,6 +666,10 @@ class FirehoseConfig:
             admin_pubkey_hex=admin_pubkey_hex,
             host=server.get("host", "127.0.0.1"),
             unknown_keys=unknown_keys,
+            log_level=logging_cfg.get("level", "DEBUG"),
+            log_keep_files=logging_cfg.get("keep_files", 20),
+            log_max_bytes=logging_cfg.get("max_bytes", 10 * 1024 * 1024),
+            log_backup_count=logging_cfg.get("backup_count", 5),
             witness=WitnessConfig(
                 retain_upstream=_as_bool(witnesses, "retain_upstream", "witnesses", True),
                 max_per_event=witnesses.get("max_per_event", 0),
@@ -707,6 +767,16 @@ rate_limit_window = 1
 max_count = 1000
 timeout_seconds = 10
 result_limit = 100
+
+[logging]
+# File verbosity and disk cap. level is DEBUG|INFO|WARNING|ERROR
+# (env BONNET_LOG_LEVEL wins over this file; --log-level wins over both).
+# Disk use is roughly max_bytes x (backup_count + 1) per boot file,
+# plus keep_files retained boot files.
+# level = "DEBUG"
+# keep_files = 20
+# max_bytes = 10485760
+# backup_count = 5
 
 {tls_section}
 

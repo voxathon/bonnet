@@ -717,11 +717,23 @@ class FirehoseTransport:
                 headers=headers,
             )
         except httpx.HTTPError as e:
+            try:
+                from bonnet.core.logging import log_warning
+
+                log_warning("CLIENT fail reason=unreachable", url=self._base_url)
+            except Exception:
+                pass
             raise FirehoseClientError(
                 f"could not reach {self._base_url}: {e or type(e).__name__}"
             ) from e
 
         if resp.status_code != 200:
+            try:
+                from bonnet.core.logging import log_warning as _lw
+
+                _lw("CLIENT fail", status=resp.status_code, url=self._base_url)
+            except Exception:
+                pass
             raise FirehoseClientError(f"HTTP {resp.status_code}: {resp.text[:200]}")
 
         await self._verify_response(resp, nonce)

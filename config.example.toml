@@ -46,6 +46,16 @@ max_count = 1000
 timeout_seconds = 10
 result_limit = 100
 
+[logging]
+# File verbosity and disk cap. level is DEBUG|INFO|WARNING|ERROR
+# (env BONNET_LOG_LEVEL wins over this file; --log-level wins over both).
+# Disk use is roughly max_bytes x (backup_count + 1) per boot file,
+# plus keep_files retained boot files.
+# level = "DEBUG"
+# keep_files = 20
+# max_bytes = 10485760
+# backup_count = 5
+
 [tls]
 enabled = false
 # cert_path = "./certs/bonnet.crt"
