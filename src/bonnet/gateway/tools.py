@@ -178,6 +178,30 @@ class EventSummary:
     target_article_id: str
     target_event_id: str
     created_at: int
+    # Who a bonnet.user.register binds (metadata fields 1/2/3), distinct
+    # from who signed it (actor_*). Empty unless kind is user.register, so
+    # a grant-role record (actor=root, subject=lanternfly) stops reading
+    # as a root re-register.
+    subject_username: str = ""
+    subject_pubkey: str = ""
+    subject_flags: int | None = None
+
+
+def _register_subject(rec) -> tuple[str, str, int | None]:
+    """Decode a user.register record's subject without failing the range.
+
+    Federated records may carry malformed metadata; a bad subject must
+    degrade to empty rather than fail the whole event_range response.
+    """
+    try:
+        if rec.kind != "bonnet.user.register":
+            return "", "", None
+        username = rec.metadata.get_text(1) or ""
+        subject = rec.metadata.get_bytes(2)
+        flags = rec.metadata.get_u64(3)
+        return username, (subject.hex() if subject else ""), flags
+    except Exception:
+        return "", "", None
 
 
 @dataclass
@@ -2815,7 +2839,10 @@ async def event_range(
     """Fetch firehose events from an origin starting at a sequence number.
 
     Returns a list of event summaries with origin_seq, kind, event_id,
-    actor info, board, article_num, and target fields (for control events).
+    actor info, board, article_num, target fields (for control events),
+    and subject fields (for bonnet.user.register: who the name/flags bind
+    to, distinct from who signed it — a grant-role record has actor=root
+    with subject=someone else, not a root re-register).
 
     This is the raw substrate log, ahead of any projection: entries appear in
     publication order regardless of whether a later event cancelled, superseded
@@ -2836,26 +2863,34 @@ async def event_range(
             await _connect_anonymous(client)
         origin = origin or client._server_origin or ""
         results = await client.get_event_range(origin, offset, limit)
-        return [
-            EventSummary(
-                origin_seq=rec.origin_seq,
-                kind=rec.kind,
-                event_id=rec.event_id.hex(),
-                actor_pubkey=rec.actor_pubkey.hex(),
-                actor_username=rec.actor_username,
-                actor_registrar=rec.actor_registrar,
-                board=rec.board,
-                article_num=rec.article_num,
-                target_origin=rec.target_origin,
-                target_board=rec.target_board,
-                target_article_id=rec.target_article_id.hex()
-                if rec.target_article_id != ZERO_ID
-                else "",
-                target_event_id=rec.target_event_id.hex() if rec.target_event_id != ZERO_ID else "",
-                created_at=rec.created_at,
+        summaries: list[EventSummary] = []
+        for rec, witness in results:
+            subject_username, subject_pubkey, subject_flags = _register_subject(rec)
+            summaries.append(
+                EventSummary(
+                    origin_seq=rec.origin_seq,
+                    kind=rec.kind,
+                    event_id=rec.event_id.hex(),
+                    actor_pubkey=rec.actor_pubkey.hex(),
+                    actor_username=rec.actor_username,
+                    actor_registrar=rec.actor_registrar,
+                    board=rec.board,
+                    article_num=rec.article_num,
+                    target_origin=rec.target_origin,
+                    target_board=rec.target_board,
+                    target_article_id=rec.target_article_id.hex()
+                    if rec.target_article_id != ZERO_ID
+                    else "",
+                    target_event_id=rec.target_event_id.hex()
+                    if rec.target_event_id != ZERO_ID
+                    else "",
+                    created_at=rec.created_at,
+                    subject_username=subject_username,
+                    subject_pubkey=subject_pubkey,
+                    subject_flags=subject_flags,
+                )
             )
-            for rec, witness in results
-        ]
+        return summaries
     finally:
         await client.close()
 
@@ -2876,7 +2911,9 @@ async def get_event(
     `actor_username` and `actor_registrar` are the author's own claim, signed
     but not thereby true. The origin that published the record vouches for
     neither unless it is also the named registrar. `author_pubkey` is the only
-    field a signature binds.
+    field a signature binds. For `bonnet.user.register`, `subject_*` names who
+    the username/flags bind to (metadata fields 1/2/3) — when it differs from
+    the actor this is a role grant/admin action, not a re-register.
 
     `verification` is this client checking the record's own signatures, rather
     than relying on the relay having checked them at ingest. Two independent
@@ -2910,6 +2947,7 @@ async def get_event(
         else:
             await _connect_anonymous(client)
         rec, witnesses = await client.get_event(origin, eid)
+        subject_username, subject_pubkey, subject_flags = _register_subject(rec)
         return {
             "origin": rec.origin,
             "origin_seq": rec.origin_seq,
@@ -2920,6 +2958,9 @@ async def get_event(
             "actor_pubkey": rec.actor_pubkey.hex(),
             "actor_username": rec.actor_username,
             "actor_registrar": rec.actor_registrar,
+            "subject_username": subject_username,
+            "subject_pubkey": subject_pubkey,
+            "subject_flags": subject_flags,
             "board": rec.board,
             "article_id": rec.article_id.hex() if rec.article_id != ZERO_ID else "",
             "article_num": rec.article_num,

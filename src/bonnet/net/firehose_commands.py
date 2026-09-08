@@ -350,6 +350,25 @@ class FirehoseCommandHandler:
         """
         return self._acl.check(ctx.to_auth_context(), "read", command=cmd_name, board=board)
 
+    @staticmethod
+    def _register_subject_suffix(intent) -> str:
+        """Subject hint for the EVENT log line on user.register records.
+
+        Best-effort: malformed federated metadata must not break logging.
+        """
+        try:
+            if intent.kind != KIND_USER_REGISTER:
+                return ""
+            username = intent.metadata.get_text(1) or ""
+            subject = intent.metadata.get_bytes(2)
+            flags = intent.metadata.get_u64(3)
+            if not username and not subject:
+                return ""
+            short = subject.hex()[:16] if subject else "?"
+            return f" subject={username!r}/{short} flags={flags if flags is not None else 0}"
+        except Exception:
+            return ""
+
     # ------------------------------------------------------------------
     # Punishment write gate
     # ------------------------------------------------------------------
@@ -569,6 +588,28 @@ class FirehoseCommandHandler:
                 holder = self._users.username_holder(intent.origin, requested)
                 if holder is not None and holder != subject:
                     return _error(0x0009, f"Username '{requested}' is already registered")
+                if holder is not None and holder == subject:
+                    # Exact duplicate re-registration: same key, same name,
+                    # same flags. Refuse so repeat connect+register loops and
+                    # no-op grant-role calls don't spam the append-only log.
+                    # A changed-flags grant (role update) still passes — the
+                    # admin privilege checks above already ran — as does a
+                    # rename (different name = holder is None above).
+                    requested_flags = intent.metadata.get_u64(3) or 0
+                    try:
+                        existing = self._users.get_user_by_pubkey(intent.origin, subject)
+                    except Exception:
+                        existing = None
+                    if (
+                        existing is not None
+                        and not existing.get("revoked")
+                        and existing.get("username") == requested
+                        and (existing.get("flags") or 0) == requested_flags
+                    ):
+                        return _error(
+                            0x0009,
+                            f"Username '{requested}' is already registered to this key",
+                        )
 
             # Same rule, same reason, for board names: first writer wins.
             # NavProjection.apply_board_create enforces this too and has to,
@@ -582,12 +623,11 @@ class FirehoseCommandHandler:
             # a spurious "I created this" claim minted into the append-only
             # log for no effect (the projection dedupes it away silently, but
             # the log itself now carries two creation claims with nothing to
-            # say either was a no-op). register()'s analogous re-registration
-            # case is genuinely different — the client-local IdentityStore
-            # already knows it holds that key, so the gateway tool can treat
-            # it as a clean no-op before ever publishing. There is no
-            # equivalent local state for a board name, so the honest answer
-            # here is a refusal, not a silent no-op.
+            # say either was a no-op). Same for user.register: an exact
+            # duplicate (same key, same name, same flags) is refused above,
+            # which is what lets the gateway map it to already_registered
+            # instead of appending a new seq. Changed flags (a role update by
+            # an admin) still pass.
             if kind == KIND_BOARD_CREATE:
                 claimed_owner = intent.metadata.get_bytes(1) or intent.actor_pubkey
                 existing_board = self._nav.get_board(intent.origin, board)
@@ -810,6 +850,7 @@ class FirehoseCommandHandler:
             log_msg(
                 f"EVENT: seq={rec.origin_seq} kind={intent.kind} "
                 f"actor={intent.actor_pubkey.hex()} board={intent.board or '-'}"
+                f"{self._register_subject_suffix(intent)}"
             )
 
             return _success(

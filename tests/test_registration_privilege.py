@@ -280,3 +280,198 @@ def test_the_validator_stays_schema_only(stack):  # noqa: F811
     )
 
     KindValidator().validate(intent)
+
+
+# ---------------------------------------------------------------------------
+# idempotency: same key + same name + same flags is a duplicate
+# ---------------------------------------------------------------------------
+
+
+def _registered_ctx(identity, role=""):
+    return FirehoseContext(
+        peer_pubkey=identity.public_key, is_registered=True, role=role, origin=ORIGIN
+    )
+
+
+def test_same_key_same_name_same_flags_is_refused_as_duplicate(stack, shipped_acl):  # noqa: F811
+    """Repeat connect+register loops must not spam the log: the second
+    identical registration is refused so the gateway maps it to
+    already_registered instead of appending a new seq."""
+    stack["handler"]._acl = shipped_acl
+    # The shipped default grants user.register to unknown only, so a second
+    # publish as a registered principal would stop at the ACL ("Not
+    # permitted") before reaching dedupe. Deployments with a permissive
+    # wildcard rule (and the gateway's already_registered mapping) hit the
+    # handler itself — grant that here so the dedupe is what's under test.
+    shipped_acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(registered=True),
+            actions=["write"],
+            commands=["PUBLISH_RECORD"],
+            kinds=["bonnet.user.register"],
+        )
+    )
+    alice = Identity.generate()
+
+    first = stack["handler"].handle(
+        _register_request(alice, "alice", alice.public_key, 0x00),
+        _unknown_ctx(alice),
+    )
+    assert first[0] == 0, first[:120]
+    stack["dispatcher"].dispatch_origin(ORIGIN)
+    head_before = stack["firehose"].get_head(ORIGIN).event_count
+
+    second = stack["handler"].handle(
+        _register_request(alice, "alice", alice.public_key, 0x00),
+        _registered_ctx(alice),
+    )
+    assert second[0] == 1
+    assert b"already registered to this key" in second
+    stack["dispatcher"].dispatch_origin(ORIGIN)
+    assert stack["firehose"].get_head(ORIGIN).event_count == head_before
+
+
+def test_same_key_same_name_changed_flags_still_allows_admin_role_update(stack, shipped_acl):  # noqa: F811
+    """The carve-out grant-role relies on: same (name, key) with different
+    flags is a role update, not a duplicate, and stays allowed for admins."""
+    stack["handler"]._acl = shipped_acl
+    shipped_acl.add_rule(
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(role="administrator"),
+            actions=["write"],
+            commands=["PUBLISH_RECORD"],
+            kinds=["bonnet.user.register"],
+        )
+    )
+    operator = Identity.generate()
+    newcomer = Identity.generate()
+    ctx = FirehoseContext(
+        peer_pubkey=operator.public_key,
+        is_registered=True,
+        role="administrator",
+        origin=ORIGIN,
+    )
+
+    # Operator provisions newcomer with no role, then grants admin. The
+    # actor fields stay the operator's; the subject (metadata) is newcomer.
+    first = stack["handler"].handle(
+        _register_request(operator, "newcomer", newcomer.public_key, 0x00), ctx
+    )
+    assert first[0] == 0, first[:120]
+    stack["dispatcher"].dispatch_origin(ORIGIN)
+
+    grant = stack["handler"].handle(
+        _register_request(operator, "newcomer", newcomer.public_key, 0x01), ctx
+    )
+    assert grant[0] == 0, grant[:120]
+    stack["dispatcher"].dispatch_origin(ORIGIN)
+    row = stack["users"].get_user_by_pubkey(ORIGIN, newcomer.public_key)
+    assert row is not None and row["flags"] == 0x01
+
+    # Repeating the identical grant is now a duplicate, not a new record.
+    head_before = stack["firehose"].get_head(ORIGIN).event_count
+    again = stack["handler"].handle(
+        _register_request(operator, "newcomer", newcomer.public_key, 0x01), ctx
+    )
+    assert again[0] == 1
+    assert b"already registered to this key" in again
+    stack["dispatcher"].dispatch_origin(ORIGIN)
+    assert stack["firehose"].get_head(ORIGIN).event_count == head_before
+
+
+def test_register_subject_helper_distinguishes_grant_from_self_register():
+    """The gateway display fix: actor=root + subject=lanternfly must not
+    read as a root re-register."""
+    import time
+
+    from bonnet.core.record import ZERO_ID, Record
+    from bonnet.gateway.tools import _register_subject
+
+    self_reg = Record(
+        origin=ORIGIN,
+        origin_seq=1,
+        event_id=os.urandom(32),
+        kind="bonnet.user.register",
+        schema_version=1,
+        created_at=int(time.time()),
+        actor_pubkey=b"\x01" * 32,
+        actor_username="root",
+        actor_registrar=ORIGIN,
+        board="",
+        article_id=ZERO_ID,
+        article_num=0,
+        target_origin="",
+        target_board="",
+        target_article_id=ZERO_ID,
+        target_event_id=ZERO_ID,
+        metadata=MetadataMap(
+            fields=[
+                metadata_text(1, "root"),
+                metadata_bytes(2, b"\x01" * 32),
+                metadata_u64(3, 0),
+            ]
+        ),
+        body_hash=ZERO_ID,
+        body_size=0,
+        actor_signature=b"\x00" * 64,
+        origin_signature=b"\x00" * 64,
+    )
+    assert _register_subject(self_reg) == ("root", "01" * 32, 0)
+
+    grant = Record(
+        origin=ORIGIN,
+        origin_seq=5,
+        event_id=os.urandom(32),
+        kind="bonnet.user.register",
+        schema_version=1,
+        created_at=int(time.time()),
+        actor_pubkey=b"\x01" * 32,
+        actor_username="root",
+        actor_registrar=ORIGIN,
+        board="",
+        article_id=ZERO_ID,
+        article_num=0,
+        target_origin="",
+        target_board="",
+        target_article_id=ZERO_ID,
+        target_event_id=ZERO_ID,
+        metadata=MetadataMap(
+            fields=[
+                metadata_text(1, "lanternfly"),
+                metadata_bytes(2, b"\x02" * 32),
+                metadata_u64(3, 1),
+            ]
+        ),
+        body_hash=ZERO_ID,
+        body_size=0,
+        actor_signature=b"\x00" * 64,
+        origin_signature=b"\x00" * 64,
+    )
+    assert _register_subject(grant) == ("lanternfly", "02" * 32, 1)
+
+    other = Record(
+        origin=ORIGIN,
+        origin_seq=6,
+        event_id=os.urandom(32),
+        kind="bonnet.article",
+        schema_version=1,
+        created_at=int(time.time()),
+        actor_pubkey=b"\x01" * 32,
+        actor_username="root",
+        actor_registrar=ORIGIN,
+        board="general",
+        article_id=os.urandom(32),
+        article_num=1,
+        target_origin="",
+        target_board="",
+        target_article_id=ZERO_ID,
+        target_event_id=ZERO_ID,
+        metadata=MetadataMap(fields=[]),
+        body_hash=ZERO_ID,
+        body_size=0,
+        actor_signature=b"\x00" * 64,
+        origin_signature=b"\x00" * 64,
+    )
+    assert _register_subject(other) == ("", "", None)
