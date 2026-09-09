@@ -89,6 +89,7 @@ OP_EVENT_BODY = 0x30
 
 STATUS_SUCCESS = 0x00
 STATUS_ERROR = 0x01
+STATUS_REDIRECT = 0x02
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +256,7 @@ class BodyRedirectError(Exception):
 
 
 def parse_response(resp: bytes) -> tuple[int, bytes]:
-    """Parse a response into (status, payload). Status 0=success, 1=error."""
+    """Parse a response into (status, payload). Status 0=success, 1=error, 2=body redirect."""
     if not resp:
         raise ProtocolError("empty response")
     status = resp[0]
@@ -265,6 +266,8 @@ def parse_response(resp: bytes) -> tuple[int, bytes]:
         raw, _ = _read_blob16(payload, offset)
         msg = raw.decode("utf-8", errors="replace")
         raise ProtocolError(f"error {code}: {msg}", code=code, detail=msg)
+    if status not in (STATUS_SUCCESS, STATUS_REDIRECT):
+        raise ProtocolError(f"unknown status byte 0x{status:02x}")
     return status, payload
 
 
@@ -980,6 +983,7 @@ def parse_user_list_response(resp: bytes) -> list[UserInfo]:
         reg_seq, offset = _read_u64(payload, offset)
         created_at, offset = _read_i64(payload, offset)
         revoked, offset = _read_u8(payload, offset)
+        revoked_seq, offset = _read_u64(payload, offset)
         users.append(
             UserInfo(
                 pubkey=pubkey.hex(),
@@ -988,6 +992,7 @@ def parse_user_list_response(resp: bytes) -> list[UserInfo]:
                 reg_seq=reg_seq,
                 created_at=created_at,
                 revoked=bool(revoked),
+                revoked_seq=revoked_seq,
                 origin=origin,
             )
         )

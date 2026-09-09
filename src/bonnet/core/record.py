@@ -377,7 +377,10 @@ class MetadataMap:
 
 
 def metadata_text(field_id: int, text: str) -> MetadataField:
-    return MetadataField(field_id, VT_TEXT, _normalize_text(text).encode("utf-8"))
+    encoded = _normalize_text(text).encode("utf-8")
+    if len(encoded) > MAX_TEXT_FIELD:
+        raise LengthExceeded(f"text field exceeds {MAX_TEXT_FIELD}")
+    return MetadataField(field_id, VT_TEXT, encoded)
 
 
 def metadata_u64(field_id: int, v: int) -> MetadataField:
@@ -408,10 +411,14 @@ def metadata_id_list(field_id: int, ids: list[bytes]) -> MetadataField:
 def metadata_text_list(field_id: int, texts: list[str]) -> MetadataField:
     normalized = sorted(_normalize_text(t).encode("utf-8") for t in texts)
     raw = enc_u16(len(normalized))
+    prev: bytes | None = None
     for encoded in normalized:
         if len(encoded) > MAX_TEXT_FIELD:
             raise LengthExceeded(f"text list entry exceeds {MAX_TEXT_FIELD}")
+        if prev is not None and encoded == prev:
+            raise NonCanonical("text list entries must not repeat")
         raw += struct.pack(">H", len(encoded)) + encoded
+        prev = encoded
     return MetadataField(field_id, VT_TEXT_LIST, raw)
 
 
@@ -435,8 +442,8 @@ def encode_metadata(m: MetadataMap) -> bytes:
         out += enc_u32(len(f.value))
         out += f.value
         prev_id = f.field_id
-    if len(out) - 2 > MAX_METADATA:
-        raise LengthExceeded(f"metadata encoded size exceeds {MAX_METADATA}")
+    if sum(len(f.value) for f in fields) > MAX_METADATA:
+        raise LengthExceeded(f"metadata value bytes exceed {MAX_METADATA}")
     return out
 
 
@@ -651,9 +658,12 @@ def decode_intent(data: bytes) -> Intent:
     fmt = r.u8()
     if fmt != INTENT_FORMAT:
         raise InvalidValue(f"intent_format must be {INTENT_FORMAT}, got {fmt}")
+    event_id = r.id32()
+    if event_id == ZERO_ID:
+        raise InvalidValue("event_id must be non-zero")
     intent = Intent(
         intent_format=fmt,
-        event_id=r.id32(),
+        event_id=event_id,
         kind=r.text16(MAX_KIND),
         schema_version=r.u16(),
         origin=r.text16(MAX_ORIGIN_HOSTNAME),

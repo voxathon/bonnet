@@ -11,8 +11,10 @@ Each record is a link to the hash of the record before it. You find the store co
 1. Start each origin log at origin_seq 1.
 2. Link each record to the last hash that you hold.
 3. Reject a record that links to a hash you miss.
-4. Accept a repeat of a record that you hold.
-5. Count a repeat as idempotent, not as new.
+4. Reject a batch whose first sequence jumps past your tip plus one.
+   Overlap for idempotent replay is allowed.
+5. Accept a repeat of a record that you hold.
+6. Count a repeat as idempotent, not as new.
 
 Divergence
 ==========

@@ -646,6 +646,7 @@ class TestUserList:
         item += struct.pack(">Q", 1)  # reg_seq
         item += struct.pack(">q", 1700000000)  # created_at
         item += struct.pack(">B", 0)  # not revoked
+        item += struct.pack(">Q", 0)  # revoke_seq
         resp = _success(struct.pack(">H", 1) + item)
 
         users = parse_user_list_response(resp)

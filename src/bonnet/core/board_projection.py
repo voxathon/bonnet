@@ -261,7 +261,7 @@ class BoardProjection:
                 ON articles(origin, board, created_at);
 
             CREATE TABLE IF NOT EXISTS pending_controls (
-                event_id                BLOB PRIMARY KEY,
+                event_id                BLOB NOT NULL,
                 origin                  TEXT NOT NULL,
                 origin_seq              INTEGER NOT NULL,
                 kind                    TEXT NOT NULL,
@@ -270,15 +270,17 @@ class BoardProjection:
                 target_article_id       BLOB NOT NULL,
                 target_event_id         BLOB NOT NULL,
                 metadata                BLOB NOT NULL,
-                encoded_record          BLOB NOT NULL
+                encoded_record          BLOB NOT NULL,
+                PRIMARY KEY (origin, event_id)
             );
 
             CREATE TABLE IF NOT EXISTS applied_events (
-                event_id                BLOB PRIMARY KEY,
+                event_id                BLOB NOT NULL,
                 origin                  TEXT NOT NULL,
                 origin_seq              INTEGER NOT NULL,
                 kind                    TEXT NOT NULL,
-                applied_at              INTEGER NOT NULL
+                applied_at              INTEGER NOT NULL,
+                PRIMARY KEY (origin, event_id)
             );
 
             CREATE TABLE IF NOT EXISTS projection_checkpoint (
@@ -314,11 +316,14 @@ class BoardProjection:
     # Applied event tracking (idempotency)
     # ------------------------------------------------------------------
 
-    def is_applied(self, event_id: bytes) -> bool:
+    def is_applied(self, origin: str, event_id: bytes) -> bool:
         with self._lock:
             row = self._conn.execute(
-                "SELECT 1 FROM applied_events WHERE event_id=?",
-                (event_id,),
+                "SELECT 1 FROM applied_events WHERE origin=? AND event_id=?",
+                (
+                    origin,
+                    event_id,
+                ),
             ).fetchone()
             return row is not None
 
@@ -348,7 +353,7 @@ class BoardProjection:
         an old article says about its author.
         """
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             with self._transaction():
                 subject = rec.metadata.get_text(1) or ""
@@ -413,7 +418,7 @@ class BoardProjection:
 
     def apply_cancel(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             with self._transaction():
                 if rec.origin != rec.target_origin:
@@ -436,7 +441,7 @@ class BoardProjection:
 
     def apply_restore(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             with self._transaction():
                 if rec.origin != rec.target_origin:
@@ -459,7 +464,7 @@ class BoardProjection:
 
     def apply_purge(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             with self._transaction():
                 if rec.origin != rec.target_origin:
@@ -481,7 +486,7 @@ class BoardProjection:
 
     def apply_pin(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             with self._transaction():
                 if rec.origin != rec.target_origin:
@@ -508,7 +513,7 @@ class BoardProjection:
 
     def apply_unpin(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             with self._transaction():
                 if rec.origin != rec.target_origin:
@@ -530,7 +535,7 @@ class BoardProjection:
 
     def apply_thread_close(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             with self._transaction():
                 if rec.origin != rec.target_origin:
@@ -552,7 +557,7 @@ class BoardProjection:
 
     def apply_thread_reopen(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             with self._transaction():
                 if rec.origin != rec.target_origin:
@@ -575,7 +580,7 @@ class BoardProjection:
     def apply_unknown(self, rec: Record) -> None:
         """Record an unknown kind as applied (no projection effect)."""
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             with self._transaction():
                 self._mark_applied(rec)
@@ -637,7 +642,10 @@ class BoardProjection:
                     self._apply_thread_close_inline(pending_rec)
                 elif kind == "bonnet.thread.reopen":
                     self._apply_thread_reopen_inline(pending_rec)
-            self._conn.execute("DELETE FROM pending_controls WHERE event_id=?", (eid,))
+            self._conn.execute(
+                "DELETE FROM pending_controls WHERE origin=? AND event_id=?",
+                (pending_rec.origin, eid),
+            )
 
     def _apply_cancel_inline(self, rec: Record) -> None:
         self._conn.execute(

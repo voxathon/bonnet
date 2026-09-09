@@ -19,7 +19,10 @@ One cycle
 11. Send the head only with the batch that reaches the tip.
 12. Drop the cycle past a wrong start sequence from the peer.
 13. Keep stored batches past a conflict or a reject. Then stop.
-14. Dispatch stored records to local views at the end of the cycle.
+14. Treat a reused event or article ID from the peer as divergence: store the
+    served bytes as evidence, mark the origin diverged, and halt for an
+    operator. It can never resolve by retrying.
+15. Dispatch stored records to local views at the end of the cycle.
 
 Batch checks
 ============

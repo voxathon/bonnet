@@ -717,6 +717,10 @@ class FirehoseStore:
                         accepted=False, reason="rollback: range below local sequence"
                     )
 
+                if first_seq > local_seq + 1:
+                    self._conn.execute("ROLLBACK")
+                    return AcceptResult(accepted=False, reason="gap: range starts past local tip")
+
                 expected_prev = local_hash if first_seq == local_seq + 1 else None
                 conflicts = []
                 idempotent_count = 0

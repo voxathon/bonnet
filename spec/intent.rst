@@ -71,7 +71,7 @@ Encode
 
 1. Set intent_format to 1.
 2. Set event_id to a fresh value.
-3. Never encode a zero event_id.
+3. Never encode a zero event_id. Reject a zero event_id on decode.
 4. Name the kind from the kind table.
 5. Hash the body. Store the digest plus the size.
 6. Use an empty board for acts that touch no board.

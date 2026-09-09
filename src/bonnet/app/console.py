@@ -806,11 +806,14 @@ class OperatorConsole:
 
         from bonnet.core.record import ZERO_ID, metadata_bytes
 
-        m = MetadataMap(
-            [
-                metadata_text(1, subject),
-            ]
-        )
+        try:
+            m = MetadataMap(
+                [
+                    metadata_text(1, subject),
+                ]
+            )
+        except Exception as e:
+            return f"Error: bad subject: {e}"
         if tags_list:
             m.fields.append(metadata_text_list(2, tags_list))
         m.fields.append(metadata_text(4, "text/plain"))
@@ -1517,6 +1520,8 @@ class OperatorConsole:
             offset += 8
             revoked = resp[offset]
             offset += 1
+            _revoked_seq = struct.unpack(">Q", resp[offset : offset + 8])[0]
+            offset += 8
             role = ""
             if flags & 0x01:
                 role = " [admin]"

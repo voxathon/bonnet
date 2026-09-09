@@ -93,6 +93,28 @@ def identity_text_violation(value: str) -> str | None:
     return None
 
 
+def content_type_violation(value: str) -> str | None:
+    """Why `value` is unfit as an article content type, or None if fine.
+
+    Separate from the identity rule: MIME types hold `/` plus `+` plus `.`
+    (e.g. `text/plain`), so the identity reserved set cannot apply here.
+    This blocks empty, whitespace-bearing, control-bearing, and non-ASCII
+    values only.
+    """
+    if not value or not value.strip():
+        return "empty or whitespace-only"
+    if value != value.strip():
+        return "has leading or trailing whitespace"
+    for c in value:
+        if ord(c) < 0x20 or ord(c) == 0x7F:
+            return "contains a control character"
+        if c.isspace():
+            return "contains whitespace"
+        if ord(c) > 0x7E:
+            return "contains a non-ASCII character"
+    return None
+
+
 def _validate_identity_text(field: str, value: str) -> None:
     """Reject values unfit for a username or board name, at mint time only.
 
@@ -180,8 +202,12 @@ class KindValidator:
             raise ValidationError("bonnet.article requires metadata field 1 (subject)")
         if not subject.strip():
             raise ValidationError("bonnet.article requires non-empty subject")
-        if m.get_text(4) is None:
+        content_type = m.get_text(4)
+        if content_type is None:
             raise ValidationError("bonnet.article requires metadata field 4 (content type)")
+        reason = content_type_violation(content_type)
+        if reason is not None:
+            raise ValidationError(f"bonnet.article content type {reason}")
 
     # ------------------------------------------------------------------
     # Lifecycle controls (cancel, restore, purge)
@@ -215,6 +241,7 @@ class KindValidator:
         if not intent.board:
             raise ValidationError(f"{intent.kind} requires non-empty board")
         self._require_empty_article_targets(intent)
+        self._require_empty_targets(intent)
 
         if intent.kind == KIND_BOARD_CREATE:
             _validate_identity_text("board", intent.board)
@@ -246,6 +273,7 @@ class KindValidator:
         """
         self._require_empty_board(intent)
         self._require_empty_article_targets(intent)
+        self._require_empty_targets(intent)
 
         m = intent.metadata
         username = m.get_text(1)
@@ -312,6 +340,8 @@ class KindValidator:
 
     def _validate_event_target(self, intent: Intent) -> None:
         self._require_event_target(intent)
+        self._require_empty_board(intent)
+        self._require_empty_article_targets(intent)
 
     # ------------------------------------------------------------------
     # Reports
