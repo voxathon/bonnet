@@ -36,7 +36,9 @@ from bonnet.core.crypto import Identity
 from bonnet.core.firehose import (
     KIND_ORIGIN_KEY_ROTATE,
     AcceptResult,
+    ArticleIdCollision,
     ChainBreak,
+    EventIdCollision,
     FirehoseStore,
     SignatureInvalid,
 )
@@ -584,6 +586,8 @@ class SyncManager:
                 return await self._diagnose_chain_break(origin, client, local_seq, e)
             except SignatureInvalid as e:
                 return self._diagnose_signature_failure(origin, e)
+            except (EventIdCollision, ArticleIdCollision) as e:
+                return self._diagnose_id_collision(origin, batch_records, e)
 
             log_msg(
                 f"SYNC_ONCE: origin='{origin}' batch seq {current_start}-{current_start + len(batch_records) - 1}: accepted={result.accepted} count={result.accepted_count} reason='{result.reason}'"
@@ -751,6 +755,38 @@ class SyncManager:
             f"SYNC_ONCE: origin='{origin}' DIVERGED — {detail}. This is what a key "
             f"takeover looks like from here. Sync halted; an operator must resolve "
             f"it (resume-origin, depeer, or reset-key)."
+        )
+        return AcceptResult(accepted=False, reason=f"origin diverged ({detail})")
+
+    def _diagnose_id_collision(
+        self,
+        origin: str,
+        batch_records: list[Record],
+        err: Exception,
+    ) -> AcceptResult:
+        """Halt on a reused event or article ID with the peer bytes as evidence.
+
+        A colliding ID can never resolve by retrying: the peer keeps serving
+        the same bytes and this end keeps refusing them. Prior batches stay
+        committed. The first record of the batch is stored as evidence so an
+        operator can inspect what the peer sent.
+        """
+        if batch_records:
+            try:
+                self._firehose.record_conflict(
+                    origin,
+                    batch_records[0].origin_seq,
+                    encode_record(batch_records[0]),
+                    self._hostname,
+                    f"id collision: {err}",
+                )
+            except Exception:
+                pass
+        detail = f"id collision, peer must re-mint: {err}"
+        self._firehose.set_sync_status(origin, "diverged", detail)
+        log_msg(
+            f"SYNC_ONCE: origin='{origin}' DIVERGED — {detail}. Sync halted; "
+            f"an operator must resolve it (resume-origin, depeer)."
         )
         return AcceptResult(accepted=False, reason=f"origin diverged ({detail})")
 

@@ -246,7 +246,12 @@ class TestMetadata:
         assert decoded.get_text_list(1) == ["apple", "banana", "cherry"]
 
     def test_text_list_duplicates_rejected(self):
-        m = MetadataMap([metadata_text_list(1, ["dup", "dup"])])
+        with pytest.raises(NonCanonical):
+            metadata_text_list(1, ["dup", "dup"])
+        field = MetadataField(
+            1, VT_TEXT_LIST, struct.pack(">H", 2) + enc_text16("dup") + enc_text16("dup")
+        )
+        m = MetadataMap([field])
         with pytest.raises(NonCanonical):
             decode_metadata(encode_metadata(m))
 

@@ -43,8 +43,10 @@ Encode
 2. Order field IDs in strict rise order.
 3. Reject a repeat or a fall in order as a noncanonical form.
 4. Use only the seven types in the table above.
-5. Keep total value bytes at or below 1048576.
-6. Sort text lists by encoded bytes before you store them.
+5. Keep total value bytes at or below 1048576. Count values, not headers.
+   Enforce this on encode as well as on decode.
+6. Reject oversize TEXT plus duplicate TEXT_LIST entries on encode.
+7. Sort text lists by encoded bytes before you store them.
 
 Decode
 ======

@@ -30,7 +30,8 @@ Request: opcode u8 plus text16 origin plus text16 board plus u32 offset plus u16
 
 Response: u16 row count plus article views with no body bytes. Aggregate rows start with a text16 origin prefix.
 
-1. Clamp the limit from 1 to 65535.
+1. Clamp the limit from 1 to 65535. The server enforces this. A zero limit
+   reads as 1.
 2. Sort aggregate rows by newest first, then origin, then number.
 
 ARTICLE_SEARCH (0x13)
@@ -87,7 +88,7 @@ Row start: text16 origin plus u8 key length plus key bytes.
 
 Row mid: text16 name plus u64 flags plus u64 register sequence.
 
-Row end: i64 stamp plus u8 revoked flag. A revoke sequence is past all rows.
+Row end: i64 stamp plus u8 revoked flag plus u64 revoke sequence per row, zero when unrevoked.
 
 BAN_STATUS (0x22)
 =================

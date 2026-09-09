@@ -791,7 +791,7 @@ class TestNavProjection:
         nav_proj.apply_board_create(rec)
         assert nav_proj.get_board("bbs.a", "weird\\name") is None
         assert nav_proj.list_boards("bbs.a") == []
-        assert nav_proj.is_applied(rec.event_id)
+        assert nav_proj.is_applied(rec.origin, rec.event_id)
 
     def test_board_create_with_control_char_not_projected(self, nav_proj):
         rec = Record(
@@ -805,7 +805,7 @@ class TestNavProjection:
         )
         nav_proj.apply_board_create(rec)
         assert nav_proj.list_boards("bbs.a") == []
-        assert nav_proj.is_applied(rec.event_id)
+        assert nav_proj.is_applied(rec.origin, rec.event_id)
 
     def test_board_create_with_padding_whitespace_not_projected(self, nav_proj):
         """Regression for the chaos-testing report's #2.3: a name padded with
@@ -826,7 +826,7 @@ class TestNavProjection:
         nav_proj.apply_board_create(rec)
         assert nav_proj.get_board("bbs.a", "  general  ") is None
         assert nav_proj.list_boards("bbs.a") == []
-        assert nav_proj.is_applied(rec.event_id)
+        assert nav_proj.is_applied(rec.origin, rec.event_id)
 
     def test_board_create_after_rejected_one_still_dispatches(self, nav_proj):
         """The rejected record must not stall subsequent records for the
@@ -905,7 +905,7 @@ class TestUserProjection:
         user_proj.apply_user_register(rec)
         assert user_proj.get_user_by_pubkey("bbs.a", user_pubkey) is None
         assert user_proj.username_holder("bbs.a", "alice/bob") is None
-        assert user_proj.is_applied(rec.event_id)
+        assert user_proj.is_applied(rec.origin, rec.event_id)
 
     def test_register_with_control_char_not_projected(self, user_proj):
         user_pubkey = _rid(23)
@@ -925,7 +925,7 @@ class TestUserProjection:
         )
         user_proj.apply_user_register(rec)
         assert user_proj.get_user_by_pubkey("bbs.a", user_pubkey) is None
-        assert user_proj.is_applied(rec.event_id)
+        assert user_proj.is_applied(rec.origin, rec.event_id)
 
     def test_register_after_rejected_one_still_dispatches(self, user_proj):
         bad_pubkey = _rid(24)

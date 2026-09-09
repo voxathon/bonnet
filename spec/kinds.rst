@@ -60,7 +60,9 @@ You find the kind strings in ``src/bonnet/core/kinds.py``. You find the field ru
    * - bonnet.origin.key.rotate
      - move the origin key
 
-1. Spell kinds in lower case with the dots shown.
+1. Spell kinds in lower case with the dots shown. Treat this as a SHOULD: a peer
+   stays conformant when it sends another casing, but the registry holds lower
+   case only and validation skips unknown kinds past the printable-ASCII gate.
 2. Reject non-printable bytes in a kind name.
 3. Skip validation past unknown kinds.
 
@@ -69,7 +71,8 @@ Articles
 
 1. Give ``bonnet.article`` a board plus an article ID plus no targets.
 2. Give it metadata field 1 as subject text plus field 4 as content-type text.
-3. Keep subject and content-type from empty text.
+3. Keep subject non-empty. Keep content-type non-empty with no whitespace, no
+   controls, and ASCII only (``0x21`` to ``0x7E``).
 4. Give cancel, restore, and purge a full article target plus an empty board.
 5. Give pin, unpin, thread close, and thread reopen the same target shape.
 6. Give pin metadata field 1 as rank in i64 form.
@@ -77,13 +80,14 @@ Articles
 Boards
 ======
 
-1. Give board create, close, and reopen a board plus empty article IDs.
+1. Give board create, close, and reopen a board plus fully empty targets.
+   A stray target tuple is refused. It never acts on a remote board.
 2. Give board create metadata field 1 as owner key bytes.
 
 Users
 =====
 
-1. Give user register an empty board plus empty targets.
+1. Give user register an empty board plus fully empty targets.
 2. Give it metadata field 1 as name text plus field 2 as key bytes plus field 3 as flags u64.
 3. Keep flags inside the low two bits.
 4. Give user revoke an event target plus an empty board.
@@ -96,7 +100,7 @@ Rules and reports
 =================
 
 1. Give rule publish a board plus metadata field 1 as rule name text.
-2. Give rule revoke and punishment revoke an event target only.
+2. Give rule revoke and punishment revoke an event target only: empty board plus empty article IDs.
 3. Give a report metadata field 1 as culprit key bytes.
 4. Point a report at an article tuple, an event target, or no target at all.
 
@@ -117,4 +121,5 @@ Origin rotation
 
 1. Give origin key rotate empty board plus empty targets.
 2. Give it metadata field 1 as new origin key bytes plus field 2 as proof bytes.
-3. Prove the move with the rotation proof shape.
+3. Prove the move with the rotation proof shape. The validator checks presence.
+   The store owns the crypto check before it trusts the move.

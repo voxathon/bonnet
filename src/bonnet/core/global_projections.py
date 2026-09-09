@@ -61,11 +61,12 @@ class _BaseProjection:
     def _init_common(self) -> None:
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS applied_events (
-                event_id    BLOB PRIMARY KEY,
+                event_id    BLOB NOT NULL,
                 origin      TEXT NOT NULL,
                 origin_seq  INTEGER NOT NULL,
                 kind        TEXT NOT NULL,
-                applied_at  INTEGER NOT NULL
+                applied_at  INTEGER NOT NULL,
+                PRIMARY KEY (origin, event_id)
             );
             CREATE TABLE IF NOT EXISTS projection_checkpoint (
                 origin      TEXT PRIMARY KEY,
@@ -76,10 +77,14 @@ class _BaseProjection:
     def _init_schema(self) -> None:
         pass
 
-    def is_applied(self, event_id: bytes) -> bool:
+    def is_applied(self, origin: str, event_id: bytes) -> bool:
         with self._lock:
             row = self._conn.execute(
-                "SELECT 1 FROM applied_events WHERE event_id=?", (event_id,)
+                "SELECT 1 FROM applied_events WHERE origin=? AND event_id=?",
+                (
+                    origin,
+                    event_id,
+                ),
             ).fetchone()
             return row is not None
 
@@ -94,7 +99,7 @@ class _BaseProjection:
     def apply_unknown(self, rec: Record) -> None:
         """Record an unknown kind as applied (no projection effect)."""
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -203,7 +208,7 @@ class NavProjection(_BaseProjection):
         fetchable directly by event_id for forensics.
         """
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -254,7 +259,7 @@ class NavProjection(_BaseProjection):
 
     def apply_board_close(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -271,7 +276,7 @@ class NavProjection(_BaseProjection):
 
     def apply_board_reopen(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -436,7 +441,7 @@ class UserProjection(_BaseProjection):
         does not depend on order.
         """
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -489,7 +494,7 @@ class UserProjection(_BaseProjection):
 
     def apply_user_revoke(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -528,7 +533,7 @@ class UserProjection(_BaseProjection):
         record from that origin on one bad input.
         """
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -723,18 +728,19 @@ class PolicyProjection(_BaseProjection):
 
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS rules (
-                event_id        BLOB PRIMARY KEY,
+                event_id        BLOB NOT NULL,
                 origin          TEXT NOT NULL,
                 origin_seq      INTEGER NOT NULL,
                 rule_name       TEXT NOT NULL,
                 body_hash       BLOB NOT NULL,
                 body_size       INTEGER NOT NULL,
                 created_at      INTEGER NOT NULL,
-                revoked         INTEGER NOT NULL DEFAULT 0
+                revoked         INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (origin, event_id)
             );
 
             CREATE TABLE IF NOT EXISTS reports (
-                event_id        BLOB PRIMARY KEY,
+                event_id        BLOB NOT NULL,
                 origin          TEXT NOT NULL,
                 origin_seq      INTEGER NOT NULL,
                 culprit_pubkey  BLOB NOT NULL,
@@ -744,11 +750,12 @@ class PolicyProjection(_BaseProjection):
                 target_event_id BLOB NOT NULL DEFAULT x'0000000000000000000000000000000000000000000000000000000000000000',
                 body_hash       BLOB NOT NULL,
                 body_size       INTEGER NOT NULL,
-                created_at      INTEGER NOT NULL
+                created_at      INTEGER NOT NULL,
+                PRIMARY KEY (origin, event_id)
             );
 
             CREATE TABLE IF NOT EXISTS punishments (
-                event_id        BLOB PRIMARY KEY,
+                event_id        BLOB NOT NULL,
                 origin          TEXT NOT NULL,
                 origin_seq      INTEGER NOT NULL,
                 type            TEXT NOT NULL CHECK(type IN ('warning', 'ban', 'permaban')),
@@ -758,16 +765,19 @@ class PolicyProjection(_BaseProjection):
                 body_size       INTEGER NOT NULL,
                 created_at      INTEGER NOT NULL,
                 revoked         INTEGER NOT NULL DEFAULT 0,
-                revoked_by      BLOB
+                revoked_by      BLOB,
+                PRIMARY KEY (origin, event_id)
             );
             CREATE INDEX IF NOT EXISTS idx_punishments_pubkey
                 ON punishments(punished_pubkey, revoked, expires_at);
 
             CREATE TABLE IF NOT EXISTS punishment_acks (
-                ack_event_id        BLOB PRIMARY KEY,
+                ack_event_id        BLOB NOT NULL,
+                origin              TEXT NOT NULL DEFAULT '',
                 user_pubkey         BLOB NOT NULL,
                 punishment_event_id BLOB NOT NULL,
-                acked_at            INTEGER NOT NULL
+                acked_at            INTEGER NOT NULL,
+                PRIMARY KEY (origin, ack_event_id)
             );
             CREATE INDEX IF NOT EXISTS idx_punishment_acks_target
                 ON punishment_acks(user_pubkey, punishment_event_id);
@@ -775,7 +785,7 @@ class PolicyProjection(_BaseProjection):
 
     def apply_rule(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -803,7 +813,7 @@ class PolicyProjection(_BaseProjection):
 
     def apply_rule_revoke(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -831,7 +841,7 @@ class PolicyProjection(_BaseProjection):
 
     def apply_report(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -868,7 +878,7 @@ class PolicyProjection(_BaseProjection):
         if punishment_type is None:
             raise ValueError(f"apply_punishment: not a punishment kind: {rec.kind}")
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -900,7 +910,7 @@ class PolicyProjection(_BaseProjection):
 
     def apply_punishment_revoke(self, rec: Record) -> None:
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -966,7 +976,7 @@ class PolicyProjection(_BaseProjection):
         nonexistent event ID, or an unrelated event entirely.
         """
         with self._lock:
-            if self.is_applied(rec.event_id):
+            if self.is_applied(rec.origin, rec.event_id):
                 return
             self._begin()
             try:
@@ -982,9 +992,15 @@ class PolicyProjection(_BaseProjection):
                     return
                 self._conn.execute(
                     "INSERT OR IGNORE INTO punishment_acks "
-                    "(ack_event_id, user_pubkey, punishment_event_id, acked_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (rec.event_id, rec.actor_pubkey, punishment_event_id, rec.created_at),
+                    "(ack_event_id, origin, user_pubkey, punishment_event_id, acked_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        rec.event_id,
+                        rec.origin,
+                        rec.actor_pubkey,
+                        punishment_event_id,
+                        rec.created_at,
+                    ),
                 )
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)

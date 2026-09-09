@@ -44,9 +44,12 @@ User rows
 
 User head: u8 key length plus key bytes plus text16 name.
 
-User tail: u64 flags plus u64 register sequence plus i64 stamp plus u8 revoked flag.
+User tail: u64 flags plus u64 register sequence plus i64 stamp plus u8 revoked flag plus u64 revoke sequence per row, zero when unrevoked.
 2. Read a u64 revoke sequence after the flag in single user reads.
 3. Read a text16 origin prefix before each row in user lists.
+
+Track applied state per origin: dedup keys are (origin, event ID) pairs, never
+bare event IDs. Two origins that mint the same ID project independently.
 
 Board rows
 ==========

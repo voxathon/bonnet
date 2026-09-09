@@ -65,7 +65,11 @@ Cover these fields in each request signature:
 Responses
 =========
 
-Cover these fields in each response signature:
+The cover set below applies to ``POST /command`` responses. Discovery
+(``GET /.well-known/untp``) carries no request nonce, so its signature is
+checked for math only, not for header coverage.
+
+Cover these fields in each command response signature:
 
 - ``@status``
 - ``content-type``

@@ -24,7 +24,8 @@ A request is one opcode byte plus opcode fields. A response is one status byte p
      - body redirect
      - text16 origin plus text16 host plus u16 port
 
-The redirect is for remote bodies only. It is the address of the body.
+The redirect is body-only. It occurs only on ARTICLE_BODY (0x14) for remote
+bodies. It is the address of the body. Other opcodes never send it.
 
 .. list-table:: Opcodes
    :header-rows: 1

@@ -1355,6 +1355,7 @@ class FirehoseCommandHandler:
             return _success(struct.pack(">H", 0))
         list_offset, offset = _read_u32(data, offset)
         limit, offset = _read_u16(data, offset)
+        limit = max(1, min(limit, 65535))
         flags, offset = _read_u8(data, offset)
 
         include_cancelled = bool(flags & 0x01)
@@ -1429,6 +1430,7 @@ class FirehoseCommandHandler:
         body_query, offset = _read_text16(data, offset)
         list_offset, offset = _read_u32(data, offset)
         limit, offset = _read_u16(data, offset)
+        limit = max(1, min(limit, 65535))
         flags, offset = _read_u8(data, offset)
 
         include_cancelled = bool(flags & 0x01)
@@ -1569,10 +1571,17 @@ class FirehoseCommandHandler:
             if value_type == 0x01:
                 value = raw_value
             elif value_type == 0x02:
-                value = raw_value.decode("utf-8")
+                try:
+                    value = raw_value.decode("utf-8")
+                except UnicodeDecodeError as e:
+                    return _error(0x0006, f"Bad filter text: {e}")
             elif value_type == 0x03:
+                if len(raw_value) != 8:
+                    return _error(0x0006, "Bad filter i64 length")
                 value = struct.unpack(">q", raw_value)[0]
             elif value_type == 0x04:
+                if len(raw_value) != 1:
+                    return _error(0x0006, "Bad filter bool length")
                 value = raw_value[0] != 0
             else:
                 return _error(0x0006, f"Invalid value type 0x{value_type:02x}")
@@ -1581,6 +1590,7 @@ class FirehoseCommandHandler:
 
         list_offset, offset = _read_u32(data, offset)
         limit, offset = _read_u16(data, offset)
+        limit = max(1, min(limit, 65535))
 
         bp = self._get_board_projection(origin, board)
         articles = bp.query_articles(
@@ -1723,6 +1733,7 @@ class FirehoseCommandHandler:
             out += struct.pack(">Q", u["reg_seq"])
             out += struct.pack(">q", u["created_at"])
             out += struct.pack(">B", 1 if u["revoked"] else 0)
+            out += struct.pack(">Q", u.get("revoked_seq") or 0)
         return _success(out)
 
     # ------------------------------------------------------------------
