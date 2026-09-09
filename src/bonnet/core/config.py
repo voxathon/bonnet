@@ -726,8 +726,6 @@ enabled = false
 # ca_bundle = true"""
 
         default_content = f"""# Bonnet server configuration sample.
-# Operator documentation: OPERATOR_GUIDE.md
-
 # Split a growing [[acl]] or [[sync.peers]] list into separate files with
 # conf.d-style includes. Glob patterns are resolved relative to this file;
 # each match may only contain [[acl]] and/or [sync] (peers only) — nothing
@@ -750,8 +748,7 @@ port = {port}
 # Change this deliberately once you're ready to accept remote connections.
 host = "127.0.0.1"
 # admin_pubkey = "<hex-encoded Ed25519 public key for full access>"
-# See OPERATOR_GUIDE.md "Becoming your own server's admin" for how to get one.
-# Or point at a file instead of inlining the key (a secrets mount, a path an
+# You can point at a file instead of inlining the key (a secrets mount, a path an
 # orchestrator injects) — set exactly one of the two:
 # admin_pubkey_file = "/run/secrets/bonnet_admin_pubkey"
 
@@ -838,8 +835,8 @@ interval_seconds = 300
 # first-run flow (run bonnet gateway, call connect then
 # register, then publish_article / create_board) work without any editing;
 # the server's own identity is always its own admin regardless of
-# what's below (see OPERATOR_GUIDE.md "Becoming your own server's admin").
-# Tighten or remove any of these once you're ready to lock the server down.
+# what's below. Tighten or remove any of these once
+# you're ready to lock the server down.
 
 [[acl]]
 effect = "allow"
