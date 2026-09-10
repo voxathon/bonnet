@@ -485,12 +485,20 @@ def _read_witness_set(payload: bytes, offset: int) -> tuple[list[Witness], int]:
     stored (FirehoseStore.store_witness); this only frames the bytes.
     """
     count, offset = _read_u16(payload, offset)
+    keep = count
     if count > MAX_WITNESS_SET:
-        raise ProtocolError(f"witness set of {count} exceeds maximum {MAX_WITNESS_SET}")
+        try:
+            from bonnet.core.logging import log_warning as _wire_warn
+
+            _wire_warn("WIRE truncate reason=witness-set-overflow", count=count)
+        except Exception:
+            pass
+        keep = MAX_WITNESS_SET
     witnesses = []
-    for _ in range(count):
+    for i in range(count):
         raw, offset = _read_blob16(payload, offset)
-        witnesses.append(_guard(decode_witness, raw))
+        if i < keep:
+            witnesses.append(_guard(decode_witness, raw))
     return witnesses, offset
 
 
@@ -824,9 +832,7 @@ def parse_article_search_response(resp: bytes, aggregate: bool = False) -> Searc
         article_num, offset = _read_u64(payload, offset)
         aid_len, offset = _read_u8(payload, offset)
         article_id, offset = _read_bytes(payload, offset, aid_len, "article_id")
-        subj_len, offset = _read_u8(payload, offset)
-        _raw, offset = _read_bytes(payload, offset, subj_len, "subject")
-        subject = _raw.decode("utf-8")
+        subject, offset = _read_text16(payload, offset)
         ap_len, offset = _read_u8(payload, offset)
         author_pubkey, offset = _read_bytes(payload, offset, ap_len, "author_pubkey")
         created_at, offset = _read_i64(payload, offset)

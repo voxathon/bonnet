@@ -254,7 +254,7 @@ class _Reader:
     def u64(self) -> int:
         v = struct.unpack(">Q", self.read(8))[0]
         if v > MAX_U63:
-            raise NonCanonical(f"u64 exceeds 2^63-1: {v}")
+            raise InvalidValue(f"u64 exceeds 2^63-1: {v}")
         return v
 
     def i64(self) -> int:
@@ -491,7 +491,7 @@ def _validate_value(vtype: int, v: bytes) -> None:
             raise NonCanonical(f"U64 value must be 8 bytes, got {len(v)}")
         val = struct.unpack(">Q", v)[0]
         if val > MAX_U63:
-            raise NonCanonical("U64 value exceeds 2^63-1")
+            raise InvalidValue("U64 value exceeds 2^63-1")
     elif vtype == VT_I64:
         if len(v) != 8:
             raise NonCanonical(f"I64 value must be 8 bytes, got {len(v)}")

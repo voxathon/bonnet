@@ -106,7 +106,7 @@ Witness set wire shape
 Encode a witness set as a u16 count. Then encode each witness as a u16 length plus raw bytes.
 
 1. Keep at most 32 witnesses in one set.
-2. If the count tops 32, reject the input.
+2. If the count tops 32, keep the first 32 in wire order and ignore the rest. Warn on truncation.
 3. Order the set for truncation as own witness first, then origin witnesses,
    then newest first, then key order. Wire order is truncation order. Display
    order is the reader's own choice: the gateway re-sorts on read.
