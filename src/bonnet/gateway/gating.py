@@ -166,6 +166,63 @@ def _with_warning(tool: Tool, warning: str) -> Tool:
     return tool.model_copy(update={"description": warning + (tool.description or "")})
 
 
+#: Tools whose omitted `board=` / `target_article_id=` default from the
+#: navigation cursor (see `cursor.resolve_board` / `resolve_article_id`).
+#: Only these get the cursor banner — `connect`, `register`, `where_am_i`
+#: and friends take no such default, so context there would be noise.
+CURSOR_CONTEXT_TOOLS = frozenset(
+    {
+        "get_article",
+        "list_articles",
+        "search_articles",
+        "query_articles",
+        "read_thread",
+        "publish_article",
+        "supersede_article",
+        "cancel_article",
+        "restore_article",
+        "purge_article",
+        "pin_article",
+        "unpin_article",
+        "report",
+    }
+)
+
+
+def _cursor_banner() -> str | None:
+    """What an omitted `board=` / `target_article_id=` would default to, or None.
+
+    The tool list is re-sent whole on every turn while individual results
+    compact away, so this is where "what will the default hit" belongs. Only
+    `board` / `num` / `id` are shown — the cursor stores nothing else, and the
+    view itself (cancelled/purged/...) is what `get_article` just returned.
+    """
+    board = cursor.current_board.get()
+    article_board = cursor.current_article_board.get()
+    article_num = cursor.current_article_num.get()
+    article_id = cursor.current_article_id.get()
+    if article_num is not None and article_board and article_id:
+        short = article_id[:16] + "..." if len(article_id) > 16 else article_id
+        if board and board != article_board:
+            return (
+                f"[context: in /{board}, reading /{article_board}#{article_num} "
+                f"{short} — omit board=/target_article_id= to use this] "
+            )
+        return (
+            f"[context: in /{article_board}, reading #{article_num} "
+            f"{short} — omit board=/target_article_id= to use this] "
+        )
+    if board:
+        return f"[context: in /{board}, no article open — board-scoped defaults use /{board}] "
+    return None
+
+
+def _with_cursor_context(tool: Tool, banner: str) -> Tool:
+    """A copy of `tool` carrying the cursor banner. Same copy semantics as
+    `_with_warning`: never mutates the shared registry object."""
+    return tool.model_copy(update={"description": banner + (tool.description or "")})
+
+
 def _origin_missing() -> str | None:
     """Why this caller has nowhere to send a request, or None.
 
@@ -307,6 +364,17 @@ class GatingMiddleware(Middleware):
         warning = _auth_warning()
         if warning is not None:
             tools = [_with_warning(t, warning) for t in tools]
+        # Cursor context is pull-time: SessionStateMiddleware already hydrated
+        # the cursor before this runs, so the banner is always current with no
+        # announce needed — article moves don't change visibility the way
+        # open_board does. Warning stays first: degraded capability outranks
+        # position.
+        banner = _cursor_banner()
+        if banner is not None:
+            tools = [
+                _with_cursor_context(t, banner) if t.name in CURSOR_CONTEXT_TOOLS else t
+                for t in tools
+            ]
         return tools
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):

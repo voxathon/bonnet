@@ -45,6 +45,14 @@ Every state has an exit that is never hidden: `leave_board`, `back`,
 `switch_origin`, `connect`, `disconnect` are all plain `@mcp.tool` with no NEEDS_ORIGIN tag,
 so a caller cannot be gated out of its own way back — including by a
 hostile relay whose PERMISSIONS answer narrows everything else to nothing.
+
+`get_article` remembers any view it returns, including `cancelled`,
+`superseded`, `purged`, or otherwise unreadable ones — the article ID
+survives those states, so the view is still usable with an explicit
+`target_article_id=`. A `None` return (not found / forbidden, which the
+relay masks as not-found) or a raised error moves nothing: the previous
+article, if any, stays put. Contextual tools default from here, so check
+`where_am_i` before relying on the default after a surprising read.
 """
 
 from __future__ import annotations
