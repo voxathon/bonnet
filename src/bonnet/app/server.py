@@ -27,7 +27,7 @@ from typing import Any, Protocol
 
 from bonnet.app.cli import FirehoseLocalConnection
 from bonnet.app.console import OperatorConsole
-from bonnet.core.acl import ACLEvaluator, default_rules_for_admin
+from bonnet.core.acl import default_rules_for_admin
 from bonnet.core.binutil import resolve_rg, set_rg_path
 from bonnet.core.bodies import BodyStore
 from bonnet.core.config import FirehoseConfig
@@ -50,11 +50,53 @@ class _Closeable(Protocol):
     def close(self) -> None: ...
 
 
+def _synthesize_acl(rules, admin_pubkey_hex: str, server_pubkey: bytes):
+    """Apply the same admin/fallback synthesis init uses, off to the side.
+
+    Returns (final_rules, admin_rule_or_None). admin_rule is the one
+    synthesized fallback this class owns (safe for rotate-key to mutate);
+    None means admin access comes from operator-authored config.
+    """
+    from bonnet.core.acl import ACLRule, PrincipalMatcher
+
+    final = list(rules)
+    admin_rule = None
+    if admin_pubkey_hex:
+        admin_pubkey_bytes = bytes.fromhex(admin_pubkey_hex)
+        has_configured_admin = any(
+            r.matcher.pubkey == admin_pubkey_bytes and r.effect == "allow" for r in final
+        )
+        if not has_configured_admin:
+            final.extend(default_rules_for_admin(admin_pubkey_hex))
+    if not final:
+        owned = default_rules_for_admin(server_pubkey.hex())[0]
+        return [owned], owned
+    has_server_admin = any(
+        r.matcher.pubkey is not None and r.matcher.pubkey == server_pubkey and r.effect == "allow"
+        for r in final
+    )
+    if not has_server_admin:
+        admin_rule = ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(pubkey=server_pubkey),
+            actions=["read", "write"],
+            commands=["*"],
+            kinds=["*"],
+            boards=["*"],
+            objects=["*"],
+        )
+        final.append(admin_rule)
+    return final, admin_rule
+
+
 class BonnetServer:
     """Complete Bonnet server: all components wired and runnable."""
 
-    def __init__(self, config: FirehoseConfig):
+    def __init__(self, config: FirehoseConfig, config_path: str | None = None):
         self.config = config
+        self.config_path = config_path
+        self._acl_watched_at: dict | None = None
+        self._acl_pending: dict | None = None
         self._closed = False
         # Set for real once run() binds (see run()'s startup()). Declared
         # here so a signal handler racing with startup has something to
@@ -159,49 +201,22 @@ class BonnetServer:
         # safe for apply_key_rotation to mutate live: it's synthesized state
         # we own, not operator-authored config we'd silently diverge from on
         # the next restart.
-        self._acl_admin_rule = None
-
         acl = config.acl
-        if config.admin_pubkey_hex:
-            # Ensure admin_pubkey_hex actually grants admin, regardless of
-            # whether other [[acl]] rules exist — it used to only take
-            # effect when acl._rules was completely empty, so the moment an
-            # operator kept even one of the sample config's default rules
-            # (the documented first-run flow: keep the three defaults,
-            # uncomment admin_pubkey), the configured key silently got
-            # nothing, with no error anywhere.
-            admin_pubkey_bytes = bytes.fromhex(config.admin_pubkey_hex)
-            has_configured_admin = any(
-                r.matcher.pubkey == admin_pubkey_bytes and r.effect == "allow" for r in acl._rules
-            )
-            if not has_configured_admin:
-                acl.add_rule(default_rules_for_admin(config.admin_pubkey_hex)[0])
-
-        if not acl._rules:
-            acl = ACLEvaluator(default_rules_for_admin(self.server_identity.public_key.hex()))
-            self._acl_admin_rule = acl._rules[0]
+        had_rules = bool(acl._rules)
+        had_server_admin = any(
+            r.matcher.pubkey is not None
+            and r.matcher.pubkey == self.server_identity.public_key
+            and r.effect == "allow"
+            for r in acl._rules
+        )
+        final_rules, self._acl_admin_rule = _synthesize_acl(
+            acl._rules, config.admin_pubkey_hex, self.server_identity.public_key
+        )
+        acl._rules = final_rules
+        if not had_rules:
             log_msg("INIT: no ACL rules configured, defaulting to server identity as admin")
-        else:
-            has_server_admin = any(
-                r.matcher.pubkey == self.server_identity.public_key and r.effect == "allow"
-                for r in acl._rules
-                if r.matcher.pubkey is not None
-            )
-            if not has_server_admin:
-                from bonnet.core.acl import ACLRule, PrincipalMatcher
-
-                admin_rule = ACLRule(
-                    effect="allow",
-                    matcher=PrincipalMatcher(pubkey=self.server_identity.public_key),
-                    actions=["read", "write"],
-                    commands=["*"],
-                    kinds=["*"],
-                    boards=["*"],
-                    objects=["*"],
-                )
-                acl.add_rule(admin_rule)
-                self._acl_admin_rule = admin_rule
-                log_msg("INIT: added server identity to ACL as admin (not in config)")
+        elif not had_server_admin and self._acl_admin_rule is not None:
+            log_msg("INIT: added server identity to ACL as admin (not in config)")
 
         self.acl = acl
 
@@ -416,6 +431,139 @@ class BonnetServer:
                 raise
             except Exception as e:
                 log_msg(f"SWEEP: staged-body sweep failed: {type(e).__name__}: {e}")
+
+    def _acl_watch_files(self) -> list[str]:
+        """Files whose change should trigger an ACL reload attempt."""
+        import glob as _glob
+
+        if not self.config_path:
+            return []
+        paths = [os.path.abspath(self.config_path)]
+        try:
+            with open(self.config_path, "rb") as f:
+                import tomllib as _tomllib
+
+                data = _tomllib.load(f)
+        except Exception:
+            return paths
+        base_dir = os.path.dirname(os.path.abspath(self.config_path))
+        for pattern in data.get("include", []) or []:
+            if not isinstance(pattern, str):
+                continue
+            full = pattern if os.path.isabs(pattern) else os.path.join(base_dir, pattern)
+            try:
+                for match in sorted(_glob.glob(full)):
+                    if os.path.isfile(match) and os.path.abspath(match) not in paths:
+                        paths.append(os.path.abspath(match))
+            except Exception:
+                continue
+        admin_file = ""
+        try:
+            admin_file = (data.get("server", {}) or {}).get("admin_pubkey_file", "") or ""
+        except Exception:
+            admin_file = ""
+        if admin_file and os.path.isfile(admin_file):
+            ap = os.path.abspath(admin_file)
+            if ap not in paths:
+                paths.append(ap)
+        return paths
+
+    def _acl_snapshot(self) -> dict | None:
+        """Best-effort (mtime_ns, size) snapshot; None when unwatched."""
+        if not self.config_path:
+            return None
+        snap: dict = {}
+        for path in self._acl_watch_files():
+            try:
+                st = os.stat(path)
+                snap[path] = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                snap[path] = ("missing", 0)
+        return snap
+
+    def reload_acl_from_disk(self, reason: str = "poll") -> str:
+        """Reload [[acl]] + admin_pubkey from config.toml, fail-closed.
+
+        Parses off to the side and swaps the rule list in one assignment
+        (server.acl is command_handler._acl). Keeps old rules on any
+        failure. Non-ACL config changes are ignored (need restart).
+        """
+        if not self.config_path:
+            return "Error: no config path recorded, cannot reload ACL"
+        old_n = len(self.acl._rules)
+        try:
+            fresh = FirehoseConfig.load(self.config_path)
+            fresh.validate()
+        except Exception as exc:
+            log_msg(f"ACL_RELOAD: reason={reason} failed ({exc}), keeping {old_n} rules")
+            return f"Error: ACL reload failed, keeping {old_n} rules: {exc}"
+        try:
+            new_rules, new_admin_rule = _synthesize_acl(
+                fresh.acl._rules, fresh.admin_pubkey_hex, self.server_identity.public_key
+            )
+        except Exception as exc:
+            log_msg(f"ACL_RELOAD: reason={reason} synthesis failed ({exc}), keeping {old_n} rules")
+            return f"Error: ACL reload failed, keeping {old_n} rules: {exc}"
+        admin_changed = (fresh.admin_pubkey_hex or "") != (self.config.admin_pubkey_hex or "")
+        self.acl._rules = new_rules
+        if self.command_handler is not None and self.command_handler._acl is not self.acl:
+            self.command_handler._acl._rules = new_rules
+        self._acl_admin_rule = new_admin_rule
+        self.config.admin_pubkey_hex = fresh.admin_pubkey_hex
+        self.config.acl = self.acl
+        try:
+            from bonnet.app.main import _acl_rule_warnings
+
+            for warning in _acl_rule_warnings(self.config):
+                log_msg(f"ACL_RELOAD: warning: {warning}")
+        except Exception:
+            pass
+        log_msg(
+            f"ACL_RELOAD: reason={reason} rules {old_n}->{len(new_rules)} "
+            f"admin_changed={admin_changed} (non-ACL changes ignored, restart required)"
+        )
+        return (
+            f"Reloaded ACL ({reason}): {old_n}->{len(new_rules)} rules"
+            + (", admin_pubkey changed" if admin_changed else "")
+            + ". Non-ACL changes ignored (restart required)."
+        )
+
+    async def _watch_acl_periodically(self) -> None:
+        """Poll config mtime; reload ACL once the snapshot is stable twice.
+
+        Two-tick stability is the partial-write debounce: a torn truncate-
+        write that fails to parse keeps old rules and retries next tick.
+        """
+        interval = getattr(self.config, "acl_poll_interval_seconds", 30) or 0
+        if interval <= 0:
+            return
+        self._acl_watched_at = self._acl_snapshot()
+        self._acl_pending = None
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                snap = await asyncio.to_thread(self._acl_snapshot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log_msg(f"ACL_WATCH: snapshot failed: {type(e).__name__}: {e}")
+                continue
+            try:
+                if snap is None:
+                    continue
+                if snap != self._acl_watched_at:
+                    if self._acl_pending == snap:
+                        await asyncio.to_thread(self.reload_acl_from_disk, "poll")
+                        self._acl_watched_at = snap
+                        self._acl_pending = None
+                    else:
+                        self._acl_pending = snap
+                else:
+                    self._acl_pending = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log_msg(f"ACL_WATCH: reload failed: {type(e).__name__}: {e}")
 
     def _ensure_root_registered(self) -> None:
         """Publish a bonnet.user.register record for the server identity if not already present."""
@@ -655,6 +803,10 @@ class BonnetServer:
             )
 
         tasks = [asyncio.create_task(self._sweep_staged_bodies_periodically())]
+        if getattr(self.config, "acl_poll_interval_seconds", 30):
+            self._acl_watched_at = self._acl_snapshot()
+            self._acl_pending = None
+            tasks.append(asyncio.create_task(self._watch_acl_periodically()))
         try:
             # A closed fd 0 (common under systemd/Docker when stdin isn't
             # attached at all, as opposed to being open on /dev/null) can

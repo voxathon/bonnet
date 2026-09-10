@@ -138,6 +138,7 @@ _SECTION_KEYS = {
         "signature_lifetime_seconds",
         "clock_skew_seconds",
         "host",
+        "acl_poll_interval_seconds",
     },
     "limits": {
         "max_request_size",
@@ -337,6 +338,7 @@ class FirehoseConfig:
         acl: ACLEvaluator = None,
         admin_pubkey_hex: str = "",
         host: str = "127.0.0.1",
+        acl_poll_interval_seconds: int = 30,
         unknown_keys: list = None,
         witness: WitnessConfig = None,
         log_level: str = "DEBUG",
@@ -368,6 +370,7 @@ class FirehoseConfig:
         self.peers = peers or []
         self.acl = acl or ACLEvaluator([])
         self.admin_pubkey_hex = admin_pubkey_hex
+        self.acl_poll_interval_seconds = acl_poll_interval_seconds
         self.log_level = str(log_level).upper()
         self.log_keep_files = log_keep_files
         self.log_max_bytes = log_max_bytes
@@ -429,6 +432,18 @@ class FirehoseConfig:
         if self.sync_interval_seconds <= 0:
             raise ValueError(
                 f"config: sync_interval_seconds must be positive, got {self.sync_interval_seconds}"
+            )
+        if not isinstance(self.acl_poll_interval_seconds, int) or isinstance(
+            self.acl_poll_interval_seconds, bool
+        ):
+            raise ValueError(
+                "config: server.acl_poll_interval_seconds must be an integer, "
+                f"got {self.acl_poll_interval_seconds!r}"
+            )
+        if self.acl_poll_interval_seconds < 0:
+            raise ValueError(
+                "config: server.acl_poll_interval_seconds must be >= 0 "
+                f"(0 disables), got {self.acl_poll_interval_seconds}"
             )
         if self.log_level not in self.LOG_LEVELS:
             raise ValueError(
@@ -665,6 +680,7 @@ class FirehoseConfig:
             acl=acl,
             admin_pubkey_hex=admin_pubkey_hex,
             host=server.get("host", "127.0.0.1"),
+            acl_poll_interval_seconds=server.get("acl_poll_interval_seconds", 30),
             unknown_keys=unknown_keys,
             log_level=logging_cfg.get("level", "DEBUG"),
             log_keep_files=logging_cfg.get("keep_files", 20),
@@ -747,6 +763,10 @@ port = {port}
 # Bind address: 127.0.0.1 for local-only, 0.0.0.0 for all interfaces.
 # Change this deliberately once you're ready to accept remote connections.
 host = "127.0.0.1"
+# Poll config.toml (+ acl.d includes + admin_pubkey_file) for [[acl]] /
+# admin_pubkey changes; 0 disables. Reloads are fail-closed (bad TOML keeps
+# old rules) and logged. Non-ACL changes still need a restart.
+acl_poll_interval_seconds = 30
 # admin_pubkey = "<hex-encoded Ed25519 public key for full access>"
 # You can point at a file instead of inlining the key (a secrets mount, a path an
 # orchestrator injects) — set exactly one of the two:

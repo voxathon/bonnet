@@ -402,7 +402,7 @@ def main(argv: list[str] | None = None):
         print(f"error: could not listen on {config.host}:{config.port}: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
-    server = BonnetServer(config)
+    server = BonnetServer(config, config_path=args.config)
 
     started = False
     try:

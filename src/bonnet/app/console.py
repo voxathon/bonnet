@@ -299,6 +299,9 @@ class OperatorConsole:
         if cmd == "rotate-key":
             return self._cmd_rotate_key(parts)
 
+        if cmd == "reload-acl":
+            return self._cmd_reload_acl(parts)
+
         return f"Unknown command: {cmd}. Type 'help' for commands."
 
     def _cmd_help(self) -> str:
@@ -351,6 +354,9 @@ class OperatorConsole:
                                 immediately, no restart needed - unless the
                                 admin ACL rule was hand-written in config.toml,
                                 in which case that file needs a manual update)
+  reload-acl                    Reload [[acl]] + admin_pubkey from config.toml
+                                (polls automatically every
+                                server.acl_poll_interval_seconds; this forces it)
   quit                          Exit"""
 
     def _cmd_whoami(self) -> str:
@@ -1985,6 +1991,10 @@ class OperatorConsole:
         """
         new_identity = Identity.generate()
         return self.server.apply_key_rotation(new_identity)
+
+    def _cmd_reload_acl(self, parts) -> str:
+        """Reload [[acl]] + admin_pubkey from config.toml, fail-closed."""
+        return self.server.reload_acl_from_disk(reason="console")
 
     def _cmd_resume_origin(self, parts) -> str:
         """Clear a divergence halt so the next cycle retries.
