@@ -209,6 +209,18 @@ def _pad32(value: bytes) -> bytes:
     return (value + bytes(32))[:32]
 
 
+def _require_request_end(data: bytes, offset: int, what: str) -> None:
+    """Reject a request with bytes left over after its declared fields.
+
+    Raises ValueError so handle() turns it into a 0x0006 frame. Extra bytes
+    are never padding — they mean the peer encoded a different layout than
+    this handler decoded, and silently ignoring them lets two sides disagree
+    about what was asked.
+    """
+    if offset != len(data):
+        raise ValueError(f"trailing bytes after {what}: {len(data) - offset} extra")
+
+
 # ---------------------------------------------------------------------------
 # Command context
 # ---------------------------------------------------------------------------
@@ -521,6 +533,7 @@ class FirehoseCommandHandler:
             return _error(0x0006, "Truncated body")
         body = data[offset : offset + body_len]
         offset += body_len
+        _require_request_end(data, offset, "publish request")
 
         intent = decode_intent(encoded_intent)
 
@@ -899,6 +912,7 @@ class FirehoseCommandHandler:
     def _cmd_event_head(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        _require_request_end(data, offset, "event head request")
         origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
 
@@ -916,6 +930,7 @@ class FirehoseCommandHandler:
     def _cmd_key_epochs(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        _require_request_end(data, offset, "key epochs request")
         origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
 
@@ -964,6 +979,7 @@ class FirehoseCommandHandler:
         culprit = culprit_raw or None
         limit, offset = _read_u16(data, offset)
         page_offset, offset = _read_u16(data, offset)
+        _require_request_end(data, offset, "report list request")
 
         rows = self._policy.list_reports(
             culprit_pubkey=culprit, limit=limit or 100, offset=page_offset
@@ -1037,7 +1053,8 @@ class FirehoseCommandHandler:
         is available exactly when a caller most needs it — before it knows
         what else it can do.
         """
-        board, _ = _read_text16(data, 0)
+        board, offset = _read_text16(data, 0)
+        _require_request_end(data, offset, "permissions request")
         auth = ctx.to_auth_context()
         scope = board or None
 
@@ -1138,26 +1155,27 @@ class FirehoseCommandHandler:
         start_seq, offset = _read_u64(data, offset)
         max_count, offset = _read_u16(data, offset)
         max_bytes, offset = _read_u32(data, offset)
+        _require_request_end(data, offset, "event range request")
 
         records = self._firehose.get_events_range(origin, start_seq, max_count)
 
-        out = struct.pack(">H", len(records))
+        body = b""
+        served = 0
         total_bytes = 0
         for rec in records:
             encoded_rec = encode_record(rec)
-            if max_bytes > 0 and total_bytes + len(encoded_rec) > max_bytes:
-                break
             event_hash = compute_event_hash(encoded_rec)
             witnesses = self._witness_set(origin, rec, event_hash)
+            # Budget covers record + witness bytes (spec: count rec+wit).
+            row_cost = len(encoded_rec) + len(witnesses)
+            if max_bytes > 0 and total_bytes + row_cost > max_bytes:
+                break
+            body += struct.pack(">I", len(encoded_rec)) + encoded_rec
+            body += witnesses
+            total_bytes += row_cost
+            served += 1
 
-            out += struct.pack(">I", len(encoded_rec)) + encoded_rec
-            out += witnesses
-            # Witness bytes count against the caller's budget. They did not
-            # before, which under-counted every response by one witness and
-            # would now under-count by a whole chain.
-            total_bytes += len(encoded_rec) + len(witnesses)
-
-        return _success(out)
+        return _success(struct.pack(">H", served) + body)
 
     # ------------------------------------------------------------------
     # EVENT_GET
@@ -1169,6 +1187,7 @@ class FirehoseCommandHandler:
         origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
         event_id, offset = _read_id32(data, offset)
+        _require_request_end(data, offset, "event get request")
 
         rec = self._firehose.get_event_by_id(origin, event_id)
         if rec is None:
@@ -1190,6 +1209,7 @@ class FirehoseCommandHandler:
     def _cmd_board_list(self, data: bytes, ctx: FirehoseContext) -> bytes:
         offset = 0
         origin, offset = _read_text16(data, offset)
+        _require_request_end(data, offset, "board list request")
         origin = normalize_origin(origin)
 
         if origin == "":
@@ -1253,6 +1273,7 @@ class FirehoseCommandHandler:
             return _error(0x0005, "Invalid selector type")
 
         include_body, offset = _read_u8(data, offset)
+        _require_request_end(data, offset, "article get request")
 
         bp = self._get_board_projection(origin, board)
         if article_num is not None:
@@ -1356,6 +1377,7 @@ class FirehoseCommandHandler:
         limit, offset = _read_u16(data, offset)
         limit = max(1, min(limit, 65535))
         flags, offset = _read_u8(data, offset)
+        _require_request_end(data, offset, "article list request")
 
         include_cancelled = bool(flags & 0x01)
         include_superseded = bool(flags & 0x02)
@@ -1431,6 +1453,7 @@ class FirehoseCommandHandler:
         limit, offset = _read_u16(data, offset)
         limit = max(1, min(limit, 65535))
         flags, offset = _read_u8(data, offset)
+        _require_request_end(data, offset, "article search request")
 
         include_cancelled = bool(flags & 0x01)
         include_superseded = bool(flags & 0x02)
@@ -1588,6 +1611,7 @@ class FirehoseCommandHandler:
         list_offset, offset = _read_u32(data, offset)
         limit, offset = _read_u16(data, offset)
         limit = max(1, min(limit, 65535))
+        _require_request_end(data, offset, "article query request")
 
         bp = self._get_board_projection(origin, board)
         articles = bp.query_articles(
@@ -1620,6 +1644,7 @@ class FirehoseCommandHandler:
         if not self._board_read_allowed(ctx, "ARTICLE_BODY", board):
             return _error(0x0003, "Article body unavailable")
         article_num, offset = _read_u64(data, offset)
+        _require_request_end(data, offset, "article body request")
 
         bp = self._get_board_projection(origin, board)
         art = bp.get_article_by_num(origin, board, article_num)
@@ -1685,6 +1710,7 @@ class FirehoseCommandHandler:
             return _error(0x0001, "User not found")
         pubkey_len, offset = _read_u8(data, offset)
         pubkey, offset = _read_bytes(data, offset, pubkey_len, "pubkey")
+        _require_request_end(data, offset, "user get request")
 
         user = self._users.get_user_by_pubkey(origin, pubkey)
         if user is None:
@@ -1715,6 +1741,7 @@ class FirehoseCommandHandler:
         if origin and self._allowed_origins and origin not in self._allowed_origins:
             return _success(struct.pack(">H", 0))
         flags, offset = _read_u8(data, offset)
+        _require_request_end(data, offset, "user list request")
 
         include_revoked = bool(flags & 0x01)
         users = self._users.list_users(origin, include_revoked=include_revoked)
@@ -1741,6 +1768,7 @@ class FirehoseCommandHandler:
         offset = 0
         pubkey_len, offset = _read_u8(data, offset)
         pubkey, offset = _read_bytes(data, offset, pubkey_len, "pubkey")
+        _require_request_end(data, offset, "ban status request")
 
         try:
             punishments = self._policy.list_pending_for_pubkey(
@@ -1773,6 +1801,7 @@ class FirehoseCommandHandler:
         origin = normalize_origin(origin)
         self._maybe_queue_remote_sync(origin)
         event_id, offset = _read_id32(data, offset)
+        _require_request_end(data, offset, "event body request")
 
         rec = self._firehose.get_event_by_id(origin, event_id)
         if rec is None:
