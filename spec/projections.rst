@@ -31,7 +31,7 @@ List and search rows
 1. Read list rows as views with no body bytes.
 2. Read search rows in two parts.
 
-Search row: u64 number plus u8 length plus article ID plus u8 length plus subject.
+Search row: u64 number plus u8 length plus article ID plus text16 subject.
 
 Search tail: u8 length plus author key plus i64 stamp plus u8 body flag plus text16 excerpt.
 3. Read a u16 row count plus u32 total plus u8 cut flag before search rows.

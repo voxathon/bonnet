@@ -94,7 +94,7 @@ Users
 5. Give it metadata field 1 as revoked key bytes.
 6. Give user key rotate empty board plus empty targets.
 7. Give it metadata field 1 as new key bytes plus field 2 as proof bytes.
-8. Keep the new key past the actor key.
+8. Name a new key different from the actor key.
 
 Rules and reports
 =================

@@ -42,9 +42,17 @@ from bonnet.core.global_projections import NavProjection, PolicyProjection, User
 from bonnet.core.kind_validator import KindValidator, ValidationError
 from bonnet.core.kinds import (
     ALL_KNOWN_KINDS,
+    KIND_ARTICLE_CANCEL,
+    KIND_ARTICLE_PIN,
+    KIND_ARTICLE_PURGE,
+    KIND_ARTICLE_RESTORE,
+    KIND_ARTICLE_UNPIN,
     KIND_BOARD_CREATE,
+    KIND_PUNISHMENT_ACK,
     KIND_PUNISHMENT_BAN,
     KIND_PUNISHMENT_PERMABAN,
+    KIND_THREAD_CLOSE,
+    KIND_THREAD_REOPEN,
     KIND_USER_REGISTER,
 )
 from bonnet.core.logging import log_debug, log_info, log_msg, log_warning
@@ -89,15 +97,6 @@ from bonnet.net.firehose_wire import (
     _read_u32,
     _read_u64,
 )
-
-KIND_ARTICLE_CANCEL = "bonnet.article.cancel"
-KIND_ARTICLE_RESTORE = "bonnet.article.restore"
-KIND_ARTICLE_PURGE = "bonnet.article.purge"
-KIND_ARTICLE_PIN = "bonnet.article.pin"
-KIND_ARTICLE_UNPIN = "bonnet.article.unpin"
-KIND_THREAD_CLOSE = "bonnet.thread.close"
-KIND_THREAD_REOPEN = "bonnet.thread.reopen"
-KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
 
 # Punishment type codes used by the BAN_STATUS response.
 PUNISHMENT_TYPE_CODES = {"warning": 1, "ban": 2, "permaban": 3}
@@ -295,7 +294,7 @@ class FirehoseCommandHandler:
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
         self._boards_lock = threading.Lock()
         self._max_body_size = max_body_size
-        self._wire_max = max(1, wire_max)
+        self._wire_max = max(1, min(32, wire_max))
         # Serializes the check-then-append span for bonnet.user.register and
         # bonnet.board.create: without it, two concurrent registrations for
         # the same name can both read "no holder yet" before either appends,
@@ -426,7 +425,7 @@ class FirehoseCommandHandler:
 
     def handle(self, body: bytes, ctx: FirehoseContext) -> bytes:
         if not body:
-            return _error(0x0005, "Empty request")
+            return _error(0x0006, "Empty request")
 
         opcode = body[0]
         data = body[1:]
@@ -1488,8 +1487,7 @@ class FirehoseCommandHandler:
                 out += _enc_text16(orig)
                 out += struct.pack(">Q", r.article_num)
                 out += struct.pack(">B", len(r.article_id)) + r.article_id
-                subj_bytes = r.subject.encode("utf-8")
-                out += struct.pack(">B", len(subj_bytes)) + subj_bytes
+                out += _enc_text16(r.subject)
                 out += struct.pack(">B", len(r.author_pubkey)) + r.author_pubkey
                 out += struct.pack(">q", r.created_at)
                 out += struct.pack(">B", 1 if r.body_available else 0)
@@ -1532,8 +1530,7 @@ class FirehoseCommandHandler:
         for r in results.results:
             out += struct.pack(">Q", r.article_num)
             out += struct.pack(">B", len(r.article_id)) + r.article_id
-            subj_bytes = r.subject.encode("utf-8")
-            out += struct.pack(">B", len(subj_bytes)) + subj_bytes
+            out += _enc_text16(r.subject)
             out += struct.pack(">B", len(r.author_pubkey)) + r.author_pubkey
             out += struct.pack(">q", r.created_at)
             out += struct.pack(">B", 1 if r.body_available else 0)

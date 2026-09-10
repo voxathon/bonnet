@@ -41,7 +41,7 @@ Request: opcode u8 plus text16 origin plus text16 board plus text16 field query 
 
 Response: u16 row count plus u32 total plus u8 cut flag plus search rows.
 
-Search row: u64 number plus u8 length plus article ID plus u8 length plus subject.
+Search row: u64 number plus u8 length plus article ID plus text16 subject.
 
 Search tail: u8 length plus author key plus i64 stamp plus u8 body flag plus text16 excerpt.
 

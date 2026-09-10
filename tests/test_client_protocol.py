@@ -350,16 +350,17 @@ class TestEventRange:
             "relay-b.test",
         ]
 
-    def test_an_oversized_witness_set_is_refused(self):
+    def test_an_oversized_witness_set_is_truncated(self):
         """The set arrives from a peer, which can fabricate entries as cheaply
-        as it relays real ones."""
+        as it relays real ones — keep the first 32 in wire order, drop rest."""
         rec = _make_record()
         er = encode_record(rec)
+        chain = [_make_witness(rec, hostname=f"r{i}.test") for i in range(MAX_WITNESS_SET + 1)]
         out = struct.pack(">H", 1) + struct.pack(">I", len(er)) + er
-        out += struct.pack(">H", MAX_WITNESS_SET + 1)
+        out += _encode_witness_set(chain)
 
-        with pytest.raises(ProtocolError, match="exceeds maximum"):
-            parse_event_range_response(_success(out))
+        results = parse_event_range_response(_success(out))
+        assert len(results[0][1]) == MAX_WITNESS_SET
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +567,7 @@ class TestArticleSearch:
         out += struct.pack(">B", 0)  # not truncated
         out += struct.pack(">Q", 1)  # article_num
         out += struct.pack(">B", 32) + aid
-        out += struct.pack(">B", 4) + b"Test"
+        out += _enc_text16("Test")
         out += struct.pack(">B", 32) + ap
         out += struct.pack(">q", 1700000000)
         out += struct.pack(">B", 1)  # body available
@@ -580,6 +581,23 @@ class TestArticleSearch:
         assert result.results[0].excerpt == "excerpt text"
         assert result.total == 1
         assert not result.truncated
+
+    def test_parse_long_subject(self):
+        """Subjects up to the 4096B TEXT cap ride as text16, not u8."""
+        aid = _rid(3)
+        long_subject = "s" * 1000
+        out = struct.pack(">H", 1)
+        out += struct.pack(">I", 1)
+        out += struct.pack(">B", 0)
+        out += struct.pack(">Q", 7)
+        out += struct.pack(">B", 32) + aid
+        out += _enc_text16(long_subject)
+        out += struct.pack(">B", 32) + ACTOR_PUB
+        out += struct.pack(">q", 1700000000)
+        out += struct.pack(">B", 1)
+        out += _enc_text16("excerpt")
+        result = parse_article_search_response(_success(out))
+        assert result.results[0].subject == long_subject
 
 
 # ---------------------------------------------------------------------------
