@@ -180,6 +180,37 @@ async def save(ctx) -> None:
 #: one lock per live session is cheap next to a 24h session TTL.
 _locks: dict[tuple[str, str], asyncio.Lock] = {}
 
+#: Spans currently inside load -> run tool -> save, per (session, tenant).
+#: Incremented synchronously before the first await so asyncio cannot
+#: preempt between the increment and the contention check: an overlapping
+#: call always observes a count above 1, a strictly sequential one always
+#: observes exactly 1. Same single-process boundary as `_locks` (and the
+#: MemoryStore itself) — across `uvicorn --workers N` neither the lock nor
+#: this counter sees the other process, and both degrade to last-writer-wins.
+_inflight: dict[tuple[str, str], int] = {}
+
+#: Keys that saw overlapping spans since their last quiescent moment. A
+#: peak, not an instant: spans queue on the lock rather than overlapping in
+#: execution, so checking the count only at save time would let the second
+#: span re-save its article after the first cleared it. The flag is raised by
+#: any newcomer arriving while another span is in flight and consumed only
+#: when the count returns to zero — every span of a raced generation then
+#: clears, and the session lands deterministically at `in_board` instead of
+#: a coin-flip article.
+_contended: set[tuple[str, str]] = set()
+
+
+def reset_session_state() -> None:
+    """Drop lock, in-flight and contention bookkeeping (tests only).
+
+    Session snapshots in the FastMCP store are untouched — only this
+    module's process-local guards. Lets contention flags from one test
+    never leak into the next.
+    """
+    _locks.clear()
+    _inflight.clear()
+    _contended.clear()
+
 
 def _session_key(ctx) -> str | None:
     """A per-caller identity stable across the calls in one session, or None.
@@ -202,6 +233,21 @@ def _session_key(ctx) -> str | None:
     return _PROCESS_SESSION_ID
 
 
+def _inflight_key(ctx) -> tuple[str, str] | None:
+    """The (session, tenant) key for contention tracking, or None.
+
+    Same key `_lock_for` locks on, factored out so the two cannot drift:
+    no key means no session-scoped state in play, and both the lock and the
+    counter correctly do nothing.
+    """
+    if ctx is None:
+        return None
+    session_id = _session_key(ctx)
+    if session_id is None:
+        return None
+    return (session_id, tenancy.current_tenant.get())
+
+
 def _lock_for(ctx) -> asyncio.Lock | None:
     """The lock serializing load/save for this session and tenant, or None.
 
@@ -209,12 +255,9 @@ def _lock_for(ctx) -> asyncio.Lock | None:
     request context). Matches load/save's own best-effort degrade: nothing
     here can race if there is no session-scoped state in play.
     """
-    if ctx is None:
+    key = _inflight_key(ctx)
+    if key is None:
         return None
-    session_id = _session_key(ctx)
-    if session_id is None:
-        return None
-    key = (session_id, tenancy.current_tenant.get())
     lock = _locks.get(key)
     if lock is None:
         lock = asyncio.Lock()
@@ -237,20 +280,48 @@ class SessionStateMiddleware(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         ctx = context.fastmcp_context
         lock = _lock_for(ctx)
-        if lock is None:
+        key = _inflight_key(ctx)
+        if lock is None or key is None:
             return await self._call(ctx, context, call_next)
-        async with lock:
-            return await self._call(ctx, context, call_next)
+        # Synchronous section — no await between the increment and the
+        # contention check, so asyncio cannot interleave a second span
+        # between them. A newcomer arriving while another span is in flight
+        # raises the peak flag; strictly sequential spans always see 1.
+        _inflight[key] = _inflight.get(key, 0) + 1
+        if _inflight[key] > 1:
+            _contended.add(key)
+        try:
+            async with lock:
+                return await self._call(ctx, context, call_next, key=key)
+        finally:
+            remaining = _inflight.get(key, 1) - 1
+            if remaining <= 0:
+                _inflight.pop(key, None)
+                _contended.discard(key)
+            else:
+                _inflight[key] = remaining
 
-    async def _call(self, ctx, context: MiddlewareContext, call_next):
+    async def _call(self, ctx, context: MiddlewareContext, call_next, key=None):
         await load(ctx)
         try:
             return await call_next(context)
         finally:
             # In a finally: a tool that raises part-way may still have moved
-            # the cursor (get_article sets it before any later failure), and
-            # losing that would leave the session's idea of where it is
-            # disagreeing with what the tool actually did.
+            # the cursor, and losing that would leave the session's idea of
+            # where it is disagreeing with what the tool actually did.
+            #
+            # Contended generations clear back to the board before saving:
+            # parallel cursor-moving calls would otherwise land on whichever
+            # span happened to save last — a coin flip the next implicit
+            # `target_article_id=` would silently inherit. Only the article
+            # fields are suppressed; the board still saves last-writer-wins.
+            if key is not None and key in _contended:
+                try:
+                    from bonnet.gateway import cursor
+
+                    cursor.clear_article()
+                except Exception as e:
+                    log_debug("SESSION contention clear degrade", err=f"{type(e).__name__}")
             await save(ctx)
 
     async def on_list_tools(self, context: MiddlewareContext, call_next):

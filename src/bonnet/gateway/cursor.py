@@ -53,6 +53,11 @@ survives those states, so the view is still usable with an explicit
 relay masks as not-found) or a raised error moves nothing: the previous
 article, if any, stays put. Contextual tools default from here, so check
 `where_am_i` before relying on the default after a surprising read.
+
+Concurrent `get_article`s in one session clear back to `in_board` instead
+of landing on whichever span happened to save last — a coin flip no
+implicit default should inherit. Pass `target_article_id=` explicitly
+after any parallel fan-out.
 """
 
 from __future__ import annotations

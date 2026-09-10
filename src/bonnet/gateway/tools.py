@@ -1859,6 +1859,9 @@ async def get_article(
     on them and check where_am_i before relying on the default. A None
     return (not found, or forbidden which the relay masks as not-found) or
     a raised error moves nothing: the previous article, if any, stays put.
+    Concurrent get_articles in one session clear back to in_board rather
+    than landing on whichever saved last — pass target_article_id=
+    explicitly after any parallel fan-out.
 
     Returns the full article including subject, tags, body (if available),
     author info, projected state (active/cancelled/superseded), and lifecycle
