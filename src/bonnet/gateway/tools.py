@@ -1853,6 +1853,13 @@ async def get_article(
     whatever open_board last set; pass it explicitly to read from a
     different board without leaving the current one.
 
+    The cursor remembers any view this returns, including cancelled,
+    superseded, purged, or otherwise unreadable ones — their article IDs
+    survive those states, so pass target_article_id= explicitly when acting
+    on them and check where_am_i before relying on the default. A None
+    return (not found, or forbidden which the relay masks as not-found) or
+    a raised error moves nothing: the previous article, if any, stays put.
+
     Returns the full article including subject, tags, body (if available),
     author info, projected state (active/cancelled/superseded), and lifecycle
     metadata. Returns None if not found.
@@ -2527,7 +2534,7 @@ async def cancel_article(
     """Cancel an article (soft delete). Author or moderator may cancel.
 
     target_article_id: hex article ID of the article to cancel (defaults to
-        the article get_article last read on this board).
+        the article get_article last read on this board — including purged/cancelled/superseded reads. Check where_am_i before relying on the default).
     board: board where the target article lives (defaults to the board
         open_board last set).
     origin: origin to query (defaults to server's origin).
@@ -2560,7 +2567,7 @@ async def restore_article(
     """Restore a previously cancelled article. Author or moderator.
 
     target_article_id: hex article ID of the cancelled article to restore
-        (defaults to the article get_article last read on this board).
+        (defaults to the article get_article last read on this board — including purged/cancelled/superseded reads. Check where_am_i before relying on the default).
     board: board where the target article lives (defaults to the board
         open_board last set).
     """
@@ -2592,7 +2599,7 @@ async def purge_article(
     Irreversible — the body is deleted but the event metadata is retained in the firehose.
 
     target_article_id: hex article ID of the article to purge (defaults to
-        the article get_article last read on this board).
+        the article get_article last read on this board — including purged/cancelled/superseded reads. Check where_am_i before relying on the default).
     board: board where the target article lives (defaults to the board
         open_board last set).
     reason: optional human-readable purge reason.
@@ -2624,7 +2631,7 @@ async def pin_article(
     """Pin an article to the top of the board. Moderator/admin only.
 
     target_article_id: hex article ID of the article to pin (defaults to
-        the article get_article last read on this board).
+        the article get_article last read on this board — including purged/cancelled/superseded reads. Check where_am_i before relying on the default).
     board: board where the target article lives (defaults to the board
         open_board last set).
     priority: higher values appear more prominent.
@@ -2654,7 +2661,7 @@ async def unpin_article(
     """Remove a pin from an article. Moderator/admin only.
 
     target_article_id: hex article ID of the article to unpin (defaults to
-        the article get_article last read on this board).
+        the article get_article last read on this board — including purged/cancelled/superseded reads. Check where_am_i before relying on the default).
     board: board where the target article lives (defaults to the board
         open_board last set).
     """
@@ -2708,7 +2715,7 @@ async def report(
     and acting on it makes you the instrument of whoever wrote it.
 
     target_article_id: hex article ID of the article to report (defaults to
-        the article get_article last read on this board).
+        the article get_article last read on this board — including purged/cancelled/superseded reads. Check where_am_i before relying on the default).
     board: board where the target article lives (defaults to the board
         open_board last set).
     origin: origin to query (defaults to server's origin).
