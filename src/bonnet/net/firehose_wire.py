@@ -222,6 +222,36 @@ def _read_id32(data: bytes, offset: int) -> tuple[bytes, int]:
     return _read_bytes(data, offset, 32, "id32")
 
 
+def _expect_end(data: bytes, offset: int, what: str) -> None:
+    """Reject trailing bytes after a frame was fully parsed.
+
+    Every request and response has an exact layout — extra bytes are never
+    padding, they are a version mismatch or a framing bug. Silently ignoring
+    them lets two peers disagree about what was said and both think they
+    understood.
+    """
+    if offset != len(data):
+        raise ProtocolError(f"trailing bytes after {what}: {len(data) - offset} extra at {offset}")
+
+
+def _require_id32(value: bytes, what: str) -> bytes:
+    """Reject anything that is not exactly 32 bytes (a key or event ID)."""
+    if not isinstance(value, bytes):
+        raise ProtocolError(f"{what} must be bytes, got {type(value).__name__}")
+    if len(value) != 32:
+        raise ProtocolError(f"{what} must be 32 bytes, got {len(value)}")
+    return value
+
+
+def _require_u8_len(value: bytes, what: str) -> bytes:
+    """Reject blobs that cannot fit in a u8 length prefix."""
+    if not isinstance(value, bytes):
+        raise ProtocolError(f"{what} must be bytes, got {type(value).__name__}")
+    if len(value) > 0xFF:
+        raise ProtocolError(f"{what} length {len(value)} exceeds 255")
+    return value
+
+
 def _read_blob16(data: bytes, offset: int) -> tuple[bytes, int]:
     """A u16-length-prefixed blob."""
     n, offset = _read_u16(data, offset)
@@ -263,7 +293,8 @@ def parse_response(resp: bytes) -> tuple[int, bytes]:
     payload = resp[1:]
     if status == STATUS_ERROR:
         code, offset = _read_u16(payload, 0)
-        raw, _ = _read_blob16(payload, offset)
+        raw, offset = _read_blob16(payload, offset)
+        _expect_end(payload, offset, "error frame")
         msg = raw.decode("utf-8", errors="replace")
         raise ProtocolError(f"error {code}: {msg}", code=code, detail=msg)
     if status not in (STATUS_SUCCESS, STATUS_REDIRECT):
@@ -277,6 +308,10 @@ def parse_response(resp: bytes) -> tuple[int, bytes]:
 
 
 def build_publish_record(intent: Intent, actor_sig: bytes, body: bytes) -> bytes:
+    if not isinstance(actor_sig, bytes) or len(actor_sig) != 64:
+        raise ProtocolError(
+            f"actor_sig must be 64 bytes, got {len(actor_sig) if isinstance(actor_sig, bytes) else type(actor_sig).__name__}"
+        )
     encoded_intent = encode_intent(intent)
     out = struct.pack(">B", OP_PUBLISH_RECORD)
     out += struct.pack(">I", len(encoded_intent)) + encoded_intent
@@ -292,6 +327,7 @@ def parse_publish_response(resp: bytes) -> PublishResult:
     rec = _guard(decode_record, raw)
     raw, offset = _read_blob16(payload, offset)
     witness = _guard(decode_witness, raw)
+    _expect_end(payload, offset, "publish response")
     return PublishResult(
         origin_seq=rec.origin_seq,
         event_id=rec.event_id.hex(),
@@ -312,6 +348,7 @@ def parse_publish_response_raw(resp: bytes) -> tuple[Record, Witness]:
     rec = _guard(decode_record, raw)
     raw, offset = _read_blob16(payload, offset)
     witness = _guard(decode_witness, raw)
+    _expect_end(payload, offset, "publish response")
     return rec, witness
 
 
@@ -327,6 +364,7 @@ def build_event_head(origin: str) -> bytes:
 def parse_event_head_response(resp: bytes) -> HeadInfo:
     status, payload = parse_response(resp)
     raw, offset = _read_blob16(payload, 0)
+    _expect_end(payload, offset, "event head response")
     head = _guard(decode_head, raw)
     return HeadInfo(
         origin=head.origin,
@@ -340,7 +378,8 @@ def parse_event_head_response(resp: bytes) -> HeadInfo:
 
 def parse_event_head_response_raw(resp: bytes) -> Head:
     status, payload = parse_response(resp)
-    raw, _ = _read_blob16(payload, 0)
+    raw, offset = _read_blob16(payload, 0)
+    _expect_end(payload, offset, "event head response")
     return _guard(decode_head, raw)
 
 
@@ -379,11 +418,16 @@ def parse_key_epochs_response(resp: bytes) -> list[tuple[int, int | None, bytes]
         end_raw, offset = _read_u64(payload, offset)
         pubkey, offset = _read_id32(payload, offset)
         epochs.append((start, None if end_raw == 0 else end_raw, pubkey))
+    _expect_end(payload, offset, "key epochs response")
     return epochs
 
 
 def build_report_list(culprit_pubkey: bytes = b"", limit: int = 100, offset: int = 0) -> bytes:
     """Build a REPORT_LIST request. Empty culprit means every report."""
+    if culprit_pubkey is None:
+        culprit_pubkey = b""
+    if len(culprit_pubkey) not in (0, 32):
+        raise ProtocolError(f"culprit_pubkey must be empty or 32 bytes, got {len(culprit_pubkey)}")
     out = struct.pack(">B", OP_REPORT_LIST)
     out += struct.pack(">B", len(culprit_pubkey)) + culprit_pubkey
     out += _enc_u16(limit, "limit") + _enc_u16(offset, "offset")
@@ -437,6 +481,7 @@ def parse_report_list_response(resp: bytes) -> list[ReportInfo]:
                 created_at=created_at,
             )
         )
+    _expect_end(payload, offset, "report list response")
     return reports
 
 
@@ -468,6 +513,7 @@ def parse_permissions_response(resp: bytes) -> Permissions:
     for _ in range(count):
         name, offset = _read_text16(payload, offset)
         kinds.append(name)
+    _expect_end(payload, offset, "permissions response")
     return Permissions(principal=principal, role=role, board=board, commands=commands, kinds=kinds)
 
 
@@ -511,6 +557,7 @@ def parse_event_range_response(resp: bytes) -> list[tuple[Record, list[Witness]]
         rec = _guard(decode_record, raw)
         witnesses, offset = _read_witness_set(payload, offset)
         results.append((rec, witnesses))
+    _expect_end(payload, offset, "event range response")
     return results
 
 
@@ -520,6 +567,7 @@ def parse_event_range_response(resp: bytes) -> list[tuple[Record, list[Witness]]
 
 
 def build_event_get(origin: str, event_id: bytes) -> bytes:
+    _require_id32(event_id, "event_id")
     out = struct.pack(">B", OP_EVENT_GET)
     out += _enc_text16(origin)
     out += event_id
@@ -532,6 +580,7 @@ def parse_event_get_response(resp: bytes) -> tuple[Record, list[Witness]]:
     raw, offset = _read_blob32(payload, offset)
     rec = _guard(decode_record, raw)
     witnesses, offset = _read_witness_set(payload, offset)
+    _expect_end(payload, offset, "event get response")
     return rec, witnesses
 
 
@@ -567,6 +616,7 @@ def parse_board_list_response(resp: bytes, aggregate: bool = False) -> list[Boar
                 origin=board_origin,
             )
         )
+    _expect_end(payload, offset, "board list response")
     return boards
 
 
@@ -590,6 +640,7 @@ def build_article_get(
     elif selector_type == SELECTOR_BY_ID:
         if not isinstance(selector, bytes):
             raise ProtocolError("by-ID selector must be bytes")
+        _require_id32(selector, "article selector")
         out += selector
     else:
         raise ProtocolError(f"invalid selector type {selector_type}")
@@ -599,7 +650,8 @@ def build_article_get(
 
 def parse_article_get_response(resp: bytes) -> ArticleView:
     status, payload = parse_response(resp)
-    return _decode_article_view(payload)
+    view = _decode_article_view(payload)
+    return view
 
 
 def _decode_article_view(data: bytes) -> ArticleView:
@@ -642,6 +694,7 @@ def _decode_article_view(data: bytes) -> ArticleView:
     author_check, offset = _read_text16(data, offset)
 
     body_bytes, offset = _read_blob32(data, offset)
+    _expect_end(data, offset, "article view")
 
     vis_map = {0: "active", 1: "cancelled", 2: "superseded"}
     body_map = {0: "available", 1: "unavailable", 2: "purged"}
@@ -715,6 +768,7 @@ def parse_article_list_response(resp: bytes, aggregate: bool = False) -> QueryRe
         item, offset = _decode_article_list_item(payload, offset)
         item.origin = item_origin
         items.append(item)
+    _expect_end(payload, offset, "article list response")
     return QueryResponse(results=items)
 
 
@@ -850,6 +904,7 @@ def parse_article_search_response(resp: bytes, aggregate: bool = False) -> Searc
                 origin=result_origin,
             )
         )
+    _expect_end(payload, offset, "article search response")
     return SearchResponse(results=results, total=total, truncated=bool(truncated))
 
 
@@ -873,10 +928,17 @@ def build_article_query(
     out = struct.pack(">B", OP_ARTICLE_QUERY)
     out += _enc_text16(origin)
     out += _enc_text16(board)
+    if len(filters) > 0xFF:
+        raise ProtocolError(f"filter count {len(filters)} exceeds 255")
     out += struct.pack(">B", len(filters))
     for field_id, operator, value_type, value in filters:
         if isinstance(value, str):
             value = value.encode("utf-8")
+        for name, v in (("field_id", field_id), ("operator", operator), ("value_type", value_type)):
+            if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 0xFF:
+                raise ProtocolError(f"{name} must be 0-255, got {v!r}")
+        if value_type not in (0x01, 0x02, 0x03, 0x04):
+            raise ProtocolError(f"value_type must be 0x01-0x04, got {value_type:#x}")
         out += struct.pack(">B", field_id)
         out += struct.pack(">B", operator)
         out += struct.pack(">B", value_type)
@@ -897,6 +959,7 @@ def parse_article_query_response(resp: bytes) -> QueryResponse:
     for _ in range(count):
         item, offset = _decode_article_list_item(payload, offset)
         items.append(item)
+    _expect_end(payload, offset, "article query response")
     return QueryResponse(results=items)
 
 
@@ -922,10 +985,12 @@ def parse_article_body_response(resp: bytes) -> bytes:
         origin, offset = _read_text16(payload, 0)
         hostname, offset = _read_text16(payload, offset)
         port, offset = _read_u16(payload, offset)
+        _expect_end(payload, offset, "body redirect")
         raise BodyRedirectError(origin, hostname, port)
     if status == STATUS_ERROR:
         parse_response(resp)
-    body, _ = _read_blob32(payload, 0)
+    body, offset = _read_blob32(payload, 0)
+    _expect_end(payload, offset, "article body response")
     return body
 
 
@@ -935,6 +1000,7 @@ def parse_article_body_response(resp: bytes) -> bytes:
 
 
 def build_user_get(origin: str, pubkey: bytes) -> bytes:
+    _require_id32(pubkey, "pubkey")
     out = struct.pack(">B", OP_USER_GET)
     out += _enc_text16(origin)
     out += struct.pack(">B", len(pubkey)) + pubkey
@@ -952,6 +1018,7 @@ def parse_user_get_response(resp: bytes) -> UserInfo:
     created_at, offset = _read_i64(payload, offset)
     revoked, offset = _read_u8(payload, offset)
     revoked_seq, offset = _read_u64(payload, offset)
+    _expect_end(payload, offset, "user get response")
     return UserInfo(
         pubkey=pubkey.hex(),
         username=username,
@@ -1002,6 +1069,7 @@ def parse_user_list_response(resp: bytes) -> list[UserInfo]:
                 origin=origin,
             )
         )
+    _expect_end(payload, offset, "user list response")
     return users
 
 
@@ -1011,6 +1079,7 @@ def parse_user_list_response(resp: bytes) -> list[UserInfo]:
 
 
 def build_ban_status(pubkey: bytes) -> bytes:
+    _require_id32(pubkey, "pubkey")
     return struct.pack(">B", OP_BAN_STATUS) + struct.pack(">B", len(pubkey)) + pubkey
 
 
@@ -1036,6 +1105,7 @@ def parse_ban_status_response(resp: bytes) -> BanStatus:
                 body_size=body_size,
             )
         )
+    _expect_end(payload, offset, "ban status response")
     return BanStatus(punishments=punishments)
 
 
@@ -1045,6 +1115,7 @@ def parse_ban_status_response(resp: bytes) -> BanStatus:
 
 
 def build_event_body(origin: str, event_id: bytes) -> bytes:
+    _require_id32(event_id, "event_id")
     out = struct.pack(">B", OP_EVENT_BODY)
     out += _enc_text16(origin)
     out += event_id
@@ -1053,5 +1124,6 @@ def build_event_body(origin: str, event_id: bytes) -> bytes:
 
 def parse_event_body_response(resp: bytes) -> bytes:
     status, payload = parse_response(resp)
-    body, _ = _read_blob32(payload, 0)
+    body, offset = _read_blob32(payload, 0)
+    _expect_end(payload, offset, "event body response")
     return body

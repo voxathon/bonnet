@@ -215,6 +215,8 @@ class KindValidator:
 
     def _validate_lifecycle_control(self, intent: Intent) -> None:
         self._require_article_target(intent)
+        if intent.article_id != ZERO_ID:
+            raise ValidationError(f"{intent.kind} requires zero article_id")
         if intent.board:
             raise ValidationError(
                 f"{intent.kind} must have empty board (target tuple carries board)"
@@ -226,6 +228,8 @@ class KindValidator:
 
     def _validate_pin_thread_control(self, intent: Intent) -> None:
         self._require_article_target(intent)
+        if intent.article_id != ZERO_ID:
+            raise ValidationError(f"{intent.kind} requires zero article_id")
         if intent.board:
             raise ValidationError(f"{intent.kind} must have empty board")
 
@@ -245,9 +249,14 @@ class KindValidator:
 
         if intent.kind == KIND_BOARD_CREATE:
             _validate_identity_text("board", intent.board)
-            if intent.metadata.get_bytes(1) is None:
+            owner = intent.metadata.get_bytes(1)
+            if owner is None:
                 raise ValidationError(
                     "bonnet.board.create requires metadata field 1 (owner public key)"
+                )
+            if len(owner) != 32:
+                raise ValidationError(
+                    "bonnet.board.create metadata field 1 (owner public key) must be 32 bytes"
                 )
 
     # ------------------------------------------------------------------
@@ -280,9 +289,14 @@ class KindValidator:
         if username is None:
             raise ValidationError("bonnet.user.register requires metadata field 1 (username)")
         _validate_identity_text("username", username)
-        if m.get_bytes(2) is None:
+        user_key = m.get_bytes(2)
+        if user_key is None:
             raise ValidationError(
                 "bonnet.user.register requires metadata field 2 (user public key)"
+            )
+        if len(user_key) != 32:
+            raise ValidationError(
+                "bonnet.user.register metadata field 2 (user public key) must be 32 bytes"
             )
         flags = m.get_u64(3)
         if flags is None:
@@ -293,9 +307,16 @@ class KindValidator:
     def _validate_user_revoke(self, intent: Intent) -> None:
         self._require_event_target(intent)
         self._require_empty_board(intent)
-        if intent.metadata.get_bytes(1) is None:
+        if intent.article_id != ZERO_ID:
+            raise ValidationError(f"{intent.kind} requires zero article_id")
+        revoked = intent.metadata.get_bytes(1)
+        if revoked is None:
             raise ValidationError(
                 "bonnet.user.revoke requires metadata field 1 (revoked user public key)"
+            )
+        if len(revoked) != 32:
+            raise ValidationError(
+                "bonnet.user.revoke metadata field 1 (revoked user public key) must be 32 bytes"
             )
 
     def _validate_user_key_rotate(self, intent: Intent) -> None:
@@ -318,6 +339,10 @@ class KindValidator:
         if new_pubkey is None:
             raise ValidationError(
                 "bonnet.user.key.rotate requires metadata field 1 (new actor public key)"
+            )
+        if len(new_pubkey) != 32:
+            raise ValidationError(
+                "bonnet.user.key.rotate metadata field 1 (new actor public key) must be 32 bytes"
             )
         if m.get_bytes(2) is None:
             raise ValidationError(
@@ -348,8 +373,13 @@ class KindValidator:
     # ------------------------------------------------------------------
 
     def _validate_report(self, intent: Intent) -> None:
-        if intent.metadata.get_bytes(1) is None:
+        culprit = intent.metadata.get_bytes(1)
+        if culprit is None:
             raise ValidationError("bonnet.report requires metadata field 1 (culprit public key)")
+        if len(culprit) != 32:
+            raise ValidationError(
+                "bonnet.report metadata field 1 (culprit public key) must be 32 bytes"
+            )
 
         has_article_target = (
             intent.target_origin
@@ -435,9 +465,14 @@ class KindValidator:
         self._require_empty_targets(intent)
 
         m = intent.metadata
-        if m.get_bytes(1) is None:
+        new_origin_key = m.get_bytes(1)
+        if new_origin_key is None:
             raise ValidationError(
                 "bonnet.origin.key.rotate requires metadata field 1 (new origin public key)"
+            )
+        if len(new_origin_key) != 32:
+            raise ValidationError(
+                "bonnet.origin.key.rotate metadata field 1 (new origin public key) must be 32 bytes"
             )
         if m.get_bytes(2) is None:
             raise ValidationError(
