@@ -376,6 +376,152 @@ async def test_concurrent_calls_in_one_session_are_serialized():
     assert events == ["load", "a_running", "save", "load", "b_running", "save"]
 
 
+def _seeded_race_store(sid: str) -> dict:
+    """A session store pre-seeded at `in_board`, plus a matching FakeCtx pair.
+
+    Returns (store, key, FakeContext class). Each span loads the seed into its
+    own task-local context — mirroring how ASGI hands every HTTP request a
+    fresh copy — so cursor movement inside one span is invisible to the other
+    except through the store.
+    """
+    from bonnet.gateway import cursor
+    from bonnet.gateway import session as session_module
+
+    session_module.reset_session_state()
+    cursor.set_board("general")
+    seed = session_module.snapshot()
+    cursor.clear_board()
+
+    store: dict = {}
+    key = session_module._key()
+    store[key] = seed
+
+    class FakeCtx:
+        session_id = sid
+
+        async def get_state(self, state_key):
+            return store.get(state_key)
+
+        async def set_state(self, state_key, value):
+            store[state_key] = value
+
+    class FakeContext:
+        fastmcp_context = FakeCtx()
+
+    return store, key, FakeContext
+
+
+async def _wait_for_inflight(count: int) -> None:
+    """Spin until `count` spans are inside load -> run -> save (or time out).
+
+    Overlap is forced, not hoped for: the first span waits on a gate while
+    the second arrives, so both are provably in flight before either saves.
+    """
+    from bonnet.gateway import session as session_module
+
+    for _ in range(200):
+        if sum(session_module._inflight.values()) >= count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("spans never overlapped")
+
+
+async def test_concurrent_article_reads_clear_back_to_the_board():
+    """Parallel get_article(1) + get_article(2) must not land on a coin flip.
+
+    Both spans set different articles while overlapped; the contended
+    generation clears the article fields on save, so the session lands
+    deterministically at in_board with the board preserved. Both return
+    values are still individually correct — only the stored default is
+    neutralized, forcing an explicit target_article_id= afterwards.
+    """
+    from bonnet.gateway import cursor
+    from bonnet.gateway.session import SessionStateMiddleware
+
+    store, key, FakeContext = _seeded_race_store("article-race")
+    release = asyncio.Event()
+    middleware = SessionStateMiddleware()
+
+    async def read_one(_context):
+        cursor.set_article("general", 1, "11" * 32)
+        await release.wait()
+        return "one"
+
+    async def read_two(_context):
+        cursor.set_article("general", 2, "22" * 32)
+        return "two"
+
+    task_one = asyncio.ensure_future(middleware.on_call_tool(FakeContext(), read_one))
+    task_two = asyncio.ensure_future(middleware.on_call_tool(FakeContext(), read_two))
+    await _wait_for_inflight(2)
+    release.set()
+    assert [await task_one, await task_two] == ["one", "two"]
+
+    final = store[key]
+    assert final["board"] == "general"
+    assert final["article_board"] is None
+    assert final["article_num"] is None
+    assert final["article_id"] is None
+
+
+async def test_sequential_article_reads_keep_the_last_one():
+    """No overlap, no clearing: strictly sequential reads keep last-writer
+    semantics, which are well-defined because the order is real."""
+    from bonnet.gateway import cursor
+    from bonnet.gateway.session import SessionStateMiddleware
+
+    store, key, FakeContext = _seeded_race_store("article-sequence")
+    middleware = SessionStateMiddleware()
+
+    async def read_one(_context):
+        cursor.set_article("general", 1, "11" * 32)
+        return "one"
+
+    async def read_two(_context):
+        cursor.set_article("general", 2, "22" * 32)
+        return "two"
+
+    assert await middleware.on_call_tool(FakeContext(), read_one) == "one"
+    assert await middleware.on_call_tool(FakeContext(), read_two) == "two"
+
+    final = store[key]
+    assert final["board"] == "general"
+    assert final["article_board"] == "general"
+    assert final["article_num"] == 2
+    assert final["article_id"] == "22" * 32
+
+
+async def test_racing_a_read_with_a_harmless_call_still_clears_the_article():
+    """The contention flag cannot tell which spans move the cursor, so any
+    overlap clears the article fields. A get raced with a no-op costs one
+    explicit target_article_id= — the documented tradeoff for never keeping
+    a coin-flip default."""
+    from bonnet.gateway import cursor
+    from bonnet.gateway.session import SessionStateMiddleware
+
+    store, key, FakeContext = _seeded_race_store("article-harmless-race")
+    release = asyncio.Event()
+    middleware = SessionStateMiddleware()
+
+    async def read_one(_context):
+        cursor.set_article("general", 1, "11" * 32)
+        await release.wait()
+        return "one"
+
+    async def harmless(_context):
+        return "lists-things"
+
+    task_one = asyncio.ensure_future(middleware.on_call_tool(FakeContext(), read_one))
+    task_two = asyncio.ensure_future(middleware.on_call_tool(FakeContext(), harmless))
+    await _wait_for_inflight(2)
+    release.set()
+    assert [await task_one, await task_two] == ["one", "lists-things"]
+
+    final = store[key]
+    assert final["board"] == "general"
+    assert final["article_num"] is None
+
+
 # --- the snapshot itself ---------------------------------------------------
 
 

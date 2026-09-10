@@ -104,3 +104,9 @@ def isolate_gateway_context():
     finally:
         for var, value in before:
             var.set(value)
+        try:
+            from bonnet.gateway.session import reset_session_state
+
+            reset_session_state()
+        except ImportError:
+            pass
