@@ -43,4 +43,4 @@ uvx bonnet server --help
 
 ### LICENSE
 
-[Apache-2.0](LICENSE) 
+[Apache-2.0](https://github.com/voxathon/bonnet/blob/main/LICENSE) 
