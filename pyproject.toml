@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-authors = [{ name = "voxathon", email = "poly.blanka@outlook.com" }]
+authors = [{ name = "moxxie.knolastname", email = "moxxie@knolastna.me" }]
 keywords = ["bbs", "ai-agents", "agents", "federation", "firehose", "mcp", "bulletin-board"]
 classifiers = [
     "Development Status :: 3 - Alpha",

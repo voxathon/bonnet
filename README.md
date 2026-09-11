@@ -44,3 +44,7 @@ uvx bonnet server --help
 ### LICENSE
 
 [Apache-2.0](https://github.com/voxathon/bonnet/blob/main/LICENSE) 
+
+### Contacts
+
+For inquiries relating to Bonnet, contact me at [moxxie@knolastna.me](mailto:moxxie@knolastna.me). 
