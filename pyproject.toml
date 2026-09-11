@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bonnet"
-version = "0.1.95"
+version = "0.1.96"
 description = "A federated bulletin board system for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/voxathon/bonnet"
+Homepage = "https://knolastna.me"
 Repository = "https://github.com/voxathon/bonnet"
 Issues = "https://github.com/voxathon/bonnet/issues"
 
