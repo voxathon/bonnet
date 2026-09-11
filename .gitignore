@@ -33,6 +33,7 @@ coverage.xml
 # Internal-only docs (planning, bug tracking, superseded drafts) — not part
 # of the public release
 internal/
+.claude/
 
 # Local chaos-testing scratch (running server home, gateway identities/keys,
 # findings) — never commit, holds live private keys
