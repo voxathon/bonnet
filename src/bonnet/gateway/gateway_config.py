@@ -51,6 +51,17 @@ KNOWN_KEYS = frozenset(
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
+#: Keys recognized under the [gateway.oauth] table.
+KNOWN_OAUTH_KEYS = frozenset(
+    {
+        "enabled",
+        "allow_all",
+        "blocked_iss",
+        "audience",
+        "allow_private_iss",
+    }
+)
+
 _SAMPLE = """\
 # Bonnet gateway configuration sample (http mode only).
 # Stdio needs no file: there is no host/port/TLS to configure for a process
@@ -85,7 +96,34 @@ _SAMPLE = """\
 # # wins over this file). Pruning keeps the newest N boot files.
 # # log_level = "DEBUG"
 # # log_keep_files = 20
+# #
+# # OIDC JWT verifier (http only). Disabled by default: no discovery/JWKS
+# # fetches happen until enabled. When enabled, any https OIDC issuer is
+# # accepted via dynamic discovery (allow_all) unless listed in blocked_iss.
+# # Tenants are numeric t<N> derived strictly from (iss, sub) — email is
+# # never read. Env BONNET_OAUTH=off wins over this file (kill switch).
+# # [gateway.oauth]
+# # enabled = true
+# # allow_all = true
+# # blocked_iss = []
+# # # Required when enabled: this gateway's own client ID / API identifier.
+# # # Every accepted JWT must carry it as aud (fail-closed).
+# # audience = "bonnet-public-gateway"
+# # # Escape hatch for LAN/dev IdPs (http, localhost, 192.168.x). Default
+# # # false: discovery URLs are attacker-influenced, so private hosts are
+# # # an SSRF line. Leave off for public-utility.
+# # allow_private_iss = false
 """
+
+
+@dataclass
+class OAuthConfig:
+    enabled: bool = False
+    allow_all: bool = True
+    blocked_iss: list[str] = field(default_factory=list)
+    audience: str | None = None
+    allow_private_iss: bool = False
+    unknown_keys: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -100,7 +138,9 @@ class GatewayConfig:
     url: str | None = None
     log_level: str | None = None
     log_keep_files: int | None = None
+    oauth: OAuthConfig | None = None
     unknown_keys: list[str] = field(default_factory=list)
+    oauth_unknown_keys: list[str] = field(default_factory=list)
 
 
 def load(path: str) -> GatewayConfig | None:
@@ -118,7 +158,23 @@ def load(path: str) -> GatewayConfig | None:
     table = data.get("gateway", {})
     if not isinstance(table, dict):
         raise ValueError("config: [gateway] must be a table")
-    unknown = sorted(k for k in table if k not in KNOWN_KEYS)
+    unknown = sorted(k for k in table if k not in KNOWN_KEYS and k != "oauth")
+    oauth_raw = table.get("oauth", None)
+    oauth: OAuthConfig | None = None
+    oauth_unknown: list[str] = []
+    if oauth_raw is not None:
+        if not isinstance(oauth_raw, dict):
+            raise ValueError("config: [gateway.oauth] must be a table")
+        oauth_unknown = sorted(k for k in oauth_raw if k not in KNOWN_OAUTH_KEYS)
+        blocked = oauth_raw.get("blocked_iss", [])
+        oauth = OAuthConfig(
+            enabled=bool(oauth_raw.get("enabled", False)),
+            allow_all=bool(oauth_raw.get("allow_all", True)),
+            blocked_iss=list(blocked) if isinstance(blocked, list) else blocked,
+            audience=oauth_raw.get("audience"),
+            allow_private_iss=bool(oauth_raw.get("allow_private_iss", False)),
+            unknown_keys=oauth_unknown,
+        )
     return GatewayConfig(
         transport=table.get("transport"),
         host=table.get("host"),
@@ -130,7 +186,9 @@ def load(path: str) -> GatewayConfig | None:
         url=table.get("url") or None,
         log_level=table.get("log_level"),
         log_keep_files=table.get("log_keep_files"),
+        oauth=oauth,
         unknown_keys=unknown,
+        oauth_unknown_keys=oauth_unknown,
     )
 
 
@@ -188,6 +246,58 @@ def validate(cfg: GatewayConfig) -> None:
                 f"config: gateway.log_keep_files must be an integer >= 1, "
                 f"got {cfg.log_keep_files!r}"
             )
+    if cfg.oauth is not None:
+        _validate_oauth(cfg.oauth)
+
+
+def _validate_oauth(o: OAuthConfig) -> None:
+    if not isinstance(o.enabled, bool):
+        raise ValueError(f"config: gateway.oauth.enabled must be true or false, got {o.enabled!r}")
+    if not isinstance(o.allow_all, bool):
+        raise ValueError(
+            f"config: gateway.oauth.allow_all must be true or false, got {o.allow_all!r}"
+        )
+    if not isinstance(o.allow_private_iss, bool):
+        raise ValueError(
+            f"config: gateway.oauth.allow_private_iss must be true or false, "
+            f"got {o.allow_private_iss!r}"
+        )
+    if not isinstance(o.blocked_iss, list) or any(
+        not isinstance(v, str) for v in o.blocked_iss
+    ):
+        raise ValueError("config: gateway.oauth.blocked_iss must be a list of URLs")
+    for raw in o.blocked_iss:
+        _validate_iss(raw)
+    if o.enabled:
+        if o.audience is None or (
+            not isinstance(o.audience, str) or not o.audience.strip()
+        ):
+            raise ValueError(
+                "config: gateway.oauth.audience is required when oauth is enabled "
+                "(every accepted JWT must carry it as aud)"
+            )
+    elif o.audience is not None and (
+        not isinstance(o.audience, str) or not o.audience.strip()
+    ):
+        raise ValueError(
+            f"config: gateway.oauth.audience must be a non-empty string, got {o.audience!r}"
+        )
+
+
+def _validate_iss(raw: object) -> None:
+    from urllib.parse import urlsplit
+
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"config: gateway.oauth.blocked_iss entry must be a URL, got {raw!r}")
+    parsed = urlsplit(raw.strip())
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError(
+            f"config: gateway.oauth.blocked_iss entry must be https://host, got {raw!r}"
+        )
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise ValueError(
+            f"config: gateway.oauth.blocked_iss entry takes just scheme+host, got {raw!r}"
+        )
 
 
 def _validate_path(raw: object) -> None:

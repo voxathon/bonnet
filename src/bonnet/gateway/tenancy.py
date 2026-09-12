@@ -106,24 +106,47 @@ def is_anonymous() -> bool:
 _identity_stores: dict[str, IdentityStore] = {}
 _origin_stores: dict[str, OriginStore] = {}
 
+#: Bound on open per-tenant stores. Public-utility scale means 100k tenants
+#: must not mean 100k open sqlite handles — LRU eviction closes the coldest.
+_STORE_CACHE_LIMIT = 500
+
+
+def _cache_get(cache: dict, path: str):
+    store = cache.get(path)
+    if store is not None:
+        cache.pop(path)
+        cache[path] = store
+    return store
+
+
+def _cache_put(cache: dict, path: str, store) -> None:
+    cache[path] = store
+    while len(cache) > _STORE_CACHE_LIMIT:
+        oldest, evicted = next(iter(cache.items())), None
+        evicted = cache.pop(oldest)
+        try:
+            evicted.close()
+        except Exception as e:
+            log_msg(f"TENANCY: evicting store failed: {type(e).__name__}: {e}")
+
 
 def identity_store() -> IdentityStore:
     """The current tenant's signing identities."""
     path = identities_db_path()
-    store = _identity_stores.get(path)
+    store = _cache_get(_identity_stores, path)
     if store is None:
         store = IdentityStore(path)
-        _identity_stores[path] = store
+        _cache_put(_identity_stores, path, store)
     return store
 
 
 def origin_store() -> OriginStore:
     """The current tenant's joined origins."""
     path = origins_db_path()
-    store = _origin_stores.get(path)
+    store = _cache_get(_origin_stores, path)
     if store is None:
         store = OriginStore(path)
-        _origin_stores[path] = store
+        _cache_put(_origin_stores, path, store)
     return store
 
 
