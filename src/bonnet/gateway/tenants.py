@@ -47,6 +47,8 @@ __all__ = [
     "get_tenant",
     "set_enabled",
     "remove_tenant",
+    "get_or_create_oauth_tenant",
+    "list_oauth_bindings",
 ]
 
 
@@ -140,3 +142,32 @@ def remove_tenant(tenant_id: str, db_path: str | None = None) -> None:
     path = Path(tenant_dir(tenant_id))
     if path.exists():
         shutil.rmtree(path)
+
+
+def get_or_create_oauth_tenant(
+    iss: str, sub: str, db_path: str | None = None
+) -> str:
+    """Return the numeric t<N> tenant for (iss, sub), minting it on first sight.
+
+    One account, both paths: the returned tenant can later hold bnt_ API keys
+    via `key add`, and revoking those keys never affects the OAuth binding.
+    """
+    registry = Registry(db_path)
+    try:
+        return registry.get_or_create_oauth_tenant(iss, sub)
+    finally:
+        registry.close()
+
+
+def list_oauth_bindings(
+    iss: str | None = None,
+    since: int | None = None,
+    inactive_before: int | None = None,
+    db_path: str | None = None,
+) -> list[dict]:
+    """Triage view for manual drops: filter by issuer, age, inactivity."""
+    registry = Registry(db_path)
+    try:
+        return registry.list_oauth_bindings(iss, since, inactive_before)
+    finally:
+        registry.close()

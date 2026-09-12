@@ -193,6 +193,11 @@ class AuthMiddleware(Middleware):
             tenant = tenancy.resolve_key(candidate)
             if tenant is not None:
                 break
+        if tenant is None:
+            # Second credential type: OIDC JWT (never bnt_-shaped). One
+            # account, both paths — a verified (iss, sub) returns the same
+            # t<N> tenant that `key add` can later arm with fixed keys.
+            tenant = self._resolve_oauth(candidates)
         if tenant is not None:
             tenancy.current_tenant.set(tenant)
             tenancy.current_auth_status.set(tenancy.AUTH_OK)
@@ -205,6 +210,23 @@ class AuthMiddleware(Middleware):
             # username from whatever ran in this context before it.
             current_username.set(None)
             current_password.set("")
+
+    @staticmethod
+    def _resolve_oauth(candidates: list[str]) -> str | None:
+        from bonnet.gateway import oauth, tenants
+
+        for candidate in candidates:
+            if not candidate or candidate.startswith("bnt_") or "." not in candidate:
+                continue
+            try:
+                iss, sub = oauth.verify_token(candidate)
+            except Exception:
+                continue
+            try:
+                return tenants.get_or_create_oauth_tenant(iss, sub)
+            except Exception:
+                return None
+        return None
 
     async def on_request(self, context: MiddlewareContext, call_next):
         self._set_auth_context(context)
@@ -380,6 +402,14 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("tenant_id")
     add.add_argument("--note", default="", help="free-text note stored with the tenant")
     tenant.add_parser("list", help="list tenants")
+    links = tenant.add_parser("links", help="list OIDC (iss, sub) bindings for triage")
+    links.add_argument("--issuer", default=None, help="only bindings for this iss")
+    links.add_argument("--since", type=int, default=None, help="only created at/after epoch")
+    links.add_argument(
+        "--inactive-before", type=int, default=None, help="only last seen before epoch"
+    )
+    links.add_argument("--limit", type=int, default=200)
+    links.add_argument("--offset", type=int, default=0)
     for name, helptext in (("enable", "re-enable a tenant"), ("disable", "disable a tenant")):
         sub = tenant.add_parser(name, help=helptext)
         sub.add_argument("tenant_id")
@@ -428,6 +458,20 @@ def _run_admin(args) -> int:
             elif args.action in ("enable", "disable"):
                 tenants.set_enabled(args.tenant_id, args.action == "enable")
                 print(f"tenant {args.tenant_id} {args.action}d")
+            elif args.action == "links":
+                rows = tenants.list_oauth_bindings(
+                    args.issuer, args.since, args.inactive_before
+                )
+                page = rows[args.offset : args.offset + args.limit]
+                if not page:
+                    print("no bindings")
+                for row in page:
+                    sub = row["oauth_sub"]
+                    masked = (sub[:6] + "..." + sub[-4:]) if len(sub) > 12 else (sub[:4] + "...")
+                    print(
+                        f"{row['tenant_id']}\t{row['oauth_iss']}\t{masked}\t"
+                        f"created={row['created_at']}\tseen={row['last_seen']}"
+                    )
             elif args.action == "remove":
                 if tenants.get_tenant(args.tenant_id) is None:
                     raise TenantError(f"no such tenant {args.tenant_id!r}")
@@ -580,6 +624,8 @@ def _run_check_config(config_path: str) -> None:
         raise SystemExit(1)
     for key in cfg.unknown_keys:
         print(f"warning: unrecognized config key '{key}' (ignored)", file=sys.stderr)
+    for key in getattr(cfg, "oauth_unknown_keys", []):
+        print(f"warning: unrecognized oauth config key '{key}' (ignored)", file=sys.stderr)
     print(f"OK: {config_path} is valid.")
     print(f"  transport: {cfg.transport or '(default: stdio)'}")
     print(f"  listen: {cfg.host or '(default: 127.0.0.1)'}:{cfg.port or '(default: 8080)'}")
@@ -589,6 +635,14 @@ def _run_check_config(config_path: str) -> None:
     print(f"  gating: {'off' if cfg.gating is False else 'on'}")
     print(f"  log_level: {cfg.log_level or '(default: $BONNET_LOG_LEVEL or DEBUG)'}")
     print(f"  log_keep_files: {cfg.log_keep_files or '(default: 20)'}")
+    oauth = getattr(cfg, "oauth", None)
+    if oauth is None or not oauth.enabled:
+        print("  oauth: off (default)")
+    else:
+        print(
+            f"  oauth: on (allow_all={'on' if oauth.allow_all else 'off'}, "
+            f"audience={oauth.audience}, blocked={len(oauth.blocked_iss or [])})"
+        )
 
 
 def run(argv: list[str] | None = None):
@@ -648,6 +702,8 @@ def run(argv: list[str] | None = None):
     if gw_config:
         for key in gw_config.unknown_keys:
             print(f"warning: unrecognized config key '{key}' (ignored)", file=sys.stderr)
+        for key in getattr(gw_config, "oauth_unknown_keys", []):
+            print(f"warning: unrecognized oauth config key '{key}' (ignored)", file=sys.stderr)
         try:
             gateway_config.validate(gw_config)
         except ValueError as exc:

@@ -98,8 +98,26 @@ def tenant_dir(tenant: str | None = None) -> str:
     isolation is enforced by the filesystem: there is no query that can forget
     its WHERE clause, deleting a tenant is removing a tree, and backing one up
     is archiving a directory.
+
+    Numeric JIT tenants (t<N>) shard two levels deep — `tenants/t/XX/YY/t<N>` —
+    so 100k+ tenants never share one flat directory. Named tenants and the
+    built-ins (`default`, `anonymous`) stay flat for backward compatibility,
+    as does any legacy flat t<N> directory left from before sharding.
     """
-    return os.path.join(gateway_dir(), "tenants", tenant or current_tenant.get())
+    import hashlib
+    import re
+
+    name = tenant or current_tenant.get()
+    base = os.path.join(gateway_dir(), "tenants")
+    if re.fullmatch(r"t\d+", name or ""):
+        flat = os.path.join(base, name)
+        # os.path.exists here is a legacy probe, not a hot-path stat for
+        # named tenants: only numeric JIT names hit the filesystem.
+        if os.path.exists(flat):
+            return flat
+        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+        return os.path.join(base, "t", digest[:2], digest[2:4], name)
+    return os.path.join(base, name)
 
 
 def identities_db_path(tenant: str | None = None) -> str:
