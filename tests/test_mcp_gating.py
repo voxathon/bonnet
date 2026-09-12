@@ -368,6 +368,87 @@ async def test_gating_off_also_lifts_the_call_block(bridge, monkeypatch):
         assert await c.call_tool("list_boards", {"origin": ORIGIN}) is not None
 
 
+# --- per-request header override -------------------------------------------
+
+
+def _with_list_override(monkeypatch, value: bool):
+    """Pretend this request did (or did not) send X-Bonnet-Gating: off.
+
+    Patching `list_override_off` rather than `get_http_request`: the latter
+    is also read by FastMCP's own stack, which needs the real request.
+    Header parsing itself is covered by the unit tests below, which call
+    `list_override_off` directly with no client involved.
+    """
+    monkeypatch.setattr(gating, "list_override_off", lambda: value)
+
+
+async def test_gating_header_off_shows_everything_but_call_still_blocked(bridge, monkeypatch):
+    """X-Bonnet-Gating: off is visibility-only: the list opens up like
+    BONNET_GATING=off, but on_call_tool still refuses unready calls."""
+    _with_list_override(monkeypatch, True)
+
+    assert "publish_article" in await _visible()
+
+    async with Client(tools.mcp) as c:
+        with pytest.raises(Exception) as exc:
+            await c.call_tool("publish_article", {"board": "b", "subject": "s", "body": "c"})
+    assert "unavailable" in str(exc.value)
+
+
+async def test_gating_header_garbage_stays_gated(bridge, monkeypatch):
+    _with_list_override(monkeypatch, False)
+
+    assert "publish_article" not in await _visible()
+
+
+async def test_gating_header_is_per_request(bridge, monkeypatch):
+    _with_list_override(monkeypatch, True)
+    assert "publish_article" in await _visible()
+
+    _with_list_override(monkeypatch, False)
+    assert "publish_article" not in await _visible()
+
+
+def _fake_request(headers: dict):
+    class FakeHeaders(dict):
+        def get(self, key, default=""):
+            for k, v in self.items():
+                if isinstance(k, str) and k.lower() == key.lower():
+                    return v
+            return default
+
+    return type("R", (), {"headers": FakeHeaders(headers)})()
+
+
+def test_list_override_off_parses_header(monkeypatch):
+    import fastmcp.server.dependencies as deps
+
+    for raw, expected in [
+        ("off", True),
+        (" OFF ", True),
+        ("false", True),
+        ("0", True),
+        ("no", True),
+        ("yes", False),
+        ("", False),
+    ]:
+        monkeypatch.setattr(deps, "get_http_request", lambda r=_fake_request({"X-Bonnet-Gating": raw}): r)
+        assert gating.list_override_off() is expected
+
+    monkeypatch.setattr(deps, "get_http_request", lambda: _fake_request({}))
+    assert gating.list_override_off() is False
+
+
+def test_list_override_off_is_stdio_safe(monkeypatch):
+    import fastmcp.server.dependencies as deps
+
+    def boom():
+        raise RuntimeError("no http request")
+
+    monkeypatch.setattr(deps, "get_http_request", boom)
+    assert gating.list_override_off() is False
+
+
 # --- narrowed by the relay's actual PERMISSIONS ----------------------------
 
 
