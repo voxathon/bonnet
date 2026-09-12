@@ -40,6 +40,11 @@ default; widening it exposes a process holding every tenant's private keys, so
 it takes a deliberate MCP_HOST. `sse` is the legacy MCP transport, kept for
 clients that cannot speak Streamable HTTP; prefer `--http`.
 
+A client may send `X-Bonnet-Gating: off` to see every tool in the list
+response (a per-request, visibility-only debugging aid — unready calls are
+still refused with what is missing). Send it on each `list_tools` request;
+nothing is persisted, and there is no equivalent in stdio.
+
 Tenants are administered from this same entry point — `bonnet gateway tenant
 add`, `key revoke`, and so on — wrapping `gateway.tenants`, which is also the
 programmatic path for an external script. Deliberately not MCP tools: see that

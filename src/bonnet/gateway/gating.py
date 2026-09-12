@@ -49,6 +49,12 @@ being checked for. And BONNET_GATING=off pins everything visible, because
 "the tool isn't there" is a far worse thing to debug than "the tool returned
 an error".
 
+**Per-request escape hatch.** A client may send `X-Bonnet-Gating: off` to
+see every tool in the list response, the same answer BONNET_GATING=off gives
+there. It is visibility-only — `on_call_tool` ignores it, so an unready call
+is still refused with what is missing and what fixes it. HTTP-only,
+per-request, garbage fails closed to gated.
+
 **The one exception, and why it is not one.** An anonymous tenant (see
 `tenancy`) never sees `register` or `login`. That looks like a violation of
 the rule above, and is its logical end: the rule exists so a caller is never
@@ -125,6 +131,52 @@ def gating_enabled() -> bool:
         "false",
         "no",
     )
+
+
+#: Per-request visibility override. A client sending
+#: `X-Bonnet-Gating: off` sees every tool in `on_list_tools`, the same
+#: answer `BONNET_GATING=off` gives there — a client-side footgun for
+#: remote debugging, not a capability grant. `on_call_tool` ignores it:
+#: unready calls are still refused with what is missing and what fixes it.
+GATING_HEADER = "x-bonnet-gating"
+
+_OFF_VALUES = frozenset({"off", "0", "false", "no"})
+
+
+def list_override_off() -> bool:
+    """Whether this request asked out of list-filtering via the gating header.
+
+    HTTP-only and per-request: there is no HTTP request in stdio, and nothing
+    is persisted — the client re-sends the header on each `list_tools`
+    request it wants unfiltered. Garbage fails closed to gated.
+    """
+    try:
+        from fastmcp.server.dependencies import get_http_request
+
+        request = get_http_request()
+    except Exception:
+        return False
+    try:
+        headers = request.headers
+    except Exception:
+        return False
+    try:
+        # Starlette Headers.get is case-insensitive; plain dicts in tests
+        # are not, so fall back to a case-insensitive scan.
+        value = headers.get(GATING_HEADER, "")
+        if not value and not isinstance(headers, dict):
+            try:
+                value = headers.get(GATING_HEADER.lower(), "")
+            except Exception:
+                value = ""
+        if not value and isinstance(headers, dict):
+            for key, val in headers.items():
+                if isinstance(key, str) and key.lower() == GATING_HEADER:
+                    value = val
+                    break
+    except Exception:
+        return False
+    return (value or "").strip().lower() in _OFF_VALUES
 
 
 def _anonymous_forbids(tool: Tool) -> str | None:
@@ -356,9 +408,19 @@ class GatingMiddleware(Middleware):
     async def on_list_tools(self, context: MiddlewareContext, call_next) -> Sequence[Tool]:
         tools = await call_next(context)
         if gating_enabled():
-            tools = [
-                t for t in tools if _anonymous_forbids(t) is None and await _missing_for(t) is None
-            ]
+            if list_override_off():
+                try:
+                    from bonnet.core.logging import log_debug
+
+                    log_debug("GATING list override", header=GATING_HEADER)
+                except Exception:
+                    pass
+            else:
+                tools = [
+                    t
+                    for t in tools
+                    if _anonymous_forbids(t) is None and await _missing_for(t) is None
+                ]
         # Outside the gating check on purpose: BONNET_GATING=off suppresses
         # filtering, not the report that this session is degraded.
         warning = _auth_warning()
