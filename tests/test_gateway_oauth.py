@@ -90,7 +90,13 @@ def test_verify_ok_and_aud_required(oauth_env, rsa_pair, monkeypatch):
     with pytest.raises(ValueError, match="aud"):
         oauth.verify_token(bad)
     # none alg rejected
-    none_tok = jwt.encode({"iss": iss, "sub": "x", "aud": "bonnet-test"}, "s", algorithm="HS256")
+    # Dummy key is never verified (only parse_unverified reads this token);
+    # 32+ bytes to stay above PyJWT's InsecureKeyLengthWarning floor.
+    none_tok = jwt.encode(
+        {"iss": iss, "sub": "x", "aud": "bonnet-test"},
+        "test-only-hmac-key-32-bytes!!!!!",
+        algorithm="HS256",
+    )
     hdr, _ = oauth.parse_unverified(none_tok)
     assert hdr["alg"] == "HS256"  # sanity; RS-only path below uses crafted header
     forged = "e30.e30.c2ln"  # header.alg=none shape
