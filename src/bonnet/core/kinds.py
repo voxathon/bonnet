@@ -31,6 +31,7 @@ KIND_THREAD_REOPEN = "bonnet.thread.reopen"
 KIND_BOARD_CREATE = "bonnet.board.create"
 KIND_BOARD_CLOSE = "bonnet.board.close"
 KIND_BOARD_REOPEN = "bonnet.board.reopen"
+KIND_BOARD_PURGE = "bonnet.board.purge"
 KIND_USER_REGISTER = "bonnet.user.register"
 KIND_USER_REVOKE = "bonnet.user.revoke"
 # An actor succeeding its own signing key. Distinct from
@@ -108,6 +109,7 @@ BOARD_LIFECYCLE_KINDS = frozenset(
         KIND_BOARD_CREATE,
         KIND_BOARD_CLOSE,
         KIND_BOARD_REOPEN,
+        KIND_BOARD_PURGE,
     }
 )
 
@@ -145,6 +147,7 @@ ALL_KNOWN_KINDS = frozenset(
         KIND_BOARD_CREATE,
         KIND_BOARD_CLOSE,
         KIND_BOARD_REOPEN,
+        KIND_BOARD_PURGE,
         KIND_USER_REGISTER,
         KIND_USER_REVOKE,
         KIND_USER_KEY_ROTATE,

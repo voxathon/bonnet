@@ -49,7 +49,9 @@ from bonnet.core.kinds import (
     KIND_ARTICLE_PURGE,
     KIND_ARTICLE_RESTORE,
     KIND_ARTICLE_UNPIN,
+    KIND_BOARD_CLOSE,
     KIND_BOARD_CREATE,
+    KIND_BOARD_REOPEN,
     KIND_PUNISHMENT_ACK,
     KIND_PUNISHMENT_BAN,
     KIND_PUNISHMENT_PERMABAN,
@@ -772,6 +774,25 @@ class FirehoseCommandHandler:
                     if existing_board["owner_pubkey"] != claimed_owner:
                         return _error(0x0009, f"Board '{board}' is already owned by someone else")
                     return _error(0x0009, f"Board '{board}' already exists")
+
+            # Board close/reopen name a real board and a real state change:
+            # a close for a name nobody created (or one already purged, whose
+            # nav row is gone) and a duplicate close / reopen of an already-
+            # open board would otherwise append a signed no-effect record —
+            # the same "spurious claim minted into the append-only log" the
+            # board.create block above refuses. Purge is the deliberate
+            # exception (second/absent purge stays a success no-op so names
+            # remain reclaimable). Checked under the stripe so concurrent
+            # close/reopen/article on the same board serialize.
+            if kind in (KIND_BOARD_CLOSE, KIND_BOARD_REOPEN):
+                target_board = self._nav.get_board(intent.origin, board)
+                if target_board is None:
+                    return _error(0x0003, f"Board '{board}' does not exist")
+                if kind == KIND_BOARD_CLOSE:
+                    if target_board.get("closed"):
+                        return _error(0x0009, f"Board '{board}' is already closed")
+                elif not target_board.get("closed"):
+                    return _error(0x0009, f"Board '{board}' is not closed")
 
             # The identity a record is published under is the registrar's to state,
             # not the caller's to choose. Until now `actor_username` and

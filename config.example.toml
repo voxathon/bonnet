@@ -207,7 +207,7 @@ boards = ["*"]
 # match.registered = true
 # actions = ["write"]
 # commands = ["PUBLISH_RECORD"]
-# kinds = ["bonnet.board.close", "bonnet.board.reopen"]
+# kinds = ["bonnet.board.close", "bonnet.board.reopen", "bonnet.board.purge"]
 # boards = ["announce"]
 #
 # [[acl]]
@@ -218,4 +218,8 @@ boards = ["*"]
 #
 # Closed boards additionally refuse new articles and article controls
 # server-side (owner + administrator/moderator bypass; reopen always
-# allowed), even when the ACL above would permit the write.
+# allowed), even when the ACL above would permit the write. Purged boards
+# are gone: the nav entry, projection, bodies, and counter are deleted
+# (firehose/event rows kept for forensics), and the empty name may be
+# reclaimed by an ordinary later board.create — don't grant purge rights
+# you don't mean.
