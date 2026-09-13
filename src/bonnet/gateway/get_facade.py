@@ -566,9 +566,7 @@ async def call_tool_get(request: Request) -> JSONResponse:
     # Lock order is fixed everywhere: dedup lock -> snapshot lock, never
     # the reverse, so concurrent bursts cannot deadlock against each other.
     dedup_window = _dedup_window()
-    dedup_cacheable = (
-        tool_name in WRITE_TOOL_NAMES and not anonymous and dedup_window > 0
-    )
+    dedup_cacheable = tool_name in WRITE_TOOL_NAMES and not anonymous and dedup_window > 0
     dedup_key: tuple[str, str, str, str] | None = None
     dedup_lock: asyncio.Lock | None = None
     if dedup_cacheable:
