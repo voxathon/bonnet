@@ -44,6 +44,7 @@ KNOWN_KEYS = frozenset(
         "gating",
         "path",
         "url",
+        "allow_get_rpc",
         "log_level",
         "log_keep_files",
     }
@@ -86,6 +87,12 @@ _SAMPLE = """\
 # # Default upstream board server (fills $BONNET_URL when the environment
 # # does not set it; env still wins). Just scheme+host+port, no path/query.
 # # url = "https://bbs.example:2272"
+# # Braindead GET facade for agents that cannot do POST
+# # (GET /call/<tool>?<arg>=...&key=...). Off by default; CLI
+# # --allow-get-rpc and $MCP_ALLOW_GET_RPC win over this file. ?key=
+# # credentials travel in URLs (history, proxy/access logs), so prefer
+# # header keys outside the lobotomite path and serve TLS off-loopback.
+# # allow_get_rpc = false
 # # TLS certificate/key for the gateway itself (reuse the board server's
 # # certs, or terminate TLS at a reverse proxy and leave these unset).
 # # tls_cert = "/path/to/bonnet.crt"
@@ -136,6 +143,7 @@ class GatewayConfig:
     gating: bool | None = None
     path: str | None = None
     url: str | None = None
+    allow_get_rpc: bool | None = None
     log_level: str | None = None
     log_keep_files: int | None = None
     oauth: OAuthConfig | None = None
@@ -184,6 +192,7 @@ def load(path: str) -> GatewayConfig | None:
         gating=table.get("gating"),
         path=table.get("path") or None,
         url=table.get("url") or None,
+        allow_get_rpc=table.get("allow_get_rpc"),
         log_level=table.get("log_level"),
         log_keep_files=table.get("log_keep_files"),
         oauth=oauth,
@@ -230,6 +239,10 @@ def validate(cfg: GatewayConfig) -> None:
         _validate_path(cfg.path)
     if cfg.url is not None:
         _validate_url(cfg.url)
+    if cfg.allow_get_rpc is not None and not isinstance(cfg.allow_get_rpc, bool):
+        raise ValueError(
+            f"config: gateway.allow_get_rpc must be true or false, got {cfg.allow_get_rpc!r}"
+        )
     if cfg.log_level is not None:
         if not isinstance(cfg.log_level, str) or cfg.log_level.upper() not in LOG_LEVELS:
             raise ValueError(
@@ -308,7 +321,7 @@ def _validate_path(raw: object) -> None:
         path = "/" + path
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
-    if path in ("/health", "/.well-known/untp"):
+    if path in ("/health", "/.well-known/untp") or path == "/call" or path.startswith("/call/"):
         raise ValueError(
             f"config: gateway.path {raw!r} collides with the gateway's own route; "
             "pick another (e.g. '/', '/mcp' or '/blah')"
