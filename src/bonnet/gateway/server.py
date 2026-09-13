@@ -806,6 +806,7 @@ def run(argv: list[str] | None = None):
         port=port,
         path=mcp_path,
         uvicorn_config=uvicorn_config or None,
+        how_banner=False,
         middleware=[ASGIMiddleware(CleanTransportErrorMiddleware)],
     )
 
