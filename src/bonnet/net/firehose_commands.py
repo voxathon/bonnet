@@ -42,6 +42,8 @@ from bonnet.core.global_projections import NavProjection, PolicyProjection, User
 from bonnet.core.kind_validator import KindValidator, ValidationError
 from bonnet.core.kinds import (
     ALL_KNOWN_KINDS,
+    ARTICLE_CONTROL_KINDS,
+    BOARD_LIFECYCLE_KINDS,
     KIND_ARTICLE_CANCEL,
     KIND_ARTICLE_PIN,
     KIND_ARTICLE_PURGE,
@@ -316,6 +318,21 @@ class FirehoseCommandHandler:
         # here), so a blocked second registration re-checks against a
         # projection that has already caught up with the first.
         self._identity_lock = threading.Lock()
+        # Per-board striped locks for the closed-board write gate. Article
+        # publishes are high-volume, so a single global lock would serialize
+        # every board behind one mutex; stripes keep the check-then-append
+        # race (article vs close racing on the SAME board) serialized while
+        # letting different boards proceed in parallel. RLock: the publish
+        # path re-reads the same board twice (no-board check, then supersede
+        # / control-target lookup). Fixed order everywhere: stripe ->>
+        # _identity_lock -> FirehoseStore -> Dispatcher -> projections, and
+        # the stripe is never taken from inside dispatch/rebuild/sync.
+        self._board_write_stripes: list[threading.RLock] = [
+            threading.RLock() for _ in range(256)
+        ]
+
+    def _board_stripe(self, origin: str, board: str) -> threading.RLock:
+        return self._board_write_stripes[hash((origin, board)) % len(self._board_write_stripes)]
 
     def close(self) -> None:
         with self._boards_lock:
@@ -360,6 +377,62 @@ class FirehoseCommandHandler:
         aggregate index regardless of what they were actually granted.
         """
         return self._acl.check(ctx.to_auth_context(), "read", command=cmd_name, board=board)
+
+    @staticmethod
+    def _effective_board(intent) -> tuple[str, str | None]:
+        """Board a publish acts on, for ACL and closed-gate purposes.
+
+        Articles and board-lifecycle records carry it in `intent.board`;
+        article controls (cancel/restore/purge/pin/unpin/thread.close/reopen)
+        force `board == ""` and carry it in the target tuple instead. Using
+        the target here is what lets `boards = [...]` ACL rules actually
+        scope controls, and what lets the closed gate see which board a
+        control would mutate. Returns (origin, board); board is None for
+        board-agnostic kinds (register, ack, revokes, key rotation).
+        """
+        if intent.kind == KIND_ARTICLE or intent.kind in BOARD_LIFECYCLE_KINDS:
+            return (intent.origin, intent.board or None)
+        if intent.kind in ARTICLE_CONTROL_KINDS:
+            if intent.target_origin and intent.target_board:
+                return (intent.target_origin, intent.target_board)
+            return (intent.origin, None)
+        return (intent.origin, None)
+
+    def _closed_board_denial(
+        self, intent, ctx: FirehoseContext
+    ) -> tuple[bytes | None, tuple[str, str | None]]:
+        """Refuse article writes into a closed board, with owner/admin bypass.
+
+        Returns (error_response_or_None, (eff_origin, eff_board)). `reopen`
+        is never gated (else a close deadlocks); federated records never
+        reach this path — dispatch still projects/relays them verbatim.
+        """
+        eff_origin, eff_board = self._effective_board(intent)
+        if eff_board is None:
+            return None, (eff_origin, eff_board)
+        if intent.kind != KIND_ARTICLE and intent.kind not in ARTICLE_CONTROL_KINDS:
+            return None, (eff_origin, eff_board)
+        # Only a board on this origin can gate a local publish; a control
+        # naming a foreign board is some other origin's business (and its
+        # own origin will enforce it there).
+        if eff_origin != self._origin:
+            return None, (eff_origin, eff_board)
+        try:
+            board = self._nav.get_board(eff_origin, eff_board)
+        except Exception:
+            return None, (eff_origin, eff_board)
+        if board is None or not board.get("closed"):
+            return None, (eff_origin, eff_board)
+        try:
+            is_owner = bytes(board.get("owner_pubkey") or b"") == bytes(
+                intent.actor_pubkey or b""
+            ) and bool(intent.actor_pubkey)
+        except Exception:
+            is_owner = False
+        if is_owner or ctx.role in ("administrator", "moderator"):
+            return None, (eff_origin, eff_board)
+        log_warning("PUBLISH deny reason=board-closed", board=eff_board)
+        return _error(0x0004, f"Board '{eff_board}' is closed"), (eff_origin, eff_board)
 
     @staticmethod
     def _register_subject_suffix(intent) -> str:
@@ -557,13 +630,18 @@ class FirehoseCommandHandler:
 
         kind = intent.kind
         board = intent.board
+        eff_origin, eff_board = self._effective_board(intent)
         if not self._acl.check(
-            ctx.to_auth_context(), "write", command="PUBLISH_RECORD", kind=kind, board=board or None
+            ctx.to_auth_context(),
+            "write",
+            command="PUBLISH_RECORD",
+            kind=kind,
+            board=eff_board,
         ):
             log_warning(
                 "PUBLISH deny reason=acl",
                 kind=kind,
-                board=board or "-",
+                board=eff_board or board or "-",
                 actor=ctx.peer_pubkey.hex()[:16] if ctx.peer_pubkey else "-",
             )
             return _error(0x0004, "Not permitted")
@@ -576,6 +654,13 @@ class FirehoseCommandHandler:
         if kind == KIND_ARTICLE and self._nav.get_board(intent.origin, board) is None:
             log_warning("PUBLISH deny reason=no-board", board=board)
             return _error(0x0003, f"Board '{board}' does not exist - create it first")
+
+        # Closed boards refuse new articles and article controls. Owner and
+        # admin/moderator bypass; reopen is never gated; federated records
+        # never reach this handler so they still project/relay verbatim.
+        closed_denial, _ = self._closed_board_denial(intent, ctx)
+        if closed_denial is not None:
+            return closed_denial
 
         # Registration gates: privilege, and subject.
         #
@@ -612,7 +697,22 @@ class FirehoseCommandHandler:
             if kind in (KIND_USER_REGISTER, KIND_BOARD_CREATE)
             else nullcontext()
         )
-        with identity_guard:
+        # Stripe key: the board this publish would mutate, so a close racing
+        # an article on the SAME board serializes while different boards run
+        # in parallel. Board-agnostic kinds stripe by kind to avoid collapsing
+        # onto one lock. Fixed order: stripe -> _identity_lock -> store ->
+        # dispatcher -> projections; never taken from inside dispatch/sync.
+        stripe_key = (
+            (eff_origin, eff_board)
+            if eff_board
+            else (self._origin, f"kind:{kind}")
+        )
+        with self._board_stripe(*stripe_key), identity_guard:
+            # Re-check under the stripe: a close may have landed between the
+            # fast-path check above and lock acquisition.
+            locked_denial, _ = self._closed_board_denial(intent, ctx)
+            if locked_denial is not None:
+                return locked_denial
             # First writer wins on a username, within this origin. UserProjection
             # enforces this too and has to, since federated registrations never
             # reach this handler — but refusing here is what lets a local caller

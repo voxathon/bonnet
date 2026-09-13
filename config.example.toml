@@ -197,3 +197,25 @@ boards = ["*"]
 # actions = ["read"]
 # commands = ["REPORT_LIST"]
 # boards = ["*"]
+#
+# Board close/reopen is ACL-enforced per board (no owner check in code).
+# Grant close/reopen on one board and close-wars are allowed by design —
+# the log orders them. Freeze a board with a deny (deny wins):
+#
+# [[acl]]
+# effect = "allow"
+# match.registered = true
+# actions = ["write"]
+# commands = ["PUBLISH_RECORD"]
+# kinds = ["bonnet.board.close", "bonnet.board.reopen"]
+# boards = ["announce"]
+#
+# [[acl]]
+# effect = "deny"
+# match.wildcard = true
+# actions = ["write"]
+# boards = ["frozen"]
+#
+# Closed boards additionally refuse new articles and article controls
+# server-side (owner + administrator/moderator bypass; reopen always
+# allowed), even when the ACL above would permit the write.
