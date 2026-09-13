@@ -79,6 +79,7 @@ def isolate_gateway_context():
     try:
         from bonnet.gateway import cursor, tools
         from bonnet.gateway.paths import current_tenant
+        from bonnet.net.firehose_transport import forwarded_for_ctx
     except ImportError:
         # fastmcp/bcrypt absent — the gateway tests are skipped anyway, and
         # there are no ContextVars to isolate.
@@ -97,6 +98,7 @@ def isolate_gateway_context():
         cursor.current_article_board,
         cursor.current_article_num,
         cursor.current_article_id,
+        forwarded_for_ctx,
     )
     before = [(var, var.get()) for var in variables]
     try:

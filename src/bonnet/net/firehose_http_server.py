@@ -146,6 +146,7 @@ class FirehoseHTTPServer:
 
         self._max_request_size = getattr(config, "max_request_size", 10 * 1024 * 1024)
         self._cleanup_counter = 0
+        self._trusted_forwarders = set(getattr(config, "trusted_forwarders", []) or [])
 
     @staticmethod
     def _build_signer(identity: Identity, origin: str) -> BonnetSigner:
@@ -350,6 +351,7 @@ class FirehoseHTTPServer:
         import os as _os
 
         remote_addr = self._get_remote_addr(scope)
+        forwarded = self._forwarded_ips(scope)
         req_id = _os.urandom(8).hex()[:8]
         start = time.time()
         opcode = -1
@@ -359,16 +361,16 @@ class FirehoseHTTPServer:
         try:
             body = await self._read_body(receive, self._max_request_size)
         except _BodyTooLarge:
-            log_warning("REQ deny reason=request-too-large", remote=remote_addr)
+            log_warning("REQ deny reason=request-too-large", remote=remote_addr, fwd=forwarded)
             await self._send_protocol_error(send, 413, "Request too large", remote_addr, "")
             return
         if body is None:
-            log_warning("REQ deny reason=read-fail", remote=remote_addr)
+            log_warning("REQ deny reason=read-fail", remote=remote_addr, fwd=forwarded)
             await self._send_protocol_error(send, 400, "Failed to read body", remote_addr, "")
             return
 
         if len(body) == 0:
-            log_warning("REQ deny reason=empty-body", remote=remote_addr)
+            log_warning("REQ deny reason=empty-body", remote=remote_addr, fwd=forwarded)
             await self._send_protocol_error(send, 400, "Empty command body", remote_addr, "")
             return
 
@@ -381,29 +383,39 @@ class FirehoseHTTPServer:
         untp_nonce = headers.get("untp-nonce", "")
 
         if untp_version != "1":
-            log_warning("REQ deny reason=bad-version", remote=remote_addr, version=untp_version)
+            log_warning(
+                "REQ deny reason=bad-version",
+                remote=remote_addr,
+                fwd=forwarded,
+                version=untp_version,
+            )
             await self._send_protocol_error(send, 426, "Unsupported protocol", remote_addr, "")
             return
 
         if content_type != "application/vnd.bonnet.command":
-            log_warning("REQ deny reason=bad-content-type", remote=remote_addr, ctype=content_type)
+            log_warning(
+                "REQ deny reason=bad-content-type",
+                remote=remote_addr,
+                fwd=forwarded,
+                ctype=content_type,
+            )
             await self._send_protocol_error(send, 415, "Unsupported content type", remote_addr, "")
             return
 
         if not content_digest:
-            log_warning("REQ deny reason=missing-digest", remote=remote_addr)
+            log_warning("REQ deny reason=missing-digest", remote=remote_addr, fwd=forwarded)
             await self._send_protocol_error(send, 400, "Missing Content-Digest", remote_addr, "")
             return
 
         try:
             validate_content_digest(body, content_digest)
         except DigestMismatch:
-            log_warning("REQ deny reason=digest-mismatch", remote=remote_addr)
+            log_warning("REQ deny reason=digest-mismatch", remote=remote_addr, fwd=forwarded)
             await self._send_protocol_error(send, 400, "Content-Digest mismatch", remote_addr, "")
             return
 
         if not sig_input or not sig:
-            log_warning("REQ deny reason=missing-signature", remote=remote_addr)
+            log_warning("REQ deny reason=missing-signature", remote=remote_addr, fwd=forwarded)
             await self._send_protocol_error(send, 401, "Missing signature", remote_addr, "")
             return
 
@@ -437,7 +449,12 @@ class FirehoseHTTPServer:
                 error_desc = self._signature_error_desc(
                     InvalidSignature("Signature verification failed")
                 )
-                log_warning("REQ deny reason=bad-signature", remote=remote_addr, err=error_desc)
+                log_warning(
+                    "REQ deny reason=bad-signature",
+                    remote=remote_addr,
+                    fwd=forwarded,
+                    err=error_desc,
+                )
                 await self._send_protocol_error(send, 401, error_desc, remote_addr, "")
                 return
             req_msg = HTTPMessage(
@@ -452,12 +469,19 @@ class FirehoseHTTPServer:
                 )
             except SignatureError as e:
                 error_desc = self._signature_error_desc(e)
-                log_warning("REQ deny reason=bad-signature-alt", remote=remote_addr, err=error_desc)
+                log_warning(
+                    "REQ deny reason=bad-signature-alt",
+                    remote=remote_addr,
+                    fwd=forwarded,
+                    err=error_desc,
+                )
                 await self._send_protocol_error(send, 401, error_desc, remote_addr, "")
                 return
         except SignatureError as e:
             error_desc = self._signature_error_desc(e)
-            log_warning("REQ deny reason=bad-signature", remote=remote_addr, err=error_desc)
+            log_warning(
+                "REQ deny reason=bad-signature", remote=remote_addr, fwd=forwarded, err=error_desc
+            )
             await self._send_protocol_error(send, 401, error_desc, remote_addr, "")
             return
 
@@ -476,6 +500,7 @@ class FirehoseHTTPServer:
                 log_warning(
                     "REPLAY deny",
                     remote=remote_addr,
+                    fwd=forwarded,
                     key=peer_public_key.hex()[:16],
                     nonce=str(nonce)[:16],
                 )
@@ -485,7 +510,10 @@ class FirehoseHTTPServer:
                 return
 
         if is_anonymous:
-            rl_key = self._rate_limiter.address_key(remote_addr)
+            rl_addr = (
+                forwarded if forwarded and remote_addr in self._trusted_forwarders else remote_addr
+            )
+            rl_key = self._rate_limiter.address_key(rl_addr)
         else:
             rl_key = self._rate_limiter.identity_key(peer_public_key)
 
@@ -493,6 +521,7 @@ class FirehoseHTTPServer:
             log_warning(
                 "RATE_LIMIT deny",
                 remote=remote_addr,
+                fwd=forwarded,
                 key=peer_public_key.hex()[:16] if not is_anonymous else "anon",
             )
             await self._send_protocol_error(
@@ -556,6 +585,7 @@ class FirehoseHTTPServer:
             log_debug(
                 "REQ start",
                 remote=remote_addr,
+                fwd=forwarded,
                 opcode=f"0x{opcode:02x}" if opcode >= 0 else "?",
                 size=len(body or b""),
                 role=role or ("anon" if is_anonymous else ("reg" if is_registered else "unknown")),
@@ -568,7 +598,14 @@ class FirehoseHTTPServer:
 
         ms = int((time.time() - start) * 1000)
         ok = not (len(response_body) >= 1 and response_body[0:1] == b"\x01")
-        log_info("REQ done", opcode=f"0x{opcode:02x}" if opcode >= 0 else "?", ok=ok, ms=ms)
+        log_info(
+            "REQ done",
+            remote=remote_addr,
+            fwd=forwarded,
+            opcode=f"0x{opcode:02x}" if opcode >= 0 else "?",
+            ok=ok,
+            ms=ms,
+        )
         clear_context()
         await self._send_signed_response(send, response_body, request_nonce)
 
@@ -695,6 +732,27 @@ class FirehoseHTTPServer:
         if client and isinstance(client, tuple) and len(client) > 0:
             return str(client[0])
         return "unknown"
+
+    def _forwarded_ips(self, scope) -> str:
+        """The forwarded client IP a proxy put on the request, or "".
+
+        Data, never an authorization: `_handle_command` substitutes it into
+        logging and the anonymous rate-limit bucket only when the socket peer
+        is on config's trusted_forwarders list. Precedence: CF-Connecting-IP
+        (only the edge can mint it), then X-Real-IP, then the leftmost
+        X-Forwarded-For entry.
+        """
+        headers = self._extract_headers(scope)
+        cf = headers.get("cf-connecting-ip", "").strip()
+        if cf:
+            return cf
+        real = headers.get("x-real-ip", "").strip()
+        if real:
+            return real
+        xff = headers.get("x-forwarded-for", "").strip()
+        if xff:
+            return xff.split(",")[0].strip()
+        return ""
 
     def _get_authority(self, scope) -> str:
         for k, v in scope.get("headers", []):
