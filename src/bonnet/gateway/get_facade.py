@@ -43,9 +43,8 @@ Design (see spike notes in the plan thread):
   Anonymous callers are stateless (no restore/save) so one shared
   fallback key can't leak cursor position across callers.
 - Query-auth (`?key=`) is accepted **only here**, never on `/mcp/`.
-  Header credentials always win over query ones. OIDC JWTs stay
-  header-only. `?key=` must be the full `bnt_<id>_<secret>`; a bare key
-  id never resolves.
+  Header credentials always win over query ones. `?key=` must be the
+  full `bnt_<id>_<secret>`; a bare key id never resolves.
 - Every `GET /call/<tool>` response carries a tiny addendum — `session`,
   `tools_changed`, `visible_tools` (names only) — so a notification-blind
   GET-only caller knows when to re-fetch `GET /call` for usage strings.
@@ -129,7 +128,7 @@ def _apply_tenant(request: Request, query_key: str):
     """Resolve this facade request's tenant and set the request ContextVars.
 
     Mirrors `AuthMiddleware` (header credentials first, `?key=` last so
-    headers win; OIDC JWTs header-only) because Auth has no `on_list_tools`
+    headers win) because Auth has no `on_list_tools`
     hook — without this, `GET /call` would list tools for the `default`
     tenant no matter what credential was presented, while `GET /call/<tool>`
     (which runs `on_call_tool`) would resolve correctly. Setting it here
@@ -140,7 +139,6 @@ def _apply_tenant(request: Request, query_key: str):
     Returns (tenant, reset) where reset() restores the previous ContextVar
     values — call it in a `finally`, after the snapshot save.
     """
-    from bonnet.gateway.server import AuthMiddleware  # lazy: server imports us
     from bonnet.gateway.tools import current_password, current_username
 
     header_candidates = _header_candidates(request.headers)
@@ -159,11 +157,6 @@ def _apply_tenant(request: Request, query_key: str):
             tenant = None
         if tenant is not None:
             break
-    if tenant is None:
-        try:
-            tenant = AuthMiddleware._resolve_oauth(header_candidates)
-        except Exception:
-            tenant = None
 
     applied: list[tuple[Any, Any]] = []
     if tenant is not None:
