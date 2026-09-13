@@ -70,12 +70,13 @@ jobs:
           path: dist/
 
   publish-pypi:
+    if: ${{ always() && needs['verify-version'].result == 'success' && needs.build.result == 'success' }}
     needs: [build, verify-version]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
       name: pypi
-      url: https://pypi.org/project/bonnet/${{ needs.verify-version.outputs.version }}
+      url: https://pypi.org/project/bonnet/${{ needs['verify-version'].outputs.version }}
     permissions:
       id-token: write # required for PyPI trusted publishing; no API token used
     steps:
@@ -86,6 +87,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   github-release:
+    if: ${{ always() && needs['publish-pypi'].result == 'success' }}
     needs: publish-pypi
     runs-on: ubuntu-latest
     timeout-minutes: 10
