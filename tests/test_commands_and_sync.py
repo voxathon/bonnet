@@ -580,9 +580,7 @@ class TestClosedBoardGate:
         intent = _article_intent(other, "openboard", 11)
         resp = h.handle(
             _publish_request(intent, other, b"x"),
-            FirehoseContext(
-                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
-            ),
+            FirehoseContext(peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"),
         )
         assert resp[0] == 0
 
@@ -595,9 +593,7 @@ class TestClosedBoardGate:
         intent = _article_intent(other, "frozen", 21)
         resp = h.handle(
             _publish_request(intent, other, b"x"),
-            FirehoseContext(
-                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
-            ),
+            FirehoseContext(peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"),
         )
         assert resp[0] == 1
         assert b"is closed" in resp
@@ -636,9 +632,7 @@ class TestClosedBoardGate:
         first = _article_intent(other, "ctl", 51)
         resp = h.handle(
             _publish_request(first, other, b"x"),
-            FirehoseContext(
-                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
-            ),
+            FirehoseContext(peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"),
         )
         assert resp[0] == 0
         target_id = _rid(51 + 100)
@@ -654,9 +648,7 @@ class TestClosedBoardGate:
         )
         resp = h.handle(
             _publish_request(cancel, other),
-            FirehoseContext(
-                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
-            ),
+            FirehoseContext(peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"),
         )
         assert resp[0] == 1
         assert b"is closed" in resp
@@ -672,9 +664,7 @@ class TestClosedBoardGate:
         intent = _article_intent(other, "reopenme", 61)
         resp = h.handle(
             _publish_request(intent, other, b"x"),
-            FirehoseContext(
-                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
-            ),
+            FirehoseContext(peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"),
         )
         assert resp[0] == 0
 
@@ -731,9 +721,7 @@ class TestClosedBoardGate:
         intent = _article_intent(other, "boardb", 71)
         resp = h.handle(
             _publish_request(intent, other, b"x"),
-            FirehoseContext(
-                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
-            ),
+            FirehoseContext(peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"),
         )
         assert resp[0] == 0
 
@@ -746,9 +734,7 @@ class TestClosedBoardGate:
         first = _article_intent(other, "scoped", 81)
         resp = h.handle(
             _publish_request(first, other, b"x"),
-            FirehoseContext(
-                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
-            ),
+            FirehoseContext(peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"),
         )
         assert resp[0] == 0
         target_id = _rid(81 + 100)
@@ -776,9 +762,7 @@ class TestClosedBoardGate:
         )
         resp = h.handle(
             _publish_request(cancel, other),
-            FirehoseContext(
-                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
-            ),
+            FirehoseContext(peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"),
         )
         # Passes ACL (then succeeds as author-cancel on an open board).
         assert resp[0] == 0
@@ -794,9 +778,7 @@ class TestClosedBoardGate:
         )
         resp2 = h.handle(
             _publish_request(cancel2, other),
-            FirehoseContext(
-                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
-            ),
+            FirehoseContext(peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"),
         )
         assert resp2[0] == 1
         assert b"not permitted" in resp2.lower()
@@ -884,9 +866,7 @@ class TestBoardPurge:
             body_hash=compute_body_hash(body),
             body_size=len(body),
         )
-        ctx = FirehoseContext(
-            peer_pubkey=user.public_key, is_registered=True, origin="bbs.test"
-        )
+        ctx = FirehoseContext(peer_pubkey=user.public_key, is_registered=True, origin="bbs.test")
         resp = h.handle(_publish_request(intent, user, body), ctx)
         assert resp[0] == 0, resp
         return _rid(seed + 100)

@@ -329,9 +329,7 @@ class FirehoseCommandHandler:
         # / control-target lookup). Fixed order everywhere: stripe ->>
         # _identity_lock -> FirehoseStore -> Dispatcher -> projections, and
         # the stripe is never taken from inside dispatch/rebuild/sync.
-        self._board_write_stripes: list[threading.RLock] = [
-            threading.RLock() for _ in range(256)
-        ]
+        self._board_write_stripes: list[threading.RLock] = [threading.RLock() for _ in range(256)]
 
     def _board_stripe(self, origin: str, board: str) -> threading.RLock:
         return self._board_write_stripes[hash((origin, board)) % len(self._board_write_stripes)]
@@ -704,11 +702,7 @@ class FirehoseCommandHandler:
         # in parallel. Board-agnostic kinds stripe by kind to avoid collapsing
         # onto one lock. Fixed order: stripe -> _identity_lock -> store ->
         # dispatcher -> projections; never taken from inside dispatch/sync.
-        stripe_key = (
-            (eff_origin, eff_board)
-            if eff_board
-            else (self._origin, f"kind:{kind}")
-        )
+        stripe_key = (eff_origin, eff_board) if eff_board else (self._origin, f"kind:{kind}")
         with self._board_stripe(*stripe_key), identity_guard:
             # Re-check under the stripe: a close may have landed between the
             # fast-path check above and lock acquisition.
