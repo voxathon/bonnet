@@ -35,6 +35,10 @@ class PublishResult:
     board: str
     witness_pubkey: str
     witness_hostname: str
+    # Client-side only: True when the server answered with a different
+    # event_id than requested (purge-of-absent-board noop returns the
+    # current head record). Never on the wire.
+    deduped: bool = False
 
 
 @dataclass

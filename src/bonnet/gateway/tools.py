@@ -2703,9 +2703,9 @@ async def purge_board(
     ACL-scoped like close: whoever holds PUBLISH_RECORD + board.purge on
     this board may purge it — don't grant nuke rights you don't mean.
     Irreversible — bodies are deleted but firehose/event rows are retained.
-    Second purge of an absent board is a success no-op; a later
-    board.create may reclaim the name under ordinary board-create
-    authorization, in origin sequence order.
+    Second purge of an absent board is a success without append (no new
+    event); a later board.create may reclaim the name under ordinary
+    board-create authorization, in origin sequence order.
     """
     _reject_lone_surrogates("reason", reason)
     _check_byte_len("board", board, MAX_BOARD)
@@ -2714,6 +2714,8 @@ async def purge_board(
     try:
         await _connect_authenticated(client, auth)
         result = await client.publish_board_purge(board, reason)
+        if result.deduped:
+            return f"Board already absent — no new event (head seq {result.origin_seq})"
         return f"Board purge event published — seq {result.origin_seq}"
     finally:
         await client.close()
