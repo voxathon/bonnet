@@ -2630,6 +2630,96 @@ async def purge_article(
 
 
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.board.close",))
+async def close_board(
+    *,
+    board: str = "",
+    reason: str = "",
+    auth: str | None = None,
+) -> str:
+    """Close a board (freeze article writes until reopened).
+
+    ACL-scoped per board with no owner check in code: whoever holds
+    PUBLISH_RECORD + board.close on this board may close it — don't grant
+    rights you don't mean. Closing a board you may not close is refused
+    (0x0004); closing an absent board (0x0003) or an already-closed board
+    (0x0009) is refused rather than appending a no-effect record.
+
+    Closed boards refuse new articles and article controls with 0x0004
+    "Board ... is closed" (owner + admin/moderator bypass); reopen is never
+    gated, so a close cannot deadlock a board. list_boards shows the closed
+    flag, but still handle refusal — the board may close between check and
+    publish.
+    """
+    _reject_lone_surrogates("reason", reason)
+    _check_byte_len("board", board, MAX_BOARD)
+    board = cursor.resolve_board(board)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_board_close(board, reason)
+        return f"Board close event published — seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.board.reopen",))
+async def reopen_board(
+    *,
+    board: str = "",
+    reason: str = "",
+    auth: str | None = None,
+) -> str:
+    """Reopen a closed board.
+
+    ACL-scoped like close: whoever holds PUBLISH_RECORD + board.reopen on
+    this board may reopen it. Reopening an absent board (0x0003) or an
+    already-open board (0x0009) is refused rather than appending a
+    no-effect record.
+    """
+    _reject_lone_surrogates("reason", reason)
+    _check_byte_len("board", board, MAX_BOARD)
+    board = cursor.resolve_board(board)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_board_reopen(board, reason)
+        return f"Board reopen event published — seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.board.purge",))
+async def purge_board(
+    *,
+    board: str = "",
+    reason: str = "",
+    auth: str | None = None,
+) -> str:
+    """Purge a board (drop its entry, tombstone its articles, rm bodies).
+
+    ACL-scoped like close: whoever holds PUBLISH_RECORD + board.purge on
+    this board may purge it — don't grant nuke rights you don't mean.
+    Irreversible — bodies are deleted but firehose/event rows are retained.
+    Second purge of an absent board is a success no-op; a later
+    board.create may reclaim the name under ordinary board-create
+    authorization, in origin sequence order.
+    """
+    _reject_lone_surrogates("reason", reason)
+    _check_byte_len("board", board, MAX_BOARD)
+    board = cursor.resolve_board(board)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_board_purge(board, reason)
+        return f"Board purge event published — seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 @needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.article.pin",))
 async def pin_article(
     *,
@@ -2685,6 +2775,70 @@ async def unpin_article(
         srv_origin = origin or client._server_origin or ""
         result = await client.publish_unpin(board, srv_origin, board, aid)
         return f"Unpin event published — seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.thread.close",))
+async def close_thread(
+    *,
+    target_article_id: str = "",
+    board: str = "",
+    reason: str = "",
+    origin: str = "",
+    auth: str | None = None,
+) -> str:
+    """Close a thread (freeze replies under an article). Moderator/admin only.
+
+    target_article_id: hex article ID of the thread root to close (defaults
+        to the article get_article last read on this board — including purged/cancelled/superseded reads. Check where_am_i before relying on the default).
+    board: board where the target article lives (defaults to the board
+        open_board last set).
+    reason: optional human-readable reason.
+    """
+    _reject_lone_surrogates("reason", reason)
+    board = cursor.resolve_board(board)
+    target_article_id = cursor.resolve_article_id(target_article_id, board)
+    aid = _validate_article_id(target_article_id)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        srv_origin = origin or client._server_origin or ""
+        result = await client.publish_thread_close(board, srv_origin, board, aid, reason)
+        return f"Thread close event published — seq {result.origin_seq}"
+    finally:
+        await client.close()
+
+
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.thread.reopen",))
+async def reopen_thread(
+    *,
+    target_article_id: str = "",
+    board: str = "",
+    reason: str = "",
+    origin: str = "",
+    auth: str | None = None,
+) -> str:
+    """Reopen a closed thread. Moderator/admin only.
+
+    target_article_id: hex article ID of the thread root to reopen (defaults
+        to the article get_article last read on this board — including purged/cancelled/superseded reads. Check where_am_i before relying on the default).
+    board: board where the target article lives (defaults to the board
+        open_board last set).
+    reason: optional human-readable reason.
+    """
+    _reject_lone_surrogates("reason", reason)
+    board = cursor.resolve_board(board)
+    target_article_id = cursor.resolve_article_id(target_article_id, board)
+    aid = _validate_article_id(target_article_id)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        srv_origin = origin or client._server_origin or ""
+        result = await client.publish_thread_reopen(board, srv_origin, board, aid, reason)
+        return f"Thread reopen event published — seq {result.origin_seq}"
     finally:
         await client.close()
 

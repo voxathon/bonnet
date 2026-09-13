@@ -53,12 +53,17 @@ READ_COMMANDS = [
 
 WRITE_KINDS = [
     "bonnet.board.create",
+    "bonnet.board.close",
+    "bonnet.board.reopen",
+    "bonnet.board.purge",
     "bonnet.article",
     "bonnet.article.cancel",
     "bonnet.article.restore",
     "bonnet.article.purge",
     "bonnet.article.pin",
     "bonnet.article.unpin",
+    "bonnet.thread.close",
+    "bonnet.thread.reopen",
     "bonnet.user.register",
     "bonnet.user.key.rotate",
     "bonnet.report",
@@ -254,6 +259,70 @@ async def test_report_reaches_the_moderation_queue(wired):
     queue = wired["policy"].list_reports(limit=10, offset=0)
     assert len(queue) == 1
     assert queue[0]["target_board"] == "general"
+
+
+# ---------------------------------------------------------------------------
+# close_board / reopen_board — board freeze cycle
+# ---------------------------------------------------------------------------
+
+
+async def test_close_board_freezes_writes_and_reopen_lifts_it(wired):
+    """Close flips list_boards' closed flag and refuses non-owner publishes;
+    reopen restores them. The owner bypass still holds while closed, and the
+    0x0009 duplicate protection is covered server-side in
+    test_commands_and_sync."""
+    await tools.connect("https://bbs.test")
+    await tools.register("other")
+    await tools.register("owner")
+    await tools.create_board("general")
+    await tools.open_board("general")
+
+    await tools.publish_article("before", "body", auth="other")
+    assert (await tools.list_boards())[0].closed is False
+
+    await tools.close_board(reason="cooling off")
+    assert (await tools.list_boards())[0].closed is True
+
+    with pytest.raises(Exception, match="is closed"):
+        await tools.publish_article("blocked", "should not land", auth="other")
+    # Owner bypass: the closer can still write to their own frozen board.
+    await tools.publish_article("owner note", "body")
+
+    await tools.reopen_board(reason="all clear")
+    assert (await tools.list_boards())[0].closed is False
+    await tools.publish_article("after", "body", auth="other")
+
+
+async def test_double_close_is_refused(wired):
+    await _setup()
+    await tools.close_board()
+    with pytest.raises(Exception, match="already closed"):
+        await tools.close_board()
+
+
+async def test_close_absent_board_is_refused(wired):
+    await tools.connect("https://bbs.test")
+    await tools.register("scout")
+    with pytest.raises(Exception, match="does not exist"):
+        await tools.close_board(board="never-existed")
+
+
+# ---------------------------------------------------------------------------
+# close_thread / reopen_thread
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_close_and_reopen_round_trip(wired):
+    await _setup()
+    await tools.publish_article("subject", "body")
+    view = await tools.get_article(1)
+    assert view.thread_state == "open"
+
+    await tools.close_thread(reason="derailed")
+    assert (await tools.get_article(1)).thread_state == "closed"
+
+    await tools.reopen_thread(reason="back on track")
+    assert (await tools.get_article(1)).thread_state == "open"
 
 
 # ---------------------------------------------------------------------------

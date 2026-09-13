@@ -280,6 +280,30 @@ class BodyStore:
                 return True
             return False
 
+    def delete_board_bodies(self, origin: str, board: str) -> int:
+        """Delete all article body files for one board (for BOARD_PURGE).
+
+        Removes the board's bodies/ subtree (including staged bodies).
+        The board projection database is left alone — article rows are
+        flipped to body_state='purged' separately and stay as tombstones.
+        Returns the number of files deleted.
+        """
+        import shutil
+
+        bodies_dir = self._article_body_dir(origin, board)
+        count = 0
+        with self._lock:
+            if os.path.isdir(bodies_dir):
+                for root, _dirs, files in os.walk(bodies_dir):
+                    for name in files:
+                        try:
+                            os.remove(os.path.join(root, name))
+                            count += 1
+                        except OSError:
+                            pass
+                shutil.rmtree(bodies_dir, ignore_errors=True)
+        return count
+
     def search_article_bodies(
         self,
         origin: str,

@@ -304,6 +304,89 @@ class FirehoseHTTPClient(FirehoseTransport):
         resp = await self._send_command(cmd)
         return parse_publish_response(resp)
 
+    async def publish_board_close(self, board: str, reason: str = "") -> PublishResult:
+        """Close a board: refuse article writes until reopened.
+
+        Board-carried (not target-carried) like board.reopen/purge. The
+        reason is an optional event body. Refused for absent boards (0x0003)
+        and already-closed boards (0x0009); closing a board you may not
+        close is an ACL refusal (0x0004).
+        """
+        if self._identity is None or self._server_origin is None:
+            raise FirehoseClientError("not connected")
+        eid = os.urandom(32)
+        body = reason.encode("utf-8") if reason else b""
+        intent = Intent(
+            event_id=eid,
+            kind="bonnet.board.close",
+            origin=self._server_origin,
+            actor_pubkey=self._identity.public_key,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            board=board,
+            body_hash=compute_body_hash(body) if body else ZERO_ID,
+            body_size=len(body),
+        )
+        actor_sig = sign_intent(self._identity, encode_intent(intent))
+        cmd = build_publish_record(intent, actor_sig, body)
+        resp = await self._send_command(cmd)
+        return parse_publish_response(resp)
+
+    async def publish_board_reopen(self, board: str, reason: str = "") -> PublishResult:
+        """Reopen a closed board.
+
+        Board-carried (not target-carried) like board.close/purge. The
+        reason is an optional event body. Refused for absent boards (0x0003)
+        and open boards (0x0009); reopen is never subject to the
+        closed-board gate, so a close cannot deadlock a board.
+        """
+        if self._identity is None or self._server_origin is None:
+            raise FirehoseClientError("not connected")
+        eid = os.urandom(32)
+        body = reason.encode("utf-8") if reason else b""
+        intent = Intent(
+            event_id=eid,
+            kind="bonnet.board.reopen",
+            origin=self._server_origin,
+            actor_pubkey=self._identity.public_key,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            board=board,
+            body_hash=compute_body_hash(body) if body else ZERO_ID,
+            body_size=len(body),
+        )
+        actor_sig = sign_intent(self._identity, encode_intent(intent))
+        cmd = build_publish_record(intent, actor_sig, body)
+        resp = await self._send_command(cmd)
+        return parse_publish_response(resp)
+
+    async def publish_board_purge(self, board: str, reason: str = "") -> PublishResult:
+        """Purge a board: drop its nav entry, tombstone its articles, rm bodies.
+
+        Board-carried (not target-carried) like board.close/reopen. The
+        reason is an optional event body. Second purge of an absent board
+        is a success no-op; a later board.create may reclaim the name.
+        """
+        if self._identity is None or self._server_origin is None:
+            raise FirehoseClientError("not connected")
+        eid = os.urandom(32)
+        body = reason.encode("utf-8") if reason else b""
+        intent = Intent(
+            event_id=eid,
+            kind="bonnet.board.purge",
+            origin=self._server_origin,
+            actor_pubkey=self._identity.public_key,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            board=board,
+            body_hash=compute_body_hash(body) if body else ZERO_ID,
+            body_size=len(body),
+        )
+        actor_sig = sign_intent(self._identity, encode_intent(intent))
+        cmd = build_publish_record(intent, actor_sig, body)
+        resp = await self._send_command(cmd)
+        return parse_publish_response(resp)
+
     async def publish_user_register(
         self,
         username: str,
@@ -546,6 +629,42 @@ class FirehoseHTTPClient(FirehoseTransport):
             target_board,
             target_article_id,
             "",
+        )
+
+    async def publish_thread_close(
+        self,
+        board: str,
+        target_origin: str,
+        target_board: str,
+        target_article_id: bytes,
+        reason: str = "",
+    ) -> PublishResult:
+        """Close a thread (freeze replies under an article)."""
+        return await self._publish_control(
+            "bonnet.thread.close",
+            board,
+            target_origin,
+            target_board,
+            target_article_id,
+            reason,
+        )
+
+    async def publish_thread_reopen(
+        self,
+        board: str,
+        target_origin: str,
+        target_board: str,
+        target_article_id: bytes,
+        reason: str = "",
+    ) -> PublishResult:
+        """Reopen a closed thread."""
+        return await self._publish_control(
+            "bonnet.thread.reopen",
+            board,
+            target_origin,
+            target_board,
+            target_article_id,
+            reason,
         )
 
     async def _publish_control(

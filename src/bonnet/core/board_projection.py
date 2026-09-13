@@ -484,6 +484,22 @@ class BoardProjection:
                 self._mark_applied(rec)
                 self._set_checkpoint(rec.origin, rec.origin_seq)
 
+    def mark_all_bodies_purged(self, origin: str, board: str, seq: int) -> int:
+        """Flip every article row on a board to body_state='purged'.
+
+        Board-purge fan-out: keeps all metadata rows as tombstones (so GET
+        still returns them and LIST drops them by default) while the body
+        files are removed separately. Returns rows flipped.
+        """
+        with self._lock:
+            with self._transaction():
+                cur = self._conn.execute(
+                    "UPDATE articles SET body_state='purged', latest_control_seq=? "
+                    "WHERE origin=? AND board=? AND body_state != 'purged'",
+                    (seq, origin, board),
+                )
+                return cur.rowcount
+
     def apply_pin(self, rec: Record) -> None:
         with self._lock:
             if self.is_applied(rec.origin, rec.event_id):

@@ -291,6 +291,30 @@ class NavProjection(_BaseProjection):
                 self._rollback()
                 raise
 
+    def apply_board_purge(self, rec: Record) -> None:
+        """Drop a board entry so its name may be reclaimed.
+
+        Row-delete (not a tombstone flag): a later board.create for the
+        empty name wins by the ordinary first-writer rule, in origin
+        sequence order. Second purge is a success no-op. Never raises out
+        of apply — same contract as close/reopen.
+        """
+        with self._lock:
+            if self.is_applied(rec.origin, rec.event_id):
+                return
+            self._begin()
+            try:
+                self._conn.execute(
+                    "DELETE FROM boards WHERE origin=? AND board=?",
+                    (rec.origin, rec.board),
+                )
+                self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
+
     def list_boards(self, origin: str = None) -> list[dict]:
         with self._lock:
             if origin:

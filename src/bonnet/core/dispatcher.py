@@ -50,6 +50,7 @@ from bonnet.core.kinds import (
     KIND_ARTICLE_UNPIN,
     KIND_BOARD_CLOSE,
     KIND_BOARD_CREATE,
+    KIND_BOARD_PURGE,
     KIND_BOARD_REOPEN,
     KIND_ORIGIN_KEY_ROTATE,
     KIND_PUNISHMENT_ACK,
@@ -112,6 +113,7 @@ class Dispatcher:
             KIND_BOARD_CREATE: self._nav.apply_board_create,
             KIND_BOARD_CLOSE: self._nav.apply_board_close,
             KIND_BOARD_REOPEN: self._nav.apply_board_reopen,
+            KIND_BOARD_PURGE: self._dispatch_board_purge,
             KIND_USER_REGISTER: self._users.apply_user_register,
             KIND_USER_REVOKE: self._users.apply_user_revoke,
             # Unlike KIND_ORIGIN_KEY_ROTATE below, this one does real work
@@ -324,6 +326,23 @@ class Dispatcher:
             bp.apply_thread_close(rec)
         elif kind == KIND_THREAD_REOPEN:
             bp.apply_thread_reopen(rec)
+
+    def _dispatch_board_purge(self, rec: Record) -> None:
+        """Purge a board: drop its nav entry, tombstone its articles, rm bodies.
+
+        Board kinds always act on their own origin/board, so unlike article
+        controls there is no cross-origin guard to check. Article rows are
+        kept as body-purged tombstones (GET-able, LIST-excluded by default);
+        the nav row is deleted so the name may be reclaimed by an ordinary
+        later board.create, in origin sequence order. Second purge of an
+        absent board is a success no-op. The board counter is deliberately
+        left alone so a reclaimed board's numbering continues without
+        colliding with tombstoned article_nums.
+        """
+        self._nav.apply_board_purge(rec)
+        bp = self._get_board_projection(rec.origin, rec.board)
+        bp.mark_all_bodies_purged(rec.origin, rec.board, rec.origin_seq)
+        self._body_store.delete_board_bodies(rec.origin, rec.board)
 
     def _dispatch_unknown(self, rec: Record) -> None:
         """Unknown kinds are applied as no-ops to track idempotency."""

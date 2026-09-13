@@ -498,10 +498,10 @@ class TestPublishRecord:
 # ---------------------------------------------------------------------------
 
 
-def _close_board(handler, board, actor=None):
+def _close_board(handler, board, actor=None, seed=900):
     actor = actor or ACTOR
     intent = Intent(
-        event_id=_rid(900),
+        event_id=_rid(seed),
         kind="bonnet.board.close",
         origin="bbs.test",
         actor_pubkey=actor.public_key,
@@ -510,6 +510,19 @@ def _close_board(handler, board, actor=None):
     resp = handler.handle(_publish_request(intent, actor), _user_ctx(actor))
     assert resp[0] == 0x00, resp
     assert handler._nav.get_board("bbs.test", board)["closed"] is True
+
+
+def _board_lifecycle_attempt(handler, kind, board, actor=None, seed=900):
+    """Publish a board.close/reopen without asserting success; return resp."""
+    actor = actor or ACTOR
+    intent = Intent(
+        event_id=_rid(seed),
+        kind=kind,
+        origin="bbs.test",
+        actor_pubkey=actor.public_key,
+        board=board,
+    )
+    return handler.handle(_publish_request(intent, actor), _user_ctx(actor))
 
 
 def _reopen_board(handler, board, actor=None):
@@ -665,6 +678,49 @@ class TestClosedBoardGate:
         )
         assert resp[0] == 0
 
+    def test_close_absent_board_is_not_found(self, stack):
+        h = stack["handler"]
+        resp = _board_lifecycle_attempt(h, "bonnet.board.close", "never-existed", seed=960)
+        assert resp[0] == 1
+        assert b"does not exist" in resp
+
+    def test_double_close_is_conflict(self, stack):
+        h = stack["handler"]
+        _create_board(h, "alreadyshut")
+        _close_board(h, "alreadyshut")
+        resp = _board_lifecycle_attempt(h, "bonnet.board.close", "alreadyshut", seed=961)
+        assert resp[0] == 1
+        assert b"already closed" in resp
+
+    def test_reopen_open_board_is_conflict(self, stack):
+        h = stack["handler"]
+        _create_board(h, "wideopen")
+        resp = _board_lifecycle_attempt(h, "bonnet.board.reopen", "wideopen", seed=962)
+        assert resp[0] == 1
+        assert b"not closed" in resp
+
+    def test_reopen_absent_board_is_not_found(self, stack):
+        h = stack["handler"]
+        resp = _board_lifecycle_attempt(h, "bonnet.board.reopen", "never-existed", seed=963)
+        assert resp[0] == 1
+        assert b"does not exist" in resp
+
+    def test_close_purged_board_is_not_found(self, stack):
+        h = stack["handler"]
+        _create_board(h, "scoured")
+        _purge_board(h, "scoured")
+        resp = _board_lifecycle_attempt(h, "bonnet.board.close", "scoured", seed=964)
+        assert resp[0] == 1
+        assert b"does not exist" in resp
+
+    def test_close_reopen_close_round_trip(self, stack):
+        h = stack["handler"]
+        _create_board(h, "revolving")
+        _close_board(h, "revolving")
+        _reopen_board(h, "revolving")
+        _close_board(h, "revolving", seed=965)
+        assert h._nav.get_board("bbs.test", "revolving")["closed"] is True
+
     def test_close_does_not_gate_other_boards(self, stack):
         h = stack["handler"]
         self._grant_write_all(stack)
@@ -780,6 +836,153 @@ class TestClosedBoardGate:
         for t in threads:
             t.join(timeout=30)
         assert not errors
+
+
+def _purge_board(handler, board, actor=None, seed=950, reason=b""):
+    actor = actor or ACTOR
+    intent = Intent(
+        event_id=_rid(seed),
+        kind="bonnet.board.purge",
+        origin="bbs.test",
+        actor_pubkey=actor.public_key,
+        board=board,
+        body_hash=compute_body_hash(reason) if reason else bytes(32),
+        body_size=len(reason),
+    )
+    resp = handler.handle(_publish_request(intent, actor, reason), _user_ctx(actor))
+    assert resp[0] == 0x00, resp
+
+
+class TestBoardPurge:
+    def _grant_write_all(self, stack):
+        stack["acl"].add_rule(
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(wildcard=True),
+                actions=["read", "write"],
+                commands=["*"],
+                kinds=["*"],
+                boards=["*"],
+                objects=["*"],
+            )
+        )
+
+    def _publish_body_article(self, h, user, board, seed, body):
+        intent = Intent(
+            event_id=_rid(seed),
+            kind="bonnet.article",
+            origin="bbs.test",
+            actor_pubkey=user.public_key,
+            board=board,
+            article_id=_rid(seed + 100),
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "Subj"),
+                    metadata_text(4, "text/plain"),
+                ]
+            ),
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
+        )
+        ctx = FirehoseContext(
+            peer_pubkey=user.public_key, is_registered=True, origin="bbs.test"
+        )
+        resp = h.handle(_publish_request(intent, user, body), ctx)
+        assert resp[0] == 0, resp
+        return _rid(seed + 100)
+
+    def test_purge_drops_nav_row_and_tombstones_articles(self, stack):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        _create_board(h, "doomed")
+        other = Identity.generate()
+        self._publish_body_article(h, other, "doomed", 301, b"bye")
+        assert h._nav.get_board("bbs.test", "doomed") is not None
+        _purge_board(h, "doomed")
+        assert h._nav.get_board("bbs.test", "doomed") is None
+        bp = stack["dispatcher"]._get_board_projection("bbs.test", "doomed")
+        assert bp.list_articles("bbs.test", "doomed") == []
+        tombstones = bp.list_articles("bbs.test", "doomed", include_purged=True)
+        assert len(tombstones) == 1
+        assert tombstones[0].body_state == "purged"
+
+    def test_second_purge_is_noop_success(self, stack):
+        h = stack["handler"]
+        _create_board(h, "twice")
+        _purge_board(h, "twice", seed=950)
+        _purge_board(h, "twice", seed=951)
+        assert h._nav.get_board("bbs.test", "twice") is None
+
+    def test_purge_absent_board_is_noop_success(self, stack):
+        h = stack["handler"]
+        _purge_board(h, "never-existed", seed=952)
+        assert h._nav.get_board("bbs.test", "never-existed") is None
+
+    def test_reclaim_name_after_purge(self, stack):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        _create_board(h, "phoenix")
+        _purge_board(h, "phoenix")
+        claimant = Identity.generate()
+        event_id = hashlib.sha256(b"test-board-create:phoenix:2").digest()
+        intent = Intent(
+            event_id=event_id,
+            kind="bonnet.board.create",
+            origin="bbs.test",
+            actor_pubkey=claimant.public_key,
+            board="phoenix",
+            metadata=MetadataMap([metadata_bytes(1, claimant.public_key)]),
+        )
+        resp = h.handle(
+            _publish_request(intent, claimant),
+            FirehoseContext(
+                peer_pubkey=claimant.public_key,
+                is_registered=True,
+                origin="bbs.test",
+            ),
+        )
+        assert resp[0] == 0x00, resp
+        board = h._nav.get_board("bbs.test", "phoenix")
+        assert board is not None
+        assert board["owner_pubkey"] == claimant.public_key
+        # New articles number past the tombstones without colliding.
+        self._publish_body_article(h, claimant, "phoenix", 302, b"reborn")
+        bp = stack["dispatcher"]._get_board_projection("bbs.test", "phoenix")
+        live = bp.list_articles("bbs.test", "phoenix")
+        assert len(live) == 1
+        assert live[0].subject == "Subj"
+
+    def test_article_body_gone_after_board_purge(self, stack):
+        from bonnet.net.firehose_wire import build_article_body
+
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        _create_board(h, "gone")
+        other = Identity.generate()
+        article_id = self._publish_body_article(h, other, "gone", 311, b"vapour")
+        bp = stack["dispatcher"]._get_board_projection("bbs.test", "gone")
+        proj = bp.get_article_by_id("bbs.test", "gone", article_id)
+        assert proj is not None
+        num = proj.article_num
+        _purge_board(h, "gone")
+        assert not stack["body_store"].article_body_exists("bbs.test", "gone", num)
+        req = build_article_body("bbs.test", "gone", num)
+        resp = h.handle(
+            req,
+            FirehoseContext(
+                peer_pubkey=other.public_key,
+                is_registered=True,
+                origin="bbs.test",
+            ),
+        )
+        assert resp[0] == 1
+        assert b"purged" in resp.lower()
+
+    def test_purge_with_reason_body(self, stack):
+        h = stack["handler"]
+        _create_board(h, "explained")
+        _purge_board(h, "explained", seed=953, reason=b"spam haven")
+        assert h._nav.get_board("bbs.test", "explained") is None
 
 
 # ---------------------------------------------------------------------------
