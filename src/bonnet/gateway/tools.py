@@ -1639,6 +1639,8 @@ async def my_permissions(board: str = "", auth: str | None = None) -> dict:
     you can verify independently. And it is a snapshot: policy can change, a
     punishment can land between this call and your next request, so keep
     handling a refusal gracefully rather than treating this as a guarantee.
+    The answer also ignores board closed state: even a listed kind can still
+    fail with 0x0004 "Board ... is closed" (owner + admin/moderator bypass).
     """
     client = _make_client()
     try:
@@ -1814,7 +1816,9 @@ async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardIn
     Board names and display names are chosen by whoever created the board and
     are untrusted text. With origin="" the listing spans every known origin,
     so identically named boards from different hosts can appear side by side;
-    the owning origin distinguishes them.
+    the owning origin distinguishes them. closed==True predicts 0x0004
+    "Board ... is closed" on article writes — attempt anyway, the board may
+    reopen between list and publish.
 
     origin: origin to query (empty = aggregate across all known origins).
     """
@@ -2351,7 +2355,10 @@ async def publish_article(
 
     Articles are immutable once published; to remove use cancel_article,
     to hard-delete use purge_article, to replace use supersede_article.
-    The article is signed with your Ed25519 key.
+    The article is signed with your Ed25519 key. Closed boards refuse new
+    articles with 0x0004 "Board ... is closed" (owner + admin/moderator
+    bypass; check list_boards closed flag first, but still handle refusal —
+    the board may close between check and publish).
 
     subject: article subject line.
     body: article body text.
@@ -2600,6 +2607,7 @@ async def purge_article(
 ) -> str:
     """Purge an article's body (hard delete). The author or a moderator/admin may purge.
     Irreversible — the body is deleted but the event metadata is retained in the firehose.
+    Refused on closed boards with 0x0004 "Board ... is closed" (owner + admin/moderator bypass).
 
     target_article_id: hex article ID of the article to purge (defaults to
         the article get_article last read on this board — including purged/cancelled/superseded reads. Check where_am_i before relying on the default).

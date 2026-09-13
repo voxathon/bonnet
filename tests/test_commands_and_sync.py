@@ -494,6 +494,295 @@ class TestPublishRecord:
 
 
 # ---------------------------------------------------------------------------
+# Closed-board write gate
+# ---------------------------------------------------------------------------
+
+
+def _close_board(handler, board, actor=None):
+    actor = actor or ACTOR
+    intent = Intent(
+        event_id=_rid(900),
+        kind="bonnet.board.close",
+        origin="bbs.test",
+        actor_pubkey=actor.public_key,
+        board=board,
+    )
+    resp = handler.handle(_publish_request(intent, actor), _user_ctx(actor))
+    assert resp[0] == 0x00, resp
+    assert handler._nav.get_board("bbs.test", board)["closed"] is True
+
+
+def _reopen_board(handler, board, actor=None):
+    actor = actor or ACTOR
+    intent = Intent(
+        event_id=_rid(901),
+        kind="bonnet.board.reopen",
+        origin="bbs.test",
+        actor_pubkey=actor.public_key,
+        board=board,
+    )
+    resp = handler.handle(_publish_request(intent, actor), _user_ctx(actor))
+    assert resp[0] == 0x00, resp
+    assert handler._nav.get_board("bbs.test", board)["closed"] is False
+
+
+def _article_intent(user, board, seed, body=b"x"):
+    return Intent(
+        event_id=_rid(seed),
+        kind="bonnet.article",
+        origin="bbs.test",
+        actor_pubkey=user.public_key,
+        board=board,
+        article_id=_rid(seed + 100),
+        metadata=MetadataMap(
+            [
+                metadata_text(1, "Subj"),
+                metadata_text(4, "text/plain"),
+            ]
+        ),
+        body_hash=compute_body_hash(body),
+        body_size=len(body),
+    )
+
+
+class TestClosedBoardGate:
+    def _grant_write_all(self, stack):
+        stack["acl"].add_rule(
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(wildcard=True),
+                actions=["read", "write"],
+                commands=["*"],
+                kinds=["*"],
+                boards=["*"],
+                objects=["*"],
+            )
+        )
+
+    def test_open_board_allows_article(self, stack):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        _create_board(h, "openboard")
+        other = Identity.generate()
+        intent = _article_intent(other, "openboard", 11)
+        resp = h.handle(
+            _publish_request(intent, other, b"x"),
+            FirehoseContext(
+                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
+            ),
+        )
+        assert resp[0] == 0
+
+    def test_closed_board_refuses_non_owner_article(self, stack):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        _create_board(h, "frozen")
+        _close_board(h, "frozen")
+        other = Identity.generate()
+        intent = _article_intent(other, "frozen", 21)
+        resp = h.handle(
+            _publish_request(intent, other, b"x"),
+            FirehoseContext(
+                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
+            ),
+        )
+        assert resp[0] == 1
+        assert b"is closed" in resp
+
+    def test_owner_bypass_writes_while_closed(self, stack):
+        h = stack["handler"]
+        _create_board(h, "mine")
+        _close_board(h, "mine")
+        intent = _article_intent(ACTOR, "mine", 31)
+        resp = h.handle(_publish_request(intent, ACTOR, b"x"), _actor_ctx())
+        assert resp[0] == 0
+
+    def test_admin_role_bypass_writes_while_closed(self, stack):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        _create_board(h, "locked")
+        _close_board(h, "locked")
+        other = Identity.generate()
+        intent = _article_intent(other, "locked", 41)
+        ctx = FirehoseContext(
+            peer_pubkey=other.public_key,
+            is_registered=True,
+            origin="bbs.test",
+            role="administrator",
+        )
+        resp = h.handle(_publish_request(intent, other, b"x"), ctx)
+        assert resp[0] == 0
+
+    def test_control_refused_on_closed_board(self, stack):
+        from bonnet.core.record import ZERO_ID
+
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        _create_board(h, "ctl")
+        other = Identity.generate()
+        first = _article_intent(other, "ctl", 51)
+        resp = h.handle(
+            _publish_request(first, other, b"x"),
+            FirehoseContext(
+                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
+            ),
+        )
+        assert resp[0] == 0
+        target_id = _rid(51 + 100)
+        _close_board(h, "ctl")
+        cancel = Intent(
+            event_id=_rid(52),
+            kind="bonnet.article.cancel",
+            origin="bbs.test",
+            actor_pubkey=other.public_key,
+            target_origin="bbs.test",
+            target_board="ctl",
+            target_article_id=target_id,
+        )
+        resp = h.handle(
+            _publish_request(cancel, other),
+            FirehoseContext(
+                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
+            ),
+        )
+        assert resp[0] == 1
+        assert b"is closed" in resp
+        assert ZERO_ID is not None  # keep import used if linter prunes
+
+    def test_reopen_lifts_gate(self, stack):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        _create_board(h, "reopenme")
+        _close_board(h, "reopenme")
+        _reopen_board(h, "reopenme")
+        other = Identity.generate()
+        intent = _article_intent(other, "reopenme", 61)
+        resp = h.handle(
+            _publish_request(intent, other, b"x"),
+            FirehoseContext(
+                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
+            ),
+        )
+        assert resp[0] == 0
+
+    def test_close_does_not_gate_other_boards(self, stack):
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        _create_board(h, "boarda")
+        _create_board(h, "boardb")
+        _close_board(h, "boarda")
+        other = Identity.generate()
+        intent = _article_intent(other, "boardb", 71)
+        resp = h.handle(
+            _publish_request(intent, other, b"x"),
+            FirehoseContext(
+                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
+            ),
+        )
+        assert resp[0] == 0
+
+    def test_control_acl_scoped_by_target_board(self, stack):
+        """Controls authorize against target_board, not empty intent.board."""
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        _create_board(h, "scoped")
+        other = Identity.generate()
+        first = _article_intent(other, "scoped", 81)
+        resp = h.handle(
+            _publish_request(first, other, b"x"),
+            FirehoseContext(
+                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
+            ),
+        )
+        assert resp[0] == 0
+        target_id = _rid(81 + 100)
+        # Swap in an ACL that only allows cancel on boards=["scoped"].
+        scoped_acl = ACLEvaluator(default_rules_for_admin(ACTOR_PUB.hex()))
+        scoped_acl.add_rule(
+            ACLRule(
+                effect="allow",
+                matcher=PrincipalMatcher(wildcard=True),
+                actions=["write"],
+                commands=["PUBLISH_RECORD"],
+                kinds=["bonnet.article.cancel"],
+                boards=["scoped"],
+            )
+        )
+        h._acl = scoped_acl
+        cancel = Intent(
+            event_id=_rid(82),
+            kind="bonnet.article.cancel",
+            origin="bbs.test",
+            actor_pubkey=other.public_key,
+            target_origin="bbs.test",
+            target_board="scoped",
+            target_article_id=target_id,
+        )
+        resp = h.handle(
+            _publish_request(cancel, other),
+            FirehoseContext(
+                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
+            ),
+        )
+        # Passes ACL (then succeeds as author-cancel on an open board).
+        assert resp[0] == 0
+        # Same control naming another board must NOT be permitted by that rule.
+        cancel2 = Intent(
+            event_id=_rid(83),
+            kind="bonnet.article.cancel",
+            origin="bbs.test",
+            actor_pubkey=other.public_key,
+            target_origin="bbs.test",
+            target_board="elsewhere",
+            target_article_id=target_id,
+        )
+        resp2 = h.handle(
+            _publish_request(cancel2, other),
+            FirehoseContext(
+                peer_pubkey=other.public_key, is_registered=True, origin="bbs.test"
+            ),
+        )
+        assert resp2[0] == 1
+        assert b"not permitted" in resp2.lower()
+
+    def test_parallel_publishes_to_different_boards(self, stack):
+        import threading
+
+        h = stack["handler"]
+        self._grant_write_all(stack)
+        _create_board(h, "par1")
+        _create_board(h, "par2")
+        errors: list = []
+
+        def pub(board, seed):
+            try:
+                user = Identity.generate()
+                intent = _article_intent(user, board, seed)
+                resp = h.handle(
+                    _publish_request(intent, user, b"x"),
+                    FirehoseContext(
+                        peer_pubkey=user.public_key,
+                        is_registered=True,
+                        origin="bbs.test",
+                    ),
+                )
+                if resp[0] != 0:
+                    errors.append(resp)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=pub, args=("par1", 91)),
+            threading.Thread(target=pub, args=("par2", 92)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert not errors
+
+
+# ---------------------------------------------------------------------------
 # Punishment write gate + BAN_STATUS
 # ---------------------------------------------------------------------------
 
