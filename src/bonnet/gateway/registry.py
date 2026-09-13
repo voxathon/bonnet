@@ -122,29 +122,6 @@ class Registry:
             )
         """)
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_keys_tenant ON api_keys(tenant_id)")
-        # OIDC JIT bindings: one row per (issuer, subject), pointing at a
-        # numeric t<N> tenant. The tenant holds API keys like any other, so
-        # one account can use both paths. AUTOINCREMENT sequence never reuses
-        # deleted numbers — a new stranger must not inherit audit history.
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS oauth_seq (
-                id INTEGER PRIMARY KEY AUTOINCREMENT
-            )
-        """)
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS oauth_bindings (
-                oauth_iss TEXT NOT NULL,
-                oauth_sub TEXT NOT NULL,
-                tenant_id TEXT NOT NULL UNIQUE,
-                created_at INTEGER NOT NULL,
-                last_seen INTEGER NOT NULL,
-                PRIMARY KEY (oauth_iss, oauth_sub)
-            )
-        """)
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_oauth_tenant ON oauth_bindings(tenant_id)"
-        )
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_oauth_seen ON oauth_bindings(last_seen)")
         self._conn.commit()
 
     # --- tenants ---------------------------------------------------------
@@ -186,89 +163,7 @@ class Registry:
         if cur.rowcount == 0:
             raise TenantError(f"no such tenant {tenant_id!r}")
         self._conn.execute("DELETE FROM api_keys WHERE tenant_id = ?", (tenant_id,))
-        self._conn.execute("DELETE FROM oauth_bindings WHERE tenant_id = ?", (tenant_id,))
         self._conn.commit()
-
-    # --- oauth bindings ----------------------------------------------------
-
-    def get_oauth_tenant(self, iss: str, sub: str) -> dict | None:
-        """The enabled tenant bound to (iss, sub), or None.
-
-        Disabled tenants do not resolve — disabling kills keys and OAuth
-        together, or the kill switch would be a lie.
-        """
-        row = self._conn.execute(
-            """SELECT b.tenant_id, b.created_at, b.last_seen, t.enabled FROM oauth_bindings b
-               JOIN tenants t ON t.tenant_id = b.tenant_id
-               WHERE b.oauth_iss = ? AND b.oauth_sub = ? AND t.enabled = 1""",
-            (iss, sub),
-        ).fetchone()
-        return dict(row) if row else None
-
-    def get_or_create_oauth_tenant(self, iss: str, sub: str) -> str:
-        """Return the tenant for (iss, sub), JIT-minting t<N> on first sight.
-
-        Idempotent: the same pair always returns the same tenant. Allocation
-        is one transaction (sequence insert + tenant + binding), so concurrent
-        first-logins serialize and the loser reads the winner's row.
-        """
-        if not iss or not sub:
-            raise TenantError("oauth binding requires non-empty iss and sub")
-        existing = self.get_oauth_tenant(iss, sub)
-        if existing is not None:
-            now = int(time.time())
-            self._conn.execute(
-                "UPDATE oauth_bindings SET last_seen = ? WHERE oauth_iss = ? AND oauth_sub = ?",
-                (now, iss, sub),
-            )
-            self._conn.commit()
-            return existing["tenant_id"]
-        now = int(time.time())
-        try:
-            cur = self._conn.execute("INSERT INTO oauth_seq DEFAULT VALUES")
-            seq = cur.lastrowid
-            tenant_id = f"t{seq}"
-            validate_tenant_id(tenant_id)
-            self._conn.execute(
-                "INSERT INTO tenants (tenant_id, created_at, enabled, note) VALUES (?, ?, 1, ?)",
-                (tenant_id, now, f"oauth {iss}"),
-            )
-            self._conn.execute(
-                """INSERT INTO oauth_bindings
-                   (oauth_iss, oauth_sub, tenant_id, created_at, last_seen)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (iss, sub, tenant_id, now, now),
-            )
-            self._conn.commit()
-            return tenant_id
-        except sqlite3.IntegrityError:
-            self._conn.rollback()
-            retry = self.get_oauth_tenant(iss, sub)
-            if retry is not None:
-                return retry["tenant_id"]
-            raise
-
-    def list_oauth_bindings(
-        self, iss: str | None = None, since: int | None = None, inactive_before: int | None = None
-    ) -> list[dict]:
-        """Triage view for manual drops: filter by issuer, age, inactivity."""
-        query = "SELECT oauth_iss, oauth_sub, tenant_id, created_at, last_seen FROM oauth_bindings"
-        clauses: list[str] = []
-        args: list[object] = []
-        if iss is not None:
-            clauses.append("oauth_iss = ?")
-            args.append(iss)
-        if since is not None:
-            clauses.append("created_at >= ?")
-            args.append(since)
-        if inactive_before is not None:
-            clauses.append("last_seen < ?")
-            args.append(inactive_before)
-        if clauses:
-            query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY created_at"
-        rows = self._conn.execute(query, tuple(args)).fetchall()
-        return [dict(r) for r in rows]
 
     # --- keys ------------------------------------------------------------
 
