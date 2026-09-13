@@ -191,7 +191,7 @@ wheels = [
 
 [[package]]
 name = "bonnet"
-version = "0.1.96"
+version = "0.1.97"
 source = { editable = "." }
 dependencies = [
     { name = "bcrypt" },
@@ -199,6 +199,7 @@ dependencies = [
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "platformdirs" },
+    { name = "pyjwt" },
     { name = "pynacl" },
     { name = "ripgrep" },
     { name = "uts46" },
@@ -221,6 +222,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3.0.0,<4.0.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "platformdirs", specifier = ">=4.0.0" },
+    { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "pynacl", specifier = ">=1.5.0" },
     { name = "ripgrep", specifier = ">=14.1.0" },
     { name = "uts46", specifier = ">=0.2.0,<1" },

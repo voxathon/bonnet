@@ -144,9 +144,7 @@ class Registry:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_oauth_tenant ON oauth_bindings(tenant_id)"
         )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_oauth_seen ON oauth_bindings(last_seen)"
-        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_oauth_seen ON oauth_bindings(last_seen)")
         self._conn.commit()
 
     # --- tenants ---------------------------------------------------------
@@ -254,9 +252,7 @@ class Registry:
         self, iss: str | None = None, since: int | None = None, inactive_before: int | None = None
     ) -> list[dict]:
         """Triage view for manual drops: filter by issuer, age, inactivity."""
-        query = (
-            "SELECT oauth_iss, oauth_sub, tenant_id, created_at, last_seen FROM oauth_bindings"
-        )
+        query = "SELECT oauth_iss, oauth_sub, tenant_id, created_at, last_seen FROM oauth_bindings"
         clauses: list[str] = []
         args: list[object] = []
         if iss is not None:

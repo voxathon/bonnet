@@ -275,23 +275,17 @@ def _validate_oauth(o: OAuthConfig) -> None:
             f"config: gateway.oauth.allow_private_iss must be true or false, "
             f"got {o.allow_private_iss!r}"
         )
-    if not isinstance(o.blocked_iss, list) or any(
-        not isinstance(v, str) for v in o.blocked_iss
-    ):
+    if not isinstance(o.blocked_iss, list) or any(not isinstance(v, str) for v in o.blocked_iss):
         raise ValueError("config: gateway.oauth.blocked_iss must be a list of URLs")
     for raw in o.blocked_iss:
         _validate_iss(raw)
     if o.enabled:
-        if o.audience is None or (
-            not isinstance(o.audience, str) or not o.audience.strip()
-        ):
+        if o.audience is None or (not isinstance(o.audience, str) or not o.audience.strip()):
             raise ValueError(
                 "config: gateway.oauth.audience is required when oauth is enabled "
                 "(every accepted JWT must carry it as aud)"
             )
-    elif o.audience is not None and (
-        not isinstance(o.audience, str) or not o.audience.strip()
-    ):
+    elif o.audience is not None and (not isinstance(o.audience, str) or not o.audience.strip()):
         raise ValueError(
             f"config: gateway.oauth.audience must be a non-empty string, got {o.audience!r}"
         )

@@ -123,9 +123,7 @@ def test_private_iss_rejected_by_default(oauth_env, rsa_pair, monkeypatch):
 def test_disabled_makes_zero_fetches(oauth_env, rsa_pair, monkeypatch):
     # no config file -> disabled by default
     called = []
-    monkeypatch.setattr(
-        oauth, "_discover", lambda i: called.append(i) or {"jwks_uri": "https://x"}
-    )
+    monkeypatch.setattr(oauth, "_discover", lambda i: called.append(i) or {"jwks_uri": "https://x"})
     with pytest.raises(ValueError, match="disabled"):
         oauth.verify_token("a.b.c")
     assert called == []
@@ -169,9 +167,7 @@ def test_config_validation():
     with pytest.raises(ValueError, match="audience"):
         gateway_config.validate(cfg)
     cfg2 = gateway_config.GatewayConfig(
-        oauth=gateway_config.OAuthConfig(
-            enabled=True, audience="x", blocked_iss=["http://nope"]
-        )
+        oauth=gateway_config.OAuthConfig(enabled=True, audience="x", blocked_iss=["http://nope"])
     )
     with pytest.raises(ValueError, match="blocked_iss"):
         gateway_config.validate(cfg2)
@@ -182,9 +178,7 @@ def test_auth_middleware_oauth_branch(oauth_env, rsa_pair, monkeypatch):
 
     priv, jwk = rsa_pair
     _write_oauth_config(oauth_env)
-    monkeypatch.setattr(
-        oauth, "_discover", lambda i: {"jwks_uri": "https://idp.example/jwks"}
-    )
+    monkeypatch.setattr(oauth, "_discover", lambda i: {"jwks_uri": "https://idp.example/jwks"})
     monkeypatch.setattr(oauth, "_jwks", lambda u: {"keys": [jwk]})
     token = _mint(priv, "https://idp.example", "agent-7", "bonnet-test")
 

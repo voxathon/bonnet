@@ -165,7 +165,9 @@ def _apply_tenant(request: Request, query_key: str):
     applied: list[tuple[Any, Any]] = []
     if tenant is not None:
         applied.append((tenancy.current_tenant, tenancy.current_tenant.set(tenant)))
-        applied.append((tenancy.current_auth_status, tenancy.current_auth_status.set(tenancy.AUTH_OK)))
+        applied.append(
+            (tenancy.current_auth_status, tenancy.current_auth_status.set(tenancy.AUTH_OK))
+        )
     else:
         tenant = ANONYMOUS_TENANT
         applied.append((tenancy.current_tenant, tenancy.current_tenant.set(tenant)))
@@ -352,9 +354,7 @@ async def call_tool_get(request: Request) -> JSONResponse:
         if query_auth and "auth" in properties and "auth" not in args:
             args["auth"] = query_auth
     except ValueError as e:
-        return JSONResponse(
-            {"ok": False, "error": str(e)}, headers=_no_store_headers()
-        )
+        return JSONResponse({"ok": False, "error": str(e)}, headers=_no_store_headers())
 
     tenant, reset_tenant = _apply_tenant(request, query_key)
     anonymous = tenant == ANONYMOUS_TENANT
