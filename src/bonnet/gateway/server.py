@@ -477,9 +477,7 @@ def _run_admin(args) -> int:
                 tenants.set_enabled(args.tenant_id, args.action == "enable")
                 print(f"tenant {args.tenant_id} {args.action}d")
             elif args.action == "links":
-                rows = tenants.list_oauth_bindings(
-                    args.issuer, args.since, args.inactive_before
-                )
+                rows = tenants.list_oauth_bindings(args.issuer, args.since, args.inactive_before)
                 page = rows[args.offset : args.offset + args.limit]
                 if not page:
                     print("no bindings")

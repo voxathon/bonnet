@@ -144,9 +144,7 @@ def remove_tenant(tenant_id: str, db_path: str | None = None) -> None:
         shutil.rmtree(path)
 
 
-def get_or_create_oauth_tenant(
-    iss: str, sub: str, db_path: str | None = None
-) -> str:
+def get_or_create_oauth_tenant(iss: str, sub: str, db_path: str | None = None) -> str:
     """Return the numeric t<N> tenant for (iss, sub), minting it on first sight.
 
     One account, both paths: the returned tenant can later hold bnt_ API keys

@@ -432,7 +432,9 @@ def test_list_override_off_parses_header(monkeypatch):
         ("yes", False),
         ("", False),
     ]:
-        monkeypatch.setattr(deps, "get_http_request", lambda r=_fake_request({"X-Bonnet-Gating": raw}): r)
+        monkeypatch.setattr(
+            deps, "get_http_request", lambda r=_fake_request({"X-Bonnet-Gating": raw}): r
+        )
         assert gating.list_override_off() is expected
 
     monkeypatch.setattr(deps, "get_http_request", lambda: _fake_request({}))

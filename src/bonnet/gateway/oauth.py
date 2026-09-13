@@ -241,9 +241,7 @@ def _key_for(jwks: dict, kid: str | None):
     from jwt import PyJWK
 
     keys = jwks.get("keys") or []
-    candidates = (
-        [e for e in keys if isinstance(e, dict) and e.get("kid") == kid] if kid else []
-    )
+    candidates = [e for e in keys if isinstance(e, dict) and e.get("kid") == kid] if kid else []
     if not candidates and len(keys) == 1 and isinstance(keys[0], dict) and not kid:
         candidates = keys
     if not candidates:
