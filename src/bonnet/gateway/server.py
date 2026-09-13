@@ -88,6 +88,7 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from bonnet.gateway import (
     gateway_config,
+    get_facade,  # noqa: F401 — registers /call custom routes on `mcp`
     paths,
     resources,  # noqa: F401 — registers @mcp.resource decorators
     tenancy,
@@ -365,6 +366,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="http endpoint path (default: $MCP_PATH, else gateway.toml, else FastMCP's /mcp/; e.g. '/' or '/blah')",
     )
     parser.add_argument(
+        "--allow-get-rpc",
+        dest="allow_get_rpc",
+        action="store_true",
+        default=None,
+        help=(
+            "Enable the braindead GET facade (GET /call/<tool>?<arg>=...&key=...) "
+            "for agents that cannot do POST. Default: $MCP_ALLOW_GET_RPC, else "
+            "gateway.toml allow_get_rpc, else off. ?key= lands in URLs (logs); "
+            "prefer header keys outside the lobotomite path."
+        ),
+    )
+    parser.add_argument(
         "--no-gating",
         action="store_true",
         help=(
@@ -545,7 +558,7 @@ def _normalize_mcp_path(raw: str) -> str:
         path = "/" + path
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
-    if path in ("/health", "/.well-known/untp"):
+    if path in ("/health", "/.well-known/untp") or path == "/call" or path.startswith("/call/"):
         print(
             f"error: MCP path {path!r} collides with the gateway's own route; "
             "pick another (e.g. '/', '/mcp' or '/blah')",
@@ -638,6 +651,7 @@ def _run_check_config(config_path: str) -> None:
     print(f"  url: {cfg.url or '(default: $BONNET_URL or https://localhost:2272)'}")
     print(f"  tls: {'yes' if cfg.tls_cert and cfg.tls_key else 'no'}")
     print(f"  gating: {'off' if cfg.gating is False else 'on'}")
+    print(f"  allow_get_rpc: {'on' if cfg.allow_get_rpc is True else 'off (default)'}")
     print(f"  log_level: {cfg.log_level or '(default: $BONNET_LOG_LEVEL or DEBUG)'}")
     print(f"  log_keep_files: {cfg.log_keep_files or '(default: 20)'}")
     oauth = getattr(cfg, "oauth", None)
@@ -728,6 +742,19 @@ def run(argv: list[str] | None = None):
     if args.no_gating or (gw_config and gw_config.gating is False):
         os.environ["BONNET_GATING"] = "off"
 
+    # Braindead GET facade, off by default. Precedence mirrors transport:
+    # CLI flag > $MCP_ALLOW_GET_RPC env > gateway.toml > off.
+    allow_get_rpc = args.allow_get_rpc
+    if allow_get_rpc is None:
+        env_allow = os.environ.get("MCP_ALLOW_GET_RPC", "").lower()
+        if env_allow:
+            allow_get_rpc = env_allow in ("1", "true", "yes", "on")
+        elif gw_config and gw_config.allow_get_rpc is not None:
+            allow_get_rpc = gw_config.allow_get_rpc
+        else:
+            allow_get_rpc = False
+    get_facade.set_enabled(bool(allow_get_rpc))
+
     transport = (
         args.mode
         or args.transport
@@ -803,6 +830,17 @@ def run(argv: list[str] | None = None):
             f"WARNING: binding {host} exposes this gateway, and the identities it "
             f"holds for every tenant, beyond this machine. Ensure MCP_TLS_CERT/KEY "
             f"are set and access is restricted.",
+            file=sys.stderr,
+        )
+
+    if get_facade.is_enabled() and host not in ("127.0.0.1", "::1", "localhost"):
+        # ?key= credentials travel in URLs (history, proxy/access logs) and
+        # GETs are prefetchable — off-loopback without TLS turns every
+        # lobotomite fetch into a replayable secret.
+        print(
+            f"WARNING: GET facade is enabled on non-loopback bind {host}: "
+            f"?key= API keys will appear in URLs and server logs. Ensure "
+            f"MCP_TLS_CERT/KEY are set and access is restricted.",
             file=sys.stderr,
         )
 
