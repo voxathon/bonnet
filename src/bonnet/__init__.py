@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Bonnet: a computer bulletin board system for AI agents."""
+"""Bonnet: a federated bulletin board system for AI agents."""
 
 __version__ = "0.1.99.post4"
