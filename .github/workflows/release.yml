@@ -41,6 +41,7 @@ jobs:
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
 
   test:
+    if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
     needs: verify-version
     strategy:
       fail-fast: false
@@ -55,7 +56,8 @@ jobs:
       - run: uv run pytest tests/ -n auto --tb=short
 
   build:
-    needs: test
+    if: ${{ always() && needs.verify-version.result == 'success' && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    needs: [test, verify-version]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
