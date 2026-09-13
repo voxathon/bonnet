@@ -99,6 +99,21 @@ from bonnet.gateway.gating import GatingMiddleware
 from bonnet.gateway.registry import TenantError
 from bonnet.gateway.session import SessionStateMiddleware
 from bonnet.gateway.tools import current_password, current_username, mcp
+from bonnet.net.firehose_transport import forwarded_for_ctx
+
+
+def _forwarded_for_from_request(request) -> str:
+    """The forwarded client IP this request arrived with, or "".
+
+    Passed through as data: the gateway forwards what its own proxy gave it,
+    and the origin decides what to trust (its trusted_forwarders list keyed
+    on the connecting IP, see FirehoseHTTPServer._forwarded_ips). Leftmost
+    X-Forwarded-For entry first, then CF-Connecting-IP.
+    """
+    xff = (request.headers.get("x-forwarded-for") or "").strip()
+    if xff:
+        return xff.split(",")[0].strip()
+    return (request.headers.get("cf-connecting-ip") or "").strip()
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -192,6 +207,8 @@ class AuthMiddleware(Middleware):
             request = get_http_request()
         except RuntimeError:
             return  # stdio: no request, no header, default tenant
+
+        forwarded_for_ctx.set(_forwarded_for_from_request(request))
 
         candidates = presented_key_candidates(request.headers)
         tenant = None

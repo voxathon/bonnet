@@ -34,6 +34,7 @@ from __future__ import annotations
 import base64
 import os
 import time
+from contextvars import ContextVar
 from urllib.parse import urlparse
 
 import httpx
@@ -68,6 +69,13 @@ from bonnet.net.http_auth import (
     canonicalize_url,
     compute_content_digest,
 )
+
+#: The forwarded client IP the current HTTP request arrived with, set by the
+#: gateway's auth middleware and exported on every gateway->server POST (see
+#: `_post_signed`) so the origin can log and rate-limit on the real client IP
+#: behind its proxies. Default empty — direct clients (CLI, federation sync)
+#: export nothing, and the origin treats an empty value as no forwarded data.
+forwarded_for_ctx: ContextVar[str] = ContextVar("forwarded_for", default="")
 
 
 class FirehoseClientError(Exception):
@@ -808,6 +816,9 @@ class FirehoseTransport:
         )
 
         headers = dict(msg.headers)
+        forwarded = forwarded_for_ctx.get()
+        if forwarded:
+            headers["X-Forwarded-For"] = forwarded
         try:
             resp = await self._http.post(
                 f"{self._base_url}/command",

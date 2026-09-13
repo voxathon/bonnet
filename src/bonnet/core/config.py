@@ -21,6 +21,7 @@ settings, data paths, and operational parameters.
 from __future__ import annotations
 
 import glob
+import ipaddress
 import os
 import re
 import socket
@@ -139,6 +140,7 @@ _SECTION_KEYS = {
         "clock_skew_seconds",
         "host",
         "acl_poll_interval_seconds",
+        "trusted_forwarders",
     },
     "limits": {
         "max_request_size",
@@ -339,6 +341,7 @@ class FirehoseConfig:
         admin_pubkey_hex: str = "",
         host: str = "127.0.0.1",
         acl_poll_interval_seconds: int = 30,
+        trusted_forwarders: list = None,
         unknown_keys: list = None,
         witness: WitnessConfig = None,
         log_level: str = "DEBUG",
@@ -378,6 +381,7 @@ class FirehoseConfig:
         self.host = host
         self.unknown_keys = list(unknown_keys or [])
         self.witness = witness or WitnessConfig()
+        self.trusted_forwarders = list(trusted_forwarders or [])
 
     def validate(self) -> None:
         """Raise ValueError if configuration is invalid."""
@@ -394,6 +398,15 @@ class FirehoseConfig:
             socket.getaddrinfo(self.host, None)
         except socket.gaierror as exc:
             raise ValueError(f"config: host {self.host!r} does not resolve: {exc}") from exc
+        for fwd in self.trusted_forwarders:
+            if not isinstance(fwd, str):
+                raise ValueError(f"config: trusted_forwarders entries must be strings, got {fwd!r}")
+            try:
+                ipaddress.ip_address(fwd.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    f"config: trusted_forwarders entry {fwd!r} is not a valid IP address"
+                ) from exc
         if self.max_request_size <= 0:
             raise ValueError(
                 f"config: max_request_size must be positive, got {self.max_request_size}"
@@ -681,6 +694,9 @@ class FirehoseConfig:
             admin_pubkey_hex=admin_pubkey_hex,
             host=server.get("host", "127.0.0.1"),
             acl_poll_interval_seconds=server.get("acl_poll_interval_seconds", 30),
+            trusted_forwarders=[
+                str(x).strip() for x in server.get("trusted_forwarders", []) if str(x).strip()
+            ],
             unknown_keys=unknown_keys,
             log_level=logging_cfg.get("level", "DEBUG"),
             log_keep_files=logging_cfg.get("keep_files", 20),
