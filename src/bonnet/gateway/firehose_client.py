@@ -365,7 +365,9 @@ class FirehoseHTTPClient(FirehoseTransport):
 
         Board-carried (not target-carried) like board.close/reopen. The
         reason is an optional event body. Second purge of an absent board
-        is a success no-op; a later board.create may reclaim the name.
+        is a success without append (no new event; the result carries the
+        current head record with deduped=True); a later board.create may
+        reclaim the name.
         """
         if self._identity is None or self._server_origin is None:
             raise FirehoseClientError("not connected")
@@ -385,7 +387,9 @@ class FirehoseHTTPClient(FirehoseTransport):
         actor_sig = sign_intent(self._identity, encode_intent(intent))
         cmd = build_publish_record(intent, actor_sig, body)
         resp = await self._send_command(cmd)
-        return parse_publish_response(resp)
+        result = parse_publish_response(resp)
+        result.deduped = result.event_id != eid.hex()
+        return result
 
     async def publish_user_register(
         self,

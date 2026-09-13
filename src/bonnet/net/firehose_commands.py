@@ -51,6 +51,7 @@ from bonnet.core.kinds import (
     KIND_ARTICLE_UNPIN,
     KIND_BOARD_CLOSE,
     KIND_BOARD_CREATE,
+    KIND_BOARD_PURGE,
     KIND_BOARD_REOPEN,
     KIND_PUNISHMENT_ACK,
     KIND_PUNISHMENT_BAN,
@@ -775,9 +776,11 @@ class FirehoseCommandHandler:
             # open board would otherwise append a signed no-effect record —
             # the same "spurious claim minted into the append-only log" the
             # board.create block above refuses. Purge is the deliberate
-            # exception (second/absent purge stays a success no-op so names
-            # remain reclaimable). Checked under the stripe so concurrent
-            # close/reopen/article on the same board serialize.
+            # exception (second/absent purge stays a success *without
+            # append* — see the noop block below — so names remain
+            # reclaimable without spamming the append-only log). Checked
+            # under the stripe so concurrent close/reopen/article on the
+            # same board serialize.
             if kind in (KIND_BOARD_CLOSE, KIND_BOARD_REOPEN):
                 target_board = self._nav.get_board(intent.origin, board)
                 if target_board is None:
@@ -942,6 +945,56 @@ class FirehoseCommandHandler:
                 actual_hash = compute_body_hash(body)
                 if actual_hash != intent.body_hash:
                     return _error(0x0006, "Body hash mismatch")
+
+            # Purge of an absent board is success without append: the
+            # projection would be a no-op anyway (nav row already gone),
+            # so skip the body write, append_record, dispatch and witness
+            # mint, and return the current head record + own witness to
+            # keep the publish response shape. The caller detects the
+            # noop by returned event_id != requested event_id. Falls
+            # through to the legacy append path only when there is no
+            # head yet (fresh origin, test-only in practice). All
+            # authorization above (ACL, actor binding, punishment gate)
+            # already ran, so this is not a free success probe.
+            if kind == KIND_BOARD_PURGE:
+                if self._nav.get_board(intent.origin, board) is None:
+                    head_seq = self._firehose.get_highest_seq(self._origin)
+                    head_recs = (
+                        self._firehose.get_events_range(self._origin, head_seq, 1)
+                        if head_seq > 0
+                        else []
+                    )
+                    if head_recs:
+                        head_rec = head_recs[0]
+                        encoded_head = encode_record(head_rec)
+                        head_hash = compute_event_hash(encoded_head)
+                        own = self._firehose.get_witness(
+                            self._origin, head_rec.event_id, self._identity.public_key
+                        )
+                        if own is None:
+                            own = make_origin_witness(
+                                origin=self._origin,
+                                event_id=head_rec.event_id,
+                                event_hash=head_hash,
+                                origin_identity=self._identity,
+                                hostname=self._hostname,
+                                seen_at=now,
+                            )
+                            self._firehose.store_witness(
+                                own, keep_pubkeys={self._identity.public_key}
+                            )
+                        encoded_own = encode_witness(own)
+                        log_debug(
+                            "PUBLISH purge noop",
+                            board=board or "-",
+                            head_seq=head_rec.origin_seq,
+                        )
+                        return _success(
+                            struct.pack(">I", len(encoded_head))
+                            + encoded_head
+                            + struct.pack(">H", len(encoded_own))
+                            + encoded_own
+                        )
 
             if intent.kind == KIND_ARTICLE and intent.body_size > 0:
                 self._body_store.stage_article_body(

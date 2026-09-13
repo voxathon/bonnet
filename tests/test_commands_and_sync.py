@@ -822,8 +822,9 @@ class TestClosedBoardGate:
 
 def _purge_board(handler, board, actor=None, seed=950, reason=b""):
     actor = actor or ACTOR
+    event_id = _rid(seed)
     intent = Intent(
-        event_id=_rid(seed),
+        event_id=event_id,
         kind="bonnet.board.purge",
         origin="bbs.test",
         actor_pubkey=actor.public_key,
@@ -833,6 +834,9 @@ def _purge_board(handler, board, actor=None, seed=950, reason=b""):
     )
     resp = handler.handle(_publish_request(intent, actor, reason), _user_ctx(actor))
     assert resp[0] == 0x00, resp
+    rec_len = struct.unpack(">I", resp[1:5])[0]
+    rec = decode_record(resp[5 : 5 + rec_len])
+    return event_id, rec
 
 
 class TestBoardPurge:
@@ -888,15 +892,44 @@ class TestBoardPurge:
 
     def test_second_purge_is_noop_success(self, stack):
         h = stack["handler"]
+        fh = stack["firehose"]
         _create_board(h, "twice")
         _purge_board(h, "twice", seed=950)
-        _purge_board(h, "twice", seed=951)
+        seq_before = fh.get_highest_seq("bbs.test")
+        requested, returned = _purge_board(h, "twice", seed=951)
         assert h._nav.get_board("bbs.test", "twice") is None
+        # Success without append: no new event, head returned instead.
+        assert fh.get_highest_seq("bbs.test") == seq_before
+        assert returned.event_id != requested
+        assert returned.origin_seq == seq_before
+        assert fh.get_event_by_id("bbs.test", requested) is None
 
     def test_purge_absent_board_is_noop_success(self, stack):
         h = stack["handler"]
-        _purge_board(h, "never-existed", seed=952)
+        fh = stack["firehose"]
+        bs = stack["body_store"]
+        # A head must exist for the noop-without-append path (production
+        # always has root registration; a bare fixture does not).
+        _create_board(h, "unrelated")
+        seq_before = fh.get_highest_seq("bbs.test")
+        requested, returned = _purge_board(h, "never-existed", seed=952, reason=b"why")
         assert h._nav.get_board("bbs.test", "never-existed") is None
+        # No new event, no stored body for the requested event_id.
+        assert fh.get_highest_seq("bbs.test") == seq_before
+        assert returned.event_id != requested
+        assert fh.get_event_by_id("bbs.test", requested) is None
+        assert bs.event_body_exists("bbs.test", requested) is False
+
+    def test_purge_noop_returns_head(self, stack):
+        """The noop response carries the current head record, so the
+        publish response shape is unchanged for clients."""
+        h = stack["handler"]
+        fh = stack["firehose"]
+        _create_board(h, "ghost")
+        head_before = fh.get_events_range("bbs.test", fh.get_highest_seq("bbs.test"), 1)[0]
+        _, returned = _purge_board(h, "ghost-missing", seed=953)
+        assert returned.event_id == head_before.event_id
+        assert returned.origin_seq == head_before.origin_seq
 
     def test_reclaim_name_after_purge(self, stack):
         h = stack["handler"]
