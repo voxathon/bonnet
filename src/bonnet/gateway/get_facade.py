@@ -46,6 +46,9 @@ Design (see spike notes in the plan thread):
   Header credentials always win over query ones. OIDC JWTs stay
   header-only. `?key=` must be the full `bnt_<id>_<secret>`; a bare key
   id never resolves.
+- Every `GET /call/<tool>` response carries a tiny addendum — `session`,
+  `tools_changed`, `visible_tools` (names only) — so a notification-blind
+  GET-only caller knows when to re-fetch `GET /call` for usage strings.
 
 Gated off by default: `--allow-get-rpc` / `$MCP_ALLOW_GET_RPC` /
 `gateway.toml [gateway] allow_get_rpc`. Disabled → 404 (the surface is
@@ -259,8 +262,9 @@ def _result_to_json(result: Any) -> Any:
         return structured
     content = getattr(result, "content", None)
     if isinstance(content, list):
-        texts = [getattr(block, "text", None) for block in content]
-        texts = [t for t in texts if isinstance(t, str)]
+        texts: list[str] = [
+            t for t in (getattr(block, "text", None) for block in content) if isinstance(t, str)
+        ]
         if len(texts) == 1:
             try:
                 return json.loads(texts[0])
@@ -285,6 +289,45 @@ def _disabled() -> JSONResponse:
         status_code=404,
         headers=_no_store_headers(),
     )
+
+
+async def _visible_tool_names() -> list[str]:
+    """Names currently visible to this facade request, tenant-filtered.
+
+    Must run inside `set_http_request(patched_request)` with the tenant
+    ContextVars applied: Auth + Gating then filter exactly as `GET /call`
+    does. Names only — usage strings stay at `GET /call`.
+    """
+    tools = await mcp.list_tools()
+    return sorted(t.name for t in tools)
+
+
+async def _try_visible_tool_names(patched_request: Request) -> list[str] | None:
+    """Best-effort `_visible_tool_names`: None instead of ever raising.
+
+    The addendum must never break the tool call it rides on; a listing
+    failure degrades to `tools_changed: false` with whatever half is known.
+    """
+    try:
+        from fastmcp.server.http import set_http_request
+
+        with set_http_request(patched_request):
+            return await _visible_tool_names()
+    except Exception:
+        return None
+
+
+def _addendum(
+    session_label: str, before: list[str] | None, after: list[str] | None
+) -> dict[str, Any]:
+    """The tiny visibility addendum for a `GET /call/<tool>` response."""
+    visible = after if after is not None else (before if before is not None else [])
+    changed = before is not None and after is not None and before != after
+    return {
+        "session": session_label,
+        "tools_changed": changed,
+        "visible_tools": visible,
+    }
 
 
 @mcp.custom_route("/call", methods=["GET"])
@@ -366,23 +409,34 @@ async def call_tool_get(request: Request) -> JSONResponse:
     patched_request = _with_injected_key(request, query_key)
     from fastmcp.server.http import set_http_request
 
+    # Before-state for the addendum: after restore so the cursor is hydrated
+    # (board-scoped PERMISSIONS answers for the right board), inside the
+    # patched request so the tenant resolves as the inner Auth pass will.
+    before = await _try_visible_tool_names(patched_request)
+
     lock = _snapshot_lock(snapshot_key) if not anonymous else None
     try:
         if lock is not None:
             await lock.acquire()
         with set_http_request(patched_request):
             result = await mcp.call_tool(tool_name, args)
+            try:
+                after = await _visible_tool_names()
+            except Exception:
+                after = None
     except Exception as e:
         from fastmcp.exceptions import NotFoundError
 
+        after_err = await _try_visible_tool_names(patched_request)
+        addendum = _addendum(session_label, before, after_err)
         if isinstance(e, NotFoundError):
             return JSONResponse(
-                {"ok": False, "error": f"unknown tool {tool_name!r}"},
+                {"ok": False, "error": f"unknown tool {tool_name!r}", **addendum},
                 status_code=404,
                 headers=_no_store_headers(),
             )
         return JSONResponse(
-            {"ok": False, "error": str(e) or type(e).__name__},
+            {"ok": False, "error": str(e) or type(e).__name__, **addendum},
             headers=_no_store_headers(),
         )
     finally:
@@ -395,7 +449,11 @@ async def call_tool_get(request: Request) -> JSONResponse:
         if lock is not None:
             lock.release()
     return JSONResponse(
-        {"ok": True, "result": _result_to_json(result)},
+        {
+            "ok": True,
+            "result": _result_to_json(result),
+            **_addendum(session_label, before, after),
+        },
         headers=_no_store_headers(),
     )
 
