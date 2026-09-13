@@ -48,6 +48,18 @@ Design (see spike notes in the plan thread):
 - Every `GET /call/<tool>` response carries a tiny addendum — `session`,
   `tools_changed`, `visible_tools` (names only) — so a notification-blind
   GET-only caller knows when to re-fetch `GET /call` for usage strings.
+- Burst dedup for writes: identical `GET /call/<write-tool>?<args>` URLs
+  arriving within a few seconds of each other execute once; the later
+  call gets the first call's `result` replayed (with a fresh addendum).
+  GET-only harnesses retry by re-fetching the same URL, and every write
+  tool mints fresh randomness (`article_id`, `event_id`) per call, so each
+  retry would otherwise append a distinct duplicate record to the firehose.
+  The dedup key is (tenant, session label, tool, canonical args) — the
+  source IP is deliberately ignored, `?key=`/`?session=` never reach the
+  tool args, and only `ok:true` results are cached. Reads are never
+  deduped. Process-local memory, like `_snapshots` below; intentional
+  duplicate content should be spaced past the window or sent via POST.
+  See `DEDUP_TTL_SECONDS`.
 
 Gated off by default: `--allow-get-rpc` / `$MCP_ALLOW_GET_RPC` /
 `gateway.toml [gateway] allow_get_rpc`. Disabled → 404 (the surface is
@@ -59,8 +71,11 @@ off-loopback.
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 import os
+import time
 from typing import Any
 
 from starlette.requests import Request
@@ -107,6 +122,142 @@ def _snapshot_lock(key: tuple[str, str]) -> asyncio.Lock:
         lock = asyncio.Lock()
         _snapshot_locks[key] = lock
     return lock
+
+
+#: Burst-dedup window for write tools reached through this facade, in
+#: seconds. A GET-only caller that hits the same write URL several times in
+#: a row — retries from several IPs, prefetch replays, a double-pasted URL —
+#: is one intention executed several times, and each execution would mint
+#: fresh `article_id`/`event_id` randomness into a distinct firehose record.
+#: Within this window the second and later identical calls replay the first
+#: call's stored `result` instead of executing. Override with
+#: $MCP_DEDUP_WINDOW_SECONDS ("0" disables); failures are never cached.
+DEDUP_TTL_SECONDS = 5.0
+
+#: Cap on cached burst-dedup entries. Lazy expiry on lookup plus an
+#: opportunistic sweep on insert; same never-cleaned tolerance as
+#: `session._locks` and `tools.auth_tokens` — one small entry per recent
+#: write is cheap next to a 24h token TTL.
+_DEDUP_MAX_ENTRIES = 1024
+
+#: Tools whose GET-facade calls append records to the firehose (or otherwise
+#: mutate durable gateway state, like `register` minting an identity). Reads
+#: are deliberately absent: caching a read would serve stale board content.
+WRITE_TOOL_NAMES = frozenset(
+    {
+        "register",
+        "rotate_identity_key",
+        "create_board",
+        "close_board",
+        "reopen_board",
+        "purge_board",
+        "publish_article",
+        "supersede_article",
+        "cancel_article",
+        "restore_article",
+        "purge_article",
+        "pin_article",
+        "unpin_article",
+        "close_thread",
+        "reopen_thread",
+        "report",
+        "punish_warn",
+        "punish_ban",
+        "punish_permaban",
+        "punish_revoke",
+        "acknowledge_punishment",
+    }
+)
+
+#: Recent successful write results keyed by dedup key (see `_dedup_key`):
+#: key -> (expires_monotonic, stored JSON-able result).
+_recent_writes: dict[tuple[str, str, str, str], tuple[float, Any]] = {}
+_dedup_locks: dict[tuple[str, str, str, str], asyncio.Lock] = {}
+
+#: Miss sentinel for `_dedup_get`: a cached result may legitimately be
+#: None, which must replay rather than re-execute.
+_DEDUP_MISS: Any = object()
+
+
+def _dedup_window() -> float:
+    """The live burst-dedup window in seconds (env override, floor 0=off)."""
+    raw = os.environ.get("MCP_DEDUP_WINDOW_SECONDS", "")
+    if not raw.strip():
+        return DEDUP_TTL_SECONDS
+    try:
+        return max(0.0, float(raw.strip()))
+    except ValueError:
+        return DEDUP_TTL_SECONDS
+
+
+def _dedup_key(args: dict[str, Any]) -> str:
+    """Fingerprint one write intention's arguments for burst dedup.
+
+    Canonical JSON over the already-parsed `args` (which exclude the facade
+    `RESERVED_PARAMS`), so `?subject=A&body=B` and `?body=B&subject=A` hash
+    together, and `?key=` differences and the caller's source IP never split
+    the key. `?session=` DOES split the key — but one level up, as a tuple
+    element, because the cursor scope differs per session. `?auth=` splits
+    too, via `args` itself: different identities must never coalesce.
+    Non-JSON-able arg values degrade to `repr` rather than breaking the call.
+    """
+    try:
+        canonical = json.dumps(args, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        canonical = repr(sorted(args.items()))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _dedup_lock(key: tuple[str, str, str, str]) -> asyncio.Lock:
+    lock = _dedup_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _dedup_locks[key] = lock
+    return lock
+
+
+def _dedup_get(key: tuple[str, str, str, str]) -> Any:
+    """A live cached write result for `key`, or `_DEDUP_MISS` on miss/expiry.
+
+    `None` is a legitimate cached result (a tool returning nothing), so the
+    sentinel — not None — marks a miss. Returns a deep copy so callers
+    cannot mutate the stored entry through the response they were handed.
+    """
+    entry = _recent_writes.get(key)
+    if entry is None:
+        return _DEDUP_MISS
+    expires, stored = entry
+    if time.monotonic() >= expires:
+        _recent_writes.pop(key, None)
+        return _DEDUP_MISS
+    try:
+        return copy.deepcopy(stored)
+    except Exception:
+        return stored
+
+
+def _dedup_store(key: tuple[str, str, str, str], result: Any, window: float) -> None:
+    """Remember a successful write result for `window` seconds."""
+    if window <= 0:
+        return
+    if len(_recent_writes) >= _DEDUP_MAX_ENTRIES:
+        now = time.monotonic()
+        stale = [k for k, (exp, _) in _recent_writes.items() if exp <= now]
+        for k in stale:
+            _recent_writes.pop(k, None)
+        while len(_recent_writes) >= _DEDUP_MAX_ENTRIES:
+            _recent_writes.pop(next(iter(_recent_writes)))
+    try:
+        stored = copy.deepcopy(result)
+    except Exception:
+        stored = result
+    _recent_writes[key] = (time.monotonic() + window, stored)
+
+
+def reset_dedup_state() -> None:
+    """Drop burst-dedup entries and locks (tests only)."""
+    _recent_writes.clear()
+    _dedup_locks.clear()
 
 
 def _header_candidates(headers) -> list[str]:
@@ -407,6 +558,43 @@ async def call_tool_get(request: Request) -> JSONResponse:
     # patched request so the tenant resolves as the inner Auth pass will.
     before = await _try_visible_tool_names(patched_request)
 
+    # Burst dedup for writes (singleflight + short-TTL replay). Keyed per
+    # (tenant, session label, tool, canonical args) so one caller's retry
+    # burst coalesces while two callers sharing a tenant+session label but
+    # doing different things never collide — and, by the same token, two
+    # genuinely different write intentions from one caller never merge.
+    # Lock order is fixed everywhere: dedup lock -> snapshot lock, never
+    # the reverse, so concurrent bursts cannot deadlock against each other.
+    dedup_window = _dedup_window()
+    dedup_cacheable = (
+        tool_name in WRITE_TOOL_NAMES and not anonymous and dedup_window > 0
+    )
+    dedup_key: tuple[str, str, str, str] | None = None
+    dedup_lock: asyncio.Lock | None = None
+    if dedup_cacheable:
+        dedup_key = (tenant, session_label, tool_name, _dedup_key(args))
+        dedup_lock = _dedup_lock(dedup_key)
+        await dedup_lock.acquire()
+        try:
+            hit = _dedup_get(dedup_key)
+        except Exception:
+            hit = _DEDUP_MISS
+        if hit is not _DEDUP_MISS:
+            try:
+                from bonnet.core.logging import log_info as _log_info
+
+                _log_info("GET_FACADE dedup hit", tool=tool_name, tenant=tenant)
+            except Exception:
+                pass
+            after_hit = await _try_visible_tool_names(patched_request)
+            addendum = _addendum(session_label, before, after_hit)
+            reset_tenant()
+            dedup_lock.release()
+            return JSONResponse(
+                {"ok": True, "result": hit, **addendum},
+                headers=_no_store_headers(),
+            )
+
     lock = _snapshot_lock(snapshot_key) if not anonymous else None
     try:
         if lock is not None:
@@ -417,6 +605,11 @@ async def call_tool_get(request: Request) -> JSONResponse:
                 after = await _visible_tool_names()
             except Exception:
                 after = None
+            if dedup_cacheable and dedup_key is not None:
+                try:
+                    _dedup_store(dedup_key, _result_to_json(result), dedup_window)
+                except Exception:
+                    pass
     except Exception as e:
         from fastmcp.exceptions import NotFoundError
 
@@ -441,6 +634,11 @@ async def call_tool_get(request: Request) -> JSONResponse:
         reset_tenant()
         if lock is not None:
             lock.release()
+        if dedup_lock is not None:
+            try:
+                dedup_lock.release()
+            except RuntimeError:
+                pass
     return JSONResponse(
         {
             "ok": True,
