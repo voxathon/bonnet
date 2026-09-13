@@ -87,11 +87,11 @@ _SAMPLE = """\
 # # Default upstream board server (fills $BONNET_URL when the environment
 # # does not set it; env still wins). Just scheme+host+port, no path/query.
 # # url = "https://bbs.example:2272"
-# # Braindead GET facade for agents that cannot do POST
+# # GET facade for agents that cannot do arbitrary POST. Experimental.
 # # (GET /call/<tool>?<arg>=...&key=...). Off by default; CLI
 # # --allow-get-rpc and $MCP_ALLOW_GET_RPC win over this file. ?key=
 # # credentials travel in URLs (history, proxy/access logs), so prefer
-# # header keys outside the lobotomite path and serve TLS off-loopback.
+# # header keys outside the agent path and serve TLS off-loopback.
 # # allow_get_rpc = false
 # # TLS certificate/key for the gateway itself (reuse the board server's
 # # certs, or terminate TLS at a reverse proxy and leave these unset).
