@@ -27,7 +27,7 @@ from bonnet.app.server import BonnetServer
 from bonnet.core.acl import ACLError
 from bonnet.core.config import FirehoseConfig
 from bonnet.core.home import resolve_home, set_home
-from bonnet.core.logging import init_logging
+from bonnet.core.logging import enable_request_mirror, init_logging
 from bonnet.core.tlsutil import OpenSSLNotFoundError, generate_self_signed_cert
 
 
@@ -395,6 +395,12 @@ def main(argv: list[str] | None = None):
             f"'{log_dir}': {exc}. Continuing without file logs.",
             file=sys.stderr,
         )
+
+    # One line per request on the operator console (method, path, remote,
+    # forwarded IP, status) — the file log is the durable record, the
+    # console is what the operator watches. Uvicorn's own access log is
+    # off; see RequestLogMiddleware.
+    enable_request_mirror()
 
     try:
         _preflight_bind(config.host, config.port)

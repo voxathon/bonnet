@@ -191,7 +191,7 @@ wheels = [
 
 [[package]]
 name = "bonnet"
-version = "0.1.99.post6"
+version = "0.1.99.post7"
 source = { editable = "." }
 dependencies = [
     { name = "bcrypt" },

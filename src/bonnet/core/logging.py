@@ -17,6 +17,7 @@ import glob
 import logging
 import logging.handlers
 import os
+import sys
 from datetime import datetime
 
 _log_file_path = None
@@ -198,6 +199,46 @@ def set_level(level: str) -> None:
     global _log
     if _log is not None:
         _log.setLevel(_resolve_level(level))
+
+
+class _RequestMirrorFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage().startswith("HTTP ")
+
+
+class _RequestMirrorHandler(logging.StreamHandler):
+    """stderr handler passing only the `HTTP ` per-request lines.
+
+    The `HTTP ` prefix is the ASGI request logger's line (one per request,
+    with remote and forwarded IPs); `HTTP_COMMAND:` has an underscore so it
+    doesn't match, and every other log line stays file-only.
+    """
+
+    def __init__(self):
+        super().__init__(sys.stderr)
+        self.addFilter(_RequestMirrorFilter())
+
+
+def enable_request_mirror() -> None:
+    """Mirror the per-request `HTTP` log lines to stderr.
+
+    A running server's requests are watched on the operator console, not in
+    the file log — the file is the durable record but it isn't what's on
+    screen. This adds a stderr handler passing only the `HTTP ` lines the
+    ASGI request logger (firehose_http_server.RequestLogMiddleware) emits —
+    one line per request, with the remote and forwarded client IPs —
+    leaving every other log line file-only. Idempotent: calling twice adds
+    one handler, not two. No-op if init_logging() not called.
+    """
+    global _log
+    if not _initialized or _log is None:
+        return
+    for handler in _log.handlers:
+        if isinstance(handler, _RequestMirrorHandler):
+            return
+    handler = _RequestMirrorHandler()
+    handler.setFormatter(TimestampFormatter())
+    _log.addHandler(handler)
 
 
 def close_logging() -> None:

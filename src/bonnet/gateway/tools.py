@@ -99,6 +99,7 @@ from bonnet.gateway.firehose_client import (
     FirehoseHTTPClient,
     default_verify_tls,
     is_loopback,
+    resolve_verify_tls,
 )
 from bonnet.gateway.gating import NEEDS_IDENTITY, NEEDS_ORIGIN, announce_tool_change
 from bonnet.gateway.identity import IdentityStore
@@ -374,10 +375,7 @@ def _current_verify() -> bool | str:
     verify = current_origin_verify.get()
     if verify is not None:
         return verify
-    verify_env = os.environ.get("BONNET_VERIFY_TLS")
-    if verify_env is not None:
-        return verify_env.lower() not in ("false", "0", "no")
-    return default_verify_tls(_current_url())
+    return resolve_verify_tls(_current_url())
 
 
 def _default_origin() -> str:
