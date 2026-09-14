@@ -44,7 +44,7 @@ acl_poll_interval_seconds = 30
 # socket peer, and the anonymous rate limiter buckets on the forwarded IP
 # instead of the proxy's. Anything else arriving with such headers is logged
 # as-is and bucketed on its own socket address. Exact IPs only — no CIDRs.
-# trusted_forwarders = ["127.0.0.1"]
+trusted_forwarders = ["127.0.0.1"]
 
 [limits]
 max_request_size = 10485760
