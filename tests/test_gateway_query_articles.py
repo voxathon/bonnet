@@ -53,12 +53,13 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
             effect="allow",
             matcher=PrincipalMatcher(registered=True),
             actions=["read"],
-            commands=["BOARD_LIST", "ARTICLE_LIST", "ARTICLE_GET", "ARTICLE_QUERY", "EVENT_HEAD"],
+            commands=["BOARD_LIST", "ARTICLE_LIST", "ARTICLE_GET", "ARTICLE_QUERY", "EVENT_HEAD", "EVENT_RANGE", "EVENT_GET"],
             boards=["*"],
         )
     )
-    # query_articles/get_article default to the anonymous principal when no
-    # auth= is passed, same as every other read tool.
+    # Reads without auth= go out as the session's default identity when one
+    # is selected (else anonymous), same as every other read tool — so both
+    # principals need the read grants here.
     server_stack["command_handler"]._acl.add_rule(
         ACLRule(
             effect="allow",

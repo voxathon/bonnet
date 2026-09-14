@@ -615,6 +615,29 @@ async def _connect_anonymous(client: FirehoseHTTPClient) -> None:
     _store_manifest_after_first_use(client)
 
 
+async def _connect_with_default(client: FirehoseHTTPClient, auth: str | None) -> None:
+    """Connect as the call's identity, the session default, or anonymous — in that order.
+
+    Explicit `auth` wins; otherwise the session default (`current_username`,
+    then `$BONNET_IDENTITY` / the origin store's active identity, the same
+    resolution gating's PERMISSIONS check uses) is acted as; anonymous is the
+    last resort when no identity is selected at all. The anonymous tenant
+    always lands on anonymous via `_connect_authenticated`'s own degrade.
+
+    A selected-but-unusable identity (wrapped key with no password, unknown
+    name) raises rather than silently downgrading: acting as the wrong
+    principal while gating showed the real identity's permissions is worse
+    than failing loud.
+    """
+    if auth:
+        await _connect_authenticated(client, auth)
+        return
+    if current_username.get() or _default_identity():
+        await _connect_authenticated(client, None)
+        return
+    await _connect_anonymous(client)
+
+
 def _store_manifest_after_first_use(client: FirehoseHTTPClient) -> None:
     """Store-on-first-use for the session manifest cache.
 
@@ -1479,10 +1502,7 @@ async def open_board(board: str) -> dict:
     boards: list | None = None
     elsewhere: list[str] = []
     try:
-        if current_username.get():
-            await _connect_authenticated(check_client, None)
-        else:
-            await _connect_anonymous(check_client)
+        await _connect_with_default(check_client, None)
         boards = await check_client.list_boards(target_origin)
         if boards is not None and not any(b.name == board for b in boards):
             # Miss locally — check the aggregate view before reporting, so a
@@ -1642,16 +1662,11 @@ async def my_permissions(board: str = "", auth: str | None = None) -> dict:
     """
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            try:
-                await _connect_authenticated(client, None)
-            except ValueError:
-                # No identity selected — still a meaningful question, since
-                # the anonymous principal has permissions of its own and this
-                # is exactly when a caller most needs to know them.
-                await _connect_anonymous(client)
+        # No identity selected is still a meaningful question, since the
+        # anonymous principal has permissions of its own and this is exactly
+        # when a caller most needs to know them. A selected-but-unusable
+        # identity raises instead (see _connect_with_default).
+        await _connect_with_default(client, auth)
         perms = await client.get_permissions(board)
         return {
             "principal": perms.principal,
@@ -1736,10 +1751,7 @@ async def get_user(pubkey_hex: str, origin: str = "", auth: str | None = None) -
     pubkey = _validate_pubkey(pubkey_hex)
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         origin = origin or client._server_origin or ""
         return await client.get_user(origin, pubkey)
     finally:
@@ -1758,10 +1770,7 @@ async def list_users(origin: str = "", auth: str | None = None) -> list[UserInfo
     """
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         origin = origin or client._server_origin or ""
         return await client.list_users(origin)
     finally:
@@ -1822,10 +1831,7 @@ async def list_boards(origin: str = "", auth: str | None = None) -> list[BoardIn
     """
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         if origin:
             return await client.list_boards(origin)
         return await client.list_boards("")
@@ -1920,10 +1926,7 @@ async def get_article(
     board = cursor.resolve_board(board)
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         origin = origin or client._server_origin or ""
         try:
             view = await client.get_article(origin, board, article_num, include_body)
@@ -2013,10 +2016,7 @@ async def list_articles(
         raise ValueError("limit must be at least 1")
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         if origin:
             return await client.list_articles(
                 origin,
@@ -2083,10 +2083,7 @@ async def search_articles(
     _check_byte_len("body_query", body_query, MAX_TEXT_FIELD)
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         if origin:
             return await client.search_articles(origin, board, query, body_query, offset, limit)
         return await client.search_articles("", board, query, body_query, offset, limit)
@@ -2231,10 +2228,7 @@ async def query_articles(
 
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         origin = origin or client._server_origin or ""
         return await client.query_articles(origin, board, filters, offset, limit)
     finally:
@@ -2296,10 +2290,7 @@ async def read_thread(
 
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         origin = origin or client._server_origin or ""
         view = await client.get_article(origin, board, article_num, include_body=False)
         if view is None:
@@ -2383,10 +2374,7 @@ async def publish_article(
         reply_id = _validate_article_id(reply_to_article_id)
         client = _make_client()
         try:
-            if auth:
-                await _connect_authenticated(client, auth)
-            else:
-                await _connect_anonymous(client)
+            await _connect_with_default(client, auth)
             srv_origin = origin or client._server_origin or ""
             target = await client.get_article_by_id(srv_origin, board, reply_id, include_body=False)
             if target is None:
@@ -2975,10 +2963,7 @@ async def ban_status(pubkey_hex: str, auth: str | None = None) -> BanStatus:
     pubkey = _validate_pubkey(pubkey_hex)
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         return await client.get_ban_status(pubkey)
     finally:
         await client.close()
@@ -3138,10 +3123,7 @@ async def event_head(origin: str = "", auth: str | None = None) -> HeadInfo | No
     """
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         origin = origin or client._server_origin or ""
         return await client.get_head(origin)
     finally:
@@ -3177,10 +3159,7 @@ async def event_range(
     """
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         origin = origin or client._server_origin or ""
         results = await client.get_event_range(origin, offset, limit)
         summaries: list[EventSummary] = []
@@ -3262,10 +3241,7 @@ async def get_event(
     eid = _validate_event_id(event_id_hex)
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         rec, witnesses = await client.get_event(origin, eid)
         subject_username, subject_pubkey, subject_flags = _register_subject(rec)
         return {
@@ -3355,10 +3331,7 @@ async def trace_event(
     eid = _validate_event_id(event_id_hex)
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         return await client.trace_event(origin, eid)
     finally:
         await client.close()
@@ -3380,10 +3353,7 @@ async def get_event_body(
     eid = _validate_event_id(event_id_hex)
     client = _make_client()
     try:
-        if auth:
-            await _connect_authenticated(client, auth)
-        else:
-            await _connect_anonymous(client)
+        await _connect_with_default(client, auth)
         body = await client.get_event_body(origin, eid)
         return body.decode("utf-8", errors="replace") if body else ""
     finally:

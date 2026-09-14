@@ -86,11 +86,12 @@ NEEDS_ORIGIN = "needs_origin"
 
 #: Tag marking a tool that additionally cannot function without an identity
 #: to sign as. Independent of NEEDS_ORIGIN: 13 read tools take NEEDS_ORIGIN
-#: alone because they fall back to the anonymous principal — an origin and
-#: nothing else is enough to call them. (publish_article also calls
-#: connect_anonymous, but only in its reply-lookup sub-step; the publish
-#: itself always needs an identity, so it carries both tags — a naive scan
-#: for the anonymous fallback would miscount it as a 14th read tool.)
+#: alone because they fall back to the anonymous principal when no identity
+#: is selected — an origin and nothing else is enough to call them.
+#: (publish_article also reaches anonymous, but only in its reply-lookup
+#: sub-step; the publish itself always needs an identity, so it carries
+#: both tags — a naive scan for the fallback would miscount it as a 14th
+#: read tool.)
 #: Everything that writes, or that answers on behalf of a specific caller
 #: (list_reports, my_punishments), needs both tags.
 NEEDS_IDENTITY = "needs_identity"
