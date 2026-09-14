@@ -39,7 +39,7 @@ from bonnet.core.kind_validator import KindValidator
 from bonnet.core.logging import close_logging, get_log_path, log_msg
 from bonnet.core.search import SearchService
 from bonnet.net.firehose_commands import FirehoseCommandHandler
-from bonnet.net.firehose_http_server import FirehoseHTTPServer
+from bonnet.net.firehose_http_server import FirehoseHTTPServer, RequestLogMiddleware
 from bonnet.net.firehose_sync import HttpSyncClient
 from bonnet.net.firehose_sync import SyncManager as FirehoseSyncManager
 from bonnet.net.rate_limiter import RateLimiter
@@ -735,12 +735,13 @@ class BonnetServer:
         scheme = "https" if ssl_certfile else "http"
 
         uv_config = uvicorn.Config(
-            self.http_server,
+            RequestLogMiddleware(self.http_server, self.http_server),
             host=self.config.http_host,
             port=listen_port,
             ssl_certfile=ssl_certfile,
             ssl_keyfile=ssl_keyfile,
             log_level="info",
+            access_log=False,
         )
         server = uvicorn.Server(uv_config)
         self._uvicorn_server = server

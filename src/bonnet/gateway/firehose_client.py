@@ -129,6 +129,40 @@ def default_verify_tls(url: str) -> bool:
     return not is_loopback(url)
 
 
+#: BONNET_VERIFY_TLS values that mean "off", exactly as before paths were
+#: accepted. Anything that isn't one of these and isn't a true literal is
+#: treated as a CA bundle path, not silently coerced to a bool.
+_OFF_VALUES = ("false", "0", "no")
+_ON_VALUES = ("true", "1", "yes", "on")
+
+
+def resolve_verify_tls(url: str) -> bool | str:
+    """BONNET_VERIFY_TLS resolved against `url`: bool, or a CA bundle path.
+
+    Bool literals keep their old meaning; unset falls through to
+    `default_verify_tls` (on for remote hosts, off for loopback). Any other
+    non-empty value is a CA bundle path handed straight to httpx's `verify`
+    (which accepts `bool | str` end to end in this transport) — so an origin
+    behind a Cloudflare Origin CA cert can be reached over loopback with
+    full chain + hostname verification instead of turning verification off.
+    A path that doesn't exist raises here, with a legible message, rather
+    than surfacing as a cryptic TLS handshake failure later.
+    """
+    raw = os.environ.get("BONNET_VERIFY_TLS")
+    if raw is None:
+        return default_verify_tls(url)
+    value = raw.strip()
+    if value.lower() in _ON_VALUES:
+        return True
+    if value.lower() in _OFF_VALUES:
+        return False
+    if not os.path.exists(value):
+        raise ValueError(
+            f"BONNET_VERIFY_TLS {value!r} is neither a boolean nor an existing CA bundle path"
+        )
+    return value
+
+
 class FirehoseHTTPClient(FirehoseTransport):
     """Typed client API over the shared signed-HTTP transport."""
 

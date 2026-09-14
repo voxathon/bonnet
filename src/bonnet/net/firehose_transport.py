@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import base64
 import os
+import ssl
 import time
 from contextvars import ContextVar
 from urllib.parse import urlparse
@@ -204,7 +205,15 @@ class FirehoseTransport:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._verify = verify
-        self._http = httpx.AsyncClient(timeout=timeout, verify=verify)
+        if isinstance(verify, str):
+            # A CA bundle path: httpx accepts a raw str but deprecates it,
+            # warning on every client construction — and this transport
+            # builds one per tool call. Build the ssl context once here.
+            self._http = httpx.AsyncClient(
+                timeout=timeout, verify=ssl.create_default_context(cafile=verify)
+            )
+        else:
+            self._http = httpx.AsyncClient(timeout=timeout, verify=verify)
         self._identity: Identity | None = None
         self._server_pubkey: bytes | None = None
         self._server_origin: str | None = None

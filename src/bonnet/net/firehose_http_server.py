@@ -786,3 +786,54 @@ class FirehoseHTTPServer:
     @property
     def anonymous_private_key(self) -> bytes:
         return self._anonymous_identity.private_key
+
+
+class RequestLogMiddleware:
+    """One console-visible log line per HTTP request.
+
+    Wraps the ASGI app served by uvicorn, which installs its own
+    ProxyHeadersMiddleware outside this — so `scope["client"]` here is
+    already the forwarded-rewritten value `_get_remote_addr` reports, and
+    `_forwarded_ips` reads the same header the rewrite came from. The
+    logged `HTTP ` line is what the REQ-only stderr mirror
+    (core.logging.enable_request_mirror) passes to the operator console;
+    `access_log=False` on uvicorn keeps it to one line per request. Status
+    comes from `http.response.start`; the log call is in a `finally` and
+    never raises, so it can never break the request it describes.
+    """
+
+    def __init__(self, app, http_server):
+        self._app = app
+        self._http = http_server
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        remote = self._http._get_remote_addr(scope)
+        forwarded = self._http._forwarded_ips(scope)
+        status = 0
+        start = time.time()
+
+        async def _send(message):
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            await send(message)
+
+        try:
+            await self._app(scope, receive, _send)
+        finally:
+            try:
+                log_info(
+                    "HTTP",
+                    method=scope.get("method", ""),
+                    path=scope.get("path", ""),
+                    remote=remote,
+                    fwd=forwarded,
+                    status=status if status else "-",
+                    ms=int((time.time() - start) * 1000),
+                )
+            except Exception:
+                pass
