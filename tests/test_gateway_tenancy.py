@@ -127,7 +127,7 @@ def test_joined_origins_are_per_tenant(gw):
 # --- the PERMISSIONS cache -------------------------------------------------
 
 
-async def test_permissions_cache_does_not_cross_tenants(gw):
+async def test_permissions_cache_does_not_cross_tenants(gw, monkeypatch):
     """The leak this test exists for: two tenants can each hold an identity
     named "scout" on the same origin, so (url, identity, board) alone is not
     a distinguishing key and one would be served the other's answer about
@@ -151,6 +151,16 @@ async def test_permissions_cache_does_not_cross_tenants(gw):
         assert await needs_module._permissions_for("") is granted
     finally:
         tenancy.current_tenant.reset(token)
+
+    # Bob's miss must fall through to a failed fetch and report None — which
+    # is precisely "I could not ask", not "alice's answer". The URL is
+    # pinned to .invalid (RFC 2606, never resolves) rather than relying on
+    # there being no reachable origin: on a box with a live server on
+    # loopback, the default https://localhost:2272 fallback would answer and
+    # turn this miss into a hit. Placed after alice's block on purpose: her
+    # pre-populated entry is keyed under the real URL, and patching first
+    # would change her key and break her hit.
+    monkeypatch.setattr(tools, "_current_url", lambda: "https://invalid.invalid:2272")
 
     # bob holds no cached answer. There is no reachable origin here, so a
     # genuine miss falls through to a failed fetch and reports None — which
