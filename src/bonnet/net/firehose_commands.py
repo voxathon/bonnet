@@ -880,6 +880,29 @@ class FirehoseCommandHandler:
                 if target is None:
                     return _error(0x0003, "Target article not found")
 
+                if kind in (
+                    KIND_ARTICLE_PIN,
+                    KIND_ARTICLE_UNPIN,
+                    KIND_THREAD_CLOSE,
+                    KIND_THREAD_REOPEN,
+                ):
+                    # These controls chase supersede chains to the live head:
+                    # validating the named (possibly superseded) row would
+                    # approve state that lands nowhere visible, while the
+                    # projection applies to the head. Cap the walk against
+                    # corrupt loops; a broken chain validates the last row
+                    # found, same as projection does.
+                    for _ in range(16):
+                        repl = target.replacement_article_id
+                        if not repl:
+                            break
+                        nxt = bp.get_article_by_id(
+                            intent.target_origin, intent.target_board, repl
+                        )
+                        if nxt is None:
+                            break
+                        target = nxt
+
                 if kind == KIND_ARTICLE_CANCEL:
                     if target.author_pubkey != intent.actor_pubkey:
                         if ctx.role != "administrator" and ctx.role != "moderator":

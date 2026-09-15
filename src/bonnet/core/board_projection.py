@@ -341,6 +341,47 @@ class BoardProjection:
     # Article operations
     # ------------------------------------------------------------------
 
+    def _is_superseded(self, origin: str, board: str, article_id: bytes) -> bool:
+        """Whether the named row exists and is terminally superseded.
+
+        Superseded is terminal — no kind transitions such a row back — so a
+        cancel/restore naming it can never become applicable, and pending it
+        would litter the queue forever. A missing row answers False: that is
+        genuine out-of-order federation, which must still pend. No locking —
+        callers hold `_lock` (and usually a transaction).
+        """
+        row = self._conn.execute(
+            "SELECT visibility FROM articles WHERE origin=? AND board=? AND article_id=?",
+            (origin, board, article_id),
+        ).fetchone()
+        return row is not None and row[0] == VISIBILITY_SUPERSEDED
+
+    def _resolve_head_id(self, origin: str, board: str, article_id: bytes) -> bytes:
+        """Follow the supersede chain to the live head article ID.
+
+        Supersede is a move, not a copy: the replacement inherits the old
+        row's live state, so controls naming an old ID must land on the
+        head. No locking — callers hold `_lock` (and usually a transaction).
+        A visited-set caps chains against corrupt loops; unknown IDs resolve
+        to themselves.
+        """
+        seen = {article_id}
+        current = article_id
+        for _ in range(16):
+            row = self._conn.execute(
+                "SELECT replacement_article_id FROM articles "
+                "WHERE origin=? AND board=? AND article_id=?",
+                (origin, board, current),
+            ).fetchone()
+            if not row or not row[0]:
+                return current
+            nxt = bytes(row[0])
+            if nxt in seen:
+                return current
+            seen.add(nxt)
+            current = nxt
+        return current
+
     def apply_article(self, rec: Record, author_check: str = AUTHOR_UNCHECKED) -> None:
         """Insert or update an article projection from a bonnet.article record.
 
@@ -368,12 +409,42 @@ class BoardProjection:
                 options = ",".join(options_list)
 
                 if superseded_id != ZERO_ID:
+                    # Supersede is a move: the replacement inherits the old
+                    # row's live state (pin, thread), the old row is stilled
+                    # to unpinned so pins live only on visible rows, and
+                    # replies are re-pointed at the replacement. A missing
+                    # old row (impossible same-origin under seq-ordered
+                    # dispatch, possible in a hand-built log) degrades to
+                    # defaults with the UPDATEs below simply matching nothing.
+                    old_state = self._conn.execute(
+                        "SELECT pin_state, thread_state FROM articles "
+                        "WHERE origin=? AND board=? AND article_id=?",
+                        (rec.origin, rec.board, superseded_id),
+                    ).fetchone()
+                    carried_pin = old_state[0] if old_state else "unpinned"
+                    carried_thread = old_state[1] if old_state else "open"
                     self._conn.execute(
                         "UPDATE articles SET visibility='superseded', "
-                        "replacement_article_id=?, latest_control_seq=? "
+                        "replacement_article_id=?, latest_control_seq=?, "
+                        "pin_state='unpinned' "
                         "WHERE origin=? AND board=? AND article_id=?",
                         (rec.article_id, rec.origin_seq, rec.origin, rec.board, superseded_id),
                     )
+                    self._conn.execute(
+                        "UPDATE articles SET root_article_id=? "
+                        "WHERE origin=? AND board=? AND root_article_id=? "
+                        "AND article_id != ?",
+                        (rec.article_id, rec.origin, rec.board, superseded_id, rec.article_id),
+                    )
+                    self._conn.execute(
+                        "UPDATE articles SET reply_to_article_id=? "
+                        "WHERE origin=? AND board=? AND reply_to_article_id=? "
+                        "AND article_id != ?",
+                        (rec.article_id, rec.origin, rec.board, superseded_id, rec.article_id),
+                    )
+                else:
+                    carried_pin = "unpinned"
+                    carried_thread = "open"
 
                 body_state = BODY_UNAVAILABLE
 
@@ -385,7 +456,7 @@ class BoardProjection:
                     "author_pubkey, author_username, author_registrar, author_check, "
                     "created_at, body_hash, body_size, "
                     "root_article_id, reply_to_article_id, latest_control_seq) "
-                    "VALUES (?, ?, ?, ?, ?, 'active', ?, 'unpinned', 'open', "
+                    "VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, "
                     "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         rec.origin,
@@ -394,6 +465,8 @@ class BoardProjection:
                         rec.article_id,
                         rec.event_id,
                         body_state,
+                        carried_pin,
+                        carried_thread,
                         subject,
                         tags,
                         options,
@@ -433,7 +506,9 @@ class BoardProjection:
                     (rec.origin_seq, rec.target_origin, rec.target_board, rec.target_article_id),
                 ).rowcount
 
-                if updated == 0:
+                if updated == 0 and not self._is_superseded(
+                    rec.target_origin, rec.target_board, rec.target_article_id
+                ):
                     self._add_pending(rec)
 
                 self._mark_applied(rec)
@@ -456,7 +531,9 @@ class BoardProjection:
                     (rec.origin_seq, rec.target_origin, rec.target_board, rec.target_article_id),
                 ).rowcount
 
-                if updated == 0:
+                if updated == 0 and not self._is_superseded(
+                    rec.target_origin, rec.target_board, rec.target_article_id
+                ):
                     self._add_pending(rec)
 
                 self._mark_applied(rec)
@@ -511,13 +588,18 @@ class BoardProjection:
                     return
 
                 priority = rec.metadata.get_i64(1) or 0
+                head_id = self._resolve_head_id(
+                    rec.target_origin, rec.target_board, rec.target_article_id
+                )
                 updated = self._conn.execute(
-                    "UPDATE articles SET pin_state=? WHERE origin=? AND board=? AND article_id=?",
+                    "UPDATE articles SET pin_state=?, latest_control_seq=? "
+                    "WHERE origin=? AND board=? AND article_id=?",
                     (
                         f"pinned({priority})",
+                        rec.origin_seq,
                         rec.target_origin,
                         rec.target_board,
-                        rec.target_article_id,
+                        head_id,
                     ),
                 ).rowcount
 
@@ -537,10 +619,13 @@ class BoardProjection:
                     self._set_checkpoint(rec.origin, rec.origin_seq)
                     return
 
+                head_id = self._resolve_head_id(
+                    rec.target_origin, rec.target_board, rec.target_article_id
+                )
                 updated = self._conn.execute(
-                    "UPDATE articles SET pin_state='unpinned' "
+                    "UPDATE articles SET pin_state='unpinned', latest_control_seq=? "
                     "WHERE origin=? AND board=? AND article_id=?",
-                    (rec.target_origin, rec.target_board, rec.target_article_id),
+                    (rec.origin_seq, rec.target_origin, rec.target_board, head_id),
                 ).rowcount
 
                 if updated == 0:
@@ -559,10 +644,13 @@ class BoardProjection:
                     self._set_checkpoint(rec.origin, rec.origin_seq)
                     return
 
+                head_id = self._resolve_head_id(
+                    rec.target_origin, rec.target_board, rec.target_article_id
+                )
                 updated = self._conn.execute(
-                    "UPDATE articles SET thread_state='closed' "
+                    "UPDATE articles SET thread_state='closed', latest_control_seq=? "
                     "WHERE origin=? AND board=? AND article_id=?",
-                    (rec.target_origin, rec.target_board, rec.target_article_id),
+                    (rec.origin_seq, rec.target_origin, rec.target_board, head_id),
                 ).rowcount
 
                 if updated == 0:
@@ -581,10 +669,13 @@ class BoardProjection:
                     self._set_checkpoint(rec.origin, rec.origin_seq)
                     return
 
+                head_id = self._resolve_head_id(
+                    rec.target_origin, rec.target_board, rec.target_article_id
+                )
                 updated = self._conn.execute(
-                    "UPDATE articles SET thread_state='open' "
+                    "UPDATE articles SET thread_state='open', latest_control_seq=? "
                     "WHERE origin=? AND board=? AND article_id=?",
-                    (rec.target_origin, rec.target_board, rec.target_article_id),
+                    (rec.origin_seq, rec.target_origin, rec.target_board, head_id),
                 ).rowcount
 
                 if updated == 0:
@@ -629,7 +720,13 @@ class BoardProjection:
         )
 
     def _replay_pending_for_article(self, origin: str, board: str, article_id: bytes) -> None:
-        """Replay pending controls for a newly appeared article."""
+        """Replay pending controls for a newly appeared article.
+
+        Pending rows name the article ID they targeted; the four forwarding
+        kinds (pin/unpin/thread close/reopen) are applied to the live head
+        of any supersede chain, so a control that predates the replacement
+        still lands on visible state.
+        """
         from bonnet.core.record import decode_record
 
         rows = self._conn.execute(
@@ -651,13 +748,33 @@ class BoardProjection:
                 elif kind == "bonnet.article.purge":
                     self._apply_purge_inline(pending_rec)
                 elif kind == "bonnet.article.pin":
-                    self._apply_pin_inline(pending_rec)
+                    head_id = self._resolve_head_id(
+                        pending_rec.target_origin,
+                        pending_rec.target_board,
+                        pending_rec.target_article_id,
+                    )
+                    self._apply_pin_inline(pending_rec, head_id)
                 elif kind == "bonnet.article.unpin":
-                    self._apply_unpin_inline(pending_rec)
+                    head_id = self._resolve_head_id(
+                        pending_rec.target_origin,
+                        pending_rec.target_board,
+                        pending_rec.target_article_id,
+                    )
+                    self._apply_unpin_inline(pending_rec, head_id)
                 elif kind == "bonnet.thread.close":
-                    self._apply_thread_close_inline(pending_rec)
+                    head_id = self._resolve_head_id(
+                        pending_rec.target_origin,
+                        pending_rec.target_board,
+                        pending_rec.target_article_id,
+                    )
+                    self._apply_thread_close_inline(pending_rec, head_id)
                 elif kind == "bonnet.thread.reopen":
-                    self._apply_thread_reopen_inline(pending_rec)
+                    head_id = self._resolve_head_id(
+                        pending_rec.target_origin,
+                        pending_rec.target_board,
+                        pending_rec.target_article_id,
+                    )
+                    self._apply_thread_reopen_inline(pending_rec, head_id)
             self._conn.execute(
                 "DELETE FROM pending_controls WHERE origin=? AND event_id=?",
                 (pending_rec.origin, eid),
@@ -684,29 +801,54 @@ class BoardProjection:
             (rec.origin_seq, rec.target_origin, rec.target_board, rec.target_article_id),
         )
 
-    def _apply_pin_inline(self, rec: Record) -> None:
+    def _apply_pin_inline(self, rec: Record, article_id: bytes | None = None) -> None:
         priority = rec.metadata.get_i64(1) or 0
         self._conn.execute(
-            "UPDATE articles SET pin_state=? WHERE origin=? AND board=? AND article_id=?",
-            (f"pinned({priority})", rec.target_origin, rec.target_board, rec.target_article_id),
+            "UPDATE articles SET pin_state=?, latest_control_seq=? "
+            "WHERE origin=? AND board=? AND article_id=?",
+            (
+                f"pinned({priority})",
+                rec.origin_seq,
+                rec.target_origin,
+                rec.target_board,
+                article_id if article_id is not None else rec.target_article_id,
+            ),
         )
 
-    def _apply_unpin_inline(self, rec: Record) -> None:
+    def _apply_unpin_inline(self, rec: Record, article_id: bytes | None = None) -> None:
         self._conn.execute(
-            "UPDATE articles SET pin_state='unpinned' WHERE origin=? AND board=? AND article_id=?",
-            (rec.target_origin, rec.target_board, rec.target_article_id),
+            "UPDATE articles SET pin_state='unpinned', latest_control_seq=? "
+            "WHERE origin=? AND board=? AND article_id=?",
+            (
+                rec.origin_seq,
+                rec.target_origin,
+                rec.target_board,
+                article_id if article_id is not None else rec.target_article_id,
+            ),
         )
 
-    def _apply_thread_close_inline(self, rec: Record) -> None:
+    def _apply_thread_close_inline(self, rec: Record, article_id: bytes | None = None) -> None:
         self._conn.execute(
-            "UPDATE articles SET thread_state='closed' WHERE origin=? AND board=? AND article_id=?",
-            (rec.target_origin, rec.target_board, rec.target_article_id),
+            "UPDATE articles SET thread_state='closed', latest_control_seq=? "
+            "WHERE origin=? AND board=? AND article_id=?",
+            (
+                rec.origin_seq,
+                rec.target_origin,
+                rec.target_board,
+                article_id if article_id is not None else rec.target_article_id,
+            ),
         )
 
-    def _apply_thread_reopen_inline(self, rec: Record) -> None:
+    def _apply_thread_reopen_inline(self, rec: Record, article_id: bytes | None = None) -> None:
         self._conn.execute(
-            "UPDATE articles SET thread_state='open' WHERE origin=? AND board=? AND article_id=?",
-            (rec.target_origin, rec.target_board, rec.target_article_id),
+            "UPDATE articles SET thread_state='open', latest_control_seq=? "
+            "WHERE origin=? AND board=? AND article_id=?",
+            (
+                rec.origin_seq,
+                rec.target_origin,
+                rec.target_board,
+                article_id if article_id is not None else rec.target_article_id,
+            ),
         )
 
     def pending_count(self) -> int:

@@ -531,6 +531,258 @@ class TestBoardProjection:
         assert board_proj.get_checkpoint("bbs.a") == 0
 
 
+class TestSupersedeCarry:
+    """Supersede is a move, not a copy: the replacement inherits the old
+    row's live state (pin, thread), replies are re-pointed at it, and late
+    controls naming an old ID land on the live head."""
+
+    def _make_superseding_record(self, seq, supersedes_aid, eid=None, aid=None, board="general"):
+        eid = eid or _rid(seq)
+        aid = aid or _rid(seq + 10)
+        body = b"replacement body"
+        metadata = MetadataMap(
+            [
+                metadata_text(1, "Replacement"),
+                metadata_text(4, "text/plain"),
+                metadata_bytes(7, supersedes_aid),
+            ]
+        )
+        intent = Intent(
+            event_id=eid,
+            kind="bonnet.article",
+            origin="bbs.a",
+            actor_pubkey=ACTOR_PUB,
+            board=board,
+            article_id=aid,
+            metadata=metadata,
+            body_hash=compute_body_hash(body),
+            body_size=len(body),
+        )
+        actor_sig = sign_intent(ACTOR, encode_intent(intent))
+        rec = Record(
+            origin="bbs.a",
+            origin_seq=seq,
+            previous_event_hash=ZERO_HASH,
+            event_id=eid,
+            kind="bonnet.article",
+            actor_pubkey=ACTOR_PUB,
+            board=board,
+            article_id=aid,
+            article_num=seq,
+            metadata=metadata,
+            body_hash=intent.body_hash,
+            body_size=intent.body_size,
+            actor_signature=actor_sig,
+        )
+        unsigned = encode_unsigned_record(rec)
+        rec.origin_signature = sign_record(ORIGIN_A, unsigned)
+        return rec
+
+    def _make_pin_record(self, seq, target_aid, priority=7):
+        return Record(
+            origin="bbs.a",
+            origin_seq=seq,
+            event_id=_rid(seq),
+            kind="bonnet.article.pin",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
+            target_article_id=target_aid,
+            metadata=MetadataMap([metadata_i64(1, priority)]),
+        )
+
+    def _make_thread_close_record(self, seq, target_aid):
+        return Record(
+            origin="bbs.a",
+            origin_seq=seq,
+            event_id=_rid(seq),
+            kind="bonnet.thread.close",
+            actor_pubkey=ACTOR_PUB,
+            board="general",
+            target_origin="bbs.a",
+            target_board="general",
+            target_article_id=target_aid,
+        )
+
+    def test_supersede_carries_pin(self, board_proj):
+        old = TestBoardProjection()._make_article_record(seq=1)
+        board_proj.apply_article(old)
+        board_proj.apply_pin(self._make_pin_record(2, old.article_id))
+        assert "pinned" in board_proj.get_article_by_id("bbs.a", "general", old.article_id).pin_state
+
+        new = self._make_superseding_record(3, old.article_id)
+        board_proj.apply_article(new)
+
+        old_view = board_proj.get_article_by_id("bbs.a", "general", old.article_id)
+        assert old_view.visibility == "superseded"
+        assert old_view.replacement_article_id == new.article_id
+        assert old_view.pin_state == "unpinned"
+        new_view = board_proj.get_article_by_id("bbs.a", "general", new.article_id)
+        assert new_view.visibility == "active"
+        assert "pinned" in new_view.pin_state
+        assert "7" in new_view.pin_state
+
+    def test_supersede_carries_thread_close(self, board_proj):
+        old = TestBoardProjection()._make_article_record(seq=1)
+        board_proj.apply_article(old)
+        board_proj.apply_thread_close(self._make_thread_close_record(2, old.article_id))
+
+        new = self._make_superseding_record(3, old.article_id)
+        board_proj.apply_article(new)
+
+        assert board_proj.get_article_by_id("bbs.a", "general", new.article_id).thread_state == "closed"
+        assert board_proj.get_article_by_id("bbs.a", "general", old.article_id).thread_state == "closed"
+
+    def test_supersede_repoints_replies(self, board_proj):
+        maker = TestBoardProjection()
+        root = maker._make_article_record(seq=1)
+        board_proj.apply_article(root)
+        reply = maker._make_article_record(seq=2)
+        reply.metadata = MetadataMap(
+            [
+                metadata_text(1, "reply"),
+                metadata_text(4, "text/plain"),
+                metadata_bytes(5, root.article_id),
+                metadata_bytes(6, root.article_id),
+            ]
+        )
+        board_proj.apply_article(reply)
+
+        new = self._make_superseding_record(3, root.article_id)
+        board_proj.apply_article(new)
+
+        reply_view = board_proj.get_article_by_id("bbs.a", "general", reply.article_id)
+        assert reply_view.root_article_id == new.article_id
+        assert reply_view.reply_to_article_id == new.article_id
+
+    def test_late_pin_naming_old_id_forwards_to_head(self, board_proj):
+        old = TestBoardProjection()._make_article_record(seq=1)
+        board_proj.apply_article(old)
+        new = self._make_superseding_record(2, old.article_id)
+        board_proj.apply_article(new)
+
+        board_proj.apply_pin(self._make_pin_record(3, old.article_id))
+        assert "pinned" in board_proj.get_article_by_id("bbs.a", "general", new.article_id).pin_state
+        assert board_proj.get_article_by_id("bbs.a", "general", old.article_id).pin_state == "unpinned"
+
+    def test_late_thread_close_naming_old_id_forwards_to_head(self, board_proj):
+        old = TestBoardProjection()._make_article_record(seq=1)
+        board_proj.apply_article(old)
+        new = self._make_superseding_record(2, old.article_id)
+        board_proj.apply_article(new)
+
+        board_proj.apply_thread_close(self._make_thread_close_record(3, old.article_id))
+        assert board_proj.get_article_by_id("bbs.a", "general", new.article_id).thread_state == "closed"
+
+    def test_chain_a_b_c(self, board_proj):
+        maker = TestBoardProjection()
+        a = maker._make_article_record(seq=1)
+        board_proj.apply_article(a)
+        board_proj.apply_pin(self._make_pin_record(2, a.article_id))
+        b = self._make_superseding_record(3, a.article_id)
+        board_proj.apply_article(b)
+        c = self._make_superseding_record(4, b.article_id)
+        board_proj.apply_article(c)
+
+        assert "pinned" in board_proj.get_article_by_id("bbs.a", "general", c.article_id).pin_state
+        assert board_proj.get_article_by_id("bbs.a", "general", b.article_id).pin_state == "unpinned"
+        assert board_proj.get_article_by_id("bbs.a", "general", b.article_id).visibility == "superseded"
+
+        # A pin naming the original root chases the whole chain to C.
+        board_proj.apply_unpin(
+            Record(
+                origin="bbs.a",
+                origin_seq=5,
+                event_id=_rid(5),
+                kind="bonnet.article.unpin",
+                actor_pubkey=ACTOR_PUB,
+                board="general",
+                target_origin="bbs.a",
+                target_board="general",
+                target_article_id=b.article_id,
+            )
+        )
+        assert board_proj.get_article_by_id("bbs.a", "general", c.article_id).pin_state == "unpinned"
+
+    def test_pending_pin_for_replacement_replays_on_arrival(self, board_proj):
+        old = TestBoardProjection()._make_article_record(seq=1)
+        board_proj.apply_article(old)
+
+        # Pin for the not-yet-arrived replacement goes pending...
+        new_aid = _rid(12)
+        board_proj.apply_pin(self._make_pin_record(2, new_aid))
+        assert board_proj.pending_count() == 1
+
+        # ...and lands on it when the superseding article arrives.
+        new = self._make_superseding_record(3, old.article_id, aid=new_aid)
+        board_proj.apply_article(new)
+        assert "pinned" in board_proj.get_article_by_id("bbs.a", "general", new_aid).pin_state
+        assert board_proj.pending_count() == 0
+
+    def test_cancel_naming_superseded_id_is_dropped_not_pended(self, board_proj):
+        old = TestBoardProjection()._make_article_record(seq=1)
+        board_proj.apply_article(old)
+        new = self._make_superseding_record(2, old.article_id)
+        board_proj.apply_article(new)
+
+        board_proj.apply_cancel(
+            Record(
+                origin="bbs.a",
+                origin_seq=3,
+                event_id=_rid(3),
+                kind="bonnet.article.cancel",
+                actor_pubkey=ACTOR_PUB,
+                board="general",
+                target_origin="bbs.a",
+                target_board="general",
+                target_article_id=old.article_id,
+            )
+        )
+        assert board_proj.pending_count() == 0
+        assert board_proj.get_article_by_id("bbs.a", "general", old.article_id).visibility == "superseded"
+        assert board_proj.get_article_by_id("bbs.a", "general", new.article_id).visibility == "active"
+
+    def test_restore_naming_superseded_id_is_dropped_not_pended(self, board_proj):
+        old = TestBoardProjection()._make_article_record(seq=1)
+        board_proj.apply_article(old)
+        new = self._make_superseding_record(2, old.article_id)
+        board_proj.apply_article(new)
+
+        board_proj.apply_restore(
+            Record(
+                origin="bbs.a",
+                origin_seq=3,
+                event_id=_rid(3),
+                kind="bonnet.article.restore",
+                actor_pubkey=ACTOR_PUB,
+                board="general",
+                target_origin="bbs.a",
+                target_board="general",
+                target_article_id=old.article_id,
+            )
+        )
+        assert board_proj.pending_count() == 0
+        assert board_proj.get_article_by_id("bbs.a", "general", old.article_id).visibility == "superseded"
+
+    def test_cancel_for_missing_row_still_pends(self, board_proj):
+        # The genuine out-of-order case is untouched: no row, no verdict.
+        board_proj.apply_cancel(
+            Record(
+                origin="bbs.a",
+                origin_seq=1,
+                event_id=_rid(1),
+                kind="bonnet.article.cancel",
+                actor_pubkey=ACTOR_PUB,
+                board="general",
+                target_origin="bbs.a",
+                target_board="general",
+                target_article_id=_rid(77),
+            )
+        )
+        assert board_proj.pending_count() == 1
+
+
 class TestQueryArticlesVisibilityFilter:
     """internal/BUGS.md #2 as originally filed claimed an unsupported
     operator on the visibility field (0x06) disabled the default
