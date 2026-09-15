@@ -100,21 +100,15 @@ from bonnet.gateway.gating import GatingMiddleware
 from bonnet.gateway.registry import TenantError
 from bonnet.gateway.session import SessionStateMiddleware
 from bonnet.gateway.tools import current_password, current_username, mcp
-from bonnet.net.firehose_transport import forwarded_for_ctx
+from bonnet.net.firehose_transport import (
+    forwarded_for_ctx,
+    forwarded_for_from_request,
+)
 
-
-def _forwarded_for_from_request(request) -> str:
-    """The forwarded client IP this request arrived with, or "".
-
-    Passed through as data: the gateway forwards what its own proxy gave it,
-    and the origin decides what to trust (its trusted_forwarders list keyed
-    on the connecting IP, see FirehoseHTTPServer._forwarded_ips). Leftmost
-    X-Forwarded-For entry first, then CF-Connecting-IP.
-    """
-    xff = (request.headers.get("x-forwarded-for") or "").strip()
-    if xff:
-        return xff.split(",")[0].strip()
-    return (request.headers.get("cf-connecting-ip") or "").strip()
+# `_forwarded_for_from_request` lives in bonnet.net.firehose_transport (next
+# to the ContextVar it feeds) so the GET facade shares it without an import
+# cycle; this alias keeps the previous private name working.
+_forwarded_for_from_request = forwarded_for_from_request
 
 
 @mcp.custom_route("/health", methods=["GET"])
