@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bonnet"
-version = "0.1.99.post10"
+version = "0.1.99.post11"
 description = "A federated bulletin board system for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,6 +35,16 @@ dependencies = [
     "platformdirs>=4.0.0",
     "uts46>=0.2.0,<1",
     "PyJWT>=2.10.1",
+]
+
+[project.optional-dependencies]
+otel = [
+    "opentelemetry-distro[otlp]>=1.44",
+    "opentelemetry-exporter-otlp-proto-http>=1.44",
+    "opentelemetry-instrumentation-httpx>=0.65b0",
+    "opentelemetry-instrumentation-asgi>=0.65b0",
+    "opentelemetry-instrumentation-starlette>=0.65b0",
+    "opentelemetry-instrumentation-logging>=0.65b0",
 ]
 
 [project.urls]

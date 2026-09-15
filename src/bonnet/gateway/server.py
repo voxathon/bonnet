@@ -122,6 +122,23 @@ async def health_check(request: Request) -> PlainTextResponse:
     return PlainTextResponse("OK")
 
 
+@mcp.custom_route("/metrics", methods=["GET"])
+async def metrics_endpoint(request: Request) -> PlainTextResponse:
+    """Prometheus text exposition for gateway tool RED counters.
+
+    http mode only (stdio has no port). Backed by `bonnet.core.telemetry`,
+    which needs no OTel packages: counts accrue in-process from the tool
+    middleware + `_gw_log` funnel. Scrape with Prometheus/Grafana Alloy, or
+    skip it entirely and use OTLP instead — the two are independent.
+    Disabled with `metrics_enabled = false` / `BONNET_METRICS_ENABLED=0`.
+    """
+    from bonnet.core import telemetry
+
+    return PlainTextResponse(
+        telemetry.render_prometheus(), media_type="text/plain; version=0.0.4"
+    )
+
+
 @mcp.custom_route("/.well-known/untp", methods=["GET"])
 async def well_known_bonnet(request: Request):
     import sys
@@ -238,7 +255,75 @@ class AuthMiddleware(Middleware):
         return await call_next(context)
 
 
+class TelemetryMiddleware(Middleware):
+    """Time every MCP tool call into the built-in RED counters + OTel span.
+
+    One place covering all ~50 tools: `on_call_tool` wraps the call with a
+    monotonic clock and a per-tool OTel span, then records
+    ``(tool, tenant, ok, duration_ms)`` via ``bonnet.core.telemetry``.
+    Best-effort and never raises into the tool path — a telemetry failure
+    must not fail the call it measures.
+
+    The tool name is resolved defensively because FastMCP's
+    ``MiddlewareContext.message`` shape is generic; unknown shapes record as
+    ``"unknown"`` rather than crashing.
+    """
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        import time as _time
+
+        from bonnet.core import telemetry
+
+        op = _tool_name_from_context(context)
+        try:
+            tenant = tenancy.current_tenant.get()
+        except Exception:
+            tenant = ""
+        start = _time.perf_counter()
+        try:
+            with telemetry.tool_span(op, tenant=tenant or ""):
+                result = await call_next(context)
+        except Exception:
+            ms = (_time.perf_counter() - start) * 1000.0
+            telemetry.observe_tool_call(op, ok=False, tenant=tenant or "", duration_ms=ms)
+            raise
+        ms = (_time.perf_counter() - start) * 1000.0
+        telemetry.observe_tool_call(op, ok=True, tenant=tenant or "", duration_ms=ms)
+        return result
+
+
+def _tool_name_from_context(context: MiddlewareContext) -> str:
+    """Best-effort tool name out of a FastMCP middleware context."""
+    try:
+        msg = getattr(context, "message", None)
+        for attr in ("name", "tool", "tool_name"):
+            val = getattr(msg, attr, None)
+            if isinstance(val, str) and val.strip():
+                return val.strip()[:64]
+        if isinstance(msg, dict):
+            for key in ("name", "tool", "tool_name"):
+                val = msg.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()[:64]
+            params = msg.get("params")
+            if isinstance(params, dict):
+                for key in ("name", "tool", "tool_name"):
+                    val = params.get(key)
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()[:64]
+        method = getattr(context, "method", None)
+        if isinstance(method, str) and method.strip():
+            # e.g. "tools/call" — better than "unknown", still bounded.
+            return method.strip()[-64:]
+    except Exception:
+        pass
+    return "unknown"
+
+
 mcp.add_middleware(AuthMiddleware())
+# First after auth: timing/span dimensions (tenant, tool, ok) must accrue for
+# every call regardless of gating/session outcome, so this sits outside them.
+mcp.add_middleware(TelemetryMiddleware())
 # Between the two, and the order is load-bearing in both directions: the
 # session key is scoped by the tenant AuthMiddleware resolves, and gating
 # reads the cursor this restores — `_missing_for` consults board-scoped
@@ -527,7 +612,7 @@ def _normalize_mcp_path(raw: str) -> str:
         path = "/" + path
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
-    if path in ("/health", "/.well-known/untp") or path == "/call" or path.startswith("/call/"):
+    if path in ("/health", "/metrics", "/.well-known/untp") or path == "/call" or path.startswith("/call/"):
         print(
             f"error: MCP path {path!r} collides with the gateway's own route; "
             "pick another (e.g. '/', '/mcp' or '/blah')",
@@ -621,6 +706,8 @@ def _run_check_config(config_path: str) -> None:
     print(f"  allow_get_rpc: {'on' if cfg.allow_get_rpc is True else 'off (default)'}")
     print(f"  log_level: {cfg.log_level or '(default: $BONNET_LOG_LEVEL or DEBUG)'}")
     print(f"  log_keep_files: {cfg.log_keep_files or '(default: 20)'}")
+    print(f"  metrics_enabled: {'off' if cfg.metrics_enabled is False else 'on (default)'}")
+    print(f"  otel_enabled: {'on' if cfg.otel_enabled is True else 'off (default)'}")
 
 
 def run(argv: list[str] | None = None):
@@ -731,6 +818,7 @@ def run(argv: list[str] | None = None):
         raise SystemExit(1)
     transport = cast(Literal["stdio", "http", "sse"], transport)
     try:
+        from bonnet.core import telemetry
         from bonnet.core.logging import init_logging, log_info
 
         # Precedence: BONNET_LOG_LEVEL > gateway.toml log_level > DEBUG.
@@ -745,6 +833,32 @@ def run(argv: list[str] | None = None):
             gw_config.log_keep_files if gw_config and gw_config.log_keep_files is not None else 20
         )
         init_logging(os.path.join(paths.gateway_dir(), "logs"), level=gw_level, keep_files=gw_keep)
+        # Metrics (/metrics) default on; env wins over gateway.toml.
+        # OTel bridge default off; env wins over gateway.toml. Both are
+        # best-effort and never prevent startup.
+        metrics_on: bool | None = None
+        otel_on: bool | None = None
+        if gw_config and gw_config.metrics_enabled is not None:
+            metrics_on = bool(gw_config.metrics_enabled)
+        if gw_config and gw_config.otel_enabled is not None:
+            otel_on = bool(gw_config.otel_enabled)
+        env_metrics = os.environ.get("BONNET_METRICS_ENABLED", "").strip().lower()
+        if env_metrics in ("0", "false", "no", "off"):
+            metrics_on = False
+        elif env_metrics in ("1", "true", "yes", "on"):
+            metrics_on = True
+        env_otel = os.environ.get("BONNET_OTEL_ENABLED", "").strip().lower()
+        if env_otel in ("0", "false", "no", "off"):
+            otel_on = False
+        elif env_otel in ("1", "true", "yes", "on"):
+            otel_on = True
+        if metrics_on is False:
+            os.environ["BONNET_METRICS_ENABLED"] = "0"
+        if otel_on is False:
+            os.environ["BONNET_OTEL_ENABLED"] = "0"
+        telemetry.init_telemetry(
+            enabled=False if metrics_on is False else True,
+        )
         log_info("GATEWAY start", transport=transport)
     except Exception:
         pass
