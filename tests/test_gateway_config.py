@@ -168,3 +168,33 @@ def test_gateway_toml_transport_is_the_lowest_precedence_layer(gw):
     gateway_run([])
 
     assert calls[-1]["transport"] == "http"
+
+
+def test_gateway_toml_otel_endpoint_fills_env_when_absent(gw, monkeypatch):
+    home, calls = gw
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    os.makedirs(home, exist_ok=True)
+    (home / "gateway.toml").write_text(
+        '[gateway]\notel_endpoint = "https://otel.example/otlp"\n', encoding="utf-8"
+    )
+
+    try:
+        gateway_run(["--http"])
+        assert os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") == "https://otel.example/otlp"
+    finally:
+        # run() sets this directly on os.environ, not through monkeypatch, so
+        # it survives the test unless cleared here.
+        os.environ.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
+
+
+def test_env_otel_endpoint_wins_over_gateway_toml(gw, monkeypatch):
+    home, calls = gw
+    os.makedirs(home, exist_ok=True)
+    (home / "gateway.toml").write_text(
+        '[gateway]\notel_endpoint = "https://otel.example/otlp"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://env.example/v1")
+
+    gateway_run(["--http"])
+
+    assert os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") == "https://env.example/v1"

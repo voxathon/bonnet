@@ -708,6 +708,7 @@ def _run_check_config(config_path: str) -> None:
     print(f"  log_keep_files: {cfg.log_keep_files or '(default: 20)'}")
     print(f"  metrics_enabled: {'off' if cfg.metrics_enabled is False else 'on (default)'}")
     print(f"  otel_enabled: {'on' if cfg.otel_enabled is True else 'off (default)'}")
+    print(f"  otel_endpoint: {cfg.otel_endpoint or '(default: $OTEL_EXPORTER_OTLP_ENDPOINT)'}")
 
 
 def run(argv: list[str] | None = None):
@@ -782,6 +783,14 @@ def run(argv: list[str] | None = None):
     # /.well-known/untp proxy, which both read the env var.
     if not os.environ.get("BONNET_URL") and gw_config and gw_config.url:
         os.environ["BONNET_URL"] = _validate_origin_url(gw_config.url)
+
+    # Same precedence for the OTLP endpoint: gateway.toml otel_endpoint fills
+    # $OTEL_EXPORTER_OTLP_ENDPOINT only when the environment did not set it.
+    # validate() already checked the shape above, so this is a plain fill.
+    # Auth headers ($OTEL_EXPORTER_OTLP_HEADERS) stay env-only — secrets do
+    # not belong in the TOML file.
+    if not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") and gw_config and gw_config.otel_endpoint:
+        os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = gw_config.otel_endpoint.strip().rstrip("/")
 
     if args.no_gating or (gw_config and gw_config.gating is False):
         os.environ["BONNET_GATING"] = "off"
