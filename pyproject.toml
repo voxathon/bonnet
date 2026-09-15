@@ -39,7 +39,11 @@ dependencies = [
     # but installed-by-default means `uv sync` can never strip the OTLP +
     # auto-instrumentation stack out from under a running gateway, and
     # `uv run opentelemetry-instrument ...` just works. No bootstrap step.
-    "opentelemetry-distro[otlp]>=1.44",
+    # NOTE: the distro/instrumentation packages use a 0.x version scheme that
+    # releases in lockstep with the 1.x core (0.65b0 pairs with 1.44.0) — do
+    # NOT "unify" these pins to >=1.44, no such distro exists and resolution
+    # fails unsatisfiable.
+    "opentelemetry-distro[otlp]>=0.65b0",
     "opentelemetry-exporter-otlp-proto-http>=1.44",
     "opentelemetry-instrumentation-httpx>=0.65b0",
     "opentelemetry-instrumentation-asgi>=0.65b0",
@@ -51,7 +55,7 @@ dependencies = [
 # Backcompat alias: `pip install bonnet[otel]` keeps resolving now that the
 # OTel stack ships by default. New installs should not need it.
 otel = [
-    "opentelemetry-distro[otlp]>=1.44",
+    "opentelemetry-distro[otlp]>=0.65b0",
     "opentelemetry-exporter-otlp-proto-http>=1.44",
     "opentelemetry-instrumentation-httpx>=0.65b0",
     "opentelemetry-instrumentation-asgi>=0.65b0",
