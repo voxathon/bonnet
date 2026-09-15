@@ -53,7 +53,15 @@ def wired(server_stack, tmp_path, monkeypatch):  # noqa: F811
             effect="allow",
             matcher=PrincipalMatcher(registered=True),
             actions=["read"],
-            commands=["BOARD_LIST", "ARTICLE_LIST", "ARTICLE_GET", "ARTICLE_QUERY", "EVENT_HEAD", "EVENT_RANGE", "EVENT_GET"],
+            commands=[
+                "BOARD_LIST",
+                "ARTICLE_LIST",
+                "ARTICLE_GET",
+                "ARTICLE_QUERY",
+                "EVENT_HEAD",
+                "EVENT_RANGE",
+                "EVENT_GET",
+            ],
             boards=["*"],
         )
     )

@@ -134,9 +134,7 @@ async def metrics_endpoint(request: Request) -> PlainTextResponse:
     """
     from bonnet.core import telemetry
 
-    return PlainTextResponse(
-        telemetry.render_prometheus(), media_type="text/plain; version=0.0.4"
-    )
+    return PlainTextResponse(telemetry.render_prometheus(), media_type="text/plain; version=0.0.4")
 
 
 @mcp.custom_route("/.well-known/untp", methods=["GET"])
@@ -612,7 +610,11 @@ def _normalize_mcp_path(raw: str) -> str:
         path = "/" + path
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
-    if path in ("/health", "/metrics", "/.well-known/untp") or path == "/call" or path.startswith("/call/"):
+    if (
+        path in ("/health", "/metrics", "/.well-known/untp")
+        or path == "/call"
+        or path.startswith("/call/")
+    ):
         print(
             f"error: MCP path {path!r} collides with the gateway's own route; "
             "pick another (e.g. '/', '/mcp' or '/blah')",
