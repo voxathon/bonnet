@@ -70,6 +70,8 @@ AGENTS.md
 
 # Scratch and diagnostic files
 runme.txt
+# Instance-specific launcher (embeds this machine's OTLP credentials) — never commit
+start.sh
 tmp_*.txt
 diff.txt
 .ignore

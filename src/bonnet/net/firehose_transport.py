@@ -72,11 +72,35 @@ from bonnet.net.http_auth import (
 )
 
 #: The forwarded client IP the current HTTP request arrived with, set by the
-#: gateway's auth middleware and exported on every gateway->server POST (see
-#: `_post_signed`) so the origin can log and rate-limit on the real client IP
-#: behind its proxies. Default empty — direct clients (CLI, federation sync)
-#: export nothing, and the origin treats an empty value as no forwarded data.
+#: gateway's auth middleware (and the GET facade's tenant resolution, which
+#: runs on plain Starlette routes the middleware never sees) and exported on
+#: every gateway->server POST (see `_post_signed`) so the origin can log and
+#: rate-limit on the real client IP behind its proxies. Default empty —
+#: direct clients (CLI, federation sync) export nothing, and the origin
+#: treats an empty value as no forwarded data.
 forwarded_for_ctx: ContextVar[str] = ContextVar("forwarded_for", default="")
+
+
+def forwarded_for_from_request(request) -> str:
+    """The forwarded client IP a request arrived with, or "".
+
+    Passed through as data: the gateway forwards what its own proxy gave it,
+    and the origin decides what to trust (its trusted_forwarders list keyed
+    on the connecting IP, see FirehoseHTTPServer._forwarded_ips). Leftmost
+    X-Forwarded-For entry first, then CF-Connecting-IP.
+
+    Lives here (not in gateway.server) so both the MCP auth middleware and
+    the GET facade — plain Starlette routes the middleware never sees — share
+    one extraction rule without an import cycle.
+    """
+    try:
+        headers = request.headers
+    except Exception:
+        return ""
+    xff = (headers.get("x-forwarded-for") or "").strip()
+    if xff:
+        return xff.split(",")[0].strip()
+    return (headers.get("cf-connecting-ip") or "").strip()
 
 
 class FirehoseClientError(Exception):

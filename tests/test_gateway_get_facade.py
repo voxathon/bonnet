@@ -194,3 +194,48 @@ async def test_authenticated_session_label_echo_and_snapshot(facade_env):
     assert body["session"] == "bob"
     assert body["tools_changed"] is False
     assert ("alice", "bob") in get_facade._snapshots
+
+
+def _request_with_headers(tool_name, query, headers):
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": f"/call/{tool_name}",
+        "query_string": urlencode(query).encode(),
+        "headers": headers,
+        "server": ("test", 80),
+        "path_params": {"tool_name": tool_name},
+    }
+    return Request(scope)
+
+
+def test_apply_tenant_exports_forwarded_client_ip(facade_env):
+    """The facade bypasses AuthMiddleware, so it must set forwarded_for_ctx
+    itself — otherwise the origin logs/buckets every facade call under the
+    gateway's own IP."""
+    from bonnet.net.firehose_transport import forwarded_for_ctx
+
+    _, _ = facade_env
+    assert forwarded_for_ctx.get() == ""
+
+    _, reset = get_facade._apply_tenant(
+        _request_with_headers("where_am_i", {}, [(b"x-forwarded-for", b"198.51.100.7, 10.0.0.1")]),
+        "",
+    )
+    try:
+        assert forwarded_for_ctx.get() == "198.51.100.7"
+    finally:
+        reset()
+    assert forwarded_for_ctx.get() == ""
+
+    _, reset = get_facade._apply_tenant(
+        _request_with_headers("where_am_i", {}, [(b"cf-connecting-ip", b"198.51.100.9")]),
+        "",
+    )
+    try:
+        assert forwarded_for_ctx.get() == "198.51.100.9"
+    finally:
+        reset()
+    assert forwarded_for_ctx.get() == ""

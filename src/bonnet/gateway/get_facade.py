@@ -85,6 +85,7 @@ from bonnet.gateway import session as session_store
 from bonnet.gateway import tenancy
 from bonnet.gateway.paths import ANONYMOUS_TENANT
 from bonnet.gateway.tools import mcp
+from bonnet.net.firehose_transport import forwarded_for_ctx, forwarded_for_from_request
 
 #: Set by `server.run()` from flag > env > toml. Tests may call
 #: `set_enabled(True)` directly. Env is honored live so the facade can be
@@ -310,6 +311,12 @@ def _apply_tenant(request: Request, query_key: str):
             break
 
     applied: list[tuple[Any, Any]] = []
+    # Custom Starlette routes never pass through AuthMiddleware, so without
+    # this the facade's gateway->server POSTs would export no X-Forwarded-For
+    # and the origin would log/bucket every facade call under the gateway's
+    # own IP. Same extraction rule as the middleware; the origin decides what
+    # to trust via its trusted_forwarders list.
+    applied.append((forwarded_for_ctx, forwarded_for_ctx.set(forwarded_for_from_request(request))))
     if tenant is not None:
         applied.append((tenancy.current_tenant, tenancy.current_tenant.set(tenant)))
         applied.append(
