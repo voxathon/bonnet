@@ -239,7 +239,11 @@ def _validate_path(raw: object) -> None:
         path = "/" + path
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
-    if path in ("/health", "/metrics", "/.well-known/untp") or path == "/call" or path.startswith("/call/"):
+    if (
+        path in ("/health", "/metrics", "/.well-known/untp")
+        or path == "/call"
+        or path.startswith("/call/")
+    ):
         raise ValueError(
             f"config: gateway.path {raw!r} collides with the gateway's own route; "
             "pick another (e.g. '/', '/mcp' or '/blah')"
@@ -281,6 +285,4 @@ def _validate_otlp_endpoint(raw: object) -> None:
             f"https://otlp-gateway-<zone>.grafana.net/otlp, got {raw!r}"
         )
     if parsed.query or parsed.fragment:
-        raise ValueError(
-            f"config: gateway.otel_endpoint takes no query or fragment, got {raw!r}"
-        )
+        raise ValueError(f"config: gateway.otel_endpoint takes no query or fragment, got {raw!r}")

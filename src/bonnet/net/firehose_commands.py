@@ -896,9 +896,7 @@ class FirehoseCommandHandler:
                         repl = target.replacement_article_id
                         if not repl:
                             break
-                        nxt = bp.get_article_by_id(
-                            intent.target_origin, intent.target_board, repl
-                        )
+                        nxt = bp.get_article_by_id(intent.target_origin, intent.target_board, repl)
                         if nxt is None:
                             break
                         target = nxt
