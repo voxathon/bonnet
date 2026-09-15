@@ -47,6 +47,8 @@ KNOWN_KEYS = frozenset(
         "allow_get_rpc",
         "log_level",
         "log_keep_files",
+        "metrics_enabled",
+        "otel_enabled",
     }
 )
 
@@ -92,6 +94,13 @@ _SAMPLE = """\
 # # wins over this file). Pruning keeps the newest N boot files.
 # # log_level = "DEBUG"
 # # log_keep_files = 20
+# # Prometheus /metrics on the gateway's own port (http mode only).
+# # On by default; env BONNET_METRICS_ENABLED=0 wins over this file.
+# # metrics_enabled = true
+# # OTel log-correlation bridge (needs opentelemetry-distro installed;
+# # real traces/metrics flow via `opentelemetry-instrument ... bonnet gateway`
+# # with OTEL_EXPORTER_OTLP_* env). Env BONNET_OTEL_ENABLED wins over this file.
+# # otel_enabled = false
 """
 
 
@@ -108,6 +117,8 @@ class GatewayConfig:
     allow_get_rpc: bool | None = None
     log_level: str | None = None
     log_keep_files: int | None = None
+    metrics_enabled: bool | None = None
+    otel_enabled: bool | None = None
     unknown_keys: list[str] = field(default_factory=list)
 
 
@@ -139,6 +150,8 @@ def load(path: str) -> GatewayConfig | None:
         allow_get_rpc=table.get("allow_get_rpc"),
         log_level=table.get("log_level"),
         log_keep_files=table.get("log_keep_files"),
+        metrics_enabled=table.get("metrics_enabled"),
+        otel_enabled=table.get("otel_enabled"),
         unknown_keys=unknown,
     )
 
@@ -201,6 +214,10 @@ def validate(cfg: GatewayConfig) -> None:
                 f"config: gateway.log_keep_files must be an integer >= 1, "
                 f"got {cfg.log_keep_files!r}"
             )
+    for key in ("metrics_enabled", "otel_enabled"):
+        value = getattr(cfg, key)
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(f"config: gateway.{key} must be true or false, got {value!r}")
 
 
 def _validate_path(raw: object) -> None:
@@ -211,7 +228,7 @@ def _validate_path(raw: object) -> None:
         path = "/" + path
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
-    if path in ("/health", "/.well-known/untp") or path == "/call" or path.startswith("/call/"):
+    if path in ("/health", "/metrics", "/.well-known/untp") or path == "/call" or path.startswith("/call/"):
         raise ValueError(
             f"config: gateway.path {raw!r} collides with the gateway's own route; "
             "pick another (e.g. '/', '/mcp' or '/blah')"

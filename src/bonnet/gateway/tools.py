@@ -488,6 +488,27 @@ def _gw_log(op: str, ok: bool = True, **fields) -> None:
             log_warning(f"GATEWAY {op} fail", **fields)
     except Exception:
         pass
+    # Metrics/span enrichment rides along with the log funnel so every
+    # currently-logged op is counted even if middleware naming ever misses.
+    # TelemetryMiddleware remains the primary path (it also times calls);
+    # this is the backstop for count completeness. Never raises.
+    try:
+        from bonnet.core import telemetry
+
+        ms = fields.get("ms")
+        if ms is None:
+            ms = fields.get("duration_ms")
+        tenant_t = tenant if isinstance(tenant, str) else ""
+        origin = fields.get("origin")
+        telemetry.observe_tool_call(
+            op,
+            ok=ok,
+            tenant=tenant_t or "",
+            duration_ms=ms if isinstance(ms, (int, float)) else None,
+            origin=origin if isinstance(origin, str) else "",
+        )
+    except Exception:
+        pass
 
 
 def _pin_mode_for(url: str) -> str:
