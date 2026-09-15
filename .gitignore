@@ -79,3 +79,6 @@ diff.txt
 # External tooling
 hermes/
 instructions/
+
+# Instance-specific stuff
+start.sh

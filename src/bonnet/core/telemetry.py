@@ -111,7 +111,9 @@ def init_telemetry(
             enabled = raw not in ("0", "false", "no", "off")
         _enabled = bool(enabled)
         if service_name or os.environ.get("OTEL_SERVICE_NAME"):
-            _service_name = (service_name or os.environ["OTEL_SERVICE_NAME"]).strip() or _service_name
+            _service_name = (
+                service_name or os.environ["OTEL_SERVICE_NAME"]
+            ).strip() or _service_name
         try:
             from opentelemetry.instrumentation.logging import LoggingInstrumentor
 
@@ -177,8 +179,12 @@ def observe_tool_call(
                             _buckets[bkey] = _buckets.get(bkey, 0) + 1
                     _buckets[(tool, ten, "+Inf")] = _buckets.get((tool, ten, "+Inf"), 0) + 1
         set_span_attributes(
-            **{"bonnet.tool": tool, "bonnet.tenant": ten, "bonnet.ok": ok_s,
-               **({"bonnet.origin": str(origin)[:64]} if origin else {})}
+            **{
+                "bonnet.tool": tool,
+                "bonnet.tenant": ten,
+                "bonnet.ok": ok_s,
+                **({"bonnet.origin": str(origin)[:64]} if origin else {}),
+            }
         )
     except Exception:
         pass
@@ -240,7 +246,7 @@ def render_prometheus() -> str:
         "# TYPE bonnet_gateway_tool_calls_total counter",
     ]
     with _lock:
-        for (tool, ten, ok_s) in sorted(_calls):
+        for tool, ten, ok_s in sorted(_calls):
             lines.append(
                 f'bonnet_gateway_tool_calls_total{{tool="{_esc(tool)}",'
                 f'tenant="{_esc(ten)}",ok="{ok_s}"}} {_calls[(tool, ten, ok_s)]}'
@@ -249,7 +255,7 @@ def render_prometheus() -> str:
             "# HELP bonnet_gateway_tool_latency_ms_sum Total tool latency in ms.",
             "# TYPE bonnet_gateway_tool_latency_ms_sum counter",
         ]
-        for (tool, ten) in sorted(_latency):
+        for tool, ten in sorted(_latency):
             count, total = _latency[(tool, ten)]
             lines.append(
                 f'bonnet_gateway_tool_latency_ms_sum{{tool="{_esc(tool)}",'
@@ -259,7 +265,7 @@ def render_prometheus() -> str:
             "# HELP bonnet_gateway_tool_latency_ms_count Tool calls with a measured latency.",
             "# TYPE bonnet_gateway_tool_latency_ms_count counter",
         ]
-        for (tool, ten) in sorted(_latency):
+        for tool, ten in sorted(_latency):
             count, _ = _latency[(tool, ten)]
             lines.append(
                 f'bonnet_gateway_tool_latency_ms_count{{tool="{_esc(tool)}",'
@@ -270,7 +276,7 @@ def render_prometheus() -> str:
             "# TYPE bonnet_gateway_tool_latency_ms_bucket histogram",
         ]
         pairs = sorted({(t, ten) for (t, ten, _ok) in _calls} | set(_latency))
-        for (tool, ten) in pairs:
+        for tool, ten in pairs:
             for b in list(_BUCKETS_MS) + ["+Inf"]:
                 le = str(b)
                 n = _buckets.get((tool, ten, le), 0)

@@ -609,7 +609,9 @@ class TestSupersedeCarry:
         old = TestBoardProjection()._make_article_record(seq=1)
         board_proj.apply_article(old)
         board_proj.apply_pin(self._make_pin_record(2, old.article_id))
-        assert "pinned" in board_proj.get_article_by_id("bbs.a", "general", old.article_id).pin_state
+        assert (
+            "pinned" in board_proj.get_article_by_id("bbs.a", "general", old.article_id).pin_state
+        )
 
         new = self._make_superseding_record(3, old.article_id)
         board_proj.apply_article(new)
@@ -631,8 +633,14 @@ class TestSupersedeCarry:
         new = self._make_superseding_record(3, old.article_id)
         board_proj.apply_article(new)
 
-        assert board_proj.get_article_by_id("bbs.a", "general", new.article_id).thread_state == "closed"
-        assert board_proj.get_article_by_id("bbs.a", "general", old.article_id).thread_state == "closed"
+        assert (
+            board_proj.get_article_by_id("bbs.a", "general", new.article_id).thread_state
+            == "closed"
+        )
+        assert (
+            board_proj.get_article_by_id("bbs.a", "general", old.article_id).thread_state
+            == "closed"
+        )
 
     def test_supersede_repoints_replies(self, board_proj):
         maker = TestBoardProjection()
@@ -663,8 +671,12 @@ class TestSupersedeCarry:
         board_proj.apply_article(new)
 
         board_proj.apply_pin(self._make_pin_record(3, old.article_id))
-        assert "pinned" in board_proj.get_article_by_id("bbs.a", "general", new.article_id).pin_state
-        assert board_proj.get_article_by_id("bbs.a", "general", old.article_id).pin_state == "unpinned"
+        assert (
+            "pinned" in board_proj.get_article_by_id("bbs.a", "general", new.article_id).pin_state
+        )
+        assert (
+            board_proj.get_article_by_id("bbs.a", "general", old.article_id).pin_state == "unpinned"
+        )
 
     def test_late_thread_close_naming_old_id_forwards_to_head(self, board_proj):
         old = TestBoardProjection()._make_article_record(seq=1)
@@ -673,7 +685,10 @@ class TestSupersedeCarry:
         board_proj.apply_article(new)
 
         board_proj.apply_thread_close(self._make_thread_close_record(3, old.article_id))
-        assert board_proj.get_article_by_id("bbs.a", "general", new.article_id).thread_state == "closed"
+        assert (
+            board_proj.get_article_by_id("bbs.a", "general", new.article_id).thread_state
+            == "closed"
+        )
 
     def test_chain_a_b_c(self, board_proj):
         maker = TestBoardProjection()
@@ -686,8 +701,13 @@ class TestSupersedeCarry:
         board_proj.apply_article(c)
 
         assert "pinned" in board_proj.get_article_by_id("bbs.a", "general", c.article_id).pin_state
-        assert board_proj.get_article_by_id("bbs.a", "general", b.article_id).pin_state == "unpinned"
-        assert board_proj.get_article_by_id("bbs.a", "general", b.article_id).visibility == "superseded"
+        assert (
+            board_proj.get_article_by_id("bbs.a", "general", b.article_id).pin_state == "unpinned"
+        )
+        assert (
+            board_proj.get_article_by_id("bbs.a", "general", b.article_id).visibility
+            == "superseded"
+        )
 
         # A pin naming the original root chases the whole chain to C.
         board_proj.apply_unpin(
@@ -703,7 +723,9 @@ class TestSupersedeCarry:
                 target_article_id=b.article_id,
             )
         )
-        assert board_proj.get_article_by_id("bbs.a", "general", c.article_id).pin_state == "unpinned"
+        assert (
+            board_proj.get_article_by_id("bbs.a", "general", c.article_id).pin_state == "unpinned"
+        )
 
     def test_pending_pin_for_replacement_replays_on_arrival(self, board_proj):
         old = TestBoardProjection()._make_article_record(seq=1)
@@ -740,8 +762,13 @@ class TestSupersedeCarry:
             )
         )
         assert board_proj.pending_count() == 0
-        assert board_proj.get_article_by_id("bbs.a", "general", old.article_id).visibility == "superseded"
-        assert board_proj.get_article_by_id("bbs.a", "general", new.article_id).visibility == "active"
+        assert (
+            board_proj.get_article_by_id("bbs.a", "general", old.article_id).visibility
+            == "superseded"
+        )
+        assert (
+            board_proj.get_article_by_id("bbs.a", "general", new.article_id).visibility == "active"
+        )
 
     def test_restore_naming_superseded_id_is_dropped_not_pended(self, board_proj):
         old = TestBoardProjection()._make_article_record(seq=1)
@@ -763,7 +790,10 @@ class TestSupersedeCarry:
             )
         )
         assert board_proj.pending_count() == 0
-        assert board_proj.get_article_by_id("bbs.a", "general", old.article_id).visibility == "superseded"
+        assert (
+            board_proj.get_article_by_id("bbs.a", "general", old.article_id).visibility
+            == "superseded"
+        )
 
     def test_cancel_for_missing_row_still_pends(self, board_proj):
         # The genuine out-of-order case is untouched: no row, no verdict.
