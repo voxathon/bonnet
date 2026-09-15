@@ -49,6 +49,7 @@ KNOWN_KEYS = frozenset(
         "log_keep_files",
         "metrics_enabled",
         "otel_enabled",
+        "otel_endpoint",
     }
 )
 
@@ -101,6 +102,12 @@ _SAMPLE = """\
 # # real traces/metrics flow via `opentelemetry-instrument ... bonnet gateway`
 # # with OTEL_EXPORTER_OTLP_* env). Env BONNET_OTEL_ENABLED wins over this file.
 # # otel_enabled = false
+# # OTLP/HTTP endpoint for traces+metrics+logs (e.g. Grafana Cloud
+# # https://otlp-gateway-<zone>.grafana.net/otlp). Unlike `url` above, a path
+# # is allowed and no port fallback applies. Fills $OTEL_EXPORTER_OTLP_ENDPOINT
+# # when the environment does not set it; env still wins. Auth headers stay in
+# # env ($OTEL_EXPORTER_OTLP_HEADERS) — secrets do not belong in this file.
+# # otel_endpoint = "https://otlp-gateway-prod-us-central-0.grafana.net/otlp"
 """
 
 
@@ -119,6 +126,7 @@ class GatewayConfig:
     log_keep_files: int | None = None
     metrics_enabled: bool | None = None
     otel_enabled: bool | None = None
+    otel_endpoint: str | None = None
     unknown_keys: list[str] = field(default_factory=list)
 
 
@@ -152,6 +160,7 @@ def load(path: str) -> GatewayConfig | None:
         log_keep_files=table.get("log_keep_files"),
         metrics_enabled=table.get("metrics_enabled"),
         otel_enabled=table.get("otel_enabled"),
+        otel_endpoint=table.get("otel_endpoint") or None,
         unknown_keys=unknown,
     )
 
@@ -218,6 +227,8 @@ def validate(cfg: GatewayConfig) -> None:
         value = getattr(cfg, key)
         if value is not None and not isinstance(value, bool):
             raise ValueError(f"config: gateway.{key} must be true or false, got {value!r}")
+    if cfg.otel_endpoint is not None:
+        _validate_otlp_endpoint(cfg.otel_endpoint)
 
 
 def _validate_path(raw: object) -> None:
@@ -249,4 +260,27 @@ def _validate_url(raw: object) -> None:
         raise ValueError(
             f"config: gateway.url takes just scheme+host+port, got {raw!r} "
             "(with no path, query or fragment)"
+        )
+
+
+def _validate_otlp_endpoint(raw: object) -> None:
+    """Validate a gateway.otel_endpoint: http(s) URL, path allowed.
+
+    Unlike gateway.url (scheme+host+port only, the wire paths are fixed), an
+    OTLP endpoint carries its signal path (e.g. Grafana Cloud's `/otlp`), so
+    any path is accepted. Query/fragment are refused; SDKs do not send them.
+    """
+    from urllib.parse import urlsplit
+
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"config: gateway.otel_endpoint must be a non-empty string, got {raw!r}")
+    parsed = urlsplit(raw.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(
+            f"config: gateway.otel_endpoint must be e.g. "
+            f"https://otlp-gateway-<zone>.grafana.net/otlp, got {raw!r}"
+        )
+    if parsed.query or parsed.fragment:
+        raise ValueError(
+            f"config: gateway.otel_endpoint takes no query or fragment, got {raw!r}"
         )

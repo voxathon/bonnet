@@ -90,12 +90,15 @@ def test_tenant_labels_are_bounded():
 def test_gateway_toml_accepts_telemetry_keys(tmp_path):
     path = tmp_path / "gateway.toml"
     path.write_text(
-        "[gateway]\nmetrics_enabled = false\notel_enabled = true\n", encoding="utf-8"
+        "[gateway]\nmetrics_enabled = false\notel_enabled = true\n"
+        'otel_endpoint = "https://otlp-gateway-prod-us-central-0.grafana.net/otlp"\n',
+        encoding="utf-8",
     )
     cfg = gateway_config.load(str(path))
     assert cfg is not None
     assert cfg.metrics_enabled is False
     assert cfg.otel_enabled is True
+    assert cfg.otel_endpoint == "https://otlp-gateway-prod-us-central-0.grafana.net/otlp"
     gateway_config.validate(cfg)
 
 
@@ -103,3 +106,10 @@ def test_gateway_toml_rejects_non_bool_telemetry_keys():
     cfg = gateway_config.GatewayConfig(metrics_enabled="yes")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="metrics_enabled"):
         gateway_config.validate(cfg)
+
+
+def test_gateway_toml_rejects_bad_otlp_endpoint():
+    for bad in ["notaurl", "ftp://x/y", "https://h/otlp?q=1", "https://h/otlp#f", ""]:
+        cfg = gateway_config.GatewayConfig(otel_endpoint=bad)
+        with pytest.raises(ValueError, match="otel_endpoint"):
+            gateway_config.validate(cfg)
