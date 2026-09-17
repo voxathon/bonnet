@@ -50,6 +50,7 @@ KNOWN_KEYS = frozenset(
         "metrics_enabled",
         "otel_enabled",
         "otel_endpoint",
+        "admin_token",
     }
 )
 
@@ -108,6 +109,11 @@ _SAMPLE = """\
 # # when the environment does not set it; env still wins. Auth headers stay in
 # # env ($OTEL_EXPORTER_OTLP_HEADERS) — secrets do not belong in this file.
 # # otel_endpoint = "https://otlp-gateway-prod-us-central-0.grafana.net/otlp"
+# # Bearer secret for the /admin tenant-management routes (see gateway.admin).
+# # Prefer $BONNET_GATEWAY_ADMIN_TOKEN (env wins over this file): anyone who
+# # can read the gateway home dir can read this file. Unset in both places
+# # means /admin answers 404 (disabled).
+# # admin_token = "change-me"
 """
 
 
@@ -127,6 +133,7 @@ class GatewayConfig:
     metrics_enabled: bool | None = None
     otel_enabled: bool | None = None
     otel_endpoint: str | None = None
+    admin_token: str | None = None
     unknown_keys: list[str] = field(default_factory=list)
 
 
@@ -161,6 +168,7 @@ def load(path: str) -> GatewayConfig | None:
         metrics_enabled=table.get("metrics_enabled"),
         otel_enabled=table.get("otel_enabled"),
         otel_endpoint=table.get("otel_endpoint") or None,
+        admin_token=table.get("admin_token") or None,
         unknown_keys=unknown,
     )
 
@@ -229,6 +237,12 @@ def validate(cfg: GatewayConfig) -> None:
             raise ValueError(f"config: gateway.{key} must be true or false, got {value!r}")
     if cfg.otel_endpoint is not None:
         _validate_otlp_endpoint(cfg.otel_endpoint)
+    if cfg.admin_token is not None and (
+        not isinstance(cfg.admin_token, str) or not cfg.admin_token.strip()
+    ):
+        raise ValueError(
+            f"config: gateway.admin_token must be a non-empty string, got {cfg.admin_token!r}"
+        )
 
 
 def _validate_path(raw: object) -> None:
@@ -240,9 +254,9 @@ def _validate_path(raw: object) -> None:
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
     if (
-        path in ("/health", "/metrics", "/.well-known/untp")
+        path in ("/health", "/metrics", "/.well-known/untp", "/admin")
         or path == "/call"
-        or path.startswith("/call/")
+        or path.startswith(("/call/", "/admin/"))
     ):
         raise ValueError(
             f"config: gateway.path {raw!r} collides with the gateway's own route; "

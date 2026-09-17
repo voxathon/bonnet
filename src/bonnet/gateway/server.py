@@ -70,6 +70,8 @@ Environment variables (command-line flags win over all of them):
     MCP_PATH           — http endpoint path (default: FastMCP's /mcp/; e.g. "/" or "/blah")
     MCP_TLS_CERT       — TLS certificate path (http only, optional)
     MCP_TLS_KEY        — TLS key path (http only, optional)
+    BONNET_GATEWAY_ADMIN_TOKEN — bearer secret for /admin tenant management
+                           (http only, optional; unset means /admin is disabled)
 
     BONNET_URL may also come from `gateway.toml` ([gateway] url) when the
     environment does not set it — env still wins when both are present."""
@@ -88,6 +90,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from bonnet.gateway import (
+    admin,  # noqa: F401 — registers /admin custom routes on `mcp`
     gateway_config,
     get_facade,  # noqa: F401 — registers /call custom routes on `mcp`
     paths,
@@ -605,9 +608,9 @@ def _normalize_mcp_path(raw: str) -> str:
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
     if (
-        path in ("/health", "/metrics", "/.well-known/untp")
+        path in ("/health", "/metrics", "/.well-known/untp", "/admin")
         or path == "/call"
-        or path.startswith("/call/")
+        or path.startswith(("/call/", "/admin/"))
     ):
         print(
             f"error: MCP path {path!r} collides with the gateway's own route; "
@@ -705,6 +708,12 @@ def _run_check_config(config_path: str) -> None:
     print(f"  metrics_enabled: {'off' if cfg.metrics_enabled is False else 'on (default)'}")
     print(f"  otel_enabled: {'on' if cfg.otel_enabled is True else 'off (default)'}")
     print(f"  otel_endpoint: {cfg.otel_endpoint or '(default: $OTEL_EXPORTER_OTLP_ENDPOINT)'}")
+    admin_src = None
+    if os.environ.get("BONNET_GATEWAY_ADMIN_TOKEN"):
+        admin_src = "env"
+    elif cfg.admin_token:
+        admin_src = "gateway.toml"
+    print(f"  admin: {'on (via ' + admin_src + ')' if admin_src else 'off (/admin answers 404)'}")
 
 
 def run(argv: list[str] | None = None):
@@ -919,6 +928,17 @@ def run(argv: list[str] | None = None):
             f"MCP_TLS_CERT/KEY are set and access is restricted.",
             file=sys.stderr,
         )
+
+    if os.environ.get("BONNET_GATEWAY_ADMIN_TOKEN") or (gw_config and gw_config.admin_token):
+        if host not in ("127.0.0.1", "::1", "localhost") and not (ssl_certfile and ssl_keyfile):
+            # Minted API keys come back in /admin response bodies — off-loopback
+            # without TLS they cross the network in the clear.
+            print(
+                f"WARNING: /admin tenant management is enabled on non-loopback bind "
+                f"{host} without TLS: minted API keys will cross the network in the "
+                f"clear. Set MCP_TLS_CERT/KEY or bind loopback.",
+                file=sys.stderr,
+            )
 
     if not tenants.list_tenants():
         # Not fatal: a gateway with no tenants still serves anonymous reads,
