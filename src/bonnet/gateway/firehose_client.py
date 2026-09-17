@@ -475,6 +475,37 @@ class FirehoseHTTPClient(FirehoseTransport):
             self._username = username
         return result
 
+    async def publish_user_revoke(
+        self,
+        revoked_pubkey: bytes,
+        reg_event_id: bytes,
+    ) -> PublishResult:
+        """Revoke a user's registration (soft-revoke, frees the username).
+
+        `reg_event_id` is the event ID of the registration record being
+        revoked — the validator requires a real event target, so callers
+        resolve it first via get_user (reg_seq) + get_event_range.
+        """
+        if self._identity is None or self._server_origin is None:
+            raise FirehoseClientError("not connected")
+        eid = os.urandom(32)
+        m = MetadataMap([metadata_bytes(1, revoked_pubkey)])
+        intent = Intent(
+            event_id=eid,
+            kind="bonnet.user.revoke",
+            origin=self._server_origin,
+            actor_pubkey=self._identity.public_key,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            target_origin=self._server_origin,
+            target_event_id=reg_event_id,
+            metadata=m,
+        )
+        actor_sig = sign_intent(self._identity, encode_intent(intent))
+        cmd = build_publish_record(intent, actor_sig, b"")
+        resp = await self._send_command(cmd)
+        return parse_publish_response(resp)
+
     async def publish_user_key_rotate(self, new_identity: Identity) -> PublishResult:
         """Succeed this connection's actor key with `new_identity`.
 

@@ -3095,6 +3095,120 @@ async def punish_revoke(
         await client.close()
 
 
+# ---------------------------------------------------------------------------
+# User administration (console parity: grant-role / revoke-user)
+# ---------------------------------------------------------------------------
+
+#: Role names accepted by grant_role, mirroring the console's grant-role.
+#: Deliberately the three canonical names only — no administrator/mod/member
+#: aliases.
+GRANT_ROLE_FLAGS = {"admin": 0x01, "moderator": 0x02, "none": 0x00}
+
+
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD", "USER_GET"], kinds=("bonnet.user.register",))
+async def grant_role(
+    pubkey_hex: str,
+    role: str,
+    username: str = "",
+    auth: str | None = None,
+) -> dict:
+    """Set a user's role. Requires administrator.
+
+    Publishes a bonnet.user.register record for another key (or your own)
+    with admin/moderator/none flags — the gateway equivalent of the console's
+    grant-role. Registering a never-before-seen key requires username;
+    re-granting a known key reuses its existing name when username is omitted.
+
+    This never mints a key: it names a role for a key someone already holds.
+    """
+    pubkey = _validate_pubkey(pubkey_hex)
+    role_name = role.lower()
+    if role_name not in GRANT_ROLE_FLAGS:
+        raise ValueError(f"Unknown role '{role}'. Use admin, moderator, or none.")
+    flags = GRANT_ROLE_FLAGS[role_name]
+    if username:
+        _reject_lone_surrogates("username", username)
+        _check_byte_len("username", username, MAX_TEXT_FIELD)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        assert client._identity is not None  # set by _connect_authenticated's client.connect()
+        origin = client._server_origin or ""
+        try:
+            existing = await client.get_user(origin, pubkey)
+        except ProtocolError:
+            existing = None
+        if username:
+            name = username
+        elif existing is not None:
+            name = existing.username
+        else:
+            raise ValueError("Pubkey is not yet registered on this origin — supply a username.")
+        result = await client.publish_user_register(name, user_pubkey=pubkey, flags=flags)
+        return {
+            "action": "re-registered" if existing is not None else "registered",
+            "username": name,
+            "pubkey_hex": pubkey.hex(),
+            "role": role_name,
+            "origin_seq": result.origin_seq,
+            "event_id": result.event_id,
+        }
+    finally:
+        await client.close()
+
+
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(
+    commands=["PUBLISH_RECORD", "USER_GET", "EVENT_RANGE"],
+    kinds=("bonnet.user.revoke",),
+)
+async def revoke_user(pubkey_hex: str, auth: str | None = None) -> dict:
+    """Revoke a user's registration. Requires administrator.
+
+    Soft-revoke, not deletion: the gateway equivalent of the console's
+    revoke-user. The user row stays (listed as revoked), its firehose records
+    and articles stay, but the username is freed for re-registration.
+
+    Cannot revoke your own identity — like the self-ban guard, revoking the
+    key you are acting as would lock you out of administration with no way
+    to self-undo.
+    """
+    pubkey = _validate_pubkey(pubkey_hex)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        assert client._identity is not None  # set by _connect_authenticated's client.connect()
+        if pubkey == client._identity.public_key:
+            raise ValueError(
+                "Cannot revoke your own identity — this would lock you out of "
+                "administration with no way to self-undo"
+            )
+        origin = client._server_origin or ""
+        try:
+            existing = await client.get_user(origin, pubkey)
+        except ProtocolError:
+            existing = None
+        if existing is None:
+            raise ValueError(f"'{pubkey_hex}' is not a registered user on this origin.")
+        if existing.revoked:
+            raise ValueError(f"'{pubkey_hex}' is already revoked.")
+        records = await client.get_event_range(origin, existing.reg_seq, 1)
+        if not records:
+            raise ValueError("Could not locate the registration event (data inconsistency).")
+        reg_event_id = records[0][0].event_id
+        result = await client.publish_user_revoke(pubkey, reg_event_id)
+        return {
+            "username": existing.username,
+            "pubkey_hex": pubkey.hex(),
+            "revoked": True,
+            "origin_seq": result.origin_seq,
+            "event_id": result.event_id,
+        }
+    finally:
+        await client.close()
+
+
 @mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
 @needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.punishment.ack",))
 async def acknowledge_punishment(
