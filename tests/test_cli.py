@@ -96,6 +96,21 @@ def test_gateway_command_delegates_with_the_sliced_argv(monkeypatch):
     assert seen["argv"] == ["--http", "--port", "9090"]
 
 
+def test_admin_command_delegates_with_the_sliced_argv(monkeypatch):
+    seen = {}
+
+    def fake_admin(argv):
+        seen["argv"] = argv
+        return 0
+
+    monkeypatch.setattr("bonnet.app.admin_cli.main", fake_admin)
+
+    code = main(["admin", "--config", "x.toml", "whoami"])
+
+    assert code == 0
+    assert seen["argv"] == ["--config", "x.toml", "whoami"]
+
+
 def test_delegate_returning_none_is_treated_as_success(monkeypatch):
     """Both delegates fall off the end with an implicit None on their normal
     (non-SystemExit) path today; the dispatcher must not propagate that as a

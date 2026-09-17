@@ -129,8 +129,15 @@ def _scoped_author(rec) -> str:
 class OperatorConsole:
     """Interactive administration loop for a BonnetServer."""
 
-    def __init__(self, server):
+    #: When True, commands must not prompt on stdin. Used by the one-shot
+    #: `bonnet admin` CLI, which runs without a controlling terminal
+    #: (e.g. under systemd) and must fail loudly instead of blocking on
+    #: input().
+    headless = False
+
+    def __init__(self, server, headless: bool = False):
         self.server = server
+        self.headless = headless
 
     def __getattr__(self, name):
         return getattr(self.server, name)
@@ -207,7 +214,18 @@ class OperatorConsole:
                 print(result)
 
     def dispatch_local_command(self, line) -> str | None:
-        parts = line.split()
+        import shlex as _shlex
+
+        try:
+            parts = _shlex.split(line, posix=True)
+        except ValueError:
+            parts = line.split()
+        if not parts:
+            return "Unknown command: . Type 'help' for commands."
+        return self.dispatch_argv(parts)
+
+    def dispatch_argv(self, parts) -> str | None:
+        parts = list(parts)
         cmd = parts[0].lower()
 
         if cmd in ("quit", "exit"):
@@ -226,6 +244,12 @@ class OperatorConsole:
 
         if cmd == "create-board":
             return self._cmd_create_board(parts)
+
+        if cmd == "publish-article":
+            return self._do_publish_article(parts[1:])
+
+        if cmd == "register-user":
+            return self._do_register_user(parts[1:])
 
         if cmd == "get-article":
             return self._cmd_get_article(parts)
@@ -308,9 +332,13 @@ class OperatorConsole:
         return """Commands:
   help                          Show this help
   whoami                        Show server identity
-  create-board <name>           Create a board (interactive)
+  create-board <name> [--display-name=<text>]
+                                Create a board (prompts for display name
+                                interactively; headless uses the flag or "")
   publish-article <board> [reply-to-num] [supersede-num]
-                                Publish an article (interactive)
+                                Publish an article (prompts interactively;
+                                headless requires --subject plus
+                                --body or --body-file, accepts --tags)
   register-user <name>          Rebind the server key's registration to <name>
   list-boards [origin]          List boards
   get-article [origin] <board> <num>
@@ -687,11 +715,20 @@ class OperatorConsole:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, lambda: self._do_create_board(parts))
 
-    def _do_create_board(self, parts) -> str:
-        if not parts:
-            return "Usage: create-board <name>"
+    def _do_create_board(self, parts, display_name: str | None = None) -> str:
+        positional: list[str] = []
+        flag_display: str | None = None
+        for p in parts:
+            if p.startswith("--display-name="):
+                flag_display = p.split("=", 1)[1]
+            elif p.startswith("--display="):
+                flag_display = p.split("=", 1)[1]
+            else:
+                positional.append(p)
+        if not positional:
+            return "Usage: create-board <name> [--display-name=<text>]"
 
-        board = parts[0]
+        board = positional[0]
 
         violation = identity_text_violation(board)
         if violation is not None:
@@ -700,11 +737,16 @@ class OperatorConsole:
         if self.nav.get_board(self.config.origin, board) is not None:
             return f"Board '{board}' already exists."
 
-        display_name = ""
-        try:
-            display_name = input("Display name (optional): ").strip()
-        except EOFError:
-            pass
+        if display_name is None:
+            display_name = flag_display if flag_display is not None else None
+        if display_name is None:
+            if self.headless:
+                display_name = ""
+            else:
+                try:
+                    display_name = input("Display name (optional): ").strip()
+                except EOFError:
+                    display_name = ""
 
         m = MetadataMap(
             [
@@ -756,52 +798,107 @@ class OperatorConsole:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, lambda: self._do_publish_article(parts))
 
-    def _do_publish_article(self, parts) -> str:
-        if not parts:
-            return "Usage: publish-article <board> [reply-to-num] [supersede-num]"
+    def _do_publish_article(
+        self,
+        parts,
+        subject: str | None = None,
+        tags_input: str | None = None,
+        body_text: str | None = None,
+    ) -> str:
+        positional: list[str] = []
+        flag_subject = subject
+        flag_tags = tags_input
+        flag_body = body_text
+        flag_body_file: str | None = None
+        for p in parts:
+            if p.startswith("--subject="):
+                flag_subject = p.split("=", 1)[1]
+            elif p.startswith("--tags="):
+                flag_tags = p.split("=", 1)[1]
+            elif p.startswith("--body="):
+                flag_body = p.split("=", 1)[1]
+            elif p.startswith("--body-file="):
+                flag_body_file = p.split("=", 1)[1]
+            else:
+                positional.append(p)
+        if not positional:
+            return (
+                "Usage: publish-article <board> [reply-to-num] [supersede-num] "
+                "[--subject=<text>] [--tags=<a,b>] [--body=<text> | --body-file=<path>]"
+            )
 
-        board = parts[0]
+        board = positional[0]
 
         if self.nav.get_board(self.config.origin, board) is None:
             return f"Error: Board '{board}' does not exist. Use create-board first."
 
         reply_to_num = 0
-        if len(parts) >= 2:
+        if len(positional) >= 2:
             try:
-                reply_to_num = int(parts[1])
+                reply_to_num = int(positional[1])
             except ValueError:
                 return "Invalid reply-to article number"
 
         supersede_num = 0
-        if len(parts) >= 3:
+        if len(positional) >= 3:
             try:
-                supersede_num = int(parts[2])
+                supersede_num = int(positional[2])
             except ValueError:
                 return "Invalid supersede article number"
 
-        try:
-            subject = input("Subject: ").strip()
-        except EOFError:
-            return "Cancelled."
+        if flag_body_file is not None:
+            if flag_body is not None:
+                return "Error: use only one of --body and --body-file"
+            try:
+                with open(flag_body_file, encoding="utf-8") as f:
+                    flag_body = f.read()
+            except OSError as e:
+                return f"Error: cannot read --body-file: {e}"
 
-        tags_input = ""
-        try:
-            tags_input = input("Tags (comma-separated): ").strip()
-        except EOFError:
-            pass
+        if self.headless:
+            if flag_subject is None or not flag_subject.strip():
+                return (
+                    "Error: --subject is required in non-interactive mode. "
+                    "Usage: publish-article <board> --subject=<text> "
+                    "(--body=<text> | --body-file=<path>) [--tags=<a,b>]"
+                )
+            if flag_body is None or not flag_body:
+                return "Error: --body or --body-file is required in non-interactive mode."
+            subject = flag_subject.strip()
+            tags_input = flag_tags or ""
+            content = flag_body
+        else:
+            if flag_subject is not None:
+                subject = flag_subject.strip()
+            else:
+                try:
+                    subject = input("Subject: ").strip()
+                except EOFError:
+                    return "Cancelled."
 
-        print("Content (empty line to finish):")
-        lines = []
-        try:
-            while True:
-                line = input()
-                if line == "":
-                    break
-                lines.append(line)
-        except EOFError:
-            pass
+            if flag_tags is not None:
+                tags_input = flag_tags
+            else:
+                tags_input = ""
+                try:
+                    tags_input = input("Tags (comma-separated): ").strip()
+                except EOFError:
+                    pass
 
-        content = "\n".join(lines)
+            if flag_body is not None:
+                content = flag_body
+            else:
+                print("Content (empty line to finish):")
+                lines = []
+                try:
+                    while True:
+                        line = input()
+                        if line == "":
+                            break
+                        lines.append(line)
+                except EOFError:
+                    pass
+                content = "\n".join(lines)
         if not content:
             return "Error: Content cannot be empty"
 
@@ -895,6 +992,10 @@ class OperatorConsole:
     # ------------------------------------------------------------------
 
     async def _repl_register_user(self, parts) -> str:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._do_register_user(parts))
+
+    def _do_register_user(self, parts) -> str:
         if not parts:
             return "Usage: register-user <name>"
 
@@ -1962,10 +2063,22 @@ class OperatorConsole:
         origin = parts[1]
         if origin == self.config.origin:
             return "Cannot depeer the local origin."
-        if origin not in self.sync_manager._clients and origin not in self.sync_manager._tasks:
+        live = origin in self.sync_manager._clients or origin in self.sync_manager._tasks
+        configured = any(getattr(p, "origin", None) == origin for p in self.config.peers)
+        if not live and not configured:
             return f"Origin '{origin}' is not a configured peer."
-        self.sync_manager.stop_origin(origin)
-        return f"Depeered '{origin}': sync stopped, data frozen and readable."
+        if live:
+            self.sync_manager.stop_origin(origin)
+            return f"Depeered '{origin}': sync stopped, data frozen and readable."
+        # One-shot `bonnet admin` has no live sync loops: nothing to stop,
+        # but the origin is a configured peer, so report it as such. Removing
+        # it still requires editing config.toml (and restart / reload of the
+        # live server); data stays frozen and readable either way.
+        return (
+            f"Origin '{origin}' has no live sync in this session "
+            f"(one-shot admin); data frozen and readable. "
+            f"Remove its [[sync.peers]] entry and restart to depeer persistently."
+        )
 
     def _cmd_reset_key(self, parts) -> str:
         if len(parts) < 2:

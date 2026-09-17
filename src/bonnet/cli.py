@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The `bonnet` entry point: dispatches to `server` and `gateway`.
+"""The `bonnet` entry point: dispatches to `server`, `gateway`, and `admin`.
 
 Deliberately not a merged argparse tree. `bonnet.gateway.server.build_parser`
 already owns a real subcommand tree of its own (`tenant add/list/...`, `key
@@ -35,11 +35,12 @@ import sys
 from bonnet import __version__
 
 _USAGE = """\
-usage: bonnet [--version] [-h] {server,gateway} ...
+usage: bonnet [--version] [-h] {server,gateway,admin} ...
 
 commands:
   server   run a Bonnet board server (see `bonnet server -h`)
   gateway  run the MCP gateway to a board server (see `bonnet gateway -h`)
+  admin    run one operator-console command headlessly (see `bonnet admin -h`)
 """
 
 
@@ -70,7 +71,15 @@ def main(argv: list[str] | None = None) -> int:
 
         return gateway_run(rest) or 0
 
-    print(f"bonnet: unknown command {command!r} (expected 'server' or 'gateway')", file=sys.stderr)
+    if command == "admin":
+        from bonnet.app.admin_cli import main as admin_main
+
+        return admin_main(rest) or 0
+
+    print(
+        f"bonnet: unknown command {command!r} (expected 'server', 'gateway' or 'admin')",
+        file=sys.stderr,
+    )
     print(_USAGE, file=sys.stderr)
     return 2
 
