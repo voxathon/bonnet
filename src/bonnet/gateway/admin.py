@@ -93,7 +93,9 @@ def _forbidden(request: Request) -> JSONResponse | None:
     """
     expected = _expected_token()
     if not expected:
-        return JSONResponse({"ok": False, "error": "not found"}, status_code=404, headers=_no_store())
+        return JSONResponse(
+            {"ok": False, "error": "not found"}, status_code=404, headers=_no_store()
+        )
     if not secrets.compare_digest(_presented_token(request), expected):
         return JSONResponse(
             {"ok": False, "error": "forbidden"}, status_code=403, headers=_no_store()
@@ -137,9 +139,7 @@ async def admin_tenant_list(request: Request) -> JSONResponse:
     denied = _forbidden(request)
     if denied is not None:
         return denied
-    return JSONResponse(
-        {"ok": True, "tenants": tenants.list_tenants()}, headers=_no_store()
-    )
+    return JSONResponse({"ok": True, "tenants": tenants.list_tenants()}, headers=_no_store())
 
 
 @mcp.custom_route("/admin/tenants/{tenant_id}", methods=["GET"])

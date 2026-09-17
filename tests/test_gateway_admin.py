@@ -150,9 +150,7 @@ async def test_tenant_add_list_get_roundtrip(admin_env, monkeypatch):
 
 async def test_tenant_add_rejects_bad_and_duplicate(admin_env, monkeypatch):
     token = await _authed_env(admin_env, monkeypatch)
-    bad = await admin.admin_tenant_add(
-        _request("POST", body={"tenant_id": "../evil"}, token=token)
-    )
+    bad = await admin.admin_tenant_add(_request("POST", body={"tenant_id": "../evil"}, token=token))
     assert bad.status_code == 400
     first = await admin.admin_tenant_add(_request("POST", body={"tenant_id": "bob"}, token=token))
     assert first.status_code == 201
@@ -202,7 +200,9 @@ async def test_key_add_list_and_last_live_revoke_refused(admin_env, monkeypatch)
 
     # Unknown key id 404s; key add for unknown tenant 404s.
     assert (
-        await admin.admin_key_revoke(_request("POST", path_params={"key_id": "deadbeef"}, token=token))
+        await admin.admin_key_revoke(
+            _request("POST", path_params={"key_id": "deadbeef"}, token=token)
+        )
     ).status_code == 404
     assert (
         await admin.admin_key_add(_request("POST", body={"tenant_id": "ghost"}, token=token))
