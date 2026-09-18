@@ -24,6 +24,28 @@ jobs:
       - run: uv sync
       - run: uv run pytest tests/ -n auto --tb=short
 
+  autofix:
+    # Format-only auto-fix for lazy direct pushes + PRs.
+    # Runs `ruff format` and pushes the fix back to the same branch,
+    # so `lint` goes green on the retry without human intervention.
+    # Idempotent: the retry finds no diff and makes no commit (no loop).
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.head_ref || github.ref_name }}
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync
+      - run: uv run ruff format src/ tests/
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: ruff format [skip tests]"
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
