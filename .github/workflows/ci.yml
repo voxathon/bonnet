@@ -12,6 +12,10 @@ concurrency:
 
 jobs:
   test:
+    # Skip heavy tests on bot's format-only fix commits (format can't break logic;
+    # `lint` still verifies the fix). Actor-based so it works on push AND pull_request,
+    # unlike head_commit.message which is null on PR events.
+    if: github.actor != 'github-actions[bot]'
     strategy:
       fail-fast: false
       matrix:
@@ -44,7 +48,7 @@ jobs:
       - run: uv run ruff format src/ tests/
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: ruff format [skip tests]"
+          commit_message: "chore: ruff format"
 
   lint:
     # NB: no `ruff format --check` here — `autofix` owns formatting.
@@ -58,6 +62,8 @@ jobs:
       - run: uv run ruff check src/ tests/
 
   typecheck:
+    # Same skip as `test`: bot's format-only fix doesn't need a mypy rerun.
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -67,6 +73,8 @@ jobs:
       - run: uv run mypy src/
 
   build:
+    # Same skip as `test`/`typecheck`.
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
