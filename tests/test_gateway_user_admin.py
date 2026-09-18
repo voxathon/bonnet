@@ -32,6 +32,7 @@ pytest.importorskip("fastmcp")
 from bonnet.core.acl import ACLRule, PrincipalMatcher
 from bonnet.core.crypto import Identity
 from bonnet.core.record import (
+    Intent,
     MetadataMap,
     encode_intent,
     metadata_bytes,
@@ -42,7 +43,6 @@ from bonnet.core.record import (
 from bonnet.gateway import cursor, tenancy, tools
 from bonnet.gateway.firehose_client import FirehoseHTTPClient
 from bonnet.net.firehose_commands import OP_PUBLISH_RECORD, FirehoseContext
-from bonnet.core.record import Intent
 from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
 
 READ_COMMANDS = [
