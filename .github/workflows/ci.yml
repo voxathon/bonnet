@@ -48,7 +48,7 @@ jobs:
       - run: uv run ruff format src/ tests/
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: ruff format"
+          commit_message: "chore: ruff format [skip tests]"
 
   lint:
     # NB: no `ruff format --check` here — `autofix` owns formatting.
