@@ -47,6 +47,8 @@ jobs:
           commit_message: "chore: ruff format [skip tests]"
 
   lint:
+    # NB: no `ruff format --check` here — `autofix` owns formatting.
+    # `lint` gates only on `ruff check`; format drift is fixed + pushed silently.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -54,7 +56,6 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - run: uv sync
       - run: uv run ruff check src/ tests/
-      - run: uv run ruff format --check src/ tests/
 
   typecheck:
     runs-on: ubuntu-latest
