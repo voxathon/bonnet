@@ -224,8 +224,10 @@ class FirehoseStore:
                 event_origin        TEXT NOT NULL,
                 event_id            BLOB NOT NULL,
                 event_hash          BLOB NOT NULL,
+                event_origin_seq    INTEGER NOT NULL,
                 relay_pubkey        BLOB NOT NULL,
                 relay_hostname      TEXT NOT NULL,
+                relay_origin        TEXT NOT NULL,
                 received_from_pubkey BLOB NOT NULL,
                 received_from_hostname TEXT NOT NULL,
                 seen_at             INTEGER NOT NULL,
@@ -1127,7 +1129,20 @@ class FirehoseStore:
         "last" keeps the historical REPLACE behavior. keep_pubkeys names
         relays that must never be evicted by the max_per_event cap
         (caller passes its own key; origin witnesses are always pinned).
+
+        A witness without a claim bound (empty relay_origin,
+        non-positive event_origin_seq, zero event_hash) is an error and is
+        rejected like a bad signature. No crawling happens here: the bound
+        is checked against the colocated record by the retention filter
+        and by external tooling, never by fetching another chain.
         """
+        if not w.relay_origin or w.event_origin_seq <= 0 or w.event_hash == ZERO_HASH:
+            log_msg(
+                f"WITNESS: rejecting unbounded witness for "
+                f"{w.event_origin}/{w.event_id.hex()[:16]} claiming relay "
+                f"{w.relay_pubkey.hex()[:16]}"
+            )
+            return False
         if not verify_witness_signature(
             w.relay_pubkey, encode_unsigned_witness(w), w.relay_signature
         ):
@@ -1141,15 +1156,17 @@ class FirehoseStore:
             if self._witness_update_policy == "first":
                 cur = self._conn.execute(
                     "INSERT OR IGNORE INTO relay_witnesses "
-                    "(event_origin, event_id, event_hash, relay_pubkey, relay_hostname, "
-                    "received_from_pubkey, received_from_hostname, seen_at, relay_signature) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(event_origin, event_id, event_hash, event_origin_seq, relay_pubkey, relay_hostname, "
+                    "relay_origin, received_from_pubkey, received_from_hostname, seen_at, relay_signature) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         w.event_origin,
                         w.event_id,
                         w.event_hash,
+                        w.event_origin_seq,
                         w.relay_pubkey,
                         w.relay_hostname,
+                        w.relay_origin,
                         w.received_from_pubkey,
                         w.received_from_hostname,
                         w.seen_at,
@@ -1161,15 +1178,17 @@ class FirehoseStore:
             else:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO relay_witnesses "
-                    "(event_origin, event_id, event_hash, relay_pubkey, relay_hostname, "
-                    "received_from_pubkey, received_from_hostname, seen_at, relay_signature) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(event_origin, event_id, event_hash, event_origin_seq, relay_pubkey, relay_hostname, "
+                    "relay_origin, received_from_pubkey, received_from_hostname, seen_at, relay_signature) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         w.event_origin,
                         w.event_id,
                         w.event_hash,
+                        w.event_origin_seq,
                         w.relay_pubkey,
                         w.relay_hostname,
+                        w.relay_origin,
                         w.received_from_pubkey,
                         w.received_from_hostname,
                         w.seen_at,
@@ -1238,8 +1257,8 @@ class FirehoseStore:
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT event_hash, relay_pubkey, relay_hostname, received_from_pubkey, "
-                "received_from_hostname, seen_at, relay_signature "
+                "SELECT event_hash, event_origin_seq, relay_pubkey, relay_hostname, relay_origin, "
+                "received_from_pubkey, received_from_hostname, seen_at, relay_signature "
                 "FROM relay_witnesses WHERE event_origin=? AND event_id=? "
                 "ORDER BY seen_at, relay_pubkey LIMIT ?",
                 (event_origin, event_id, limit),
@@ -1250,12 +1269,14 @@ class FirehoseStore:
                 event_origin=event_origin,
                 event_id=event_id,
                 event_hash=bytes(r[0]),
-                relay_pubkey=bytes(r[1]),
-                relay_hostname=r[2],
-                received_from_pubkey=bytes(r[3]),
-                received_from_hostname=r[4],
-                seen_at=r[5],
-                relay_signature=bytes(r[6]),
+                event_origin_seq=int(r[1]),
+                relay_pubkey=bytes(r[2]),
+                relay_hostname=r[3],
+                relay_origin=r[4],
+                received_from_pubkey=bytes(r[5]),
+                received_from_hostname=r[6],
+                seen_at=r[7],
+                relay_signature=bytes(r[8]),
             )
             for r in rows
         ]
@@ -1265,8 +1286,8 @@ class FirehoseStore:
     ) -> Witness | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT event_hash, relay_hostname, received_from_pubkey, "
-                "received_from_hostname, seen_at, relay_signature "
+                "SELECT event_hash, event_origin_seq, relay_hostname, relay_origin, "
+                "received_from_pubkey, received_from_hostname, seen_at, relay_signature "
                 "FROM relay_witnesses WHERE event_origin=? AND event_id=? AND relay_pubkey=?",
                 (event_origin, event_id, relay_pubkey),
             ).fetchone()
@@ -1277,12 +1298,14 @@ class FirehoseStore:
                 event_origin=event_origin,
                 event_id=event_id,
                 event_hash=bytes(row[0]),
+                event_origin_seq=int(row[1]),
                 relay_pubkey=relay_pubkey,
-                relay_hostname=row[1],
-                received_from_pubkey=bytes(row[2]),
-                received_from_hostname=row[3],
-                seen_at=row[4],
-                relay_signature=bytes(row[5]),
+                relay_hostname=row[2],
+                relay_origin=row[3],
+                received_from_pubkey=bytes(row[4]),
+                received_from_hostname=row[5],
+                seen_at=row[6],
+                relay_signature=bytes(row[7]),
             )
 
     # -----------------------------------------------------------------------

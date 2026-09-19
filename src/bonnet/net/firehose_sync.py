@@ -312,10 +312,12 @@ class SyncManager:
         dispatcher=None,
         *,
         retain_upstream: bool = True,
+        relay_origin: str = "",
     ):
         self._firehose = firehose
         self._identity = server_identity
         self._hostname = hostname
+        self._relay_origin = relay_origin or hostname
         self._dispatcher = dispatcher
         self._retain_upstream_enabled = retain_upstream
         self._lock = threading.RLock()
@@ -871,8 +873,10 @@ class SyncManager:
             event_origin=rec.origin,
             event_id=rec.event_id,
             event_hash=event_hash,
+            event_origin_seq=rec.origin_seq,
             relay_pubkey=self._identity.public_key,
             relay_hostname=self._hostname,
+            relay_origin=self._relay_origin,
             received_from_pubkey=peer_pubkey,
             received_from_hostname=peer_hostname,
             seen_at=int(time.time()),
@@ -902,6 +906,10 @@ class SyncManager:
             if w.event_origin != rec.origin or w.event_id != rec.event_id:
                 continue
             if w.event_hash != event_hash:
+                continue
+            if w.event_origin_seq != rec.origin_seq:
+                continue
+            if not w.relay_origin:
                 continue
             if w.relay_pubkey == self._identity.public_key:
                 continue

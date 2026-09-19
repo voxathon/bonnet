@@ -34,14 +34,25 @@ from tests.test_federation import _OriginServer
 
 
 def _witness_for(
-    origin, event_id, event_hash, relay: Identity, hostname, seen_at, frm=None, frm_host=""
+    origin,
+    event_id,
+    event_hash,
+    relay: Identity,
+    hostname,
+    seen_at,
+    frm=None,
+    frm_host="",
+    event_origin_seq=1,
+    relay_origin="",
 ):
     w = Witness(
         event_origin=origin,
         event_id=event_id,
         event_hash=event_hash,
+        event_origin_seq=event_origin_seq,
         relay_pubkey=relay.public_key,
         relay_hostname=hostname,
+        relay_origin=relay_origin or hostname,
         received_from_pubkey=frm if frm is not None else b"\x00" * 32,
         received_from_hostname=frm_host,
         seen_at=seen_at,
@@ -90,7 +101,14 @@ def test_max_per_event_keeps_origin_self_newest(tmp_path):
     me = Identity.generate()
     store = FirehoseStore(str(tmp_path / "s.db"), witness_max_per_event=4)
     origin_w = make_origin_witness(
-        "origin.test", rec.event_id, eh, server.identity, "origin.test", 1
+        "origin.test",
+        rec.event_id,
+        eh,
+        rec.origin_seq,
+        server.identity,
+        "origin.test",
+        "origin.test",
+        1,
     )
     store.store_witness(origin_w)
     own = _witness_for(
@@ -166,7 +184,14 @@ def test_wire_max_truncation_deterministic(tmp_path):
     me = Identity.generate()
     store = FirehoseStore(str(tmp_path / "h.db"))
     origin_w = make_origin_witness(
-        "origin.test", rec.event_id, eh, server.identity, "origin.test", 1
+        "origin.test",
+        rec.event_id,
+        eh,
+        rec.origin_seq,
+        server.identity,
+        "origin.test",
+        "origin.test",
+        1,
     )
     store.store_witness(origin_w)
     own = _witness_for(
@@ -245,7 +270,16 @@ def test_no_synthesised_origin_witness_for_a_remote_origin(tmp_path):
     # Only the genuine origin link is stored; this relay holds no statement
     # of its own about the event.
     store.store_witness(
-        make_origin_witness("origin.test", rec.event_id, eh, server.identity, "origin.test", 1)
+        make_origin_witness(
+            "origin.test",
+            rec.event_id,
+            eh,
+            rec.origin_seq,
+            server.identity,
+            "origin.test",
+            "origin.test",
+            1,
+        )
     )
     handler = FirehoseCommandHandler(
         firehose=store,

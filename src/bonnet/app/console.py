@@ -2037,10 +2037,12 @@ class OperatorConsole:
                 [
                     f"  Relay pubkey: {w.relay_pubkey.hex()}",
                     f"  Relay host:   {relay_shown}",
+                    f"  Relay origin: {w.relay_origin}",
                     f"  From pubkey:  {from_pubkey}",
                     f"  From host:    {from_shown}",
                     f"  Seen at:      {seen}",
                     f"  Origin term:  {'yes' if is_origin_witness(w) else 'no'}",
+                    f"  Event seq:    {w.event_origin_seq}",
                     f"  Event hash:   {w.event_hash.hex()}",
                     # Each entry is that relay's own signed claim about who
                     # handed it the record. A valid signature makes the claim

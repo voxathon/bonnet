@@ -279,7 +279,9 @@ class _ServingClient(SyncClient):
                 origin,
                 rec.event_id,
                 compute_event_hash(encode_record(rec)),
+                rec.origin_seq,
                 self._server.identity,
+                self._server.origin,
                 self._server.origin,
                 int(time.time()),
             )

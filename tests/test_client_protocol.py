@@ -191,8 +191,10 @@ def _make_witness(rec: Record, hostname="bbs.test") -> Witness:
         origin=rec.origin,
         event_id=rec.event_id,
         event_hash=event_hash,
+        event_origin_seq=rec.origin_seq,
         origin_identity=ORIGIN,
         hostname=hostname,
+        relay_origin=rec.origin,
         seen_at=1700000000,
     )
 

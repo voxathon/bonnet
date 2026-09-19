@@ -1791,8 +1791,10 @@ class TestFederationSync:
             origin="bbs.test",
             event_id=rec.event_id,
             event_hash=event_hash,
+            event_origin_seq=rec.origin_seq,
             origin_identity=ORIGIN,
             hostname="bbs.test",
+            relay_origin="bbs.test",
             seen_at=1700000000,
         )
 
@@ -1882,8 +1884,10 @@ class TestFederationSync:
             origin="bbs.test",
             event_id=rec.event_id,
             event_hash=event_hash,
+            event_origin_seq=rec.origin_seq,
             origin_identity=ORIGIN,
             hostname="bbs.test",
+            relay_origin="bbs.test",
             seen_at=1700000000,
         )
 
@@ -1913,6 +1917,9 @@ class TestFederationSync:
         local_w = receiver_store.get_witness("bbs.test", rec.event_id, relay_identity.public_key)
         assert local_w is not None
         assert local_w.relay_hostname == "relay.test"
+        assert local_w.relay_origin == "relay.test"
+        assert local_w.event_origin_seq == rec.origin_seq
+        assert local_w.event_hash == event_hash
         assert local_w.received_from_pubkey == ORIGIN_PUB
         assert local_w.received_from_hostname == "bbs.test"
 

@@ -3415,6 +3415,8 @@ async def get_event(
                     "relay_pubkey": w.relay_pubkey.hex(),
                     "relay_hostname": w.relay_hostname,
                     "relay_hostname_normalized": normalize_hostname(w.relay_hostname),
+                    "relay_origin": w.relay_origin,
+                    "event_origin_seq": w.event_origin_seq,
                     "received_from_pubkey": w.received_from_pubkey.hex(),
                     "received_from_hostname": w.received_from_hostname,
                     "received_from_hostname_normalized": (

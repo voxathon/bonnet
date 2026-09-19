@@ -1162,12 +1162,15 @@ class FirehoseHTTPClient(FirehoseTransport):
         is what a reader most needs to see, so it is not smoothed away.
 
         Returns hop dicts: {relay_pubkey, relay_hostname,
-        relay_hostname_normalized, received_from_pubkey,
+        relay_hostname_normalized, relay_origin, received_from_pubkey,
         received_from_hostname, received_from_hostname_normalized, seen_at,
-        record_hash, signature_valid, is_origin, linked}.
+        event_origin_seq, record_hash, signature_valid, is_origin, linked}.
 
         Hostname `_normalized` fields are display/comparison aids only — the
         raw strings are the relay's signed claims and are never rewritten.
+        `relay_origin` is likewise a self-reported namespace hint: identity
+        remains `relay_pubkey`. No chain is fetched here; the (seq, hash)
+        bound is checked against the colocated record only.
         """
         from bonnet.core.record import (
             encode_unsigned_witness,
@@ -1183,17 +1186,20 @@ class FirehoseHTTPClient(FirehoseTransport):
                 "relay_pubkey": w.relay_pubkey.hex(),
                 "relay_hostname": w.relay_hostname,
                 "relay_hostname_normalized": normalize_hostname(w.relay_hostname),
+                "relay_origin": w.relay_origin,
                 "received_from_pubkey": w.received_from_pubkey.hex(),
                 "received_from_hostname": w.received_from_hostname,
                 "received_from_hostname_normalized": (
                     normalize_hostname(w.received_from_hostname) if w.received_from_hostname else ""
                 ),
                 "seen_at": w.seen_at,
+                "event_origin_seq": w.event_origin_seq,
                 "record_hash": event_hash.hex(),
-                # A witness naming a different hash is a statement about some
-                # other record and cannot be part of this chain.
+                # A witness naming a different hash or seq is a statement
+                # about some other record and cannot be part of this chain.
                 "signature_valid": (
                     w.event_hash == event_hash
+                    and w.event_origin_seq == rec.origin_seq
                     and verify_witness_signature(
                         w.relay_pubkey, encode_unsigned_witness(w), w.relay_signature
                     )

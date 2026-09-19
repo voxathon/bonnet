@@ -580,8 +580,10 @@ class TestWitnessStorage:
             event_origin="bbs.a",
             event_id=eid,
             event_hash=ehash,
+            event_origin_seq=7,
             relay_pubkey=RELAY_PUB,
             relay_hostname="relay.test",
+            relay_origin="relay.test",
             received_from_pubkey=ORIGIN_A_PUB,
             received_from_hostname="bbs.a",
             seen_at=1700000000,
@@ -592,6 +594,8 @@ class TestWitnessStorage:
         retrieved = store.get_witness("bbs.a", eid, RELAY_PUB)
         assert retrieved is not None
         assert retrieved.relay_hostname == "relay.test"
+        assert retrieved.relay_origin == "relay.test"
+        assert retrieved.event_origin_seq == 7
         assert retrieved.received_from_pubkey == ORIGIN_A_PUB
         assert retrieved.seen_at == 1700000000
 

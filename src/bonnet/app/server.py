@@ -235,6 +235,7 @@ class BonnetServer:
             config.hostname,
             dispatcher=self.dispatcher,
             retain_upstream=config.witness.retain_upstream,
+            relay_origin=config.origin,
         )
         if config.peers:
             for peer in config.peers:

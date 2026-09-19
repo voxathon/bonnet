@@ -402,8 +402,10 @@ class TestCryptoDomains:
             event_origin="bbs.test",
             event_id=EVENT_ID_1,
             event_hash=ZERO_HASH,
+            event_origin_seq=1,
             relay_pubkey=RELAY_PUB,
             relay_hostname="relay.test",
+            relay_origin="relay.test",
             seen_at=1700000000,
         )
         unsigned = encode_unsigned_witness(w)
@@ -634,8 +636,10 @@ class TestWitness:
             event_origin="bbs.test",
             event_id=EVENT_ID_1,
             event_hash=event_hash,
+            event_origin_seq=1,
             relay_pubkey=RELAY_PUB,
             relay_hostname="relay.test",
+            relay_origin="relay.test",
             received_from_pubkey=ORIGIN_PUB,
             received_from_hostname="bbs.test",
             seen_at=1700000000,
@@ -649,10 +653,33 @@ class TestWitness:
         assert decoded.event_hash == event_hash
         assert decoded.relay_pubkey == RELAY_PUB
         assert decoded.relay_hostname == "relay.test"
+        assert decoded.relay_origin == "relay.test"
+        assert decoded.event_origin_seq == 1
         assert decoded.received_from_pubkey == ORIGIN_PUB
         assert decoded.received_from_hostname == "bbs.test"
         assert decoded.seen_at == 1700000000
         assert not is_origin_witness(decoded)
+
+    def test_unbounded_witness_is_unencodable(self):
+        event_hash = bytes.fromhex("ee" * 32)
+        w = Witness(
+            event_origin="bbs.test",
+            event_id=EVENT_ID_1,
+            event_hash=event_hash,
+            event_origin_seq=0,
+            relay_pubkey=RELAY_PUB,
+            relay_hostname="relay.test",
+            relay_origin="relay.test",
+            received_from_pubkey=ORIGIN_PUB,
+            received_from_hostname="bbs.test",
+            seen_at=1700000000,
+        )
+        with pytest.raises(InvalidValue):
+            encode_unsigned_witness(w)
+        w.event_origin_seq = 1
+        w.relay_origin = ""
+        with pytest.raises(InvalidValue):
+            encode_unsigned_witness(w)
 
     def test_origin_witness_terminates_trace(self):
         event_hash = bytes.fromhex("ee" * 32)
@@ -660,8 +687,10 @@ class TestWitness:
             origin="bbs.test",
             event_id=EVENT_ID_1,
             event_hash=event_hash,
+            event_origin_seq=1,
             origin_identity=ORIGIN,
             hostname="bbs.test",
+            relay_origin="bbs.test",
             seen_at=1700000000,
         )
         assert is_origin_witness(w)
@@ -680,8 +709,10 @@ class TestWitness:
             event_origin="bbs.test",
             event_id=EVENT_ID_1,
             event_hash=ZERO_HASH,
+            event_origin_seq=1,
             relay_pubkey=RELAY_PUB,
             relay_hostname="relay.test",
+            relay_origin="relay.test",
             seen_at=1700000000,
         )
         unsigned = encode_unsigned_witness(w)
@@ -802,8 +833,10 @@ class TestGoldenVectors:
             origin="bbs.test",
             event_id=EVENT_ID_1,
             event_hash=event_hash,
+            event_origin_seq=1,
             origin_identity=ORIGIN,
             hostname="bbs.test",
+            relay_origin="bbs.test",
             seen_at=1700000002,
         )
         assert is_origin_witness(witness)
@@ -889,8 +922,10 @@ class TestGoldenVectors:
             origin="bbs.test",
             event_id=EVENT_ID_1,
             event_hash=event_hash,
+            event_origin_seq=1,
             origin_identity=ORIGIN,
             hostname="bbs.test",
+            relay_origin="bbs.test",
             seen_at=1700000000,
         )
 
@@ -899,8 +934,10 @@ class TestGoldenVectors:
             event_origin="bbs.test",
             event_id=EVENT_ID_1,
             event_hash=event_hash,
+            event_origin_seq=1,
             relay_pubkey=RELAY_PUB,
             relay_hostname="relay-a.test",
+            relay_origin="relay-a.test",
             received_from_pubkey=ORIGIN_PUB,
             received_from_hostname="bbs.test",
             seen_at=1700000005,
@@ -993,8 +1030,10 @@ class TestRejections:
             event_origin="bbs.test",
             event_id=EVENT_ID_1,
             event_hash=ZERO_HASH,
+            event_origin_seq=1,
             relay_pubkey=RELAY_PUB,
             relay_hostname="r.test",
+            relay_origin="r.test",
             seen_at=1700000000,
         )
         unsigned = encode_unsigned_witness(w)

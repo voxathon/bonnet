@@ -905,8 +905,10 @@ class Witness:
     event_origin: str = ""
     event_id: bytes = ZERO_ID
     event_hash: bytes = ZERO_HASH
+    event_origin_seq: int = 0
     relay_pubkey: bytes = b"\x00" * KEY_SIZE
     relay_hostname: str = ""
+    relay_origin: str = ""
     received_from_pubkey: bytes = b"\x00" * KEY_SIZE
     received_from_hostname: str = ""
     seen_at: int = 0
@@ -916,12 +918,18 @@ class Witness:
 def encode_unsigned_witness(w: Witness) -> bytes:
     if w.witness_format != WITNESS_FORMAT:
         raise InvalidValue(f"witness_format must be {WITNESS_FORMAT}")
+    if w.event_origin_seq <= 0:
+        raise InvalidValue("event_origin_seq must be non-zero")
+    if not w.relay_origin:
+        raise InvalidValue("relay_origin must be non-empty")
     out = enc_u8(w.witness_format)
     out += enc_text16(w.event_origin, MAX_ORIGIN_HOSTNAME)
     out += enc_id32(w.event_id)
     out += enc_id32(w.event_hash)
+    out += enc_u64(w.event_origin_seq)
     out += enc_key32(w.relay_pubkey)
     out += enc_text16(w.relay_hostname, MAX_ORIGIN_HOSTNAME)
+    out += enc_text16(w.relay_origin, MAX_ORIGIN_HOSTNAME)
     out += enc_key32(w.received_from_pubkey)
     out += enc_text16(w.received_from_hostname, MAX_ORIGIN_HOSTNAME)
     out += enc_i64(w.seen_at)
@@ -942,8 +950,10 @@ def decode_witness(data: bytes) -> Witness:
         event_origin=r.text16(MAX_ORIGIN_HOSTNAME),
         event_id=r.id32(),
         event_hash=r.id32(),
+        event_origin_seq=r.u64(),
         relay_pubkey=r.key32(),
         relay_hostname=r.text16(MAX_ORIGIN_HOSTNAME),
+        relay_origin=r.text16(MAX_ORIGIN_HOSTNAME),
         received_from_pubkey=r.key32(),
         received_from_hostname=r.text16(MAX_ORIGIN_HOSTNAME),
         seen_at=r.i64(),
@@ -962,8 +972,10 @@ def make_origin_witness(
     origin: str,
     event_id: bytes,
     event_hash: bytes,
+    event_origin_seq: int,
     origin_identity: Identity,
     hostname: str,
+    relay_origin: str,
     seen_at: int,
 ) -> Witness:
     """Create the terminating witness signed by the origin itself."""
@@ -972,8 +984,10 @@ def make_origin_witness(
         event_origin=origin,
         event_id=event_id,
         event_hash=event_hash,
+        event_origin_seq=event_origin_seq,
         relay_pubkey=origin_identity.public_key,
         relay_hostname=hostname,
+        relay_origin=relay_origin,
         received_from_pubkey=b"\x00" * KEY_SIZE,
         received_from_hostname="",
         seen_at=seen_at,

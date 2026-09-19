@@ -337,6 +337,8 @@ def parse_publish_response(resp: bytes) -> PublishResult:
         board=rec.board,
         witness_pubkey=witness.relay_pubkey.hex(),
         witness_hostname=witness.relay_hostname,
+        witness_origin=witness.relay_origin,
+        witness_event_origin_seq=witness.event_origin_seq,
     )
 
 

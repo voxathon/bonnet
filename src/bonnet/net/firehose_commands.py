@@ -997,8 +997,10 @@ class FirehoseCommandHandler:
                                 origin=self._origin,
                                 event_id=head_rec.event_id,
                                 event_hash=head_hash,
+                                event_origin_seq=head_rec.origin_seq,
                                 origin_identity=self._identity,
                                 hostname=self._hostname,
+                                relay_origin=self._origin,
                                 seen_at=now,
                             )
                             self._firehose.store_witness(
@@ -1066,8 +1068,10 @@ class FirehoseCommandHandler:
                 origin=self._origin,
                 event_id=rec.event_id,
                 event_hash=event_hash,
+                event_origin_seq=rec.origin_seq,
                 origin_identity=self._identity,
                 hostname=self._hostname,
+                relay_origin=self._origin,
                 seen_at=now,
             )
             self._firehose.store_witness(witness, keep_pubkeys={self._identity.public_key})
@@ -1312,8 +1316,10 @@ class FirehoseCommandHandler:
                 origin=origin,
                 event_id=rec.event_id,
                 event_hash=event_hash,
+                event_origin_seq=rec.origin_seq,
                 origin_identity=self._identity,
                 hostname=self._hostname,
+                relay_origin=self._origin,
                 seen_at=rec.created_at,
             )
             self._firehose.store_witness(own, keep_pubkeys={self._identity.public_key})

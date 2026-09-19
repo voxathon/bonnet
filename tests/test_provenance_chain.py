@@ -87,8 +87,10 @@ def _origin_with_witness(tmp_path, name="origin.test"):
             origin=name,
             event_id=rec.event_id,
             event_hash=compute_event_hash(encode_record(rec)),
+            event_origin_seq=rec.origin_seq,
             origin_identity=server.identity,
             hostname=name,
+            relay_origin=name,
             seen_at=int(time.time()),
         )
     )
@@ -125,8 +127,10 @@ async def test_a_forged_upstream_witness_cannot_be_laundered(tmp_path):
                     event_origin=r.origin,
                     event_id=r.event_id,
                     event_hash=compute_event_hash(encode_record(r)),
+                    event_origin_seq=r.origin_seq,
                     relay_pubkey=patsy.public_key,
                     relay_hostname="innocent-relay.test",
+                    relay_origin="innocent-relay.test",
                     received_from_pubkey=b"\x00" * 32,
                     received_from_hostname="",
                     seen_at=0,
@@ -267,8 +271,10 @@ def test_store_witness_refuses_an_unverifiable_witness(tmp_path):
         event_origin="bbs.test",
         event_id=os.urandom(32),
         event_hash=os.urandom(32),
+        event_origin_seq=1,
         relay_pubkey=relay.public_key,
         relay_hostname="relay.test",
+        relay_origin="relay.test",
         received_from_pubkey=b"\x00" * 32,
         received_from_hostname="",
         seen_at=1,
@@ -297,8 +303,67 @@ def test_a_witness_about_another_record_is_not_retained(tmp_path):
         event_origin=rec.origin,
         event_id=rec.event_id,
         event_hash=os.urandom(32),  # not this record
+        event_origin_seq=rec.origin_seq,
         relay_pubkey=stranger.public_key,
         relay_hostname="stranger.test",
+        relay_origin="stranger.test",
+        received_from_pubkey=b"\x00" * 32,
+        received_from_hostname="",
+        seen_at=1,
+    )
+    w.relay_signature = sign_witness(stranger, encode_unsigned_witness(w))
+
+    kept = mgr._retain_upstream(rec, compute_event_hash(encode_record(rec)), [w])
+    assert kept == 0
+    assert store.get_witnesses(rec.origin, rec.event_id) == []
+
+    store.close()
+    origin.store.close()
+
+
+def test_store_witness_refuses_an_unbounded_witness(tmp_path):
+    """A signed witness without a claim bound is an error, not a blindspot.
+
+    The store rejects on the bound before even checking the signature, so
+    no hand-rolled encoding is needed here — garbage bytes suffice.
+    """
+    store = FirehoseStore(str(tmp_path / "s.db"))
+    relay = Identity.generate()
+    w = Witness(
+        event_origin="bbs.test",
+        event_id=os.urandom(32),
+        event_hash=os.urandom(32),
+        event_origin_seq=0,
+        relay_pubkey=relay.public_key,
+        relay_hostname="relay.test",
+        relay_origin="",
+        received_from_pubkey=b"\x00" * 32,
+        received_from_hostname="",
+        seen_at=1,
+        relay_signature=b"\x00" * 64,
+    )
+    assert store.store_witness(w) is False
+    assert store.get_witnesses("bbs.test", w.event_id) == []
+
+    store.close()
+
+
+def test_a_witness_with_the_wrong_seq_is_not_retained(tmp_path):
+    """Retention binds the seq claim to the colocated record: a witness
+    naming the right hash but the wrong origin_seq is about something else."""
+    origin, rec = _origin_with_witness(tmp_path)
+    store = FirehoseStore(str(tmp_path / "mine.db"))
+    mgr = SyncManager(store, Identity.generate(), "myrelay.test")
+
+    stranger = Identity.generate()
+    w = Witness(
+        event_origin=rec.origin,
+        event_id=rec.event_id,
+        event_hash=compute_event_hash(encode_record(rec)),
+        event_origin_seq=rec.origin_seq + 1,  # right hash, wrong position
+        relay_pubkey=stranger.public_key,
+        relay_hostname="stranger.test",
+        relay_origin="stranger.test",
         received_from_pubkey=b"\x00" * 32,
         received_from_hostname="",
         seen_at=1,
