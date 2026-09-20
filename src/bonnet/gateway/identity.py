@@ -112,19 +112,52 @@ class IdentityStore:
         """)
         conn.commit()
 
-    def _derive_aes_key(self, password: str, key_salt: bytes) -> bytes:
+    def _derive_aes_key(self, password: str, key_salt: bytes, key_len: int = 32) -> bytes:
         import warnings
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             return bcrypt.kdf(
-                password=password.encode("utf-8"), salt=key_salt, desired_key_bytes=24, rounds=100
+                password=password.encode("utf-8"),
+                salt=key_salt,
+                desired_key_bytes=key_len,
+                rounds=100,
             )
 
+    def _decrypt_private_key(self, password: str, key_salt: bytes, encrypted: bytes) -> bytes:
+        """Decrypt a wrapped key, accepting both AES-256 (new) and AES-192 (legacy).
+
+        New wraps use a 32-byte derived key (AES-256-GCM); rows written before
+        the migration use 24 bytes (AES-192-GCM). The layout is unchanged
+        (12-byte nonce prepended), so try each in turn — GCM authentication
+        fails closed on the wrong key.
+        """
+        from cryptography.exceptions import InvalidTag
+
+        nonce, ciphertext = encrypted[:12], encrypted[12:]
+        last: Exception | None = None
+        for key_len in (32, 24):
+            try:
+                aesgcm = AESGCM(self._derive_aes_key(password, key_salt, key_len))
+                return aesgcm.decrypt(nonce, ciphertext, None)
+            except InvalidTag as e:
+                last = e
+                continue
+            except Exception as e:
+                last = e
+                # Malformed blobs (short nonce, etc.) fail identically for
+                # both lengths — no point retrying.
+                break
+        raise ValueError("Failed to decrypt private key") from last
+
     def register(
-        self, origin: str, username: str, password: str | None = None
+        self,
+        origin: str,
+        username: str,
+        password: str | None = None,
+        private_key: bytes | None = None,
     ) -> tuple[bytes, bytes]:
-        """Mint an Ed25519 identity and store it, wrapped iff a password is given.
+        """Mint (or import) an Ed25519 identity and store it, wrapped iff a password is given.
 
         Scoped to `origin`: the same `username` may hold a distinct keypair on
         each origin it registers with, matching that usernames only mean
@@ -132,19 +165,38 @@ class IdentityStore:
 
         Omitting the password stores the private key as-is; see the module
         docstring for why that is the right default for an agent.
+
+        `private_key`, when given, must be a 32-byte Ed25519 seed to import
+        (mobility: reinstalling an exported identity on a new gateway);
+        omitted means generate fresh via `SigningKey.generate()`.
         """
         conn = self._get_conn()
         cur = conn.cursor()
 
+        if private_key is not None and len(private_key) != 32:
+            raise ValueError("Private key must be exactly 32 bytes")
+
         cur.execute(
-            "SELECT username FROM identities WHERE origin = ? AND username = ?",
+            "SELECT public_key FROM identities WHERE origin = ? AND username = ?",
             (origin, username),
         )
-        if cur.fetchone():
+        existing = cur.fetchone()
+        if existing is not None:
+            if private_key is not None and bytes(SigningKey(private_key).verify_key) != bytes(
+                existing["public_key"]
+            ):
+                raise ValueError(
+                    f"'{username}' on '{origin}' already exists locally under a "
+                    "different key: importing here would orphan the held key. Use "
+                    "rotate_key to move it, or pick another username."
+                )
             raise ValueError("User already exists locally")
 
         if not password:
-            signing_key = SigningKey.generate()
+            if private_key is not None:
+                signing_key = SigningKey(private_key)
+            else:
+                signing_key = SigningKey.generate()
             private_key = bytes(signing_key)
             public_key = bytes(signing_key.verify_key)
             conn.execute(
@@ -167,11 +219,14 @@ class IdentityStore:
 
         # 2. Keypair encryption
         key_salt = os.urandom(16)
-        # bcrypt output is fixed to 60 chars string, but we want a 24-byte key for AES-192.
-        # Let's derive the key using bcrypt.kdf, which is exactly for this purpose.
+        # bcrypt.kdf derives the AES wrapping key; 32 bytes for AES-256-GCM.
+        # (Legacy rows use 24 bytes / AES-192; see _decrypt_private_key.)
         aes_key = self._derive_aes_key(password, key_salt)
 
-        signing_key = SigningKey.generate()
+        if private_key is not None:
+            signing_key = SigningKey(private_key)
+        else:
+            signing_key = SigningKey.generate()
         private_key = bytes(signing_key)
         public_key = bytes(signing_key.verify_key)
 
@@ -294,16 +349,7 @@ class IdentityStore:
         key_salt = bytes(row["key_salt"])
         encrypted = bytes(row["encrypted_private_key"])
 
-        aes_key = self._derive_aes_key(password, key_salt)
-
-        aesgcm = AESGCM(aes_key)
-        nonce = encrypted[:12]
-        ciphertext = encrypted[12:]
-
-        try:
-            return aesgcm.decrypt(nonce, ciphertext, None)
-        except Exception as e:
-            raise ValueError("Failed to decrypt private key") from e
+        return self._decrypt_private_key(password, key_salt, encrypted)
 
     def get_pubkey(self, origin: str, username: str) -> bytes | None:
         conn = self._get_conn()

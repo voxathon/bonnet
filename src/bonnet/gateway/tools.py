@@ -1284,7 +1284,12 @@ async def disconnect() -> dict:
 
 
 @mcp.tool
-async def register(username: str, password: str | None = None, origin: str | None = None) -> dict:
+async def register(
+    username: str,
+    password: str | None = None,
+    origin: str | None = None,
+    private_key_hex: str | None = None,
+) -> dict:
     """Register — or re-select — a local identity for an origin, and use it.
 
     Mints a local Ed25519 keypair for `username`, scoped to `origin` (default:
@@ -1294,6 +1299,13 @@ async def register(username: str, password: str | None = None, origin: str | Non
     The private key is generated here and stays here — the origin never sees
     it. `password` is optional and only wraps that key at rest; omit it if you
     are an agent — see list_identities for why that is the honest default.
+
+    `private_key_hex` imports an existing 32-byte Ed25519 seed (hex) instead
+    of generating — mobility: reinstall an identity exported from another
+    gateway via `export_identity`. Omitted means generate fresh. Supplying a
+    seed for a `(origin, username)` this client already holds under a
+    *different* key is refused — use rotate_identity_key to move an existing
+    identity onto a new key.
 
     Registering more than one identity per origin is supported and sometimes
     correct: holding a moderator identity separately from an everyday one
@@ -1323,11 +1335,27 @@ async def register(username: str, password: str | None = None, origin: str | Non
     if origin_entry is None:
         raise ValueError(f"origin '{target_origin}' is not connected: call connect(url) first")
 
+    import_seed: bytes | None = None
+    if private_key_hex is not None:
+        try:
+            import_seed = bytes.fromhex(private_key_hex.strip())
+        except ValueError as e:
+            raise ValueError("private_key_hex must be 64 hex chars (32-byte Ed25519 seed)") from e
+        if len(import_seed) != 32:
+            raise ValueError("private_key_hex must be 64 hex chars (32-byte Ed25519 seed)")
+
     store = _get_identity_store()
+    created = True
     try:
-        store.register(target_origin, username, password)
+        store.register(target_origin, username, password, private_key=import_seed)
     except ValueError as e:
+        if "different key" in str(e):
+            # Importing over a held identity under a different key would
+            # silently orphan the held key — the store refuses; surface it
+            # with the fix attached.
+            raise ValueError(f"{e} Use rotate_identity_key to move it.") from e
         if "already exists" in str(e).lower():
+            created = False
             # Re-registering an existing local identity is how a client that
             # already holds the key re-publishes its registration record. Only
             # a wrapped identity has a password to disagree about.
@@ -1405,10 +1433,11 @@ async def register(username: str, password: str | None = None, origin: str | Non
     unlocked = await _unlock_origin_tools()
 
     already_registered = registered_seq is None
-    response: dict[str, list[str] | str | int | None] = {
+    response: dict[str, list[str] | str | int | bool | None] = {
         "origin": target_origin,
         "username": username,
         "public_key": identity.public_key.hex(),
+        "imported": created and import_seed is not None,
         "registered_seq": registered_seq,
         # `registered_seq: null` alone is easy to read as "the register call
         # didn't really do anything" - this spells out the same fact so a
@@ -1422,8 +1451,60 @@ async def register(username: str, password: str | None = None, origin: str | Non
             f"'{username}' was already registered on this origin under this key - "
             "re-selected the existing identity; no new registration record was published."
         )
-    _gw_log("register", ok=True, origin=target_origin, username=username)
+    _gw_log(
+        "register",
+        ok=True,
+        origin=target_origin,
+        username=username,
+        imported=created and import_seed is not None,
+    )
     return response
+
+
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+async def export_identity(auth: str | None = None) -> dict:
+    """Export one signing identity's private key for mobility/backup.
+
+    Returns `{origin, username, private_key_hex, public_key_hex, wrapped}`
+    for the identity `auth` selects (default: the session identity, same
+    resolution as every other `auth` tool — `auth="<name>"` unwrapped,
+    `auth="<name>:<password>"` or a `login()` token when wrapped).
+
+    This emits the seed in plaintext over the MCP channel: prefer loopback
+    or TLS, store what comes back somewhere safer than this host, and — for
+    the leaving-entirely case — have the operator remove the tenant
+    (`bonnet gateway tenant remove <id> --yes` or `POST /admin/tenants/{id}/delete`)
+    only after every identity is verified re-importable elsewhere.
+    `private_key_hex` reinstalls via `register(..., private_key_hex=...)`.
+
+    Local-only: no origin record is published and nothing on the board
+    changes, so this is callable even while banned — leaving must not
+    require the origin's cooperation.
+    """
+    from bonnet.gateway import tenancy as _tenancy
+
+    if _tenancy.is_anonymous():
+        raise ValueError(
+            "this session is anonymous, and an anonymous session holds no "
+            "identity and cannot export one."
+        )
+    username, password = _resolve_auth(auth)
+    origin = _default_origin() or ""
+    store = _get_identity_store()
+    # _resolve_auth already established (username, password); get_private_key
+    # re-checks the password for wrapped identities rather than trusting it.
+    private_key = store.get_private_key(origin, username, password)
+    pubkey = store.get_pubkey(origin, username)
+    if pubkey is None:  # pragma: no cover — get_private_key raised first
+        raise ValueError(f"No local identity found for '{username}' on '{origin}'")
+    _gw_log("export_identity", ok=True, origin=origin, username=username)
+    return {
+        "origin": origin,
+        "username": username,
+        "private_key_hex": private_key.hex(),
+        "public_key_hex": pubkey.hex(),
+        "wrapped": store.is_wrapped(origin, username),
+    }
 
 
 @mcp.tool

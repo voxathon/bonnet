@@ -30,11 +30,14 @@ Secret source (first one wins):
   2. [gateway] admin_token in gateway.toml
 Unset entirely → every route 404s (disabled, undiscoverable).
 
-Destructive operations are CLI-only by design and have no route here:
-  - tenant removal destroys signing-key directories nothing else holds
-    (use `bonnet gateway tenant remove --yes`)
-  - revoking a tenant's last live key locks it out until an operator runs
-    `key add` (the revoke route refuses with 409 instead)
+Destructive operations are guarded by explicit confirmation, not by their
+transport: `tenant remove --yes` on the CLI and the routes below are the
+same `tenants` calls with the same consequences. Removal destroys the
+tenant's signing-key directory, which nothing else holds — the delete
+route requires `{"confirm": "<tenant_id>"}` echoing the path id rather
+than a bare POST, and revoking a tenant's last live key (which locks it
+out until an operator runs `key add`) requires `{"force": true}` instead
+of the default 409 refusal.
 """
 
 from __future__ import annotations
@@ -232,19 +235,60 @@ async def admin_key_list(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "keys": rows}, headers=_no_store())
 
 
+@mcp.custom_route("/admin/tenants/{tenant_id}/delete", methods=["POST"])
+async def admin_tenant_delete(request: Request) -> JSONResponse:
+    """Delete a tenant: its registry row, its keys, and its state directory.
+
+    Irreversible, and it destroys signing keys — a tenant's identities live
+    only in its own directory, and nothing else holds a copy. The body must
+    echo the tenant id (`{"confirm": "<tenant_id>"}`); anything else is a
+    400 and nothing happens. This is the HTTP spelling of
+    `bonnet gateway tenant remove --yes`.
+    """
+    denied = _forbidden(request)
+    if denied is not None:
+        return denied
+    tenant_id = request.path_params.get("tenant_id", "")
+    try:
+        validate_tenant_id(tenant_id)
+    except TenantError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400, headers=_no_store())
+    data = await _body(request)
+    if data.get("confirm") != tenant_id:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": (
+                    f"refusing to delete {tenant_id!r} without "
+                    f'{{"confirm": "{tenant_id}"}}: this deletes its signing '
+                    "keys, and nothing else holds a copy"
+                ),
+            },
+            status_code=400,
+            headers=_no_store(),
+        )
+    try:
+        tenants.remove_tenant(tenant_id)
+    except TenantError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404, headers=_no_store())
+    return JSONResponse({"ok": True, "tenant_id": tenant_id, "deleted": True}, headers=_no_store())
+
+
 @mcp.custom_route("/admin/keys/{key_id}/revoke", methods=["POST"])
 async def admin_key_revoke(request: Request) -> JSONResponse:
     """Revoke one key, unless it is the tenant's last live one.
 
-    The CLI's `--yes` guard (`server._run_admin`) exists because revoking
-    the last live key locks the tenant out until an operator runs `key add`
-    over SSH. Over HTTP there is no operator to confirm, so refuse with 409
-    and point at the CLI instead.
+    Revoking the last live key locks the tenant out until an operator runs
+    `key add` — so that case refuses with 409 unless the body carries
+    `{"force": true}`, the HTTP spelling of the CLI's `--yes` guard
+    (`server._run_admin`).
     """
     denied = _forbidden(request)
     if denied is not None:
         return denied
     key_id = request.path_params.get("key_id", "")
+    data = await _body(request)
+    force = data.get("force") is True
     all_keys = tenants.list_keys()
     target = next((k for k in all_keys if k["key_id"] == key_id), None)
     if target is None or target.get("revoked_at") is not None:
@@ -260,14 +304,15 @@ async def admin_key_revoke(request: Request) -> JSONResponse:
         and k["key_id"] != key_id
         and k.get("revoked_at") is None
     ]
-    if not other_live:
+    if not other_live and not force:
         return JSONResponse(
             {
                 "ok": False,
                 "error": (
                     f"refusing to revoke {key_id}: it is the last live key for "
-                    f"tenant {target['tenant_id']!r} — run "
-                    "`bonnet gateway key revoke --yes` on the gateway host"
+                    f"tenant {target['tenant_id']!r} — pass "
+                    '{"force": true} or run `bonnet gateway key revoke --yes` '
+                    "on the gateway host"
                 ),
             },
             status_code=409,

@@ -98,13 +98,13 @@ NEEDS_IDENTITY = "needs_identity"
 
 
 #: Tools an anonymous tenant can never use, however the rest of its state
-#: looks. They mint or unlock a local identity, and that tenant holds none and
-#: may not acquire one.
+#: looks. They mint, unlock or export a local identity, and that tenant holds
+#: none and may not acquire one.
 #:
 #: `connect`, `disconnect`, `switch_origin` and the navigation tools are
 #: deliberately *not* here: they still work, and hiding them would strand a
 #: caller with no way to move.
-ANONYMOUS_FORBIDDEN = frozenset({"register", "login"})
+ANONYMOUS_FORBIDDEN = frozenset({"register", "login", "export_identity"})
 
 _WARNING_ABSENT = """\
 [!] This session is ANONYMOUS: read-only, no identity, nothing can be

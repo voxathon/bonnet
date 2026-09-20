@@ -16,8 +16,8 @@
 
 Drives the route handlers directly with Starlette Requests against an
 isolated gateway home: auth gating (disabled→404, wrong→403), the full
-non-destructive matrix, and the two deliberate refusals (no remove route,
-last-live-key revoke→409).
+matrix, and the destructive guards (delete needs {"confirm": id},
+last-live-key revoke→409 unless {"force": true}).
 """
 
 import json
@@ -209,10 +209,102 @@ async def test_key_add_list_and_last_live_revoke_refused(admin_env, monkeypatch)
     ).status_code == 404
 
 
-async def test_no_remove_route_registered():
+async def test_delete_route_guarded_by_confirm(admin_env, monkeypatch):
+    """Delete exists but requires {"confirm": id}; anything else is a 400 no-op."""
+    from bonnet.gateway import tenants
+
+    monkeypatch.setenv(admin.ADMIN_TOKEN_ENV, "s3cret")
+    token = "s3cret"
+
+    def _body(resp):
+        return json.loads(resp.body.decode())
+
+    await admin.admin_tenant_add(
+        _request("POST", body={"tenant_id": "erin"}, token=token)
+    )
+    assert tenants.get_tenant("erin") is not None
+
+    # Missing/wrong confirm: 400, tenant survives.
+    assert (
+        await admin.admin_tenant_delete(
+            _request(
+                "POST",
+                path_params={"tenant_id": "erin"},
+                body={},
+                token=token,
+            )
+        )
+    ).status_code == 400
+    assert (
+        await admin.admin_tenant_delete(
+            _request(
+                "POST",
+                path_params={"tenant_id": "erin"},
+                body={"confirm": "someone-else"},
+                token=token,
+            )
+        )
+    ).status_code == 400
+    assert tenants.get_tenant("erin") is not None
+
+    # Echoed confirm: deleted (registry row and directory).
+    ok = await admin.admin_tenant_delete(
+        _request(
+            "POST",
+            path_params={"tenant_id": "erin"},
+            body={"confirm": "erin"},
+            token=token,
+        )
+    )
+    assert ok.status_code == 200
+    assert _body(ok)["deleted"] is True
+    assert tenants.get_tenant("erin") is None
+
+    # Unknown tenant 404s.
+    assert (
+        await admin.admin_tenant_delete(
+            _request(
+                "POST",
+                path_params={"tenant_id": "ghost"},
+                body={"confirm": "ghost"},
+                token=token,
+            )
+        )
+    ).status_code == 404
+
+
+async def test_last_live_key_revoke_force(admin_env, monkeypatch):
+    """Last-live-key revoke 409s by default but honors {"force": true}."""
+    monkeypatch.setenv(admin.ADMIN_TOKEN_ENV, "s3cret")
+    token = "s3cret"
+
+    await admin.admin_tenant_add(_request("POST", body={"tenant_id": "fred"}, token=token))
+
+    def _body(resp):
+        return json.loads(resp.body.decode())
+
+    only = _body(await admin.admin_key_list(_request(query=b"tenant_id=fred", token=token)))
+    last_id = only["keys"][0]["key_id"]
+    refused = await admin.admin_key_revoke(
+        _request("POST", path_params={"key_id": last_id}, token=token)
+    )
+    assert refused.status_code == 409
+
+    forced = await admin.admin_key_revoke(
+        _request(
+            "POST",
+            path_params={"key_id": last_id},
+            body={"force": True},
+            token=token,
+        )
+    )
+    assert forced.status_code == 200
+
+
+async def test_delete_route_registered():
     from bonnet.gateway.tools import mcp
 
     routes = [r.path for r in mcp._additional_http_routes if r.path.startswith("/admin")]
     assert "/admin/tenants" in routes
-    assert not any("remove" in r or r.endswith("/delete") for r in routes)
-    assert len(routes) == 8
+    assert "/admin/tenants/{tenant_id}/delete" in routes
+    assert len(routes) == 9

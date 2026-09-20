@@ -170,6 +170,13 @@ WRITE_TOOL_NAMES = frozenset(
     }
 )
 
+#: Tools never served over GET, however the facade is configured. An exported
+#: seed in a query string would land in URLs, history and proxy/access logs —
+#: and a GET is prefetchable, turning one export into a replayable secret.
+#: (Identity passwords via `?auth=` remain the caller's pre-existing risk;
+#: prefer header keys outside the lobotomite path.)
+FACADE_FORBIDDEN = frozenset({"export_identity"})
+
 #: Recent successful write results keyed by dedup key (see `_dedup_key`):
 #: key -> (expires_monotonic, stored JSON-able result).
 _recent_writes: dict[tuple[str, str, str, str], tuple[float, Any]] = {}
@@ -499,6 +506,8 @@ async def call_list(request: Request) -> JSONResponse:
         reset_tenant()
     entries = []
     for tool in tools:
+        if tool.name in FACADE_FORBIDDEN:
+            continue
         params = getattr(tool, "parameters", {}) or {}
         properties = params.get("properties", {}) or {}
         required = params.get("required", []) or []
@@ -532,6 +541,18 @@ async def call_tool_get(request: Request) -> JSONResponse:
         return JSONResponse(
             {"ok": False, "error": f"unknown tool {tool_name!r} (see GET /call)"},
             status_code=404,
+            headers=_no_store_headers(),
+        )
+    if tool_name in FACADE_FORBIDDEN:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": (
+                    f"{tool_name} is not served over GET: credentials and private keys "
+                    "must not travel in URLs (history, proxy/access logs). Use POST /mcp/."
+                )
+            },
+            status_code=403,
             headers=_no_store_headers(),
         )
     schema = getattr(tool, "parameters", {}) or {}

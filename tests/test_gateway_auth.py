@@ -319,4 +319,4 @@ def test_presented_key_candidates_orders_bearer_before_x_api_key():
 def test_gating_module_exposes_the_forbidden_set():
     """Named rather than inlined, so the restriction is greppable from the
     tools it applies to."""
-    assert gating.ANONYMOUS_FORBIDDEN == {"register", "login"}
+    assert gating.ANONYMOUS_FORBIDDEN == {"register", "login", "export_identity"}
