@@ -35,6 +35,7 @@ from bonnet.core.record import (
     compute_event_hash,
     encode_intent,
     encode_record,
+    metadata_bool,
     metadata_bytes,
     metadata_i64,
     metadata_text,
@@ -871,6 +872,72 @@ class FirehoseHTTPClient(FirehoseTransport):
             actor_username=self._username,
             actor_registrar=self._server_origin,
             metadata=MetadataMap([metadata_bytes(1, punishment_event_id)]),
+        )
+        actor_sig = sign_intent(self._identity, encode_intent(intent))
+        cmd = build_publish_record(intent, actor_sig, b"")
+        resp = await self._send_command(cmd)
+        return parse_publish_response(resp)
+
+    # ------------------------------------------------------------------
+    # Routes (transitive peer discovery)
+    # ------------------------------------------------------------------
+
+    async def publish_route_announce(
+        self,
+        hostname: str,
+        port: int = 2272,
+        scheme: str = "https",
+        verify_tls: bool = False,
+        priority: int = 0,
+    ) -> PublishResult:
+        """Announce this origin's dial address to the federation.
+
+        Self-announcement only: the record's subject is the connected
+        origin itself. Relays store and forward it; whether they dial
+        it is each relay's opt-in routing policy. Requires the
+        bonnet.route.announce kind (grant to administrators only —
+        it re-points other relays' outbound connections).
+        """
+        if self._identity is None or self._server_origin is None:
+            raise FirehoseClientError("not connected")
+        eid = os.urandom(32)
+        m = MetadataMap(
+            [
+                metadata_text(1, hostname),
+                metadata_u64(2, port),
+                metadata_text(3, scheme),
+                metadata_bool(4, verify_tls),
+                metadata_u64(5, priority),
+            ]
+        )
+        intent = Intent(
+            event_id=eid,
+            kind="bonnet.route.announce",
+            origin=self._server_origin,
+            actor_pubkey=self._identity.public_key,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            metadata=m,
+        )
+        actor_sig = sign_intent(self._identity, encode_intent(intent))
+        cmd = build_publish_record(intent, actor_sig, b"")
+        resp = await self._send_command(cmd)
+        return parse_publish_response(resp)
+
+    async def publish_route_withdraw(self, announce_event_id: bytes) -> PublishResult:
+        """Withdraw a route announce by its event ID."""
+        if self._identity is None or self._server_origin is None:
+            raise FirehoseClientError("not connected")
+        eid = os.urandom(32)
+        intent = Intent(
+            event_id=eid,
+            kind="bonnet.route.withdraw",
+            origin=self._server_origin,
+            actor_pubkey=self._identity.public_key,
+            actor_username=self._username,
+            actor_registrar=self._server_origin,
+            target_origin=self._server_origin,
+            target_event_id=announce_event_id,
         )
         actor_sig = sign_intent(self._identity, encode_intent(intent))
         cmd = build_publish_record(intent, actor_sig, b"")

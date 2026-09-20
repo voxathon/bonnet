@@ -50,6 +50,31 @@ class WitnessConfig:
 
 
 @dataclass
+class RoutingConfig:
+    """Transitive peer-discovery policy ("BGP-over-Bonnet").
+
+    Route records are always stored and relayed; this only governs
+    whether the sync manager *dials* a learned dial address.
+
+    auto_dial "off" (default): learned routes are advisory only —
+        visible via the routes projection, never dialed.
+    auto_dial "trusted-peers-only": a learned route for origin X is
+        dialed only when it arrived via a configured peer (or an
+        origin in route_trust). TOFU pinning and the SSRF dial guards
+        apply to learned dials exactly as to configured ones.
+    """
+
+    auto_dial: str = "off"
+    route_trust: list = None
+    allow_private_learned: bool = False
+    max_learned: int = 32
+
+    def __post_init__(self) -> None:
+        if self.route_trust is None:
+            self.route_trust = []
+
+
+@dataclass
 class PeerConfig:
     """Configuration for a firehose federation peer.
 
@@ -118,6 +143,7 @@ _TOP_LEVEL_KEYS = {
     "search",
     "tls",
     "sync",
+    "routing",
     "acl",
     "include",
     "witnesses",
@@ -164,6 +190,12 @@ _SECTION_KEYS = {
         "interval_seconds",
         "peers",
     },
+    "routing": {
+        "auto_dial",
+        "route_trust",
+        "allow_private_learned",
+        "max_learned",
+    },
     "witnesses": {
         "retain_upstream",
         "max_per_event",
@@ -197,7 +229,7 @@ def _find_unknown_keys(data: dict) -> list[str]:
     for key in data:
         if key not in _TOP_LEVEL_KEYS:
             unknown.append(key)
-    for section_name in ("server", "limits", "search", "tls", "sync", "witnesses"):
+    for section_name in ("server", "limits", "search", "tls", "sync", "routing", "witnesses"):
         table = data.get(section_name)
         if not isinstance(table, dict):
             continue
@@ -308,6 +340,29 @@ def _resolve_includes(data: dict, base_dir: str) -> tuple[list, list, list]:
     return acl_tables, peer_tables, included
 
 
+def _parse_routing(table: dict) -> RoutingConfig:
+    """Parse the [routing] table into a RoutingConfig."""
+    auto_dial = table.get("auto_dial", "off")
+    if auto_dial not in ("off", "trusted-peers-only"):
+        raise ValueError(
+            f"config: routing.auto_dial must be 'off' or 'trusted-peers-only', got {auto_dial!r}"
+        )
+    route_trust = table.get("route_trust", [])
+    if not isinstance(route_trust, list) or not all(isinstance(x, str) for x in route_trust):
+        raise ValueError("config: routing.route_trust must be a list of origin strings")
+    max_learned = table.get("max_learned", 32)
+    if not isinstance(max_learned, int) or isinstance(max_learned, bool) or max_learned < 0:
+        raise ValueError(
+            f"config: routing.max_learned must be an integer >= 0, got {max_learned!r}"
+        )
+    return RoutingConfig(
+        auto_dial=auto_dial,
+        route_trust=[_normalize_origin(x) for x in route_trust],
+        allow_private_learned=_as_bool(table, "allow_private_learned", "routing", False),
+        max_learned=max_learned,
+    )
+
+
 class FirehoseConfig:
     """Configuration for a Bonnet server."""
 
@@ -337,6 +392,7 @@ class FirehoseConfig:
         rg_path: str = "",
         sync_interval_seconds: int = 300,
         peers: list = None,
+        routing: RoutingConfig = None,
         acl: ACLEvaluator = None,
         admin_pubkey_hex: str = "",
         host: str = "127.0.0.1",
@@ -371,6 +427,7 @@ class FirehoseConfig:
         self.rg_path = rg_path
         self.sync_interval_seconds = sync_interval_seconds
         self.peers = peers or []
+        self.routing = routing or RoutingConfig()
         self.acl = acl or ACLEvaluator([])
         self.admin_pubkey_hex = admin_pubkey_hex
         self.acl_poll_interval_seconds = acl_poll_interval_seconds
@@ -446,6 +503,27 @@ class FirehoseConfig:
             raise ValueError(
                 f"config: sync_interval_seconds must be positive, got {self.sync_interval_seconds}"
             )
+        if self.routing.auto_dial not in ("off", "trusted-peers-only"):
+            raise ValueError(
+                "config: routing.auto_dial must be 'off' or 'trusted-peers-only', "
+                f"got {self.routing.auto_dial!r}"
+            )
+        if not isinstance(self.routing.allow_private_learned, bool):
+            raise ValueError(
+                "config: routing.allow_private_learned must be a boolean, "
+                f"got {self.routing.allow_private_learned!r}"
+            )
+        if (
+            not isinstance(self.routing.max_learned, int)
+            or isinstance(self.routing.max_learned, bool)
+            or self.routing.max_learned < 0
+        ):
+            raise ValueError(
+                "config: routing.max_learned must be an integer >= 0, "
+                f"got {self.routing.max_learned!r}"
+            )
+        for trusted in self.routing.route_trust:
+            _validate_hostname_like("routing.route_trust entry", _normalize_origin(trusted))
         if not isinstance(self.acl_poll_interval_seconds, int) or isinstance(
             self.acl_poll_interval_seconds, bool
         ):
@@ -567,6 +645,10 @@ class FirehoseConfig:
         return os.path.join(self.data_dir, "policy.db")
 
     @property
+    def routes_db_path(self) -> str:
+        return os.path.join(self.data_dir, "routes.db")
+
+    @property
     def replay_db_path(self) -> str:
         return os.path.join(self.data_dir, "replay.db")
 
@@ -603,6 +685,9 @@ class FirehoseConfig:
         witnesses = data.get("witnesses", {})
         if not isinstance(witnesses, dict):
             raise ValueError("config: [witnesses] must be a table")
+        routing = data.get("routing", {})
+        if not isinstance(routing, dict):
+            raise ValueError("config: [routing] must be a table")
 
         # BONNET_SERVER_HOME (or the per-user default, see core.home) only
         # supplies a *default* for storage paths left unset in config.toml —
@@ -708,6 +793,7 @@ class FirehoseConfig:
                 update_policy=witnesses.get("update_policy", "first"),
                 wire_max=witnesses.get("wire_max", 32),
             ),
+            routing=_parse_routing(routing),
         )
 
     @staticmethod
@@ -856,6 +942,20 @@ interval_seconds = 300
 # import_temp_bans = true
 # import_permabans = false
 
+[routing]
+# Transitive peer discovery ("BGP-over-Bonnet"): origins announce their dial
+# address via bonnet.route.announce records, relayed through the firehose.
+# Records are always stored and relayed; this only governs whether this
+# server *dials* a learned address.
+# auto_dial = "off" (default): learned routes are advisory only, never dialed.
+# auto_dial = "trusted-peers-only": dial a learned route only when it arrived
+# via a configured [[sync.peers]] origin or one listed in route_trust.
+# TOFU pinning and the SSRF dial guards apply to learned dials as usual.
+# auto_dial = "off"
+# route_trust = []
+# allow_private_learned = false
+# max_learned = 32
+
 # ACL rules: explicit deny-wins, conjunctive dimensions.
 # Supported matchers: pubkey, role, origin, anonymous, unknown, registered, wildcard.
 # Selector lists: commands, kinds, boards, objects. Omit = not granted. "*" = all.
@@ -908,6 +1008,18 @@ actions = ["write"]
 commands = ["PUBLISH_RECORD"]
 kinds = ["bonnet.article", "bonnet.board.create", "bonnet.report", "bonnet.user.key.rotate", "bonnet.punishment.ack"]
 boards = ["*"]
+
+# Route announcements re-point other relays' outbound sync connections, so
+# they are deliberately NOT in the registered-user grants above: any
+# registered user could otherwise hijack this origin's dial address
+# federation-wide. Grant them to administrators only:
+#
+# [[acl]]
+# effect = "allow"
+# match.role = "administrator"
+# actions = ["write"]
+# commands = ["PUBLISH_RECORD"]
+# kinds = ["bonnet.route.announce", "bonnet.route.withdraw"]
 
 # To grant a specific key full access (read/write, every command/kind/board):
 #

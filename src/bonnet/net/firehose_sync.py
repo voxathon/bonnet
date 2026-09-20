@@ -331,6 +331,16 @@ class SyncManager:
         self._peer_backoff: dict[str, float] = {}
         self._peer_last_failure: dict[str, float] = {}
         self._backoff_max = 3600
+        # Transitive peer-discovery ("BGP-over-Bonnet") policy. Route
+        # records are always stored/relayed; these only govern whether a
+        # learned dial address is acted on. Default off (advisory only).
+        self._routes = None
+        self._routing_auto_dial = "off"
+        self._routing_trust: set[str] = set()
+        self._routing_allow_private = False
+        self._routing_max_learned = 32
+        self._routing_interval = 300
+        self._learned_origins: set[str] = set()
 
     def set_identity(self, identity: Identity) -> None:
         """Hot-swap the identity used to sign relay witnesses for future
@@ -352,6 +362,96 @@ class SyncManager:
             if self._worker_task is None:
                 self._worker_task = asyncio.ensure_future(self._sync_worker())
                 self._running = True
+
+    def set_routing(
+        self,
+        routes=None,
+        *,
+        auto_dial: str = "off",
+        trusted_vias: set[str] = None,
+        allow_private_learned: bool = False,
+        max_learned: int = 32,
+        interval: int = 300,
+    ) -> None:
+        """Attach the transitive-discovery policy (opt-in, default off).
+
+        `routes` is the RouteProjection to read live routes from.
+        `trusted_vias` are origins whose delivered routes may be dialed
+        (static peers plus routing.route_trust) — a route learned via
+        anyone else stays advisory. Must be called before sync starts;
+        safe to call again to rotate policy live.
+        """
+        with self._lock:
+            self._routes = routes
+            self._routing_auto_dial = auto_dial
+            self._routing_trust = set(trusted_vias or ())
+            self._routing_allow_private = allow_private_learned
+            self._routing_max_learned = max_learned
+            self._routing_interval = interval
+
+    def learn_transitive_route(self, origin: str, route: dict, via: str) -> tuple[bool, str]:
+        """Dial a learned route, if policy allows. Returns (started, reason).
+
+        Guards, in order: auto-dial enabled; not self; not already
+        syncing; learned-via a trusted origin; learned cap; SSRF-safe
+        dial target (HttpSyncClient enforces it again at connect).
+        TOFU key pinning happens on first connect, same as static peers.
+        Must be called from the event loop thread (start_origin needs it);
+        _maybe_adopt_routes is the in-loop caller.
+        """
+        with self._lock:
+            if self._routing_auto_dial != "trusted-peers-only":
+                return False, "auto-dial disabled"
+            if origin == self._relay_origin:
+                return False, "route targets this relay itself"
+            if origin in self._tasks or origin in self._clients:
+                return False, "already syncing"
+            if via not in self._routing_trust:
+                return False, f"via '{via}' is not trusted for route learning"
+            if len(self._learned_origins) >= self._routing_max_learned:
+                return False, "learned-route cap reached"
+            base_url = f"{route.get('scheme', 'https')}://{route.get('hostname', '')}:{route.get('port', 443)}"
+            try:
+                client = HttpSyncClient(
+                    base_url,
+                    verify_tls=bool(route.get("verify_tls", False)),
+                    allow_private_dial=self._routing_allow_private,
+                )
+            except ValueError as e:
+                return False, f"unsafe dial target: {e}"
+        # Outside the lock: start_origin takes it and needs a running loop.
+        try:
+            self.start_origin(origin, client, self._routing_interval)
+        except RuntimeError as e:
+            return False, f"no running loop: {e}"
+        except ValueError as e:
+            return False, f"unsafe dial target: {e}"
+        with self._lock:
+            self._learned_origins.add(origin)
+        log_msg(f"SYNC: learned transitive route to '{origin}' via '{via}' ({base_url})")
+        return True, base_url
+
+    def _maybe_adopt_routes(self, via: str) -> None:
+        """After a successful sync from `via`, dial newly learned routes.
+
+        Best-effort and silent on refusal: every rejection is already a
+        policy decision, not an error. Runs in the sync loop thread.
+        """
+        routes = self._routes
+        if routes is None or self._routing_auto_dial != "trusted-peers-only":
+            return
+        if via not in self._routing_trust:
+            return
+        try:
+            live = routes.list_live_routes()
+        except Exception as e:
+            log_msg(f"SYNC: route adoption scan failed: {e}")
+            return
+        for route in live:
+            try:
+                self.learn_transitive_route(route["origin"], route, via)
+            except Exception as e:
+                log_msg(f"SYNC: route adoption for '{route.get('origin', '?')}' failed: {e}")
 
     async def queue_sync(self, origin: str) -> None:
         """Queue an on-demand sync. Must be called from the event loop thread."""
@@ -382,6 +482,7 @@ class SyncManager:
         with self._lock:
             task = self._tasks.pop(origin, None)
             client = self._clients.pop(origin, None)
+            self._learned_origins.discard(origin)
             if task:
                 task.cancel()
         if client is not None:
@@ -635,6 +736,10 @@ class SyncManager:
                 log_msg(f"SYNC_ONCE: origin='{origin}' dispatch failed: {e}")
 
         if total_accepted > 0:
+            try:
+                self._maybe_adopt_routes(origin)
+            except Exception as e:
+                log_msg(f"SYNC_ONCE: origin='{origin}' route adoption failed: {e}")
             return AcceptResult(
                 accepted=True,
                 accepted_count=total_accepted,

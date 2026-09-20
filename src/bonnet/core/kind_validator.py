@@ -35,6 +35,8 @@ from bonnet.core.kinds import (
     KIND_PUNISHMENT_BAN,
     KIND_PUNISHMENT_REVOKE,
     KIND_REPORT,
+    KIND_ROUTE_ANNOUNCE,
+    KIND_ROUTE_WITHDRAW,
     KIND_RULE_PUBLISH,
     KIND_RULE_REVOKE,
     KIND_USER_KEY_ROTATE,
@@ -163,6 +165,8 @@ class KindValidator:
             KIND_PUNISHMENT_REVOKE: self._validate_event_target,
             KIND_PUNISHMENT_ACK: self._validate_punishment_ack,
             KIND_ORIGIN_KEY_ROTATE: self._validate_key_rotation,
+            KIND_ROUTE_ANNOUNCE: self._validate_route_announce,
+            KIND_ROUTE_WITHDRAW: self._validate_route_withdraw,
         }
         for kind in ARTICLE_LIFECYCLE_KINDS:
             self._validators[kind] = self._validate_lifecycle_control
@@ -478,6 +482,43 @@ class KindValidator:
             raise ValidationError(
                 "bonnet.origin.key.rotate requires metadata field 2 (new-key proof signature)"
             )
+
+    # ------------------------------------------------------------------
+    # Routes (transitive peer discovery)
+    # ------------------------------------------------------------------
+
+    def _validate_route_announce(self, intent: Intent) -> None:
+        """A self-announcement of this origin's dial address.
+
+        The subject is implicit — the publish path already forces
+        `intent.origin == local origin`, so a local announce is by
+        construction about self. Third-party claims arriving via sync
+        never reach this validator; the projection ignores them.
+        """
+        self._require_empty_board(intent)
+        self._require_empty_article_targets(intent)
+        self._require_empty_targets(intent)
+
+        m = intent.metadata
+        hostname = m.get_text(1)
+        if hostname is None or not hostname.strip():
+            raise ValidationError("bonnet.route.announce requires metadata field 1 (dial hostname)")
+        port = m.get_u64(2)
+        if port is None:
+            raise ValidationError("bonnet.route.announce requires metadata field 2 (dial port)")
+        if not 1 <= port <= 65535:
+            raise ValidationError(f"bonnet.route.announce dial port {port} out of range [1, 65535]")
+        scheme = m.get_text(3)
+        if scheme is not None and scheme not in ("http", "https"):
+            raise ValidationError(
+                "bonnet.route.announce metadata field 3 (scheme) must be 'http' or 'https'"
+            )
+
+    def _validate_route_withdraw(self, intent: Intent) -> None:
+        """Retract a route announce by its event ID (event-target shape)."""
+        self._require_event_target(intent)
+        self._require_empty_board(intent)
+        self._require_empty_article_targets(intent)
 
     # ------------------------------------------------------------------
     # Target helpers

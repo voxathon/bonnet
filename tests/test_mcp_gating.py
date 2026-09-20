@@ -72,6 +72,7 @@ READ_ONLY = {
     "get_event",
     "trace_event",
     "get_event_body",
+    "list_routes",
     "my_permissions",
     "open_board",
 }

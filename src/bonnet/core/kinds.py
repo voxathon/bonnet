@@ -49,6 +49,12 @@ KIND_PUNISHMENT_PERMABAN = "bonnet.punishment.permaban"
 KIND_PUNISHMENT_REVOKE = "bonnet.punishment.revoke"
 KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
 KIND_ORIGIN_KEY_ROTATE = "bonnet.origin.key.rotate"
+# Transitive peer discovery ("BGP-over-Bonnet"): an origin announces the
+# dial address other relays can reach it at. Self-announcements only — a
+# record about a third party is hearsay and is relayed but never projected.
+# Latest origin_seq per origin wins; withdraw tombstones (re-announce revives).
+KIND_ROUTE_ANNOUNCE = "bonnet.route.announce"
+KIND_ROUTE_WITHDRAW = "bonnet.route.withdraw"
 
 PUNISHMENT_ISSUE_KINDS = frozenset(
     {
@@ -113,6 +119,13 @@ BOARD_LIFECYCLE_KINDS = frozenset(
     }
 )
 
+ROUTE_KINDS = frozenset(
+    {
+        KIND_ROUTE_ANNOUNCE,
+        KIND_ROUTE_WITHDRAW,
+    }
+)
+
 USER_LIFECYCLE_KINDS = frozenset(
     {
         KIND_USER_REGISTER,
@@ -160,5 +173,7 @@ ALL_KNOWN_KINDS = frozenset(
         KIND_PUNISHMENT_REVOKE,
         KIND_PUNISHMENT_ACK,
         KIND_ORIGIN_KEY_ROTATE,
+        KIND_ROUTE_ANNOUNCE,
+        KIND_ROUTE_WITHDRAW,
     }
 )

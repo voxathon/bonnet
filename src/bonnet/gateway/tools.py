@@ -89,7 +89,9 @@ import httpx
 from fastmcp import FastMCP
 
 from bonnet.core.crypto import Identity
+from bonnet.core.global_projections import parse_route_announce
 from bonnet.core.hostname import normalize_hostname
+from bonnet.core.kinds import KIND_ROUTE_ANNOUNCE, KIND_ROUTE_WITHDRAW
 from bonnet.core.logging import bind_context, log_info, log_warning
 from bonnet.core.record import MAX_BOARD, MAX_TEXT_FIELD, ZERO_ID
 from bonnet.core.trust import TrustStore
@@ -3321,6 +3323,134 @@ async def my_punishments(auth: str | None = None) -> BanStatus:
         await _connect_authenticated(client, auth)
         assert client._identity is not None  # set by _connect_authenticated's client.connect()
         return await client.get_ban_status(client._identity.public_key)
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Routes (transitive peer discovery)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.route.announce",))
+async def announce_route(
+    hostname: str,
+    port: int = 2272,
+    scheme: str = "https",
+    verify_tls: bool = False,
+    priority: int = 0,
+    auth: str | None = None,
+) -> str:
+    """Announce this origin's dial address to the federation.
+
+    Publishes a self-announcement that other relays store, relay, and may
+    use to discover and sync this origin without manual peer config.
+    Whether they dial it is each relay's opt-in routing policy — this only
+    publishes the claim. Requires the bonnet.route.announce kind, which
+    should be granted to administrators only: it re-points other relays'
+    outbound sync connections.
+    """
+    hostname = normalize_hostname(hostname or "")
+    if not hostname:
+        raise ValueError("hostname must be non-empty")
+    if not 1 <= port <= 65535:
+        raise ValueError(f"port {port} out of range [1, 65535]")
+    if scheme not in ("http", "https"):
+        raise ValueError("scheme must be 'http' or 'https'")
+    if priority < 0:
+        raise ValueError("priority must be >= 0")
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_route_announce(hostname, port, scheme, verify_tls, priority)
+        return f"Route announced for {result.origin} at {scheme}://{hostname}:{port} — event {result.event_id}"
+    finally:
+        await client.close()
+
+
+@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@needs(commands=["PUBLISH_RECORD"], kinds=("bonnet.route.withdraw",))
+async def withdraw_route(
+    announce_event_id_hex: str,
+    auth: str | None = None,
+) -> str:
+    """Withdraw a route announce by its event ID.
+
+    Tombstones the announcement so relays stop dialing the address (under
+    their routing policy) while keeping the history for forensics. A later
+    announce revives the route.
+    """
+    eid = _validate_event_id(announce_event_id_hex)
+    client = _make_client()
+    try:
+        await _connect_authenticated(client, auth)
+        result = await client.publish_route_withdraw(eid)
+        return f"Route withdrawn — withdraw event {result.event_id}"
+    finally:
+        await client.close()
+
+
+@mcp.tool(tags={NEEDS_ORIGIN})
+@needs(commands=["EVENT_RANGE", "EVENT_HEAD"])
+async def list_routes(
+    origin: str = "",
+    limit: int = 100,
+    auth: str | None = None,
+) -> list[dict]:
+    """List live route announcements visible from this relay.
+
+    Assembled client-side from EVENT_RANGE: latest announce per origin
+    wins, withdrawn announcements are excluded. Advisory only — a listed
+    address is a signed claim by that origin, not a guarantee it is
+    reachable or that this relay syncs from it.
+
+    origin: origin to query (defaults to server's origin). Pass "*" for
+        every origin this relay knows.
+    limit: max events to scan per origin (most recent first).
+    """
+    client = _make_client()
+    try:
+        await _connect_with_default(client, auth)
+        if origin == "*":
+            discovery = client.discovery
+            origins = list(discovery.known_origins) if discovery else []
+            if client._server_origin and client._server_origin not in origins:
+                origins.append(client._server_origin)
+        else:
+            origins = [origin or client._server_origin or ""]
+        routes: dict[str, dict] = {}
+        withdrawn: set[tuple[str, str]] = set()
+        for queried in origins:
+            if not queried:
+                continue
+            try:
+                head = await client.get_head(queried)
+            except Exception:
+                continue
+            start = max(1, head.latest_origin_seq - limit + 1)
+            try:
+                results = await client.get_event_range(queried, start, limit)
+            except Exception:
+                continue
+            for rec, _witness in results:
+                if rec.kind == KIND_ROUTE_WITHDRAW and rec.target_event_id != ZERO_ID:
+                    withdrawn.add((rec.target_origin, rec.target_event_id.hex()))
+                elif rec.kind == KIND_ROUTE_ANNOUNCE:
+                    parsed = parse_route_announce(rec.metadata)
+                    if parsed is None:
+                        continue
+                    current = routes.get(rec.origin)
+                    if current is None or rec.origin_seq >= current["origin_seq"]:
+                        routes[rec.origin] = {
+                            "origin": rec.origin,
+                            "origin_seq": rec.origin_seq,
+                            "event_id": rec.event_id.hex(),
+                            **parsed,
+                        }
+        live = [r for r in routes.values() if (r["origin"], r["event_id"]) not in withdrawn]
+        live.sort(key=lambda r: (-r["priority"], r["origin"]))
+        return live
     finally:
         await client.close()
 

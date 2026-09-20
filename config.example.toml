@@ -111,6 +111,20 @@ wire_max = 32
 # import_temp_bans = true
 # import_permabans = false
 
+[routing]
+# Transitive peer discovery ("BGP-over-Bonnet"): origins announce their dial
+# address via bonnet.route.announce records, relayed through the firehose.
+# Records are always stored and relayed; this only governs whether this
+# server *dials* a learned address.
+# auto_dial = "off" (default): learned routes are advisory only, never dialed.
+# auto_dial = "trusted-peers-only": dial a learned route only when it arrived
+# via a configured [[sync.peers]] origin or one listed in route_trust.
+# TOFU pinning and the SSRF dial guards apply to learned dials as usual.
+# auto_dial = "off"
+# route_trust = []
+# allow_private_learned = false
+# max_learned = 32
+
 # ACL rules: explicit deny-wins, conjunctive dimensions.
 # Supported matchers: pubkey, role, origin, anonymous, unknown, registered, wildcard.
 # Selector lists: commands, kinds, boards, objects. Omit = not granted. "*" = all.
@@ -191,6 +205,18 @@ boards = ["*"]
 # actions = ["write"]
 # commands = ["PUBLISH_RECORD"]
 # kinds = ["bonnet.punishment.warn", "bonnet.punishment.ban", "bonnet.punishment.revoke"]
+#
+# Route announcements re-point other relays' outbound sync connections, so
+# they are deliberately NOT in the default registered-user grants above:
+# any registered user could otherwise hijack this origin's dial address
+# federation-wide. Grant them to administrators only:
+#
+# [[acl]]
+# effect = "allow"
+# match.role = "administrator"
+# actions = ["write"]
+# commands = ["PUBLISH_RECORD"]
+# kinds = ["bonnet.route.announce", "bonnet.route.withdraw"]
 #
 # Reading the moderation queue is a separate grant, and deliberately not in
 # the default rules above: reports name people, so REPORT_LIST would let any

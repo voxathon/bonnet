@@ -17,8 +17,9 @@
 nav.db     — board directory from bonnet.board.create/close/reopen
 users.db   — user registrations and revocations
 policy.db  — rules, reports, punishments, revocations, effective-state
+routes.db  — transitive peer-discovery dial addresses from bonnet.route.*
 
-All three are rebuildable projections containing applied_events and
+All four are rebuildable projections containing applied_events and
 per-origin checkpoints. They are never authoritative.
 """
 
@@ -29,10 +30,11 @@ import sqlite3
 import threading
 import time
 
+from bonnet.core.hostname import normalize_hostname
 from bonnet.core.kind_validator import identity_text_violation
 from bonnet.core.kinds import PUNISHMENT_TYPE_BY_KIND  # noqa: F401 (re-exported)
 from bonnet.core.logging import log_msg
-from bonnet.core.record import Record, verify_key_rotation_proof
+from bonnet.core.record import MetadataMap, Record, verify_key_rotation_proof
 
 # ---------------------------------------------------------------------------
 # Base class
@@ -1237,6 +1239,256 @@ class PolicyProjection(_BaseProjection):
                     (origin,),
                 )
                 self._conn.execute("DELETE FROM punishments WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM applied_events WHERE origin=?", (origin,))
+                self._conn.execute("DELETE FROM projection_checkpoint WHERE origin=?", (origin,))
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._rollback()
+                raise
+
+
+# ---------------------------------------------------------------------------
+# Route metadata fields + parsing
+# ---------------------------------------------------------------------------
+
+#: bonnet.route.announce metadata field numbers. Shared by the projection,
+#: the sync manager's transitive learner, and the gateway client/tools so
+#: all three agree on the wire shape.
+ROUTE_FIELD_HOSTNAME = 1  # TEXT, dial hostname (required)
+ROUTE_FIELD_PORT = 2  # U64 1..65535 (required)
+ROUTE_FIELD_SCHEME = 3  # TEXT "http" | "https" (optional, default "https")
+ROUTE_FIELD_VERIFY_TLS = 4  # BOOL (optional, default False)
+ROUTE_FIELD_PRIORITY = 5  # U64 dial-order hint (optional, default 0)
+
+_ROUTE_SCHEMES = frozenset({"http", "https"})
+
+
+def parse_route_announce(metadata: MetadataMap) -> dict | None:
+    """Parse a route-announce metadata map, or None if malformed.
+
+    Pure and total: federated records bypass KindValidator, so the
+    projection (and the sync learner, and gateway list_routes) must all
+    tolerate garbage without raising. Local publishes were already
+    schema-checked; this re-checks because the same bytes can arrive
+    from a peer that never validated them.
+    """
+    try:
+        hostname = metadata.get_text(ROUTE_FIELD_HOSTNAME)
+        port = metadata.get_u64(ROUTE_FIELD_PORT)
+        if hostname is None or port is None:
+            return None
+        hostname = normalize_hostname(hostname)
+        if not hostname or any(c.isspace() or ord(c) < 0x20 for c in hostname):
+            return None
+        if not 1 <= port <= 65535:
+            return None
+        scheme = metadata.get_text(ROUTE_FIELD_SCHEME) or "https"
+        if scheme not in _ROUTE_SCHEMES:
+            return None
+        verify_tls = metadata.get_bool(ROUTE_FIELD_VERIFY_TLS)
+        priority = metadata.get_u64(ROUTE_FIELD_PRIORITY)
+        return {
+            "hostname": hostname,
+            "port": port,
+            "scheme": scheme,
+            "verify_tls": bool(verify_tls) if verify_tls is not None else False,
+            "priority": priority if priority is not None else 0,
+            "endpoint": f"{scheme}://{hostname}:{port}",
+        }
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# RouteProjection — transitive peer-discovery dial addresses
+# ---------------------------------------------------------------------------
+
+
+class RouteProjection(_BaseProjection):
+    """One live dial address per origin, from bonnet.route.* records.
+
+    Latest origin_seq wins; a withdraw tombstones the row (kept, excluded
+    from live reads) until a later announce revives it. Third-party claims
+    — a record whose origin is not the route's subject — are hearsay:
+    every route row's subject IS its origin, so there is nothing to check
+    beyond projecting the announcing origin's own row. Stored and relayed
+    regardless; whether a relay *dials* a learned route is the sync
+    manager's opt-in policy, never this projection's decision.
+    """
+
+    def _init_schema(self) -> None:
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS routes (
+                origin          TEXT NOT NULL PRIMARY KEY,
+                hostname        TEXT NOT NULL,
+                port            INTEGER NOT NULL,
+                scheme          TEXT NOT NULL DEFAULT 'https',
+                verify_tls      INTEGER NOT NULL DEFAULT 0,
+                priority        INTEGER NOT NULL DEFAULT 0,
+                announce_event_id BLOB NOT NULL,
+                announced_seq   INTEGER NOT NULL,
+                updated_seq     INTEGER NOT NULL,
+                withdrawn       INTEGER NOT NULL DEFAULT 0,
+                created_at      INTEGER NOT NULL
+            );
+        """)
+
+    def apply_route_announce(self, rec: Record) -> None:
+        with self._lock:
+            if self.is_applied(rec.origin, rec.event_id):
+                return
+            self._begin()
+            try:
+                parsed = parse_route_announce(rec.metadata)
+                if parsed is None:
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
+                row = self._conn.execute(
+                    "SELECT updated_seq FROM routes WHERE origin=?",
+                    (rec.origin,),
+                ).fetchone()
+                if row is not None and rec.origin_seq < row[0]:
+                    # Stale announce loses to newer state (incl. withdraw).
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO routes "
+                    "(origin, hostname, port, scheme, verify_tls, priority, "
+                    " announce_event_id, announced_seq, updated_seq, withdrawn, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                    (
+                        rec.origin,
+                        parsed["hostname"],
+                        parsed["port"],
+                        parsed["scheme"],
+                        1 if parsed["verify_tls"] else 0,
+                        parsed["priority"],
+                        rec.event_id,
+                        rec.origin_seq,
+                        rec.origin_seq,
+                        int(time.time()),
+                    ),
+                )
+                self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
+
+    def apply_route_withdraw(self, rec: Record) -> None:
+        with self._lock:
+            if self.is_applied(rec.origin, rec.event_id):
+                return
+            self._begin()
+            try:
+                # Same-origin guard, matching apply_user_revoke: an origin
+                # can only withdraw its own route, never another's.
+                if rec.origin != rec.target_origin:
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
+                row = self._conn.execute(
+                    "SELECT announce_event_id, updated_seq, withdrawn FROM routes WHERE origin=?",
+                    (rec.origin,),
+                ).fetchone()
+                if (
+                    row is not None
+                    and bytes(row[0]) == bytes(rec.target_event_id)
+                    and rec.origin_seq >= row[1]
+                ):
+                    self._conn.execute(
+                        "UPDATE routes SET withdrawn=1, updated_seq=? WHERE origin=?",
+                        (rec.origin_seq, rec.origin),
+                    )
+                # Else: unknown event, stale withdraw, or already
+                # withdrawn — success no-op, still marked applied.
+                self._mark_applied(rec)
+                self._set_checkpoint(rec.origin, rec.origin_seq)
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
+
+    def _row_to_dict(self, r) -> dict:
+        return {
+            "origin": r[0],
+            "hostname": r[1],
+            "port": r[2],
+            "scheme": r[3],
+            "verify_tls": bool(r[4]),
+            "priority": r[5],
+            "announce_event_id": bytes(r[6]).hex(),
+            "announced_seq": r[7],
+            "updated_seq": r[8],
+            "withdrawn": bool(r[9]),
+            "endpoint": f"{r[3]}://{r[1]}:{r[2]}",
+        }
+
+    def get_route(self, origin: str, include_withdrawn: bool = False) -> dict | None:
+        with self._lock:
+            if include_withdrawn:
+                row = self._conn.execute(
+                    "SELECT origin, hostname, port, scheme, verify_tls, priority, "
+                    "announce_event_id, announced_seq, updated_seq, withdrawn "
+                    "FROM routes WHERE origin=?",
+                    (origin,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT origin, hostname, port, scheme, verify_tls, priority, "
+                    "announce_event_id, announced_seq, updated_seq, withdrawn "
+                    "FROM routes WHERE origin=? AND withdrawn=0",
+                    (origin,),
+                ).fetchone()
+            return self._row_to_dict(row) if row else None
+
+    def list_routes(self, origin: str = None, include_withdrawn: bool = False) -> list[dict]:
+        with self._lock:
+            clause = "" if include_withdrawn else "AND withdrawn=0"
+            if origin:
+                rows = self._conn.execute(
+                    "SELECT origin, hostname, port, scheme, verify_tls, priority, "
+                    "announce_event_id, announced_seq, updated_seq, withdrawn "
+                    f"FROM routes WHERE origin=? {clause} ORDER BY origin ASC",
+                    (origin,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT origin, hostname, port, scheme, verify_tls, priority, "
+                    "announce_event_id, announced_seq, updated_seq, withdrawn "
+                    f"FROM routes WHERE 1=1 {clause} ORDER BY origin ASC"
+                ).fetchall()
+            return [self._row_to_dict(r) for r in rows]
+
+    def list_live_routes(self) -> list[dict]:
+        """Live routes only, highest priority first — the sync learner's input."""
+        routes = self.list_routes()
+        routes.sort(key=lambda r: (-r["priority"], r["origin"]))
+        return routes
+
+    def clear(self) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM routes")
+                self._conn.execute("DELETE FROM applied_events")
+                self._conn.execute("DELETE FROM projection_checkpoint")
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._rollback()
+                raise
+
+    def clear_origin(self, origin: str) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM routes WHERE origin=?", (origin,))
                 self._conn.execute("DELETE FROM applied_events WHERE origin=?", (origin,))
                 self._conn.execute("DELETE FROM projection_checkpoint WHERE origin=?", (origin,))
                 self._conn.execute("COMMIT")

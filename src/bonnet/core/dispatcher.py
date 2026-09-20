@@ -38,6 +38,7 @@ from bonnet.core.firehose import FirehoseStore
 from bonnet.core.global_projections import (
     NavProjection,
     PolicyProjection,
+    RouteProjection,
     UserProjection,
 )
 from bonnet.core.kinds import (
@@ -56,6 +57,8 @@ from bonnet.core.kinds import (
     KIND_PUNISHMENT_ACK,
     KIND_PUNISHMENT_REVOKE,
     KIND_REPORT,
+    KIND_ROUTE_ANNOUNCE,
+    KIND_ROUTE_WITHDRAW,
     KIND_RULE_PUBLISH,
     KIND_RULE_REVOKE,
     KIND_THREAD_CLOSE,
@@ -89,11 +92,15 @@ class Dispatcher:
         allowed_origins: set = None,
         local_origin: str = "",
         punishment_import_policy: dict = None,
+        routes: RouteProjection | None = None,
     ):
         self._firehose = firehose
         self._nav = nav
         self._users = users
         self._policy = policy
+        # Optional so existing call sites keep working; without it route
+        # records fall through to _dispatch_unknown (tracked, not projected).
+        self._routes = routes
         self._boards_dir = boards_dir
         self._body_store = body_store
         self._allowed_origins = allowed_origins or set()
@@ -125,6 +132,8 @@ class Dispatcher:
             KIND_REPORT: self._policy.apply_report,
             KIND_PUNISHMENT_REVOKE: self._policy.apply_punishment_revoke,
             KIND_PUNISHMENT_ACK: self._policy.apply_punishment_ack,
+            KIND_ROUTE_ANNOUNCE: self._dispatch_route_announce,
+            KIND_ROUTE_WITHDRAW: self._dispatch_route_withdraw,
             KIND_ORIGIN_KEY_ROTATE: lambda rec: None,  # handled by firehose store
         }
         for kind in ARTICLE_CONTROL_KINDS:
@@ -352,6 +361,18 @@ class Dispatcher:
         else:
             self._nav.apply_unknown(rec)
 
+    def _dispatch_route_announce(self, rec: Record) -> None:
+        if self._routes is None:
+            self._dispatch_unknown(rec)
+        else:
+            self._routes.apply_route_announce(rec)
+
+    def _dispatch_route_withdraw(self, rec: Record) -> None:
+        if self._routes is None:
+            self._dispatch_unknown(rec)
+        else:
+            self._routes.apply_route_withdraw(rec)
+
     # ------------------------------------------------------------------
     # Rebuild
     # ------------------------------------------------------------------
@@ -378,6 +399,8 @@ class Dispatcher:
             self._nav.clear_origin(origin)
             self._users.clear_origin(origin)
             self._policy.clear_origin(origin)
+            if self._routes is not None:
+                self._routes.clear_origin(origin)
 
             self._firehose.set_checkpoint(origin, 0)
 

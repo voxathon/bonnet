@@ -34,7 +34,12 @@ from bonnet.core.config import FirehoseConfig
 from bonnet.core.crypto import Identity
 from bonnet.core.dispatcher import Dispatcher
 from bonnet.core.firehose import FirehoseStore
-from bonnet.core.global_projections import NavProjection, PolicyProjection, UserProjection
+from bonnet.core.global_projections import (
+    NavProjection,
+    PolicyProjection,
+    RouteProjection,
+    UserProjection,
+)
 from bonnet.core.kind_validator import KindValidator
 from bonnet.core.logging import close_logging, get_log_path, log_msg
 from bonnet.core.search import SearchService
@@ -166,7 +171,8 @@ class BonnetServer:
         self.nav = NavProjection(config.nav_db_path)
         self.users = UserProjection(config.users_db_path)
         self.policy = PolicyProjection(config.policy_db_path)
-        log_msg("INIT: projections initialized (nav, users, policy)")
+        self.routes = RouteProjection(config.routes_db_path)
+        log_msg("INIT: projections initialized (nav, users, policy, routes)")
 
         self.body_store = BodyStore(
             boards_dir=config.boards_dir,
@@ -192,6 +198,7 @@ class BonnetServer:
             allowed_origins=allowed_origins,
             local_origin=config.origin,
             punishment_import_policy=punishment_import_policy,
+            routes=self.routes,
         )
         log_msg("INIT: Dispatcher initialized")
 
@@ -236,6 +243,14 @@ class BonnetServer:
             dispatcher=self.dispatcher,
             retain_upstream=config.witness.retain_upstream,
             relay_origin=config.origin,
+        )
+        self.sync_manager.set_routing(
+            self.routes,
+            auto_dial=config.routing.auto_dial,
+            trusted_vias={peer.origin for peer in config.peers} | set(config.routing.route_trust),
+            allow_private_learned=config.routing.allow_private_learned,
+            max_learned=config.routing.max_learned,
+            interval=config.sync_interval_seconds,
         )
         if config.peers:
             for peer in config.peers:
@@ -872,6 +887,7 @@ class BonnetServer:
             self.nav,
             self.users,
             self.policy,
+            self.routes,
             self.replay_ledger,
         ]
         for closer in closers:

@@ -83,6 +83,8 @@ CLIENT_COMMANDS = {
     "publish_punishment_permaban": "PUBLISH_RECORD",
     "publish_punishment_revoke": "PUBLISH_RECORD",
     "publish_punishment_ack": "PUBLISH_RECORD",
+    "publish_route_announce": "PUBLISH_RECORD",
+    "publish_route_withdraw": "PUBLISH_RECORD",
 }
 
 # publish-family client method -> the record kind it publishes. Only methods
@@ -112,6 +114,8 @@ CLIENT_KINDS = {
     "publish_punishment_permaban": "bonnet.punishment.permaban",
     "publish_punishment_revoke": "bonnet.punishment.revoke",
     "publish_punishment_ack": "bonnet.punishment.ack",
+    "publish_route_announce": "bonnet.route.announce",
+    "publish_route_withdraw": "bonnet.route.withdraw",
 }
 
 # Tools whose implementation calls a client method only inside a try/except
