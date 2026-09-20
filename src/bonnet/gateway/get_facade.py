@@ -550,7 +550,7 @@ async def call_tool_get(request: Request) -> JSONResponse:
                 "error": (
                     f"{tool_name} is not served over GET: credentials and private keys "
                     "must not travel in URLs (history, proxy/access logs). Use POST /mcp/."
-                )
+                ),
             },
             status_code=403,
             headers=_no_store_headers(),
