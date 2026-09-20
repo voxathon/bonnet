@@ -219,9 +219,7 @@ async def test_delete_route_guarded_by_confirm(admin_env, monkeypatch):
     def _body(resp):
         return json.loads(resp.body.decode())
 
-    await admin.admin_tenant_add(
-        _request("POST", body={"tenant_id": "erin"}, token=token)
-    )
+    await admin.admin_tenant_add(_request("POST", body={"tenant_id": "erin"}, token=token))
     assert tenants.get_tenant("erin") is not None
 
     # Missing/wrong confirm: 400, tenant survives.
