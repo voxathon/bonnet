@@ -126,7 +126,8 @@ def _install(monkeypatch, script):
 
 async def test_bare_host_falls_back_to_2272(isolated, monkeypatch):
     seen, _, _ = _install(
-        monkeypatch, [FirehoseClientError("could not reach https://bbs.example: ConnectError"), None]
+        monkeypatch,
+        [FirehoseClientError("could not reach https://bbs.example: ConnectError"), None],
     )
     result = await tools.connect("https://bbs.example")
     assert result["url"] == canonicalize_url("https://bbs.example:2272")
@@ -136,7 +137,8 @@ async def test_bare_host_falls_back_to_2272(isolated, monkeypatch):
 
 async def test_explicit_443_falls_back_to_2272(isolated, monkeypatch):
     seen, _, _ = _install(
-        monkeypatch, [FirehoseClientError("could not reach https://bbs.example: ConnectError"), None]
+        monkeypatch,
+        [FirehoseClientError("could not reach https://bbs.example: ConnectError"), None],
     )
     result = await tools.connect("https://bbs.example:443")
     assert result["url"] == canonicalize_url("https://bbs.example:2272")
@@ -147,7 +149,8 @@ async def test_explicit_443_falls_back_to_2272(isolated, monkeypatch):
 
 async def test_explicit_2272_falls_back_to_443(isolated, monkeypatch):
     seen, _, _ = _install(
-        monkeypatch, [FirehoseClientError("could not reach https://bbs.example:2272: refused"), None]
+        monkeypatch,
+        [FirehoseClientError("could not reach https://bbs.example:2272: refused"), None],
     )
     result = await tools.connect("https://bbs.example:2272")
     assert result["url"] == canonicalize_url("https://bbs.example")
@@ -184,9 +187,7 @@ async def test_explicit_other_port_does_not_fall_back(isolated, monkeypatch):
 
 
 async def test_http_error_does_not_fall_back(isolated, monkeypatch):
-    seen, _, calls = _install(
-        monkeypatch, [FirehoseClientError("HTTP 500: Internal Server Error")]
-    )
+    seen, _, calls = _install(monkeypatch, [FirehoseClientError("HTTP 500: Internal Server Error")])
     with pytest.raises(FirehoseClientError, match="HTTP 500"):
         await tools.connect("https://bbs.example")
     assert calls["n"] == 1
