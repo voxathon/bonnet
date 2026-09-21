@@ -870,12 +870,14 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     Nothing follows it automatically; it is there so a stale configured
     address can be noticed and fixed deliberately.
 
-    A `url` with no explicit port (e.g. `https://bbs.example`) implies 443.
-    If nothing answers there, this retries the same host on 2272 — Bonnet's
-    own default listen port — before giving up. `port_fallback` in the
+    A `url` on https port 443 — bare (e.g. `https://bbs.example`, which
+    implies 443) or explicit (`https://bbs.example:443`) — that answers
+    nothing is retried once on the same host on 2272, Bonnet's own default
+    listen port, and vice versa (`https://bbs.example:2272` with nothing
+    answering is retried once on 443). `port_fallback` in the
     result says whether that happened; `url` reflects whichever one worked.
     Only a connect-level failure triggers it (DNS, refused, timeout); a real
-    HTTP response on 443, even an error one, means something is there and is
+    HTTP response (even an error one) means something is there and is
     left alone.
     """
     if not url.strip():
@@ -923,13 +925,13 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     # origin silently redirects every subsequent tool call to an address that
     # does not answer.
     #
-    # Fallback: a URL with no explicit port implies the scheme's standard one
-    # (443 for https) - fine for an origin sitting behind a reverse proxy or
-    # tunnel, but nothing for one running bare on Bonnet's own default port.
-    # Retried once, same host, on 2272, and only on a connect-level failure
-    # (DNS, refused, timeout) - a real response on 443 (even an error one)
+    # Fallback: https on 443 (bare or explicit — fine behind a reverse
+    # proxy or tunnel) and Bonnet's own default port 2272 are retried as
+    # each other, once, same host, and only on a connect-level failure
+    # (DNS, refused, timeout) - a real response (even an error one)
     # means something is there and answering, so it is left alone.
-    port_fallback_eligible = parsed.scheme == "https" and parsed.port is None
+    # `https://h:443` and `https://h` are the same socket either way.
+    port_fallback_eligible = parsed.scheme == "https" and parsed.port in (None, 443, 2272)
     fell_back_to_2272 = False
     # Establishing a connection always re-fetches the manifest: stash the
     # session entry aside and clear it so `_make_client` below cannot
@@ -947,7 +949,16 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
             if not port_fallback_eligible or "could not reach" not in str(e):
                 raise
             await client.close()
-            resolved_url = canonicalize_url(f"{parsed.scheme}://{parsed.hostname}:2272")
+            # urlsplit strips IPv6 brackets from `.hostname`; put them back
+            # so the retry target stays a valid URL for literal IPv6 hosts.
+            fallback_host = parsed.hostname or ""
+            if ":" in fallback_host and not fallback_host.startswith("["):
+                fallback_host = f"[{fallback_host}]"
+            if parsed.port == 2272:
+                fallback_target = f"{parsed.scheme}://{fallback_host}"
+            else:
+                fallback_target = f"{parsed.scheme}://{fallback_host}:2272"
+            resolved_url = canonicalize_url(fallback_target)
             resolved_verify = default_verify_tls(resolved_url) if verify_tls is None else verify_tls
             current_origin_url.set(resolved_url)
             current_origin_verify.set(resolved_verify)
@@ -1033,7 +1044,8 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     return {
         "origin": origin,
         "url": resolved_url,
-        # True when the port-less URL given failed on 443 and this fell back
+        # True when the first port tried had nothing answering and this
+        # retried once on the other port (443 <-> 2272).
         "port_fallback": fell_back_to_2272,
         "boards": boards,
         # Which origins this relay serves. Aggregate reads (origin="") span
