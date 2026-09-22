@@ -22,6 +22,7 @@ Implements exactly what the firehose protocol requires:
   - Mandatory covered-component enforcement
   - created / expires / clock-skew validation
   - nonce matching and base64url-32-byte validation
+  - label="untp" enforcement
   - tag="untp-1" filtering
   - keyid format validation (ed25519:<hex> for requests, origin:<name> for responses)
   - All public sign/verify methods are async (crypto offloaded via asyncio.to_thread)
@@ -742,6 +743,7 @@ class BonnetVerifier:
         self,
         key_resolver: KeyResolver,
         tag: str = UNTP_TAG,
+        label: str = UNTP_LABEL,
         max_lifetime: int = DEFAULT_MAX_LIFETIME,
         clock_skew: int = DEFAULT_CLOCK_SKEW,
         request_required_components: frozenset = None,
@@ -749,6 +751,7 @@ class BonnetVerifier:
     ):
         self._resolver = key_resolver
         self._tag = tag
+        self._label = label
         self._max_lifetime = max_lifetime
         self._clock_skew = clock_skew
         self._request_required = request_required_components or REQUEST_REQUIRED_COMPONENTS
@@ -816,6 +819,9 @@ class BonnetVerifier:
             raise MalformedSignature(
                 f"Signature-Input label {si.label!r} != Signature label {sig_label!r}"
             )
+
+        if si.label != self._label:
+            raise InvalidParameter(f"label={si.label!r} != expected {self._label!r}")
 
         tag = si.params.get("tag")
         if tag != self._tag:

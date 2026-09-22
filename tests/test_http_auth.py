@@ -417,6 +417,18 @@ class TestRejections:
             await verifier.verify_request(request_msg)
 
     @pytest.mark.asyncio
+    async def test_wrong_label_rejected(self, keypair, key_resolver, request_msg, valid_nonce):
+        priv, pub = keypair
+        signer = BonnetSigner(
+            private_key=priv, key_id="ed25519:" + pub.hex(), label="foreign"
+        )
+        now = int(time.time())
+        await signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60)
+        verifier = BonnetVerifier(key_resolver=key_resolver)
+        with pytest.raises(InvalidParameter, match="label"):
+            await verifier.verify_request(request_msg)
+
+    @pytest.mark.asyncio
     async def test_tampered_body_rejected(self, keypair, key_resolver, request_msg, valid_nonce):
         priv, pub = keypair
         signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex())
@@ -476,9 +488,9 @@ class TestRejections:
 
         sig = _ed25519_sign(priv, sig_base.encode())
         request_msg.set_header(
-            "Signature-Input", serialize_signature_input("bonnet", components, params)
+            "Signature-Input", serialize_signature_input("untp", components, params)
         )
-        request_msg.set_header("Signature", serialize_signature("bonnet", sig))
+        request_msg.set_header("Signature", serialize_signature("untp", sig))
 
         verifier = BonnetVerifier(key_resolver=key_resolver)
         with pytest.raises(MissingComponent):
