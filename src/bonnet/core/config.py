@@ -26,7 +26,7 @@ import os
 import re
 import socket
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from bonnet.core.acl import ACLEvaluator
 from bonnet.core.hostname import normalize_hostname
@@ -65,13 +65,9 @@ class RoutingConfig:
     """
 
     auto_dial: str = "off"
-    route_trust: list = None
+    route_trust: list[str] = field(default_factory=list)
     allow_private_learned: bool = False
     max_learned: int = 32
-
-    def __post_init__(self) -> None:
-        if self.route_trust is None:
-            self.route_trust = []
 
 
 @dataclass
