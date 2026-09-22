@@ -126,12 +126,10 @@ def test_gating_refusals_split_anonymous_from_needs():
         in body
     )
     assert (
-        'bonnet_gateway_gating_refusals_total{tool="publish",tenant="a",reason="needs"} 1'
-        in body
+        'bonnet_gateway_gating_refusals_total{tool="publish",tenant="a",reason="needs"} 1' in body
     )
     assert (
-        'bonnet_gateway_gating_refusals_total{tool="connect",tenant="b",reason="needs"} 1'
-        in body
+        'bonnet_gateway_gating_refusals_total{tool="connect",tenant="b",reason="needs"} 1' in body
     )
 
 
@@ -155,10 +153,7 @@ def test_tool_errors_group_by_type():
         'bonnet_gateway_tool_errors_total{tool="publish",tenant="a",err="FirehoseClientError"} 2'
         in body
     )
-    assert (
-        'bonnet_gateway_tool_errors_total{tool="connect",tenant="a",err="ValueError"} 1'
-        in body
-    )
+    assert 'bonnet_gateway_tool_errors_total{tool="connect",tenant="a",err="ValueError"} 1' in body
 
 
 def test_http_hits_group_by_route_method_and_outcome():

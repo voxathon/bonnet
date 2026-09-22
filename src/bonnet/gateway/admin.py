@@ -73,9 +73,7 @@ def _counted(op: str):
                     pass
                 raise
             try:
-                metrics.observe_http(
-                    f"admin_{op}", request.method, ok=resp.status_code < 400
-                )
+                metrics.observe_http(f"admin_{op}", request.method, ok=resp.status_code < 400)
             except Exception:
                 pass
             return resp
@@ -83,6 +81,7 @@ def _counted(op: str):
         return wrapper
 
     return deco
+
 
 #: Env var naming the admin bearer secret. Env wins over gateway.toml so a
 #: rotation is a process-environment change, not a config-file edit.

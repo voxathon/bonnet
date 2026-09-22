@@ -117,6 +117,7 @@ def _counted(route: str):
 
     return deco
 
+
 #: Set by `server.run()` from flag > env > toml. Tests may call
 #: `set_enabled(True)` directly. Env is honored live so the facade can be
 #: toggled without a restart in a pinch.

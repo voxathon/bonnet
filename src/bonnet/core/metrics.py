@@ -403,9 +403,7 @@ def snapshot() -> dict[str, Any]:
             "uptime_s": round(time.time() - _start_time, 1),
             "calls": {f"{t}|{ten}|{ok_s}": n for (t, ten, ok_s), n in _calls.items()},
             "auth": dict(_auth),
-            "gating_refusals": {
-                f"{t}|{ten}|{r}": n for (t, ten, r), n in _gating.items()
-            },
+            "gating_refusals": {f"{t}|{ten}|{r}": n for (t, ten, r), n in _gating.items()},
             "errors": {f"{t}|{ten}|{e}": n for (t, ten, e), n in _errors.items()},
             "http": {f"{rt}|{m}|{ok_s}": n for (rt, m, ok_s), n in _http.items()},
             "in_flight": _in_flight,
