@@ -217,8 +217,7 @@ def validate(cfg: GatewayConfig) -> None:
             )
     if cfg.metrics_enabled is not None and not isinstance(cfg.metrics_enabled, bool):
         raise ValueError(
-            f"config: gateway.metrics_enabled must be true or false, "
-            f"got {cfg.metrics_enabled!r}"
+            f"config: gateway.metrics_enabled must be true or false, got {cfg.metrics_enabled!r}"
         )
     if cfg.admin_token is not None and (
         not isinstance(cfg.admin_token, str) or not cfg.admin_token.strip()
