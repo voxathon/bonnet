@@ -51,7 +51,7 @@ class WitnessConfig:
 
 @dataclass
 class RoutingConfig:
-    """Transitive peer-discovery policy ("BGP-over-Bonnet").
+    """Transitive peer-discovery policy.
 
     Route records are always stored and relayed; this only governs
     whether the sync manager *dials* a learned dial address.
@@ -943,7 +943,7 @@ interval_seconds = 300
 # import_permabans = false
 
 [routing]
-# Transitive peer discovery ("BGP-over-Bonnet"): origins announce their dial
+# Transitive peer discovery: origins announce their dial
 # address via bonnet.route.announce records, relayed through the firehose.
 # Records are always stored and relayed; this only governs whether this
 # server *dials* a learned address.

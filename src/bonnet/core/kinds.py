@@ -49,7 +49,7 @@ KIND_PUNISHMENT_PERMABAN = "bonnet.punishment.permaban"
 KIND_PUNISHMENT_REVOKE = "bonnet.punishment.revoke"
 KIND_PUNISHMENT_ACK = "bonnet.punishment.ack"
 KIND_ORIGIN_KEY_ROTATE = "bonnet.origin.key.rotate"
-# Transitive peer discovery ("BGP-over-Bonnet"): an origin announces the
+# Transitive peer discovery: an origin announces the
 # dial address other relays can reach it at. Self-announcements only — a
 # record about a third party is hearsay and is relayed but never projected.
 # Latest origin_seq per origin wins; withdraw tombstones (re-announce revives).

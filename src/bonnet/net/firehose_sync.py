@@ -331,7 +331,7 @@ class SyncManager:
         self._peer_backoff: dict[str, float] = {}
         self._peer_last_failure: dict[str, float] = {}
         self._backoff_max = 3600
-        # Transitive peer-discovery ("BGP-over-Bonnet") policy. Route
+        # Transitive peer-discovery policy. Route
         # records are always stored/relayed; these only govern whether a
         # learned dial address is acted on. Default off (advisory only).
         self._routes = None

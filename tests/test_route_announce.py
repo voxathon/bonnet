@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Transitive peer discovery ("BGP-over-Bonnet"): bonnet.route.* records.
+"""Transitive peer discovery: bonnet.route.* records.
 
 Covers kind validation, the RouteProjection (latest-wins + withdraw
 tombstones), dispatcher integration incl. rebuild, the sync manager's
