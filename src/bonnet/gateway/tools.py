@@ -480,34 +480,39 @@ def _make_client(url: str | None = None, verify: bool | str | None = None) -> Fi
 
 
 def _gw_log(op: str, ok: bool = True, **fields) -> None:
-    """Best-effort gateway tool log. Never raises; file is a no-op until init."""
+    """Pedantic per-tool file log + metrics backstop. Never raises.
+
+    Every tool funnels through here on completion, so this is the verbose
+    record: tenant (bound into the log context), outcome, duration, origin,
+    and all sanitized result fields. File-only — a no-op until init.
+    """
     try:
         tenant = tenancy.current_tenant.get() if hasattr(tenancy, "current_tenant") else ""
         bind_context(tenant=tenant)
+        logged = dict(fields)
+        logged.setdefault("tenant", tenant or "unknown")
         if ok:
-            log_info(f"GATEWAY {op} ok", **fields)
+            log_info(f"GATEWAY {op} ok", **logged)
         else:
-            log_warning(f"GATEWAY {op} fail", **fields)
+            log_warning(f"GATEWAY {op} fail", **logged)
     except Exception:
         pass
-    # Metrics/span enrichment rides along with the log funnel so every
+    # Metrics enrichment rides along with the log funnel so every
     # currently-logged op is counted even if middleware naming ever misses.
-    # TelemetryMiddleware remains the primary path (it also times calls);
+    # MetricsMiddleware remains the primary path (it also times calls);
     # this is the backstop for count completeness. Never raises.
     try:
-        from bonnet.core import telemetry
+        from bonnet.core import metrics
 
         ms = fields.get("ms")
         if ms is None:
             ms = fields.get("duration_ms")
         tenant_t = tenant if isinstance(tenant, str) else ""
-        origin = fields.get("origin")
-        telemetry.observe_tool_call(
+        metrics.observe_tool_call(
             op,
             ok=ok,
             tenant=tenant_t or "",
             duration_ms=ms if isinstance(ms, (int, float)) else None,
-            origin=origin if isinstance(origin, str) else "",
         )
     except Exception:
         pass

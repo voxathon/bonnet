@@ -48,8 +48,6 @@ KNOWN_KEYS = frozenset(
         "log_level",
         "log_keep_files",
         "metrics_enabled",
-        "otel_enabled",
-        "otel_endpoint",
         "admin_token",
     }
 )
@@ -99,16 +97,6 @@ _SAMPLE = """\
 # # Prometheus /metrics on the gateway's own port (http mode only).
 # # On by default; env BONNET_METRICS_ENABLED=0 wins over this file.
 # # metrics_enabled = true
-# # OTel log-correlation bridge (needs opentelemetry-distro installed;
-# # real traces/metrics flow via `opentelemetry-instrument ... bonnet gateway`
-# # with OTEL_EXPORTER_OTLP_* env). Env BONNET_OTEL_ENABLED wins over this file.
-# # otel_enabled = false
-# # OTLP/HTTP endpoint for traces+metrics+logs (e.g. Grafana Cloud
-# # https://otlp-gateway-<zone>.grafana.net/otlp). Unlike `url` above, a path
-# # is allowed and no port fallback applies. Fills $OTEL_EXPORTER_OTLP_ENDPOINT
-# # when the environment does not set it; env still wins. Auth headers stay in
-# # env ($OTEL_EXPORTER_OTLP_HEADERS) — secrets do not belong in this file.
-# # otel_endpoint = "https://otlp-gateway-prod-us-central-0.grafana.net/otlp"
 # # Bearer secret for the /admin tenant-management routes (see gateway.admin).
 # # Prefer $BONNET_GATEWAY_ADMIN_TOKEN (env wins over this file): anyone who
 # # can read the gateway home dir can read this file. Unset in both places
@@ -131,8 +119,6 @@ class GatewayConfig:
     log_level: str | None = None
     log_keep_files: int | None = None
     metrics_enabled: bool | None = None
-    otel_enabled: bool | None = None
-    otel_endpoint: str | None = None
     admin_token: str | None = None
     unknown_keys: list[str] = field(default_factory=list)
 
@@ -166,8 +152,6 @@ def load(path: str) -> GatewayConfig | None:
         log_level=table.get("log_level"),
         log_keep_files=table.get("log_keep_files"),
         metrics_enabled=table.get("metrics_enabled"),
-        otel_enabled=table.get("otel_enabled"),
-        otel_endpoint=table.get("otel_endpoint") or None,
         admin_token=table.get("admin_token") or None,
         unknown_keys=unknown,
     )
@@ -231,12 +215,11 @@ def validate(cfg: GatewayConfig) -> None:
                 f"config: gateway.log_keep_files must be an integer >= 1, "
                 f"got {cfg.log_keep_files!r}"
             )
-    for key in ("metrics_enabled", "otel_enabled"):
-        value = getattr(cfg, key)
-        if value is not None and not isinstance(value, bool):
-            raise ValueError(f"config: gateway.{key} must be true or false, got {value!r}")
-    if cfg.otel_endpoint is not None:
-        _validate_otlp_endpoint(cfg.otel_endpoint)
+    if cfg.metrics_enabled is not None and not isinstance(cfg.metrics_enabled, bool):
+        raise ValueError(
+            f"config: gateway.metrics_enabled must be true or false, "
+            f"got {cfg.metrics_enabled!r}"
+        )
     if cfg.admin_token is not None and (
         not isinstance(cfg.admin_token, str) or not cfg.admin_token.strip()
     ):
@@ -279,24 +262,3 @@ def _validate_url(raw: object) -> None:
             f"config: gateway.url takes just scheme+host+port, got {raw!r} "
             "(with no path, query or fragment)"
         )
-
-
-def _validate_otlp_endpoint(raw: object) -> None:
-    """Validate a gateway.otel_endpoint: http(s) URL, path allowed.
-
-    Unlike gateway.url (scheme+host+port only, the wire paths are fixed), an
-    OTLP endpoint carries its signal path (e.g. Grafana Cloud's `/otlp`), so
-    any path is accepted. Query/fragment are refused; SDKs do not send them.
-    """
-    from urllib.parse import urlsplit
-
-    if not isinstance(raw, str) or not raw.strip():
-        raise ValueError(f"config: gateway.otel_endpoint must be a non-empty string, got {raw!r}")
-    parsed = urlsplit(raw.strip())
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError(
-            f"config: gateway.otel_endpoint must be e.g. "
-            f"https://otlp-gateway-<zone>.grafana.net/otlp, got {raw!r}"
-        )
-    if parsed.query or parsed.fragment:
-        raise ValueError(f"config: gateway.otel_endpoint takes no query or fragment, got {raw!r}")

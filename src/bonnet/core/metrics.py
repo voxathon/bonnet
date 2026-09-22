@@ -12,43 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Zero-dependency gateway telemetry: counters + Prometheus text + OTel hooks.
+"""Zero-dependency gateway metrics: counters + Prometheus text.
 
-Design constraints (laziness-compatible):
+Stdlib only. The gateway runs by default as a stdio child of an agent
+host, so this module must import and work with no third-party packages.
 
-- This module must import and work with **stdlib only**. The gateway runs by
-  default as a stdio child of an agent host; a hard dependency on
-  ``opentelemetry-*`` would tax every install for a feature only the http
-  deployment uses. All OTel SDK imports live behind ``try/except ImportError``
-  inside functions, never at module top level.
-- Two layers, deliberately split:
+``observe_tool_call`` records per-(tool, tenant, ok) counts and latency
+into in-memory structures; ``render_prometheus`` exposes them in
+Prometheus text exposition format for the gateway's ``/metrics`` route.
 
-  1. **Built-in RED counters** (always available, no exporter needed).
-     ``observe_tool_call`` records per-(tool, tenant, ok) counts and latency
-     into in-memory structures; ``render_prometheus`` exposes them in
-     Prometheus text exposition format for the gateway's ``/metrics`` route.
-     No ``prometheus_client`` or OTel required.
-  2. **OTel enrichment** (best-effort, active only when the operator installed
-     ``opentelemetry-distro[otlp]`` and runs under ``opentelemetry-instrument``
-     or called ``init_telemetry`` with an OTLP endpoint). ``tool_span`` opens
-     a real span when a tracer is configured and degrades to a nullcontext
-     otherwise; ``set_span_attributes`` stamps tenant/origin/ok onto whatever
-     span auto-instrumentation already opened (the ASGI POST span).
-
-Why both: in http mode every MCP call arrives as ``POST /mcp/``, so pure
-zero-code auto-instrumentation yields one identically-named span per call.
-The per-tool name/tenant/ok attributes — the actually useful dimensions —
-can only come from inside the gateway (``tools._gw_log`` / middleware), which
-is what this module carries.
+Per-call detail lives in the on-file log (``bonnet.core.logging`` via
+``tools._gw_log`` and the middleware start/finish lines) — this module
+carries only the aggregated RED counters, never traces or spans.
 """
 
 from __future__ import annotations
 
-import contextlib
 import os
 import threading
 import time
-from collections.abc import Iterator
 from typing import Any
 
 # Histogram buckets (milliseconds) for tool latency. Fixed set keeps /metrics
@@ -66,8 +48,6 @@ _calls: dict[tuple[str, str, str], int] = {}
 _latency: dict[tuple[str, str], list[float]] = {}
 # (tool, tenant, le) -> cumulative count, where le is bucket upper bound or "+Inf"
 _buckets: dict[tuple[str, str, str], int] = {}
-
-_otel_ready = False
 
 
 def _norm_tenant(tenant: Any) -> str:
@@ -89,40 +69,26 @@ def _norm_tool(op: Any) -> str:
     return (s.strip() or "unknown")[:64]
 
 
-def init_telemetry(
+def init_metrics(
     *,
     enabled: bool | None = None,
     service_name: str | None = None,
 ) -> bool:
-    """Enable/disable the built-in counters; opportunistically bridge OTel logging.
+    """Enable/disable the built-in counters. Never raises.
 
     ``enabled=False`` (via ``BONNET_METRICS_ENABLED=0`` or
     ``gateway.toml metrics_enabled=false``) makes ``observe_tool_call`` a no-op
-    and ``render_prometheus`` report only the ``up`` gauge. Never raises.
-
-    When the OTel SDK + logging instrumentation *are* installed, also
-    instruments stdlib logging so file log lines carry trace/span ids
-    (log correlation for free). Returns whether counters are enabled.
+    and ``render_prometheus`` report only the ``up`` gauge. Returns whether
+    counters are enabled.
     """
-    global _enabled, _service_name, _otel_ready
+    global _enabled, _service_name
     try:
         if enabled is None:
             raw = os.environ.get("BONNET_METRICS_ENABLED", "").strip().lower()
             enabled = raw not in ("0", "false", "no", "off")
         _enabled = bool(enabled)
-        if service_name or os.environ.get("OTEL_SERVICE_NAME"):
-            _service_name = (
-                service_name or os.environ["OTEL_SERVICE_NAME"]
-            ).strip() or _service_name
-        try:
-            from opentelemetry.instrumentation.logging import LoggingInstrumentor
-
-            LoggingInstrumentor().instrument(set_logging_format=True)
-            _otel_ready = True
-        except ImportError:
-            _otel_ready = False
-        except Exception:
-            pass
+        if service_name:
+            _service_name = service_name.strip() or _service_name
         return _enabled
     except Exception:
         return False
@@ -142,15 +108,13 @@ def observe_tool_call(
     ok: bool = True,
     tenant: str = "",
     duration_ms: float | None = None,
-    origin: str = "",
 ) -> None:
     """Record one gateway tool call. Never raises; no-op when disabled.
 
-    Counts are the primary signal (they work with zero OTel installed).
-    ``duration_ms`` feeds the latency histogram when the caller measured it
-    (middleware does); ``None`` records only the count. Also mirrors
-    tenant/origin/ok onto the current OTel span when one exists, so the
-    zero-code ASGI span gains the per-tool dimensions for free.
+    Counts are the primary signal. ``duration_ms`` feeds the latency
+    histogram when the caller measured it (middleware does); ``None``
+    records only the count. Per-call detail (origin, args, error) belongs
+    in the file log, not in metric labels.
     """
     try:
         if not _enabled:
@@ -178,56 +142,6 @@ def observe_tool_call(
                             bkey = (tool, ten, str(b))
                             _buckets[bkey] = _buckets.get(bkey, 0) + 1
                     _buckets[(tool, ten, "+Inf")] = _buckets.get((tool, ten, "+Inf"), 0) + 1
-        set_span_attributes(
-            **{
-                "bonnet.tool": tool,
-                "bonnet.tenant": ten,
-                "bonnet.ok": ok_s,
-                **({"bonnet.origin": str(origin)[:64]} if origin else {}),
-            }
-        )
-    except Exception:
-        pass
-
-
-@contextlib.contextmanager
-def tool_span(op: str, **attrs: Any) -> Iterator[Any]:
-    """Open a per-tool OTel span; nullcontext when OTel is absent.
-
-    Usage: ``with tool_span("publish", tenant=t): ...``. Under
-    ``opentelemetry-instrument`` this nests inside the auto-instrumented ASGI
-    server span; without OTel it costs one contextmanager entry. Never raises
-    during setup; body exceptions always propagate (the ``yield`` is never
-    wrapped in a catching ``except``, which would corrupt the generator
-    protocol with "generator didn't stop after throw()").
-    """
-    span_cm = None
-    try:
-        from opentelemetry import trace
-
-        tracer = trace.get_tracer("bonnet.gateway")
-        tool = _norm_tool(op)
-        safe = {f"bonnet.{k}": str(v)[:128] for k, v in attrs.items() if v is not None}
-        span_cm = tracer.start_as_current_span(f"gateway.{tool}", attributes=safe)
-    except Exception:
-        span_cm = None
-    if span_cm is None:
-        yield None
-        return
-    with span_cm as span:
-        yield span
-
-
-def set_span_attributes(**attrs: Any) -> None:
-    """Stamp attributes onto the current span. No-op without OTel. Never raises."""
-    try:
-        from opentelemetry import trace
-
-        span = trace.get_current_span()
-        if span is not None and getattr(span, "is_recording", lambda: False)():
-            span.set_attributes({k: str(v)[:128] for k, v in attrs.items()})
-    except ImportError:
-        pass
     except Exception:
         pass
 
@@ -296,5 +210,4 @@ def snapshot() -> dict[str, Any]:
             "enabled": _enabled,
             "uptime_s": round(time.time() - _start_time, 1),
             "calls": {f"{t}|{ten}|{ok_s}": n for (t, ten, ok_s), n in _calls.items()},
-            "otel_logging_bridge": _otel_ready,
         }
