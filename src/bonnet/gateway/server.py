@@ -326,9 +326,7 @@ class MetricsMiddleware(Middleware):
                 except Exception:
                     pass
                 try:
-                    log_warning(
-                        f"GATEWAY {op} fail", tenant=tenant or "unknown", ms=round(ms, 3)
-                    )
+                    log_warning(f"GATEWAY {op} fail", tenant=tenant or "unknown", ms=round(ms, 3))
                 except Exception:
                     pass
                 raise
