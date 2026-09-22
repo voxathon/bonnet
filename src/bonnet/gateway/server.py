@@ -116,21 +116,40 @@ _forwarded_for_from_request = forwarded_for_from_request
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> PlainTextResponse:
+    try:
+        from bonnet.core import metrics
+
+        metrics.observe_http("health", "GET", ok=True)
+    except Exception:
+        pass
     return PlainTextResponse("OK")
 
 
 @mcp.custom_route("/metrics", methods=["GET"])
 async def metrics_endpoint(request: Request) -> PlainTextResponse:
-    """Prometheus text exposition for gateway tool RED counters.
+    """Prometheus text exposition for gateway counters and gauges.
 
     http mode only (stdio has no port). Backed by `bonnet.core.metrics`:
-    counts accrue in-process from the tool middleware + `_gw_log` funnel.
-    Scrape with Prometheus/Grafana Alloy. Disabled with
-    `metrics_enabled = false` / `BONNET_METRICS_ENABLED=0`.
+    counts accrue in-process from the tool middleware + `_gw_log` funnel,
+    auth/gating hooks, and the HTTP routes themselves. Scrape with
+    Prometheus/Grafana Alloy. Disabled with `metrics_enabled = false` /
+    `BONNET_METRICS_ENABLED=0`.
     """
     from bonnet.core import metrics
 
-    return PlainTextResponse(metrics.render_prometheus(), media_type="text/plain; version=0.0.4")
+    try:
+        metrics.observe_http("metrics", "GET", ok=True)
+    except Exception:
+        pass
+    tenant_count = None
+    try:
+        tenant_count = len(tenants.list_tenants())
+    except Exception:
+        tenant_count = None
+    return PlainTextResponse(
+        metrics.render_prometheus(tenant_count=tenant_count),
+        media_type="text/plain; version=0.0.4",
+    )
 
 
 @mcp.custom_route("/.well-known/untp", methods=["GET"])
@@ -139,14 +158,24 @@ async def well_known_bonnet(request: Request):
 
     import httpx
 
+    from bonnet.core import metrics
+
     bonnet_url = os.environ.get("BONNET_URL", "https://localhost:2272")
     try:
         verify = resolve_verify_tls(bonnet_url)
         async with httpx.AsyncClient(verify=verify, timeout=10.0) as http:
             resp = await http.get(f"{bonnet_url}/.well-known/untp")
+            try:
+                metrics.observe_http("untp", "GET", ok=resp.status_code < 400)
+            except Exception:
+                pass
             return JSONResponse(content=resp.json(), status_code=resp.status_code)
     except Exception as e:
         print(f"error: discovery proxy failed for {bonnet_url}: {e!r}", file=sys.stderr)
+        try:
+            metrics.observe_http("untp", "GET", ok=False)
+        except Exception:
+            pass
         return PlainTextResponse("Failed to reach Bonnet server", status_code=502)
 
 
@@ -235,6 +264,14 @@ class AuthMiddleware(Middleware):
             # username from whatever ran in this context before it.
             current_username.set(None)
             current_password.set("")
+        # Auth outcome counter: how much traffic is authenticated vs
+        # anonymous vs rejected. Best-effort; never fails the request.
+        try:
+            from bonnet.core import metrics
+
+            metrics.observe_auth(tenancy.current_auth_status.get())
+        except Exception:
+            pass
 
     async def on_request(self, context: MiddlewareContext, call_next):
         self._set_auth_context(context)
@@ -253,9 +290,9 @@ class MetricsMiddleware(Middleware):
     """Time every MCP tool call into the built-in RED counters + file log.
 
     One place covering all ~50 tools: `on_call_tool` wraps the call with a
-    monotonic clock, emits pedantic start/finish lines to the on-file log,
-    then records ``(tool, tenant, ok, duration_ms)`` via
-    ``bonnet.core.metrics``. Best-effort and never raises into the tool
+    monotonic clock and the in-flight saturation gauge, emits pedantic
+    start/finish lines to the on-file log, then records
+    ``(tool, tenant, ok, duration_ms)`` via ``bonnet.core.metrics``. Best-effort and never raises into the tool
     path — a metrics/logging failure must not fail the call it measures.
 
     The tool name is resolved defensively because FastMCP's
@@ -279,19 +316,22 @@ class MetricsMiddleware(Middleware):
         except Exception:
             pass
         start = _time.perf_counter()
-        try:
-            result = await call_next(context)
-        except Exception:
-            ms = (_time.perf_counter() - start) * 1000.0
+        with metrics.in_flight():
             try:
-                metrics.observe_tool_call(op, ok=False, tenant=tenant or "", duration_ms=ms)
+                result = await call_next(context)
             except Exception:
-                pass
-            try:
-                log_warning(f"GATEWAY {op} fail", tenant=tenant or "unknown", ms=round(ms, 3))
-            except Exception:
-                pass
-            raise
+                ms = (_time.perf_counter() - start) * 1000.0
+                try:
+                    metrics.observe_tool_call(op, ok=False, tenant=tenant or "", duration_ms=ms)
+                except Exception:
+                    pass
+                try:
+                    log_warning(
+                        f"GATEWAY {op} fail", tenant=tenant or "unknown", ms=round(ms, 3)
+                    )
+                except Exception:
+                    pass
+                raise
         ms = (_time.perf_counter() - start) * 1000.0
         try:
             metrics.observe_tool_call(op, ok=True, tenant=tenant or "", duration_ms=ms)

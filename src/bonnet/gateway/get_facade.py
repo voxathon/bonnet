@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import hashlib
 import json
 import os
@@ -86,6 +87,35 @@ from bonnet.gateway import tenancy
 from bonnet.gateway.paths import ANONYMOUS_TENANT
 from bonnet.gateway.tools import mcp
 from bonnet.net.firehose_transport import forwarded_for_ctx, forwarded_for_from_request
+
+
+def _observe_http(route: str, ok: bool) -> None:
+    """Best-effort facade hit counter. Never raises."""
+    try:
+        from bonnet.core import metrics
+
+        metrics.observe_http(route, "GET", ok=ok)
+    except Exception:
+        pass
+
+
+def _counted(route: str):
+    """Decorator counting one facade handler's hits by outcome."""
+
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(request: Request):
+            try:
+                resp = await fn(request)
+            except Exception:
+                _observe_http(route, False)
+                raise
+            _observe_http(route, resp.status_code < 400)
+            return resp
+
+        return wrapper
+
+    return deco
 
 #: Set by `server.run()` from flag > env > toml. Tests may call
 #: `set_enabled(True)` directly. Env is honored live so the facade can be
@@ -490,6 +520,7 @@ def _addendum(
 
 @mcp.custom_route("/call", methods=["GET"])
 @mcp.custom_route("/call/", methods=["GET"])
+@_counted("call_list")
 async def call_list(request: Request) -> JSONResponse:
     """List tools with braindead usage strings."""
     if not is_enabled():
@@ -526,6 +557,7 @@ async def call_list(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/call/{tool_name}", methods=["GET"])
+@_counted("call_tool")
 async def call_tool_get(request: Request) -> JSONResponse:
     """Run one tool from query params: GET /call/<tool>?<arg>=<v>&key=..."""
     if not is_enabled():

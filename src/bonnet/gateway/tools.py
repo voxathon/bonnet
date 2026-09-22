@@ -514,6 +514,9 @@ def _gw_log(op: str, ok: bool = True, **fields) -> None:
             tenant=tenant_t or "",
             duration_ms=ms if isinstance(ms, (int, float)) else None,
         )
+        err = fields.get("err")
+        if isinstance(err, str) and err:
+            metrics.observe_tool_error(op, tenant=tenant_t or "", err=err)
     except Exception:
         pass
 

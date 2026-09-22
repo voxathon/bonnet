@@ -42,6 +42,7 @@ of the default 409 refusal.
 
 from __future__ import annotations
 
+import functools
 import os
 import secrets
 
@@ -51,6 +52,37 @@ from starlette.responses import JSONResponse
 from bonnet.gateway import paths, tenants
 from bonnet.gateway.registry import TenantError, validate_tenant_id
 from bonnet.gateway.tools import mcp
+
+
+def _counted(op: str):
+    """Decorator counting one admin handler's hits by outcome."""
+
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(request: Request) -> JSONResponse:
+            try:
+                from bonnet.core import metrics
+            except Exception:
+                return await fn(request)
+            try:
+                resp = await fn(request)
+            except Exception:
+                try:
+                    metrics.observe_http(f"admin_{op}", request.method, ok=False)
+                except Exception:
+                    pass
+                raise
+            try:
+                metrics.observe_http(
+                    f"admin_{op}", request.method, ok=resp.status_code < 400
+                )
+            except Exception:
+                pass
+            return resp
+
+        return wrapper
+
+    return deco
 
 #: Env var naming the admin bearer secret. Env wins over gateway.toml so a
 #: rotation is a process-environment change, not a config-file edit.
@@ -115,6 +147,7 @@ async def _body(request: Request) -> dict:
 
 
 @mcp.custom_route("/admin/tenants", methods=["POST"])
+@_counted("tenant_add")
 async def admin_tenant_add(request: Request) -> JSONResponse:
     denied = _forbidden(request)
     if denied is not None:
@@ -138,6 +171,7 @@ async def admin_tenant_add(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/admin/tenants", methods=["GET"])
+@_counted("tenant_list")
 async def admin_tenant_list(request: Request) -> JSONResponse:
     denied = _forbidden(request)
     if denied is not None:
@@ -146,6 +180,7 @@ async def admin_tenant_list(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/admin/tenants/{tenant_id}", methods=["GET"])
+@_counted("tenant_get")
 async def admin_tenant_get(request: Request) -> JSONResponse:
     denied = _forbidden(request)
     if denied is not None:
@@ -181,6 +216,7 @@ def _set_enabled(request: Request, enabled: bool) -> JSONResponse:
 
 
 @mcp.custom_route("/admin/tenants/{tenant_id}/enable", methods=["POST"])
+@_counted("tenant_enable")
 async def admin_tenant_enable(request: Request) -> JSONResponse:
     denied = _forbidden(request)
     if denied is not None:
@@ -189,6 +225,7 @@ async def admin_tenant_enable(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/admin/tenants/{tenant_id}/disable", methods=["POST"])
+@_counted("tenant_disable")
 async def admin_tenant_disable(request: Request) -> JSONResponse:
     denied = _forbidden(request)
     if denied is not None:
@@ -197,6 +234,7 @@ async def admin_tenant_disable(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/admin/keys", methods=["POST"])
+@_counted("key_add")
 async def admin_key_add(request: Request) -> JSONResponse:
     denied = _forbidden(request)
     if denied is not None:
@@ -223,6 +261,7 @@ async def admin_key_add(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/admin/keys", methods=["GET"])
+@_counted("key_list")
 async def admin_key_list(request: Request) -> JSONResponse:
     denied = _forbidden(request)
     if denied is not None:
@@ -236,6 +275,7 @@ async def admin_key_list(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/admin/tenants/{tenant_id}/delete", methods=["POST"])
+@_counted("tenant_delete")
 async def admin_tenant_delete(request: Request) -> JSONResponse:
     """Delete a tenant: its registry row, its keys, and its state directory.
 
@@ -275,6 +315,7 @@ async def admin_tenant_delete(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/admin/keys/{key_id}/revoke", methods=["POST"])
+@_counted("key_revoke")
 async def admin_key_revoke(request: Request) -> JSONResponse:
     """Revoke one key, unless it is the tenant's last live one.
 

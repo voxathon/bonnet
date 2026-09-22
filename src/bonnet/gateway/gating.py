@@ -443,12 +443,19 @@ class GatingMiddleware(Middleware):
                 _with_cursor_context(t, banner) if t.name in CURSOR_CONTEXT_TOOLS else t
                 for t in tools
             ]
+        try:
+            from bonnet.core import metrics
+
+            metrics.observe_http("list_tools", "mcp", ok=True)
+        except Exception:
+            pass
         return tools
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         tool = await _lookup(context)
         if tool is not None:
             reason = _anonymous_forbids(tool)
+            kind = "anonymous" if reason is not None else None
             if reason is None and gating_enabled():
                 # The call's own board=, not the cursor's — a call naming a
                 # different board must be checked against that board's
@@ -459,10 +466,25 @@ class GatingMiddleware(Middleware):
                 reason = await _missing_for(
                     tool, arguments.get("board") or None, arguments.get("auth") or None
                 )
+                kind = "needs" if reason is not None else None
             if reason is not None:
                 # Never a bare refusal: say what is missing and what fixes it,
                 # so a caller working from a stale tool list is redirected
                 # rather than stranded.
+                try:
+                    from bonnet.core import metrics
+
+                    try:
+                        tenant = tenancy.current_tenant.get()
+                    except Exception:
+                        tenant = ""
+                    metrics.observe_gating_refusal(
+                        context.message.name,
+                        tenant=tenant or "",
+                        reason=kind or "unknown",
+                    )
+                except Exception:
+                    pass
                 raise ToolError(f"{context.message.name} is unavailable — {reason}")
         return await call_next(context)
 
