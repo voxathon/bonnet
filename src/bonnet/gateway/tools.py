@@ -1483,7 +1483,7 @@ async def register(
     return response
 
 
-@mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})
+@mcp.tool(tags={NEEDS_IDENTITY})
 async def export_identity(auth: str | None = None) -> dict:
     """Export one signing identity's private key for mobility/backup.
 

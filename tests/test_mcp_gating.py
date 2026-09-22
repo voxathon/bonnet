@@ -289,7 +289,10 @@ async def test_disconnect_re_gates_origin_facing_tools(bridge):
 
     await tools.disconnect()
 
-    assert await _visible() == UNGATED
+    # disconnect forgets nothing: the "scout" identity is still held locally,
+    # so the local-only export_identity (NEEDS_IDENTITY without NEEDS_ORIGIN)
+    # stays visible while every tool that sends a request re-gates.
+    assert await _visible() == UNGATED | {"export_identity"}
 
 
 # --- per-caller, which is what makes http work ----------------------------
