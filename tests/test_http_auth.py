@@ -419,9 +419,7 @@ class TestRejections:
     @pytest.mark.asyncio
     async def test_wrong_label_rejected(self, keypair, key_resolver, request_msg, valid_nonce):
         priv, pub = keypair
-        signer = BonnetSigner(
-            private_key=priv, key_id="ed25519:" + pub.hex(), label="foreign"
-        )
+        signer = BonnetSigner(private_key=priv, key_id="ed25519:" + pub.hex(), label="foreign")
         now = int(time.time())
         await signer.sign_request(request_msg, nonce=valid_nonce, created=now, expires=now + 60)
         verifier = BonnetVerifier(key_resolver=key_resolver)
