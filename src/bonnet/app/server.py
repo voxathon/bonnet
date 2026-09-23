@@ -596,7 +596,6 @@ class BonnetServer:
                 ZERO_ID,
                 Intent,
                 MetadataMap,
-                compute_body_hash,
                 encode_intent,
                 metadata_bytes,
                 metadata_text,
@@ -621,7 +620,7 @@ class BonnetServer:
                         metadata_u64(3, 1),
                     ]
                 ),
-                body_hash=compute_body_hash(b""),
+                body_hash=ZERO_ID,
                 body_size=0,
             )
 

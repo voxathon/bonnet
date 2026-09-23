@@ -264,6 +264,26 @@ class TestMetadata:
         with pytest.raises(NonCanonical):
             decode_metadata(encoded)
 
+    def test_text_list_sorts_by_utf8_bytes_not_casefold(self):
+        m = MetadataMap([metadata_text_list(1, ["b", "A"])])
+        decoded = decode_metadata(encode_metadata(m))
+        assert decoded.get_text_list(1) == ["A", "b"]
+
+    def test_text_list_length_prefix_excluded_from_sort(self):
+        # Length-prefix-first would order ["b", "aa"]; UTF-8-byte order gives ["aa", "b"].
+        m = MetadataMap([metadata_text_list(1, ["b", "aa"])])
+        decoded = decode_metadata(encode_metadata(m))
+        assert decoded.get_text_list(1) == ["aa", "b"]
+
+    def test_text_list_nfc_normalized_before_sort(self):
+        nfd = "é"
+        nfc = unicodedata.normalize("NFC", nfd)
+        assert nfd.encode("utf-8") != nfc.encode("utf-8")
+        m = MetadataMap([metadata_text_list(1, [nfd, "z"])])
+        decoded = decode_metadata(encode_metadata(m))
+        # NFC é is 0xC3 0xA9, which sorts after ASCII "z" (0x7A) in byte order.
+        assert decoded.get_text_list(1) == ["z", nfc]
+
     def test_unknown_value_type_rejected(self):
         field = MetadataField(1, 0xFF, b"junk")
         m = MetadataMap([field])
@@ -659,6 +679,34 @@ class TestWitness:
         assert decoded.received_from_hostname == "bbs.test"
         assert decoded.seen_at == 1700000000
         assert not is_origin_witness(decoded)
+
+    def test_relay_hostname_and_origin_are_distinct_fields(self):
+        # Pins wire order and semantics when hostname != origin (they coincide
+        # on single-host relays, which makes live data ambiguous).
+        event_hash = bytes.fromhex("ee" * 32)
+        w = Witness(
+            event_origin="bbs.test",
+            event_id=EVENT_ID_1,
+            event_hash=event_hash,
+            event_origin_seq=7,
+            relay_pubkey=RELAY_PUB,
+            relay_hostname="relay.example",
+            relay_origin="origin.example",
+            received_from_pubkey=ORIGIN_PUB,
+            received_from_hostname="bbs.test",
+            seen_at=1700000000,
+        )
+        unsigned = encode_unsigned_witness(w)
+        w.relay_signature = sign_witness(RELAY, unsigned)
+        decoded = decode_witness(encode_witness(w))
+        assert decoded.event_origin_seq == 7
+        assert decoded.relay_hostname == "relay.example"
+        assert decoded.relay_origin == "origin.example"
+        assert verify_witness_signature(
+            RELAY_PUB,
+            encode_unsigned_witness(decoded),
+            decoded.relay_signature,
+        )
 
     def test_unbounded_witness_is_unencodable(self):
         event_hash = bytes.fromhex("ee" * 32)
