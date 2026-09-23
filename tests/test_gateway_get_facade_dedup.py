@@ -46,7 +46,7 @@ def dedup_env(tmp_path, monkeypatch):
     monkeypatch.delenv("MCP_DEDUP_WINDOW_SECONDS", raising=False)
     tenancy.reset_store_cache()
     tenancy.reset_registry_cache()
-    get_facade._snapshots.clear()
+    get_facade.reset_snapshot_state()
     get_facade.reset_dedup_state()
     get_facade.set_enabled(True)
 
@@ -87,7 +87,7 @@ def dedup_env(tmp_path, monkeypatch):
     yield key, state, calls
 
     get_facade.set_enabled(None)
-    get_facade._snapshots.clear()
+    get_facade.reset_snapshot_state()
     get_facade.reset_dedup_state()
     tenancy.reset_store_cache()
     tenancy.reset_registry_cache()
@@ -241,7 +241,11 @@ async def test_replay_carries_fresh_addendum(dedup_env):
     first = _body(await get_facade.call_tool_get(_request("publish_article", q)))
     second = _body(await get_facade.call_tool_get(_request("publish_article", q)))
     assert len(calls) == 1
-    for field in ("session", "tools_changed", "visible_tools"):
+    for field in ("session", "session_minted", "tools_changed", "visible_tools"):
         assert field in second
-    assert second["session"] == "default"
+    # Same-URL retry replays the executing call: same session to adopt,
+    # minted on the first call, not a fresh label holding nothing.
+    assert second["session"] == first["session"]
+    assert second["session"] != "default"
+    assert second["session_minted"] is True
     assert second["visible_tools"] == first["visible_tools"]

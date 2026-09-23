@@ -39,9 +39,13 @@ Design (see spike notes in the plan thread):
 - Session persistence is facade-owned: `call_tool` creates a `Context`
   with no session, so FastMCP's session load/save degrades to no-ops
   (best-effort by design) and the facade restores/saves its own
-  `session.snapshot()` keyed by `(tenant, ?session= label)` in memory.
-  Anonymous callers are stateless (no restore/save) so one shared
-  fallback key can't leak cursor position across callers.
+  `session.snapshot()` keyed by `(tenant, ?session= label)` with a sliding
+  TTL. A missing, blank, or literal-`"default"` label mints a fresh random
+  one per call — there is no shared `default` cursor — and the minted label
+  rides home in the response's `session` field (with `session_minted: true`)
+  for the caller to adopt on later calls. Anonymous callers are stateless
+  (no restore/save, no mint) so one shared fallback key can't leak cursor
+  position across callers.
 - Query-auth (`?key=`) is accepted **only here**, never on `/mcp/`.
   Header credentials always win over query ones. `?key=` must be the
   full `bnt_<id>_<secret>`; a bare key id never resolves.
@@ -54,12 +58,14 @@ Design (see spike notes in the plan thread):
   GET-only harnesses retry by re-fetching the same URL, and every write
   tool mints fresh randomness (`article_id`, `event_id`) per call, so each
   retry would otherwise append a distinct duplicate record to the firehose.
-  The dedup key is (tenant, session label, tool, canonical args) — the
-  source IP is deliberately ignored, `?key=`/`?session=` never reach the
-  tool args, and only `ok:true` results are cached. Reads are never
-  deduped. Process-local memory, like `_snapshots` below; intentional
-  duplicate content should be spaced past the window or sent via POST.
-  See `DEDUP_TTL_SECONDS`.
+  The dedup key is (tenant, requested session label, tool, canonical args)
+  — requested, not minted, so same-URL retries coalesce even though each
+  would mint its own label, and the replay echoes the executing call's
+  session for the caller to adopt. The source IP is deliberately ignored,
+  `?key=`/`?session=` never reach the tool args, and only `ok:true`
+  results are cached. Reads are never deduped. Process-local memory, like
+  `_snapshots` below; intentional duplicate content should be spaced past
+  the window or sent via POST. See `DEDUP_TTL_SECONDS`.
 
 Gated off by default: `--allow-get-rpc` / `$MCP_ALLOW_GET_RPC` /
 `gateway.toml [gateway] allow_get_rpc`. Disabled → 404 (the surface is
@@ -76,6 +82,7 @@ import functools
 import hashlib
 import json
 import os
+import secrets
 import time
 from typing import Any
 
@@ -144,16 +151,83 @@ RESERVED_PARAMS = frozenset({"key", "auth", "session"})
 #: In-memory snapshots keyed by (tenant, session label). Process-local,
 #: like FastMCP's default MemoryStore — a restart starts fresh and falls
 #: back to the remembered origin, exactly like a brand-new MCP session.
-_snapshots: dict[tuple[str, str], dict[str, Any]] = {}
-_snapshot_locks: dict[tuple[str, str], asyncio.Lock] = {}
+#: Entries carry a sliding expiry refreshed on every access: an idle label
+#: dies on its own, so minting labels per caller needs no cap and no sweep.
+#: Anonymous callers are stateless (no restore/save), so one shared
+#: fallback key can't leak cursor position across callers.
+_snapshots: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_snapshot_locks: dict[tuple[str, str], tuple[float, asyncio.Lock]] = {}
+
+#: Sliding session TTL in seconds. Override with
+#: $MCP_SESSION_TTL_SECONDS ("0" makes every call start fresh).
+SESSION_TTL_SECONDS = 86400.0
+
+
+def _session_ttl() -> float:
+    """The live session TTL in seconds (env override, floor 0)."""
+    raw = os.environ.get("MCP_SESSION_TTL_SECONDS", "")
+    if not raw.strip():
+        return SESSION_TTL_SECONDS
+    try:
+        return max(0.0, float(raw.strip()))
+    except ValueError:
+        return SESSION_TTL_SECONDS
+
+
+def _snapshot_get(key: tuple[str, str]) -> dict[str, Any] | None:
+    """A live snapshot for `key`, or None on miss/expiry (sweeps the entry)."""
+    entry = _snapshots.get(key)
+    if entry is None:
+        return None
+    expires, stored = entry
+    if time.monotonic() >= expires:
+        _snapshots.pop(key, None)
+        _snapshot_locks.pop(key, None)
+        return None
+    _snapshots[key] = (time.monotonic() + _session_ttl(), stored)
+    return stored
+
+
+def _snapshot_put(key: tuple[str, str], snapshot: dict[str, Any]) -> None:
+    """Remember a snapshot with a fresh sliding expiry (TTL 0 stores nothing)."""
+    window = _session_ttl()
+    if window <= 0:
+        return
+    _snapshots[key] = (time.monotonic() + window, snapshot)
 
 
 def _snapshot_lock(key: tuple[str, str]) -> asyncio.Lock:
-    lock = _snapshot_locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _snapshot_locks[key] = lock
+    now = time.monotonic()
+    entry = _snapshot_locks.get(key)
+    if entry is not None:
+        expires, lock = entry
+        if now < expires:
+            _snapshot_locks[key] = (now + _session_ttl(), lock)
+            return lock
+    lock = asyncio.Lock()
+    _snapshot_locks[key] = (now + _session_ttl(), lock)
     return lock
+
+
+def reset_snapshot_state() -> None:
+    """Drop session snapshots and locks (tests only)."""
+    _snapshots.clear()
+    _snapshot_locks.clear()
+
+
+def _mint_label(tenant: str) -> str:
+    """A fresh session label no live entry under `tenant` holds.
+
+    Collision is already absurd (128-bit URL-safe randomness); the loop is
+    belt-and-braces against a lingering live entry, and the fallback past
+    it is more randomness rather than an error.
+    """
+    for _ in range(8):
+        candidate = secrets.token_urlsafe(16)
+        entry = _snapshots.get((tenant, candidate))
+        if entry is None or time.monotonic() >= entry[0]:
+            return candidate
+    return secrets.token_urlsafe(24)
 
 
 #: Burst-dedup window for write tools reached through this facade, in
@@ -209,8 +283,11 @@ WRITE_TOOL_NAMES = frozenset(
 FACADE_FORBIDDEN = frozenset({"export_identity"})
 
 #: Recent successful write results keyed by dedup key (see `_dedup_key`):
-#: key -> (expires_monotonic, stored JSON-able result).
-_recent_writes: dict[tuple[str, str, str, str], tuple[float, Any]] = {}
+#: key -> (expires_monotonic, (stored JSON-able result, executing session)).
+#: The executing session rides along so a replay echoes the label whose
+#: snapshot the first execution saved under — the retry adopts the cursor
+#: that actually moved, not a fresh one that never ran.
+_recent_writes: dict[tuple[str, str, str, str], tuple[float, tuple[Any, str]]] = {}
 _dedup_locks: dict[tuple[str, str, str, str], asyncio.Lock] = {}
 
 #: Miss sentinel for `_dedup_get`: a cached result may legitimately be
@@ -235,10 +312,13 @@ def _dedup_key(args: dict[str, Any]) -> str:
     Canonical JSON over the already-parsed `args` (which exclude the facade
     `RESERVED_PARAMS`), so `?subject=A&body=B` and `?body=B&subject=A` hash
     together, and `?key=` differences and the caller's source IP never split
-    the key. `?session=` DOES split the key — but one level up, as a tuple
-    element, because the cursor scope differs per session. `?auth=` splits
-    too, via `args` itself: different identities must never coalesce.
-    Non-JSON-able arg values degrade to `repr` rather than breaking the call.
+    the key. The requested `?session=` DOES split the key — but one level up,
+    as a tuple element, because the cursor scope differs per session; the
+    requested label is used (missing/blank/`"default"` normalizes to `""`),
+    never the minted one, so same-URL retries coalesce across mints.
+    `?auth=` splits too, via `args` itself: different identities must never
+    coalesce. Non-JSON-able arg values degrade to `repr` rather than
+    breaking the call.
     """
     try:
         canonical = json.dumps(args, sort_keys=True, separators=(",", ":"))
@@ -256,7 +336,7 @@ def _dedup_lock(key: tuple[str, str, str, str]) -> asyncio.Lock:
 
 
 def _dedup_get(key: tuple[str, str, str, str]) -> Any:
-    """A live cached write result for `key`, or `_DEDUP_MISS` on miss/expiry.
+    """A live cached (result, session) pair for `key`, or `_DEDUP_MISS`.
 
     `None` is a legitimate cached result (a tool returning nothing), so the
     sentinel — not None — marks a miss. Returns a deep copy so callers
@@ -275,8 +355,10 @@ def _dedup_get(key: tuple[str, str, str, str]) -> Any:
         return stored
 
 
-def _dedup_store(key: tuple[str, str, str, str], result: Any, window: float) -> None:
-    """Remember a successful write result for `window` seconds."""
+def _dedup_store(
+    key: tuple[str, str, str, str], result: Any, session_label: str, window: float
+) -> None:
+    """Remember a successful write result plus its session for `window`."""
     if window <= 0:
         return
     if len(_recent_writes) >= _DEDUP_MAX_ENTRIES:
@@ -290,7 +372,7 @@ def _dedup_store(key: tuple[str, str, str, str], result: Any, window: float) -> 
         stored = copy.deepcopy(result)
     except Exception:
         stored = result
-    _recent_writes[key] = (time.monotonic() + window, stored)
+    _recent_writes[key] = (time.monotonic() + window, (stored, session_label))
 
 
 def reset_dedup_state() -> None:
@@ -507,13 +589,20 @@ async def _try_visible_tool_names(patched_request: Request) -> list[str] | None:
 
 
 def _addendum(
-    session_label: str, before: list[str] | None, after: list[str] | None
+    session_label: str, before: list[str] | None, after: list[str] | None, minted: bool = False
 ) -> dict[str, Any]:
-    """The tiny visibility addendum for a `GET /call/<tool>` response."""
+    """The tiny visibility addendum for a `GET /call/<tool>` response.
+
+    `session` is always echoed — it is how a caller that cannot keep local
+    state learns which cursor it holds. `session_minted` marks a label the
+    server minted for a missing/blank/`"default"` request: adopt the echo
+    on later calls.
+    """
     visible = after if after is not None else (before if before is not None else [])
     changed = before is not None and after is not None and before != after
     return {
         "session": session_label,
+        "session_minted": minted,
         "tools_changed": changed,
         "visible_tools": visible,
     }
@@ -567,7 +656,12 @@ async def call_tool_get(request: Request) -> JSONResponse:
     params = request.query_params
     query_key = params.get("key", "") or ""
     query_auth = params.get("auth", "") or ""
-    session_label = params.get("session", "") or "default"
+    raw_session = params.get("session", "") or ""
+    # Requested label, normalized: missing/blank/`"default"` all mean "mint
+    # me one" and share one dedup slot, so same-URL retries coalesce across
+    # mints. An explicit anything-else is honored verbatim. (`"Default"` and
+    # friends are literal labels, not the default.)
+    requested_norm = "" if (raw_session.strip() == "" or raw_session == "default") else raw_session
 
     tool = await mcp.get_tool(tool_name)
     if tool is None:
@@ -606,10 +700,23 @@ async def call_tool_get(request: Request) -> JSONResponse:
 
     tenant, reset_tenant = _apply_tenant(request, query_key)
     anonymous = tenant == ANONYMOUS_TENANT
+    if anonymous:
+        # Stateless: no restore, no save, no mint — the label is echoed
+        # untouched but holds nothing, so one shared fallback key can't
+        # leak cursor position across callers.
+        session_label = raw_session or "default"
+        minted = False
+    elif requested_norm:
+        session_label = requested_norm
+        minted = False
+    else:
+        # No shared `default` cursor: mint a fresh label holding this call's
+        # position, echoed back for the caller to adopt.
+        session_label = _mint_label(tenant)
+        minted = True
     snapshot_key = (tenant, session_label)
     if not anonymous:
-        stored = _snapshots.get(snapshot_key)
-        session_store.restore(stored)
+        session_store.restore(_snapshot_get(snapshot_key))
 
     patched_request = _with_injected_key(request, query_key)
     from fastmcp.server.http import set_http_request
@@ -620,18 +727,21 @@ async def call_tool_get(request: Request) -> JSONResponse:
     before = await _try_visible_tool_names(patched_request)
 
     # Burst dedup for writes (singleflight + short-TTL replay). Keyed per
-    # (tenant, session label, tool, canonical args) so one caller's retry
-    # burst coalesces while two callers sharing a tenant+session label but
-    # doing different things never collide — and, by the same token, two
+    # (tenant, requested session label, tool, canonical args) so one caller's
+    # retry burst coalesces while two callers sharing a tenant but doing
+    # different things never collide — and, by the same token, two
     # genuinely different write intentions from one caller never merge.
-    # Lock order is fixed everywhere: dedup lock -> snapshot lock, never
-    # the reverse, so concurrent bursts cannot deadlock against each other.
+    # Requested, not minted: same-URL retries share the "" slot across
+    # mints, and the replay echoes the executing call's session so the
+    # retry adopts the cursor that actually moved. Lock order is fixed
+    # everywhere: dedup lock -> snapshot lock, never the reverse, so
+    # concurrent bursts cannot deadlock against each other.
     dedup_window = _dedup_window()
     dedup_cacheable = tool_name in WRITE_TOOL_NAMES and not anonymous and dedup_window > 0
     dedup_key: tuple[str, str, str, str] | None = None
     dedup_lock: asyncio.Lock | None = None
     if dedup_cacheable:
-        dedup_key = (tenant, session_label, tool_name, _dedup_key(args))
+        dedup_key = (tenant, requested_norm, tool_name, _dedup_key(args))
         dedup_lock = _dedup_lock(dedup_key)
         await dedup_lock.acquire()
         try:
@@ -645,12 +755,19 @@ async def call_tool_get(request: Request) -> JSONResponse:
                 _log_info("GET_FACADE dedup hit", tool=tool_name, tenant=tenant)
             except Exception:
                 pass
+            hit_result, hit_session = hit
+            # Hydrate the executing call's cursor so the replayed addendum
+            # reports visibility for the position that moved, not this
+            # request's fresh one.
+            session_store.restore(_snapshot_get((tenant, hit_session)))
             after_hit = await _try_visible_tool_names(patched_request)
-            addendum = _addendum(session_label, before, after_hit)
+            addendum = _addendum(
+                hit_session, before, after_hit, minted=(hit_session != raw_session)
+            )
             reset_tenant()
             dedup_lock.release()
             return JSONResponse(
-                {"ok": True, "result": hit, **addendum},
+                {"ok": True, "result": hit_result, **addendum},
                 headers=_no_store_headers(),
             )
 
@@ -666,14 +783,14 @@ async def call_tool_get(request: Request) -> JSONResponse:
                 after = None
             if dedup_cacheable and dedup_key is not None:
                 try:
-                    _dedup_store(dedup_key, _result_to_json(result), dedup_window)
+                    _dedup_store(dedup_key, _result_to_json(result), session_label, dedup_window)
                 except Exception:
                     pass
     except Exception as e:
         from fastmcp.exceptions import NotFoundError
 
         after_err = await _try_visible_tool_names(patched_request)
-        addendum = _addendum(session_label, before, after_err)
+        addendum = _addendum(session_label, before, after_err, minted=minted)
         if isinstance(e, NotFoundError):
             return JSONResponse(
                 {"ok": False, "error": f"unknown tool {tool_name!r}", **addendum},
@@ -687,7 +804,7 @@ async def call_tool_get(request: Request) -> JSONResponse:
     finally:
         if not anonymous:
             try:
-                _snapshots[snapshot_key] = session_store.snapshot()
+                _snapshot_put(snapshot_key, session_store.snapshot())
             except Exception:
                 pass
         reset_tenant()
@@ -702,7 +819,7 @@ async def call_tool_get(request: Request) -> JSONResponse:
         {
             "ok": True,
             "result": _result_to_json(result),
-            **_addendum(session_label, before, after),
+            **_addendum(session_label, before, after, minted=minted),
         },
         headers=_no_store_headers(),
     )

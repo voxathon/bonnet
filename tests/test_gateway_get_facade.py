@@ -50,7 +50,7 @@ def facade_env(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     tenancy.reset_store_cache()
     tenancy.reset_registry_cache()
-    get_facade._snapshots.clear()
+    get_facade.reset_snapshot_state()
     get_facade.set_enabled(True)
 
     state = {"extra": False, "fail": False}
@@ -89,7 +89,7 @@ def facade_env(tmp_path, monkeypatch):
     yield state, calls
 
     get_facade.set_enabled(None)
-    get_facade._snapshots.clear()
+    get_facade.reset_snapshot_state()
     tenancy.reset_store_cache()
     tenancy.reset_registry_cache()
 
@@ -192,8 +192,72 @@ async def test_authenticated_session_label_echo_and_snapshot(facade_env):
     body = _body(resp)
     assert body["ok"] is True
     assert body["session"] == "bob"
+    assert body["session_minted"] is False
     assert body["tools_changed"] is False
     assert ("alice", "bob") in get_facade._snapshots
+
+
+async def test_omitted_session_mints_unique_labels(facade_env):
+    _, _ = facade_env
+    key = tenants.add_tenant("alice")
+    first = _body(await get_facade.call_tool_get(_request("where_am_i", {"key": key})))
+    second = _body(await get_facade.call_tool_get(_request("where_am_i", {"key": key})))
+    assert first["ok"] is True and second["ok"] is True
+    assert first["session_minted"] is True
+    assert second["session_minted"] is True
+    assert first["session"] != "default"
+    assert second["session"] != "default"
+    assert first["session"] != second["session"]
+
+
+async def test_explicit_default_is_yanked(facade_env):
+    _, _ = facade_env
+    key = tenants.add_tenant("alice")
+    first = _body(
+        await get_facade.call_tool_get(_request("where_am_i", {"key": key, "session": "default"}))
+    )
+    second = _body(
+        await get_facade.call_tool_get(_request("where_am_i", {"key": key, "session": "default"}))
+    )
+    assert first["session_minted"] is True
+    assert second["session_minted"] is True
+    assert first["session"] != "default"
+    assert first["session"] != second["session"]
+    assert ("alice", "default") not in get_facade._snapshots
+
+
+async def test_minted_label_round_trips(facade_env):
+    _, _ = facade_env
+    key = tenants.add_tenant("alice")
+    first = _body(await get_facade.call_tool_get(_request("where_am_i", {"key": key})))
+    minted = first["session"]
+    second = _body(
+        await get_facade.call_tool_get(_request("where_am_i", {"key": key, "session": minted}))
+    )
+    assert second["session"] == minted
+    assert second["session_minted"] is False
+
+
+async def test_anonymous_omitted_session_mints_nothing(facade_env):
+    _, _ = facade_env
+    body = _body(await get_facade.call_tool_get(_request("where_am_i", {})))
+    assert body["ok"] is True
+    assert body["session"] == "default"
+    assert body["session_minted"] is False
+    assert get_facade._snapshots == {}
+
+
+async def test_session_ttl_expiry_starts_fresh(facade_env, monkeypatch):
+    _, _ = facade_env
+    monkeypatch.setenv("MCP_SESSION_TTL_SECONDS", "0.05")
+    key = tenants.add_tenant("alice")
+    first = _body(await get_facade.call_tool_get(_request("where_am_i", {"key": key})))
+    minted = first["session"]
+    assert get_facade._snapshot_get(("alice", minted)) is not None
+    import asyncio as _asyncio
+
+    await _asyncio.sleep(0.08)
+    assert get_facade._snapshot_get(("alice", minted)) is None
 
 
 def _request_with_headers(tool_name, query, headers):
