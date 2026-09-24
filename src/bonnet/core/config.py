@@ -61,7 +61,9 @@ class RoutingConfig:
     auto_dial "trusted-peers-only": a learned route for origin X is
         dialed only when it arrived via a configured peer (or an
         origin in route_trust). TOFU pinning and the SSRF dial guards
-        apply to learned dials exactly as to configured ones.
+        apply to learned dials exactly as to configured ones. A dialed
+        origin joins the relay's allowed origins, so it is projected
+        and readable; its punishments are never imported.
     """
 
     auto_dial: str = "off"

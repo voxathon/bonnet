@@ -112,11 +112,17 @@ class FirehoseHTTPServer:
         replay_ledger: ReplayLedger | None = None,
         rate_limiter: RateLimiter | None = None,
         users_projection=None,
+        known_origins: set[str] | None = None,
     ):
         self._handler = command_handler
         self._server_identity = server_identity
         self._config = config
         self._users = users_projection
+        # The relay's live allowed-origins set, shared by reference so
+        # learned origins show up here as soon as they become readable.
+        if known_origins is None:
+            known_origins = {config.origin, *(p.origin for p in getattr(config, "peers", []))}
+        self._known_origins = known_origins
 
         if anonymous_identity is None:
             anonymous_identity = Identity.generate()
@@ -271,12 +277,12 @@ class FirehoseHTTPServer:
         return capabilities
 
     async def _handle_discovery(self, scope, receive, send):
-        # Which origins this relay serves reads for. Built from the same two
-        # inputs as `allowed_origins` in app/server.py - this origin plus each
-        # configured peer - so it states the aggregate scope rather than
-        # claiming one: a client passing origin="" to BOARD_LIST,
-        # ARTICLE_LIST or ARTICLE_SEARCH gets exactly this set merged, and
-        # anything outside it is refused by the read gate.
+        # Which origins this relay serves reads for. The same set as
+        # `allowed_origins` in app/server.py - this origin, each configured
+        # peer, and each origin learned by transitive routing - so it states
+        # the aggregate scope rather than claiming one: a client passing
+        # origin="" to BOARD_LIST, ARTICLE_LIST or ARTICLE_SEARCH gets exactly
+        # this set merged, and anything outside it is refused by the read gate.
         #
         # Public deliberately. A peer list is not a secret that could be kept:
         # every relayed record carries its origin, aggregate board and article
@@ -285,10 +291,7 @@ class FirehoseHTTPServer:
         # aggregate scope unknowable to legitimate callers. An operator who
         # wants none of this reachable should put the endpoint behind auth or
         # a firewall, which also covers /command, where the actual data is.
-        known_origins = [self._config.origin]
-        for peer in getattr(self._config, "peers", []):
-            known_origins.append(peer.origin)
-        known_origins = sorted(set(known_origins))
+        known_origins = sorted(self._known_origins)
 
         body = json.dumps(
             {

@@ -443,6 +443,126 @@ async def test_learn_starts_sync_and_second_learn_refused(tmp_path):
         await m.stop_all()
 
 
+@pytest.fixture
+def learning_server(tmp_path):
+    """A full BonnetServer at bbs.a peered with bbs.b, learning routes via it."""
+    from bonnet.app.server import BonnetServer
+    from bonnet.core.config import PeerConfig
+
+    for d in ("data", "boards", "event_bodies"):
+        (tmp_path / d).mkdir()
+    config = FirehoseConfig(
+        origin="bbs.a",
+        hostname="bbs.a",
+        data_dir=str(tmp_path / "data"),
+        boards_dir=str(tmp_path / "boards"),
+        events_bodies_dir=str(tmp_path / "event_bodies"),
+        port=2272,
+        tls_enabled=False,
+        peers=[PeerConfig(origin="bbs.b", hostname="bbs.b")],
+        routing=RoutingConfig(auto_dial="trusted-peers-only", allow_private_learned=True),
+    )
+    s = BonnetServer(config)
+    yield s
+    s.close()
+
+
+def _third_origin(tmp_path, articles):
+    """bbs.c: a board.create for "general" (articles aren't projected without
+    one) followed by `articles` articles."""
+    import os
+
+    from bonnet.core.record import metadata_bytes
+    from tests.test_federation import _OriginServer
+
+    third = _OriginServer(tmp_path, name="bbs.c")
+    intent = Intent(
+        event_id=os.urandom(32),
+        kind="bonnet.board.create",
+        origin=third.origin,
+        actor_pubkey=third.identity.public_key,
+        actor_username="root",
+        actor_registrar=third.origin,
+        board="general",
+        metadata=MetadataMap(
+            [metadata_bytes(1, third.identity.public_key), metadata_text(2, "General")]
+        ),
+    )
+    third.store.append_record(
+        third.identity, intent, sign_intent(third.identity, encode_intent(intent)), b""
+    )
+    third.publish_articles(articles)
+    return third
+
+
+def _article_list(server, origin, board="general"):
+    import struct
+
+    from bonnet.net.firehose_commands import FirehoseContext
+
+    def text16(s):
+        b = s.encode("utf-8")
+        return struct.pack(">H", len(b)) + b
+
+    req = text16(origin) + text16(board) + struct.pack(">IHB", 0, 100, 0)
+    ctx = FirehoseContext(peer_pubkey=server.server_identity.public_key, origin="bbs.a")
+    resp = server.command_handler._cmd_article_list(req, ctx)
+    assert resp[0] == 0, resp
+    return struct.unpack(">H", resp[1:3])[0]
+
+
+async def test_learned_origin_is_readable_after_sync(learning_server, tmp_path):
+    """A route learned via a trusted peer is dialed and synced; its records
+    must then be dispatched and readable, not left inert in the firehose."""
+    server = learning_server
+    mgr = server.sync_manager
+    third = _third_origin(tmp_path, articles=3)
+
+    try:
+        ok, _ = mgr.learn_transitive_route("bbs.c", _route(), "bbs.b")
+        assert ok
+        # Swap the real HTTP dialer for the in-process origin before the
+        # loop ever runs, then drive one sync cycle by hand.
+        mgr._tasks["bbs.c"].cancel()
+        client = third.serving_client()
+        mgr._clients["bbs.c"] = client
+        result = await mgr._sync_once("bbs.c", client)
+        assert result.accepted and result.accepted_count == 4, result.reason
+        assert server.firehose.get_highest_seq("bbs.c") == 4
+
+        assert server.firehose.get_checkpoint("bbs.c") == 4
+        assert _article_list(server, "bbs.c") == 3
+        assert "bbs.c" in server.http_server._known_origins
+    finally:
+        await mgr.stop_all()
+
+
+async def test_stopping_learned_origin_makes_it_unreadable(learning_server, tmp_path):
+    """Discarding a learned origin takes it back out of the readable set;
+    a configured peer is never removed by the same path."""
+    server = learning_server
+    mgr = server.sync_manager
+    third = _third_origin(tmp_path, articles=2)
+
+    try:
+        ok, _ = mgr.learn_transitive_route("bbs.c", _route(), "bbs.b")
+        assert ok
+        mgr._tasks["bbs.c"].cancel()
+        client = third.serving_client()
+        mgr._clients["bbs.c"] = client
+        await mgr._sync_once("bbs.c", client)
+        assert _article_list(server, "bbs.c") == 2
+
+        mgr.stop_origin("bbs.c")
+        assert "bbs.c" not in server.allowed_origins
+        assert _article_list(server, "bbs.c") == 0
+
+        mgr.stop_origin("bbs.b")
+        assert "bbs.b" in server.allowed_origins
+    finally:
+        await mgr.stop_all()
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------

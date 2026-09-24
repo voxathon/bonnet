@@ -120,6 +120,9 @@ wire_max = 32
 # auto_dial = "trusted-peers-only": dial a learned route only when it arrived
 # via a configured [[sync.peers]] origin or one listed in route_trust.
 # TOFU pinning and the SSRF dial guards apply to learned dials as usual.
+# A dialed origin is readable like a configured peer: its records are
+# projected, served by reads, and listed in discovery's known_origins.
+# Unlike a configured peer, none of its punishments are imported.
 # auto_dial = "off"
 # route_trust = []
 # allow_private_learned = false
