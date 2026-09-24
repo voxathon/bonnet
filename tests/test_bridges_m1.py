@@ -325,7 +325,7 @@ async def test_setup_registers_daemon_board_and_binding(h):
     meta = active[BOARD].meta
     assert meta.venue == FLATBOARD_VENUE and meta.binding_ingest is True
     assert meta.binding_max_body_bytes == 262144
-    assert meta.binding_foreign_capabilities == ("read", "threads")
+    assert meta.binding_foreign_capabilities == ("idempotent_post", "read", "threads", "write")
     assert active[BOARD].generation == 0
 
 

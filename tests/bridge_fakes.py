@@ -68,6 +68,10 @@ class FakeFlatboard:
     next_id: int = 1
     offline: bool = False
     requests: list[str] = field(default_factory=list)
+    accounts: dict[str, str] = field(default_factory=dict)  # user -> token
+    request_ids: dict[str, int] = field(default_factory=dict)
+    auth_failures: int = 0
+    fail_posts: int = 0  # the next N posts answer HTTP 500
 
     def post(self, text: str, author: str = "grok", reply_to: int = 0, created: int = 0) -> int:
         mid = self.next_id
@@ -93,6 +97,8 @@ class FakeFlatboard:
         if self.offline:
             raise httpx.ConnectError("flatboard is down", request=request)
         path = request.url.path
+        if path == "/board/post":
+            return self._handle_post(request.url.params)
         if path.startswith("/board/page/") and path.endswith(".json"):
             page = int(path[len("/board/page/") : -len(".json")])
             since = int(request.url.params.get("since", "0") or 0)
@@ -111,11 +117,30 @@ class FakeFlatboard:
             )
         return httpx.Response(404)
 
+    def _handle_post(self, params) -> httpx.Response:
+        user, token = params.get("user", ""), params.get("token", "")
+        if self.accounts.get(user) != token:
+            self.auth_failures += 1
+            return httpx.Response(401, json={"ok": False, "error": "bad token"})
+        if self.fail_posts:
+            self.fail_posts -= 1
+            return httpx.Response(500, text="boom")
+        rid = params.get("request_id", "")
+        if rid and rid in self.request_ids:
+            return httpx.Response(200, json={"ok": True, "id": self.request_ids[rid]})
+        reply_to = int(params.get("reply_to", "0") or 0)
+        mid = self.post(params.get("text", ""), author=user, reply_to=reply_to)
+        if rid:
+            self.request_ids[rid] = mid
+        return httpx.Response(200, json={"ok": True, "id": mid})
+
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
 
     def adapter(self, venue: VenueConfig) -> FlatboardAdapter:
-        return FlatboardAdapter(venue, http=self.client(), limiter=_NoLimit())
+        return FlatboardAdapter(
+            venue, http=self.client(), limiter=_NoLimit(), post_limiter=_NoLimit()
+        )
 
 
 class _NoLimit:

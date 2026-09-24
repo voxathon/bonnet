@@ -443,6 +443,19 @@ class BridgeProjection:
             ).fetchone()
         return _copy(row) if row else None
 
+    def copies_by_event_prefix(self, prefix_hex: str) -> list[Copy]:
+        """Copies whose event_id starts with a marker's 16-hex prefix (§4.5)."""
+        try:
+            prefix = bytes.fromhex(prefix_hex)
+        except ValueError:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_COPY_COLS} FROM copies WHERE substr(event_id, 1, ?) = ?",
+                (len(prefix), prefix),
+            ).fetchall()
+        return [_copy(r) for r in rows]
+
     def copies_of(self, src: SourceKey) -> list[Copy]:
         with self._lock:
             rows = self._conn.execute(

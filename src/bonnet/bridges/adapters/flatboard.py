@@ -31,8 +31,17 @@ from datetime import datetime
 
 import httpx
 
-from bonnet.bridges.adapter import ForeignPost, Gone, RateLimits, ReadLimiter, VenueError
+from bonnet.bridges.adapter import (
+    ForeignAccount,
+    ForeignPost,
+    Gone,
+    RateLimits,
+    ReadLimiter,
+    VenueAuthError,
+    VenueError,
+)
 from bonnet.bridges.config import VenueConfig
+from bonnet.bridges.model import normalize_foreign_text, truncate_utf8
 
 PAGE_SIZE = 50
 MAX_TEXT_BYTES = 2048
@@ -76,17 +85,28 @@ def _canonical(msg: dict) -> bytes:
 
 class FlatboardAdapter:
     type = "flatboard"
-    # Immutable venue: no "edit", no "deletion_log". Write lands in M4.
-    capabilities = frozenset({"read", "threads"})
+    # Immutable venue: no "edit", no "deletion_log". request_id makes
+    # posting idempotent.
+    capabilities = frozenset({"read", "threads", "write", "idempotent_post"})
     limits = RateLimits(reads_per_minute=120, posts_min_interval_seconds=15.0)
 
-    def __init__(self, venue: VenueConfig, http: httpx.AsyncClient | None = None, limiter=None):
+    def __init__(
+        self,
+        venue: VenueConfig,
+        http: httpx.AsyncClient | None = None,
+        limiter=None,
+        post_limiter=None,
+    ):
         self.venue = venue.venue
         self._base = venue.url.rstrip("/")
         self._backfill_pages = venue.backfill_pages
         self._http = http or httpx.AsyncClient(timeout=30.0)
         self._owns_http = http is None
         self._limiter = limiter or ReadLimiter(self.limits.reads_per_minute)
+        # Posts: one per 15 s per user.
+        self._post_limiter = post_limiter or ReadLimiter(
+            int(60 / self.limits.posts_min_interval_seconds)
+        )
 
     async def close(self) -> None:
         if self._owns_http:
@@ -180,3 +200,54 @@ class FlatboardAdapter:
         if not isinstance(msg, dict) or _id(msg.get("id")) != foreign_id:
             raise VenueError(f"flatboard msg {foreign_id}: unexpected body")
         return self._post(channel, msg, raw=resp.content)
+
+    # -- write ------------------------------------------------------------
+
+    def render_outbound(self, text: str, marker: str, attribution: str | None) -> str:
+        head = f"{attribution}: " if attribution else ""
+        tail = f"\n{marker}"
+        budget = MAX_TEXT_BYTES - len((head + tail).encode("utf-8"))
+        body = truncate_utf8(normalize_foreign_text(text), max(budget, 0)).rstrip()
+        return f"{head}{body}{tail}"
+
+    async def post(
+        self,
+        account: ForeignAccount,
+        channel: str,
+        text: str,
+        reply_to: str | None,
+        idempotency_key: str,
+    ) -> ForeignPost:
+        params = {
+            "user": account.user,
+            "token": account.token,
+            "text": text,
+            "request_id": idempotency_key,
+            "format": "json",
+        }
+        if reply_to:
+            params["reply_to"] = reply_to
+        await self._post_limiter.wait()
+        # The token rides in the query string: no error message below may
+        # include the URL or the underlying exception text.
+        try:
+            resp = await self._http.get(f"{self._base}/board/post", params=params)
+        except httpx.HTTPError as e:
+            raise VenueError(f"flatboard post: {type(e).__name__}") from None
+        if resp.status_code in (401, 403):
+            raise VenueAuthError(f"flatboard rejected the credentials for {account.user!r}")
+        if resp.status_code != 200:
+            raise VenueError(f"flatboard post: HTTP {resp.status_code}")
+        try:
+            data = resp.json()
+        except ValueError:
+            raise VenueError("flatboard post: bad JSON") from None
+        foreign_id = _id(data.get("id")) if isinstance(data, dict) else None
+        if not isinstance(data, dict) or not data.get("ok") or foreign_id is None:
+            error = data.get("error") if isinstance(data, dict) else None
+            raise VenueError(f"flatboard post refused: {error or 'no id in response'}")
+        fetched = await self.fetch(channel, foreign_id)
+        if isinstance(fetched, ForeignPost):
+            return fetched
+        msg = {"id": int(foreign_id), "author": account.user, "reply_to": reply_to, "text": text}
+        return self._post(channel, msg)

@@ -742,6 +742,14 @@ Native articles on a bridge board with no bridge metadata, not authored by puppe
 
 Other bridges see the relay's post at the venue, find the marker resolves in `bridges.db` to a role-3 copy with the same `foreign_id`, and mirror it as an echo (§11.1 step 4). Consumers see one copy.
 
+**Implemented (M4):**
+- **Backlog floor.** The first relay tick on a board records the highest article number and relays nothing; only articles after it go out. Turning relay egress on never floods the venue with history.
+- **Candidates:** native articles (no copy row in `bridges.db`), not by the daemon or a puppet, at least 60 s old, fewer than 5 failures.
+- **Attribution:** `<name> (<home_origin>)` for admitted crossposters, `<name>@<bridge origin>` otherwise. A reply to a copy on the board goes out as a venue reply to that copy's `foreign_id`.
+- **Idempotency:** the venue key is `article.event_id.hex()[:32]`, so a crash between the venue post and the link re-posts into the same venue post and then links it.
+- **No observation at relay time.** The relaying bridge observes its post when ingest reads it back as the echo (§11.1 step 3), so there's one observation, holding the venue's own bytes.
+- **Ingest step order:** marker resolution runs before the relay-author check, so the relay's own echoes are observed. A relay-authored post without a resolvable marker is skipped.
+
 ### 11.4 Edits, deletions, eviction
 
 - **Edits:** only for venues with the `edit` capability. A changed digest → the puppet supersedes **its own current mirror** (same origin, board and author; the target is active, so the 0.2.7 supersede gate passes), with `revision + 1` and `foreign_state = 2`.

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import metadata
 from typing import Literal, Protocol
 
@@ -72,6 +72,19 @@ class VenueError(Exception):
     """The venue failed in a way worth backing off from."""
 
 
+class VenueAuthError(VenueError):
+    """The venue rejected an account's credentials. Never retry: venues lock
+    out whole IPs after repeated bad tokens."""
+
+
+@dataclass(frozen=True)
+class ForeignAccount:
+    """An account at a venue: the relay's, or a user's own (edge egress)."""
+
+    user: str
+    token: str = field(repr=False)
+
+
 class VenueAdapter(Protocol):
     type: str
     venue: str
@@ -91,6 +104,22 @@ class VenueAdapter(Protocol):
         ...
 
     async def fetch(self, channel: str, foreign_id: str) -> ForeignPost | Gone: ...
+
+    async def post(
+        self,
+        account: ForeignAccount,
+        channel: str,
+        text: str,
+        reply_to: str | None,
+        idempotency_key: str,
+    ) -> ForeignPost:
+        """Post as `account`. Retrying with the same key must not post twice
+        on venues with `idempotent_post`. Raises VenueAuthError on bad credentials."""
+        ...
+
+    def render_outbound(self, text: str, marker: str, attribution: str | None) -> str:
+        """The venue text: attribution, body cut to fit, and the marker last."""
+        ...
 
     def max_text_bytes(self) -> int: ...
 

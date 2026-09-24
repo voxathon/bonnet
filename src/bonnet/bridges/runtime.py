@@ -26,13 +26,21 @@ puppet superseding its own mirror when an editable venue reports an edit.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from bonnet.bridges import model
-from bonnet.bridges.adapter import ForeignPost, VenueAdapter, VenueError, build_adapter
+from bonnet.bridges.adapter import (
+    ForeignAccount,
+    ForeignPost,
+    VenueAdapter,
+    VenueAuthError,
+    VenueError,
+    build_adapter,
+)
 from bonnet.bridges.bindings import Bindings
 from bonnet.bridges.config import (
     BindingConfig,
@@ -70,6 +78,20 @@ class _Venue:
     config: VenueConfig
     adapter: VenueAdapter
     failures: int = 0
+
+
+def _relay_account(venue: VenueConfig) -> ForeignAccount | None:
+    """The relay's venue account, if configured and its token file is readable."""
+    if not venue.relay_user or not venue.relay_token_file:
+        return None
+    path = os.path.expanduser(venue.relay_token_file)
+    try:
+        with open(path, encoding="utf-8") as f:
+            token = f.read().strip()
+    except OSError as e:
+        log_msg(f"BRIDGE: relay for {venue.venue} disabled, can't read token file: {e}")
+        return None
+    return ForeignAccount(venue.relay_user, token) if token else None
 
 
 def mirror_subject(venue_type: str, foreign_id: str, text: str) -> str:
@@ -110,6 +132,10 @@ class BridgeRuntime:
             self._config.daemon_username,
         )
         self.venues = [_Venue(v, adapter_factory(v)) for v in self._config.venues]
+        self._relay_accounts = {v.venue: _relay_account(v) for v in self._config.venues}
+        # Bindings whose relay credentials the venue rejected: relaying stops
+        # there until restart, since venues lock out IPs over bad tokens.
+        self._relay_stopped: set[str] = set()
 
     async def close(self) -> None:
         for v in self.venues:
@@ -196,6 +222,9 @@ class BridgeRuntime:
         for binding in venue.config.bindings:
             if binding.ingest:
                 await self.ingest_binding(venue, binding)
+        for binding in venue.config.bindings:
+            if binding.relay_egress:
+                await self.relay_binding(venue, binding)
 
     async def ingest_binding(self, venue: _Venue, binding: BindingConfig) -> int:
         """One poll of one binding. Returns the number of posts handled."""
@@ -226,26 +255,70 @@ class BridgeRuntime:
         if post.created_at is not None and now - post.created_at < self._config.grace_seconds:
             return HOLD
 
-        # 2. The relay account's own posts are observed, never mirrored (M4).
+        crosspost_of = None
+        prefix = model.find_marker(post.text)
+        if prefix is not None:
+            # 3-5. A marker is a hint: it counts only when the copy it names
+            #      states this same foreign post.
+            local, remote, anything = self._resolve_marker(board, prefix, post)
+            if local is not None:
+                # 3. Our own crosspost original or relay-linked article came
+                #    back from the venue: the echo. Observe only.
+                await self._observe(post, local.event_id, model.FOREIGN_PRESENT)
+                self.index.drop_pending(board, src)
+                return DONE
+            if remote is not None:
+                # 4. Another origin's original: mirror it, pointing there.
+                crosspost_of = (remote.origin, remote.event_id)
+            elif not anything:
+                # 5. Resolves nowhere yet: the original may still be on its
+                #    way. Defer, then mirror as an ordinary post on timeout.
+                first_seen = self.index.pending_first_seen(board, src)
+                if first_seen is None:
+                    self.index.add_pending(board, post, now, "marker")
+                    return DONE
+                if now - first_seen < self._config.marker_timeout_seconds:
+                    return DONE
+            # else: a copied marker naming some other post; ordinary post.
+
+        # 2. The relay account's own posts are never mirrored; the echoes of
+        #    what it relayed were handled above.
         if venue.config.relay_user and post.author_handle == venue.config.relay_user:
+            self.index.drop_pending(board, src)
             return DONE
 
-        # 3-5. A marker defers until it resolves or times out. Nothing can
-        #      resolve one before crossposts exist (M4), so for now every
-        #      marked post waits out the timeout and is then mirrored as an
-        #      ordinary post.
-        if model.find_marker(post.text) is not None:
-            first_seen = self.index.pending_first_seen(board, src)
-            if first_seen is None:
-                self.index.add_pending(board, post, now, "marker")
-                return DONE
-            if now - first_seen < self._config.marker_timeout_seconds:
-                return DONE
-        await self._mirror(venue, binding, post)
+        await self._mirror(venue, binding, post, crosspost_of=crosspost_of)
         self.index.drop_pending(board, src)
         return DONE
 
-    async def _mirror(self, venue: _Venue, binding: BindingConfig, post: ForeignPost) -> None:
+    def _resolve_marker(self, board: str, prefix: str, post: ForeignPost):
+        """(local copy, remote copy, any hit) for a marker, matched on foreign_id."""
+        bridges = getattr(self._server, "bridges", None)
+        if bridges is None:
+            return None, None, False
+        hits = [
+            c
+            for c in bridges.copies_by_event_prefix(prefix)
+            if c.role in (model.ROLE_CROSSPOST, model.ROLE_RELAY_LINK)
+        ]
+        same = [
+            c
+            for c in hits
+            if c.src.venue == post.venue
+            and c.src.channel == post.channel
+            and c.src.foreign_id == post.foreign_id
+        ]
+        local = next((c for c in same if c.origin == self._origin and c.board == board), None)
+        remote = next((c for c in same if c.origin != self._origin), None)
+        return local, remote, bool(hits)
+
+    async def _mirror(
+        self,
+        venue: _Venue,
+        binding: BindingConfig,
+        post: ForeignPost,
+        crosspost_of: tuple[str, bytes] | None = None,
+    ) -> None:
         board = binding.board
         venue_type = venue.config.type
         src = SourceKey(post.venue, post.channel, post.foreign_id)
@@ -308,6 +381,8 @@ class BridgeRuntime:
             foreign_root_id=root_foreign_id,
             foreign_digest=digest,
             mirror_revision=revision,
+            crosspost_of_origin=crosspost_of[0] if crosspost_of else None,
+            crosspost_of_event=crosspost_of[1] if crosspost_of else None,
         )
         fields = [
             metadata_text(1, mirror_subject(venue_type, post.foreign_id, post.text)),
@@ -365,6 +440,149 @@ class BridgeRuntime:
                 revision=revision,
             ),
         )
+
+    # ------------------------------------------------------------------
+    # Relay egress (§11.3)
+    # ------------------------------------------------------------------
+
+    RELAY_MIN_AGE_SECONDS = 60
+    RELAY_MAX_FAILURES = 5
+    RELAY_SCAN = 200
+
+    async def relay_binding(self, venue: _Venue, binding: BindingConfig) -> int:
+        """Carry native articles on a bridge board to the venue. Returns how many."""
+        board = binding.board
+        account = self._relay_accounts.get(venue.config.venue)
+        if account is None or board in self._relay_stopped:
+            return 0
+        if "write" not in venue.adapter.capabilities:
+            return 0
+        bp = self._server.dispatcher._get_board_projection(self._origin, board)
+        recent = bp.list_articles(self._origin, board, offset=0, limit=self.RELAY_SCAN)
+        floor = self.index.relay_floor(board)
+        if floor is None:
+            # First time relaying this board: only what's posted from now on,
+            # never a backlog that predates the operator turning this on.
+            floor = max((a.article_num for a in recent), default=0)
+            self.index.set_relay_floor(board, floor)
+            return 0
+        now = int(self._clock())
+        relayed = 0
+        for art in sorted(recent, key=lambda a: a.article_num):
+            if art.article_num <= floor or now - art.created_at < self.RELAY_MIN_AGE_SECONDS:
+                continue
+            state = self.index.relay_state(board, art.article_id)
+            if state is not None and (state[1] or state[0] >= self.RELAY_MAX_FAILURES):
+                continue
+            if not self._relayable(board, art):
+                self.index.relay_done(board, art.article_id, None)
+                continue
+            try:
+                if await self._relay_one(venue, binding, account, art):
+                    relayed += 1
+            except VenueAuthError as e:
+                self._relay_stopped.add(board)
+                log_msg(f"BRIDGE: relay for '{board}' stopped, venue rejected the account: {e}")
+                return relayed
+            except VenueError as e:
+                failures = self.index.relay_failed(board, art.article_id)
+                log_msg(
+                    f"BRIDGE: relaying article {art.article_num} on '{board}' failed "
+                    f"({failures}/{self.RELAY_MAX_FAILURES}): {e}"
+                )
+        return relayed
+
+    def _relayable(self, board: str, art) -> bool:
+        """Native, not a copy, and not written by the bridge's own keys."""
+        if art.author_pubkey == self.daemon.public_key:
+            return False
+        bridges = getattr(self._server, "bridges", None)
+        if bridges is not None and bridges.copy_by_article(self._origin, board, art.article_id):
+            return False
+        user = self._server.users.get_user_by_pubkey(self._origin, art.author_pubkey)
+        policy = getattr(self._server, "bridge_policy", None)
+        if user is not None and policy is not None and policy.is_puppet_name(user["username"]):
+            return False
+        return True
+
+    def _attribution(self, art) -> str:
+        user = self._server.users.get_user_by_pubkey(self._origin, art.author_pubkey)
+        name = user["username"] if user else art.author_pubkey.hex()[:16]
+        bridges = getattr(self._server, "bridges", None)
+        admission = bridges.admission(self._origin, art.author_pubkey) if bridges else None
+        if admission is not None and admission["active"]:
+            return f"{name} ({admission['home_origin']})"
+        return f"{name}@{self._origin}"
+
+    async def _relay_one(self, venue: _Venue, binding: BindingConfig, account, art) -> bool:
+        board = binding.board
+        body = self._server.body_store.get_article_body(
+            self._origin, board, art.article_num, art.body_hash, art.body_size
+        )
+        if body is None:
+            return False
+        text = venue.adapter.render_outbound(
+            body.decode("utf-8", errors="replace"),
+            model.make_marker(art.event_id),
+            self._attribution(art),
+        )
+        parent = None
+        bridges = getattr(self._server, "bridges", None)
+        if art.reply_to_article_id and art.reply_to_article_id != bytes(32) and bridges:
+            parent = bridges.copy_by_article(self._origin, board, art.reply_to_article_id)
+        posted = await venue.adapter.post(
+            account,
+            binding.channel,
+            text,
+            parent.src.foreign_id if parent is not None else None,
+            # The article's event_id: a retry after a crash re-posts with the
+            # same key, and an idempotent venue hands back the same post.
+            art.event_id.hex()[:32],
+        )
+        root = None
+        if parent is not None and bridges is not None:
+            root = bridges.thread_root(parent.src)[0]
+        meta = BridgeMetadata(
+            bridge_role=model.ROLE_RELAY_LINK,
+            venue=posted.venue,
+            channel=posted.channel,
+            foreign_id=posted.foreign_id,
+            foreign_author=posted.author_handle,
+            foreign_reply_to=posted.reply_to,
+            foreign_url=posted.url,
+            foreign_root_id=root or (posted.foreign_id if parent is None else None),
+            foreign_digest=model.foreign_digest(posted.text),
+        )
+        await self.publisher.publish(
+            self.daemon,
+            Intent(
+                event_id=model.link_event_id(
+                    self._origin,
+                    board,
+                    art.article_id,
+                    posted.venue,
+                    posted.channel,
+                    posted.foreign_id,
+                ),
+                kind=model.KIND_BRIDGE_LINK,
+                origin=self._origin,
+                actor_pubkey=self.daemon.public_key,
+                actor_username=self._config.daemon_username,
+                actor_registrar=self._origin,
+                target_origin=self._origin,
+                target_board=board,
+                target_article_id=art.article_id,
+                metadata=MetadataMap(meta.to_fields()),
+            ),
+        )
+        # The observation comes from ingest, when the relay's post is read
+        # back as the echo of this article (§11.1 step 3).
+        self.index.relay_done(board, art.article_id, posted.foreign_id)
+        log_msg(
+            f"BRIDGE: relayed article {art.article_num} on '{board}' as "
+            f"{posted.venue} #{posted.foreign_id}"
+        )
+        return True
 
     async def _observe(self, post: ForeignPost, target_event_id: bytes, state: int) -> None:
         raw = post.raw[: self._max_raw]

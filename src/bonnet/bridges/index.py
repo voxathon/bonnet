@@ -56,6 +56,18 @@ CREATE TABLE IF NOT EXISTS cursors (
     board TEXT PRIMARY KEY,
     cursor TEXT
 );
+CREATE TABLE IF NOT EXISTS relayed (
+    board TEXT NOT NULL,
+    article_id BLOB NOT NULL,
+    foreign_id TEXT,
+    failures INTEGER NOT NULL DEFAULT 0,
+    done INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (board, article_id)
+);
+CREATE TABLE IF NOT EXISTS relay_floor (
+    board TEXT PRIMARY KEY,
+    article_num INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS pending (
     board TEXT NOT NULL,
     venue TEXT NOT NULL,
@@ -194,6 +206,53 @@ class RuntimeIndex:
             self._conn.execute(
                 "DELETE FROM pending WHERE board=? AND venue=? AND channel=? AND foreign_id=?",
                 (board, src.venue, src.channel, src.foreign_id),
+            )
+            self._conn.commit()
+
+    # -- relay egress (§11.3) ------------------------------------------------
+
+    def relay_floor(self, board: str) -> int | None:
+        """Articles numbered at or below this predate relay egress: never relayed."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT article_num FROM relay_floor WHERE board=?", (board,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def set_relay_floor(self, board: str, article_num: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO relay_floor VALUES (?, ?)", (board, article_num)
+            )
+            self._conn.commit()
+
+    def relay_state(self, board: str, article_id: bytes) -> tuple[int, bool] | None:
+        """(failures, done) for one native article, or None if never tried."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT failures, done FROM relayed WHERE board=? AND article_id=?",
+                (board, article_id),
+            ).fetchone()
+        return (row[0], bool(row[1])) if row else None
+
+    def relay_failed(self, board: str, article_id: bytes) -> int:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO relayed (board, article_id, failures) VALUES (?, ?, 1) "
+                "ON CONFLICT(board, article_id) DO UPDATE SET failures = failures + 1",
+                (board, article_id),
+            )
+            self._conn.commit()
+            return self._conn.execute(
+                "SELECT failures FROM relayed WHERE board=? AND article_id=?", (board, article_id)
+            ).fetchone()[0]
+
+    def relay_done(self, board: str, article_id: bytes, foreign_id: str | None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO relayed (board, article_id, foreign_id, done) VALUES (?, ?, ?, 1) "
+                "ON CONFLICT(board, article_id) DO UPDATE SET foreign_id=excluded.foreign_id, done=1",
+                (board, article_id, foreign_id),
             )
             self._conn.commit()
 
