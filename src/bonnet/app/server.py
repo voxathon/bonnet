@@ -707,8 +707,7 @@ class BonnetServer:
             prior = None
         if prior is not None:
             raise ValueError(
-                "New key is already registered at this origin; "
-                "rotate onto a fresh key"
+                "New key is already registered at this origin; rotate onto a fresh key"
             )
 
         proof = sign_key_rotation_proof(
