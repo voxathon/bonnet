@@ -58,6 +58,8 @@ B = "bridge.test"
 HOME = "home.test"
 HOME_URL = f"https://{HOME}"
 B_URL = f"https://{B}"
+EVIL_URL = "https://evil.test"
+MIRROR_URL = "https://cdn.example"
 BOARD = "~flatboard"
 NOW = 1_900_000_000
 VENUE_USER = "moxxie_fb"
@@ -102,6 +104,17 @@ class World:
         monkeypatch.setattr(
             bridge_tools, "_adapter_for", lambda spec: self.board.adapter(venue_config())
         )
+        # Post spacing on a fake clock: waits are recorded, never slept.
+        self.now = 0.0
+        self.slept: list[float] = []
+
+        async def sleep(seconds):
+            self.slept.append(seconds)
+            self.now += seconds
+
+        monkeypatch.setattr(bridge_tools, "_gates", {})
+        monkeypatch.setattr(bridge_tools, "_clock", lambda: self.now)
+        monkeypatch.setattr(bridge_tools, "_sleep", sleep)
 
     def _client(self, url: str) -> FirehoseHTTPClient:
         servers = {B_URL: self.bridge, HOME_URL: self.home}
@@ -244,13 +257,56 @@ async def test_without_a_venue_account_the_post_stays_native(w, monkeypatch):
     assert meta.bridge_role is None and meta.home_origin == HOME
 
 
-async def test_a_venue_failure_publishes_natively_and_reports(w):
-    w.board.fail_posts = 1
+async def test_a_venue_refusal_publishes_natively_and_reports(w):
+    w.board.refuse_posts = 1
     result = await w.crosspost()
-    assert result["egress"] == "failed" and "500" in result["venue_error"]
+    assert result["egress"] == "failed" and "400" in result["venue_error"]
     assert result["published"] is True
     (art,) = w.articles()
     assert BridgeMetadata.from_metadata(art.metadata).bridge_role is None
+
+
+async def test_a_lost_venue_response_is_retried_onto_the_same_post(w):
+    w.board.lose_post_responses = 1
+    result = await w.crosspost()
+    assert result["egress"] == "posted" and result["published"] is True
+    (msg,) = w.venue_posts()
+    (art,) = w.articles()
+    meta = BridgeMetadata.from_metadata(art.metadata)
+    assert meta.bridge_role == model.ROLE_CROSSPOST and meta.foreign_id == str(msg["id"])
+
+
+async def test_an_uncertain_post_stays_pending_instead_of_going_native(w):
+    w.board.lose_post_responses = 1
+    w.board.fail_posts = 1  # the retry fails before reaching the board
+    result = await w.crosspost()
+    assert result["egress"] == "uncertain" and result["published"] is False
+    assert len(w.venue_posts()) == 1 and w.articles() == []
+    (pending,) = _outbox().by_state("pending")
+
+    flushed = await bridge_tools.flush_outbox()
+    assert flushed["entries"][0]["reposted"] is True
+    assert len(w.venue_posts()) == 1  # the same key: the same venue post
+    (art,) = w.articles()
+    assert art.event_id == pending.event_id
+    assert BridgeMetadata.from_metadata(art.metadata).bridge_role == model.ROLE_CROSSPOST
+
+
+async def test_a_failed_read_back_does_not_fail_the_post(w, monkeypatch):
+    real = w.board._handle
+
+    def handle(request):
+        if request.url.path.startswith("/board/msg/"):
+            return httpx.Response(503)
+        return real(request)
+
+    monkeypatch.setattr(w.board, "_handle", handle)
+    result = await w.crosspost("hello")
+    assert result["egress"] == "posted" and result["published"] is True
+    (msg,) = w.venue_posts()
+    (art,) = w.articles()
+    meta = BridgeMetadata.from_metadata(art.metadata)
+    assert meta.bridge_role == model.ROLE_CROSSPOST and meta.foreign_id == str(msg["id"])
 
 
 async def test_a_refused_publish_is_recorded_and_the_venue_post_stays(w):
@@ -311,6 +367,145 @@ async def test_a_pending_frame_on_a_non_idempotent_venue_is_dropped(w, monkeypat
     flushed = await bridge_tools.flush_outbox()
     assert flushed["entries"] == [{"event_id": flushed["entries"][0]["event_id"], "dropped": True}]
     assert len(w.venue_posts()) == 1
+
+
+async def test_posts_are_spaced_per_account_across_calls(w):
+    await w.crosspost("one")
+    await w.crosspost("two")
+    assert w.slept == [15.0]
+    assert len(w.venue_posts()) == 2
+
+
+async def test_a_short_rate_limit_is_waited_out_and_retried(w):
+    w.board.rate_limit_posts = 1
+    result = await w.crosspost()
+    assert result["egress"] == "posted" and result["published"] is True
+    assert w.slept == [15.0]
+    assert len(w.venue_posts()) == 1
+
+
+async def test_a_long_rate_limit_is_reported_and_the_post_stays_native(w):
+    w.board.rate_limit_posts = 1
+    w.board.retry_after = 3600
+    result = await w.crosspost()
+    assert result["egress"] == "failed" and "rate limited" in result["venue_error"]
+    assert result["published"] is True and w.venue_posts() == []
+    assert w.slept == []
+    # The next post waits out the venue's retry-after first.
+    await w.crosspost("later")
+    assert w.slept == [3600.0]
+
+
+async def test_rejected_credentials_are_never_sent_again(w):
+    w.board.accounts[VENUE_USER] = "a-new-token"
+    first = await w.crosspost("one")
+    assert first["egress"] == "failed" and first["published"] is True
+    assert w.board.auth_failures == 1
+
+    second = await w.crosspost("two")
+    assert second["egress"] == "failed" and "not sending them again" in second["venue_error"]
+    assert w.board.auth_failures == 1  # the venue never saw the token again
+
+    (w.tmp_path / "venue.token").write_text("a-new-token")
+    third = await w.crosspost("three")
+    assert third["egress"] == "posted"
+    assert [m["text"].split("\n")[0] for m in w.venue_posts()] == ["three"]
+    assert bridge_tools._read_auth_failures() == {}
+
+
+async def test_flush_carries_on_past_an_entry_the_venue_refuses(w, monkeypatch):
+    # Entry 1: pending (the gateway died after the venue post).
+    real_final = bridge_tools._final_frame
+    monkeypatch.setattr(
+        bridge_tools, "_final_frame", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
+    )
+    with pytest.raises(RuntimeError):
+        await w.crosspost("pending one")
+    monkeypatch.setattr(bridge_tools, "_final_frame", real_final)
+    # Entry 2: ready (the bridge was unreachable).
+    w.fail_send = 1
+    await w.crosspost("ready one")
+
+    w.board.rate_limit_posts = 1
+    w.board.retry_after = 3600
+    flushed = await bridge_tools.flush_outbox()
+    by_state = {e.get("state", "sent"): e for e in flushed["entries"]}
+    assert "rate limited" in by_state["pending"]["error"]
+    assert by_state["sent"]["published"] is True
+    (pending,) = _outbox().by_state("pending")
+    assert _outbox().by_state("ready") == []
+    assert pending.venue_text.startswith("pending one")
+
+
+async def _impostor(w, tmp_path):
+    """A second server calling itself home.test, served from evil.test."""
+    from bonnet.app.server import BonnetServer
+
+    evil = BonnetServer(make_config(tmp_path / "evil", HOME, rules=shipped_rules()))
+    mallory = Identity.generate()
+    await publish_as(
+        evil,
+        mallory,
+        Intent(
+            event_id=os.urandom(32),
+            kind=KIND_USER_REGISTER,
+            origin=HOME,
+            actor_pubkey=mallory.public_key,
+            actor_registrar=HOME,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "admin"),
+                    metadata_bytes(2, mallory.public_key),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        ),
+    )
+    return evil, mallory
+
+
+async def test_a_server_claiming_someone_elses_origin_is_not_admitted(w, monkeypatch):
+    evil, mallory = await _impostor(w, w.tmp_path)
+    try:
+        w.bridge.command_handler._admission._client = AdmissionClient(
+            asgi_transport_factory(
+                {HOME_URL: w.home, EVIL_URL: evil}, str(w.tmp_path / "fresh-trust.db")
+            )
+        )
+        monkeypatch.setattr(bridge_tools, "_home", lambda auth: (mallory, HOME, EVIL_URL))
+        monkeypatch.setenv("BONNET_BRIDGE_ACCOUNTS", str(w.tmp_path / "none.toml"))
+        result = await w.crosspost("hi, i'm admin from home.test")
+        assert result["published"] is False and "unreachable" in result["refused"]
+        assert w.bridge.bridges.admission(B, mallory.public_key) is None
+        # The real home.test was pinned, not the impostor: its users still get in.
+        monkeypatch.setattr(bridge_tools, "_home", lambda auth: (w.user, HOME, HOME_URL))
+        assert (await w.crosspost("the real one"))["published"] is True
+    finally:
+        evil.close()
+
+
+async def test_a_home_served_from_another_address_is_admitted(w, monkeypatch):
+    # home.test answering at a second URL with its own key: a CDN, a move.
+    w.bridge.command_handler._admission._client = AdmissionClient(
+        asgi_transport_factory(
+            {HOME_URL: w.home, MIRROR_URL: w.home}, str(w.tmp_path / "fresh-trust.db")
+        )
+    )
+    monkeypatch.setattr(bridge_tools, "_home", lambda auth: (w.user, HOME, MIRROR_URL))
+    monkeypatch.setenv("BONNET_BRIDGE_ACCOUNTS", str(w.tmp_path / "none.toml"))
+    result = await w.crosspost()
+    assert result["published"] is True
+    assert w.bridge.bridges.admission(B, w.user.public_key)["home_url"] == MIRROR_URL
+
+
+async def test_a_home_whose_own_name_does_not_answer_is_refused(w, monkeypatch):
+    w.bridge.command_handler._admission._client = AdmissionClient(
+        asgi_transport_factory({MIRROR_URL: w.home}, str(w.tmp_path / "fresh-trust.db"))
+    )
+    monkeypatch.setattr(bridge_tools, "_home", lambda auth: (w.user, HOME, MIRROR_URL))
+    monkeypatch.setenv("BONNET_BRIDGE_ACCOUNTS", str(w.tmp_path / "none.toml"))
+    result = await w.crosspost()
+    assert result["published"] is False and "unreachable" in result["refused"]
 
 
 async def test_crosspost_refuses_a_board_that_is_not_a_live_bridge(w):

@@ -39,6 +39,8 @@ from bonnet.bridges.adapter import (
     VenueAdapter,
     VenueAuthError,
     VenueError,
+    VenueRateLimited,
+    VenueUncertain,
     build_adapter,
 )
 from bonnet.bridges.bindings import Bindings
@@ -66,6 +68,9 @@ from bonnet.core.record import (
 from bonnet.net.firehose_wire import ProtocolError
 
 MAX_BACKOFF_SECONDS = 900
+# How far ahead of this clock a venue's timestamp may be before it's
+# treated as no timestamp at all (§11.1 step 1).
+MAX_CLOCK_SKEW_SECONDS = 300
 SUBJECT_CHARS = 80
 
 # _consider outcomes
@@ -267,7 +272,13 @@ class BridgeRuntime:
             if self.index.is_crossposter(post.venue, post.author_id)
             else self._config.grace_seconds
         )
-        if post.created_at is not None and now - post.created_at < grace:
+        created = post.created_at
+        if created is not None and created > now + MAX_CLOCK_SKEW_SECONDS:
+            # A post "from the future" would hold itself, and every post
+            # after it, until its timestamp came round. A marker still
+            # defers it below if it needs to wait for an original.
+            created = None
+        if created is not None and now - created < grace:
             return HOLD
 
         crosspost_of = None
@@ -305,6 +316,16 @@ class BridgeRuntime:
         if venue.config.relay_user and post.author_handle == venue.config.relay_user:
             self.index.drop_pending(board, src)
             return DONE
+
+        # 6. A reply to a post still pending here waits for it: mirrored
+        #    now, it would never be threaded under the parent's mirror.
+        #    Pending posts are reconsidered in the order they were added,
+        #    so the parent goes first.
+        if post.reply_to is not None:
+            parent = SourceKey(post.venue, post.channel, post.reply_to)
+            if self.index.pending_first_seen(board, parent) is not None:
+                self.index.add_pending(board, post, now, "parent")
+                return DONE
 
         await self._mirror(venue, binding, post, crosspost_of=crosspost_of)
         self.index.drop_pending(board, src)
@@ -503,6 +524,10 @@ class BridgeRuntime:
                 self._relay_stopped.add(board)
                 log_msg(f"BRIDGE: relay for '{board}' stopped, venue rejected the account: {e}")
                 return relayed
+            except VenueRateLimited as e:
+                # Not the article's fault: try again next pass, uncounted.
+                log_msg(f"BRIDGE: relay for '{board}' paused until the next poll: {e}")
+                return relayed
             except VenueError as e:
                 failures = self.index.relay_failed(board, art.article_id)
                 log_msg(
@@ -549,15 +574,35 @@ class BridgeRuntime:
         bridges = getattr(self._server, "bridges", None)
         if art.reply_to_article_id and art.reply_to_article_id != bytes(32) and bridges:
             parent = bridges.copy_by_article(self._origin, board, art.reply_to_article_id)
-        posted = await venue.adapter.post(
-            account,
-            binding.channel,
-            text,
-            parent.src.foreign_id if parent is not None else None,
-            # The article's event_id: a retry after a crash re-posts with the
-            # same key, and an idempotent venue hands back the same post.
-            art.event_id.hex()[:32],
-        )
+        # The article's event_id is the key: a retry after a crash re-posts
+        # with it, and an idempotent venue hands back the same post. Any
+        # other venue could post twice, so there the article is claimed
+        # before posting and relayed at most once: only a refusal, which
+        # says the venue took nothing, releases the claim for a retry.
+        at_most_once = "idempotent_post" not in venue.adapter.capabilities
+        if at_most_once:
+            self.index.relay_done(board, art.article_id, None)
+        try:
+            posted = await venue.adapter.post(
+                account,
+                binding.channel,
+                text,
+                parent.src.foreign_id if parent is not None else None,
+                art.event_id.hex()[:32],
+            )
+        except VenueUncertain as e:
+            if not at_most_once:
+                raise
+            log_msg(
+                f"BRIDGE: article {art.article_num} on '{board}' may or may not have "
+                f"reached {venue.config.venue} ({e}); not retrying, the venue can't "
+                "take a retry without risking a duplicate"
+            )
+            return False
+        except VenueError:
+            if at_most_once:
+                self.index.relay_release(board, art.article_id)
+            raise
         root = None
         if parent is not None and bridges is not None:
             root = bridges.thread_root(parent.src)[0]

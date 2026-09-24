@@ -106,6 +106,22 @@ class AdmissionClient:
         self._factory = transport_factory
         self._transports: dict[tuple[str, str], Any] = {}
 
+    async def _open(self, url: str, home_origin: str, keep: bool):
+        """A transport to `url`, connected, that serves `home_origin`."""
+        transport = self._factory(url)
+        try:
+            await transport.connect_anonymous()
+            if normalize_origin(transport._server_origin or "") != home_origin:
+                raise HomeUnreachable(
+                    f"{url} says it is {transport._server_origin!r}, not {home_origin!r}"
+                )
+        except BaseException:
+            await transport.close()
+            raise
+        if not keep:
+            await transport.close()
+        return transport
+
     async def lookup(self, home_origin: str, home_url: str, pubkey: bytes) -> HomeStatus | None:
         from bonnet.net.firehose_transport import FirehoseClientError
         from bonnet.net.firehose_wire import (
@@ -118,12 +134,14 @@ class AdmissionClient:
         transport = self._transports.get(key)
         try:
             if transport is None:
-                transport = self._factory(home_url)
-                await transport.connect_anonymous()
-                if normalize_origin(transport._server_origin or "") != home_origin:
-                    raise HomeUnreachable(
-                        f"{home_url} says it is {transport._server_origin!r}, not {home_origin!r}"
-                    )
+                if not _host_is_origin(home_url, home_origin):
+                    # home_url is the publisher's hint, and any server can
+                    # claim any origin name. Before trusting its claim, pin
+                    # the key the origin's own name serves: TLS vouches for
+                    # that one. Dialing home_url below then has to present
+                    # the same key, or the pin refuses it.
+                    await self._open(f"https://{home_origin}", home_origin, keep=False)
+                transport = await self._open(home_url, home_origin, keep=True)
                 self._transports[key] = transport
             resp = await transport.send_command(build_user_get(home_origin, pubkey))
         except (FirehoseClientError, OSError) as e:
@@ -145,6 +163,15 @@ class AdmissionClient:
 # ---------------------------------------------------------------------------
 # Admission
 # ---------------------------------------------------------------------------
+
+
+def _host_is_origin(url: str, origin: str) -> bool:
+    """Whether `url` is https on the host named `origin` itself, so TLS checks
+    the same name the key gets pinned under."""
+    from bonnet.core.hostname import normalize_hostname
+
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and normalize_hostname(parsed.hostname or "") == origin
 
 
 def _hex(home_origin: str) -> str:

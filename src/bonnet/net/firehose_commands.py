@@ -841,7 +841,7 @@ class FirehoseCommandHandler:
         """Refuse local publishes that would squat on bridge namespaces.
 
         Every origin reserves boards starting with `~` for its own bridge
-        runtime. A bridge origin also closes registration: only the runtime
+        runtime, and bridge records and roles for the runtime alone. A bridge origin also closes registration: only the runtime
         (its daemon, and puppets named `<handle>~<type>` for a type it runs)
         and administrators may register. Crossposters are admitted by
         appending straight to the firehose, so they never reach this check,
@@ -853,6 +853,23 @@ class FirehoseCommandHandler:
             and not ctx.via_bridge_runtime
         ):
             return _error(0x0004, "Boards starting with '~' are reserved for this origin's bridge")
+        if not ctx.via_bridge_runtime:
+            # Bridge facts (bindings, links, observations, mirrors) are the
+            # runtime's to state; readers dedup and thread on them. The ACL
+            # grants these kinds to the daemon alone, but an operator's broad
+            # allow rule mustn't be able to widen that. A crosspost is the one
+            # role a user may claim, and it counts for nothing until the
+            # bridge observes it at the venue.
+            from bonnet.bridges.model import ROLE_CROSSPOST, BridgeMetadata
+
+            if intent.kind.startswith("bonnet.bridge."):
+                return _error(0x0004, "Bridge records are published by the bridge runtime only")
+            if intent.kind == KIND_ARTICLE:
+                role = BridgeMetadata.from_metadata(intent.metadata).bridge_role
+                if role is not None and role != ROLE_CROSSPOST:
+                    return _error(
+                        0x0004, "Only the bridge runtime may publish mirrors of foreign posts"
+                    )
         policy = self._bridge_policy
         if policy is None or intent.kind != KIND_USER_REGISTER or ctx.role == "administrator":
             return None

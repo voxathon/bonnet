@@ -190,7 +190,8 @@ class RuntimeIndex:
     def pending(self, board: str) -> list[PendingPost]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT post, first_seen, reason FROM pending WHERE board=?", (board,)
+                "SELECT post, first_seen, reason FROM pending WHERE board=? ORDER BY rowid",
+                (board,),
             ).fetchall()
         return [PendingPost(post_from_json(r[0]), r[1], r[2]) for r in rows]
 
@@ -304,6 +305,15 @@ class RuntimeIndex:
             return self._conn.execute(
                 "SELECT failures FROM relayed WHERE board=? AND article_id=?", (board, article_id)
             ).fetchone()[0]
+
+    def relay_release(self, board: str, article_id: bytes) -> None:
+        """Undo a claim (`relay_done` with no foreign_id) so the article is retried."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE relayed SET done=0 WHERE board=? AND article_id=? AND foreign_id IS NULL",
+                (board, article_id),
+            )
+            self._conn.commit()
 
     def relay_done(self, board: str, article_id: bytes, foreign_id: str | None) -> None:
         with self._lock:

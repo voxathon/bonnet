@@ -39,12 +39,24 @@ there is no import cycle to type through.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import os
+import time
 import tomllib
 from dataclasses import dataclass
 
 from bonnet.bridges import model
-from bonnet.bridges.adapter import ForeignAccount, VenueError, build_adapter
+from bonnet.bridges.adapter import (
+    ForeignAccount,
+    ReadLimiter,
+    VenueAuthError,
+    VenueError,
+    VenueRateLimited,
+    VenueUncertain,
+    build_adapter,
+)
 from bonnet.bridges.config import VenueConfig, check_venue, venue_type_of
 from bonnet.bridges.model import BridgeMetadata, SourceKey
 from bonnet.core.crypto import Identity
@@ -125,6 +137,124 @@ def _client_for(url: str):
 
 def _adapter_for(spec: VenueAccountSpec):
     return build_adapter(VenueConfig(type=spec.type, venue=spec.venue, url=spec.url))
+
+
+# ---------------------------------------------------------------------------
+# Posting as a venue account
+# ---------------------------------------------------------------------------
+
+# Every call builds a fresh adapter, so an adapter's own post spacing never
+# outlives one call. Posts are spaced here instead, per account, for as long
+# as this gateway process runs.
+_gates: dict[tuple[str, str], ReadLimiter] = {}
+_clock = time.monotonic
+_sleep = asyncio.sleep
+
+# A venue's retry-after up to this long is waited out and the post retried
+# once; longer, and the call reports the venue error.
+MAX_RATE_WAIT_SECONDS = 20.0
+
+
+def _gate(spec: VenueAccountSpec, adapter) -> ReadLimiter:
+    key = (spec.venue, spec.account.user)
+    gate = _gates.get(key)
+    if gate is None:
+        interval = adapter.limits.posts_min_interval_seconds
+        gate = _gates[key] = ReadLimiter(
+            60.0 / interval if interval > 0 else 0,
+            clock=lambda: _clock(),
+            sleep=lambda d: _sleep(d),
+        )
+    return gate
+
+
+def _auth_failures_path() -> str:
+    return os.path.join(paths.tenant_dir(), "bridge_auth_failures.json")
+
+
+def _credential_digest(spec: VenueAccountSpec) -> str:
+    raw = f"{spec.venue}\0{spec.account.user}\0{spec.account.token}".encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _read_auth_failures() -> dict:
+    try:
+        with open(_auth_failures_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_auth_failures(data: dict) -> None:
+    path = _auth_failures_path()
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def _auth_blocked(spec: VenueAccountSpec) -> str | None:
+    """Why posting as `spec` is refused without asking the venue, if it is.
+
+    A venue that rejected these exact credentials is never sent them again:
+    flatboard locks every account on an IP out after 10 bad tokens an hour,
+    and a shared gateway holds many tenants' accounts. The block lifts when
+    the token (or user) in the accounts file changes.
+    """
+    record = _read_auth_failures().get(spec.venue)
+    if not isinstance(record, dict) or record.get("digest") != _credential_digest(spec):
+        return None
+    when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.get("at", 0)))
+    return (
+        f"{spec.venue} rejected the credentials for {spec.account.user!r} at {when}; "
+        "not sending them again: replace the token in the accounts file"
+    )
+
+
+def _note_auth(spec: VenueAccountSpec, failed: bool) -> None:
+    data = _read_auth_failures()
+    if failed:
+        data[spec.venue] = {"digest": _credential_digest(spec), "at": int(time.time())}
+    elif spec.venue in data:
+        del data[spec.venue]
+    else:
+        return
+    _write_auth_failures(data)
+
+
+async def _venue_post(spec: VenueAccountSpec, adapter, channel, text, reply_to, key):
+    """Post as `spec`: spaced per account, never with rejected credentials.
+
+    Retried once, with the same key, when that's safe: after a short rate
+    limit (the venue took nothing), or after an uncertain failure on a venue
+    with idempotent posting (the key lands on the same post either way).
+    """
+    blocked = _auth_blocked(spec)
+    if blocked is not None:
+        raise VenueAuthError(blocked)
+    gate = _gate(spec, adapter)
+    for attempt in range(2):
+        await gate.wait()
+        try:
+            posted = await adapter.post(spec.account, channel, text, reply_to, key)
+        except VenueAuthError:
+            _note_auth(spec, failed=True)
+            raise
+        except VenueUncertain:
+            if attempt or "idempotent_post" not in adapter.capabilities:
+                raise
+            continue
+        except VenueRateLimited as e:
+            wait = e.retry_after
+            if wait is not None:
+                gate.defer(wait)
+            if attempt or wait is None or wait > MAX_RATE_WAIT_SECONDS:
+                raise
+            continue
+        _note_auth(spec, failed=False)
+        return posted
+    raise AssertionError("unreachable")
 
 
 def _home(auth: str | None) -> tuple[Identity, str, str]:
@@ -362,11 +492,22 @@ async def crosspost(
                        venue_text, reply_to_foreign_id or None, frame, "pending")
             )  # fmt: skip
             try:
-                posted = await adapter.post(
-                    spec.account, channel, venue_text, reply_to_foreign_id or None,
+                posted = await _venue_post(
+                    spec, adapter, channel, venue_text, reply_to_foreign_id or None,
                     event_id.hex()[:32],
                 )  # fmt: skip
             except VenueError as e:
+                if isinstance(e, VenueUncertain) and "idempotent_post" in adapter.capabilities:
+                    # The venue may hold the post, and a native copy on B
+                    # would then sit beside it. Keep the frame pending:
+                    # flush_outbox finishes it with the same key.
+                    return {
+                        "egress": "uncertain",
+                        "venue_error": str(e),
+                        "published": False,
+                        "queued": True,
+                        "note": "run flush_outbox to finish: it re-posts with the same key",
+                    }
                 # §11.2 step 4: the venue refused; keep the post on B, natively.
                 frame = native()
                 outbox.put(
@@ -477,54 +618,57 @@ async def flush_outbox(auth: str | None = None) -> dict:
     try:
         accounts = load_accounts()
         for entry in outbox.by_state("pending", "ready"):
-            bridge_client = _client_for(entry.bridge_url)
+            # One entry failing (the venue, the bridge) leaves it where it
+            # was and moves on: the rest may not need either.
             try:
-                await bridge_client.connect(identity, username="")
-                if entry.state == "ready":
-                    result = await _send(bridge_client, outbox, entry.event_id, entry.frame)
-                    report.append({"event_id": entry.event_id.hex(), **result})
-                    continue
-                spec = accounts.get(entry.venue)
-                adapter = _adapter_for(spec) if spec is not None else None
-                try:
-                    if (
-                        spec is None
-                        or adapter is None
-                        or "idempotent_post" not in adapter.capabilities
-                    ):
-                        outbox.set_state(entry.event_id, "dropped", "venue can't re-post safely")
-                        report.append({"event_id": entry.event_id.hex(), "dropped": True})
-                        continue
-                    posted = await adapter.post(
-                        spec.account, entry.channel, entry.venue_text, entry.reply_to,
-                        entry.event_id.hex()[:32],
-                    )  # fmt: skip
-                finally:
-                    if adapter is not None:
-                        await adapter.close()
-                from bonnet.core.record import decode_intent
-
-                n = int.from_bytes(entry.frame[1:5], "big")
-                old = decode_intent(entry.frame[5 : 5 + n])
-                old_meta = BridgeMetadata.from_metadata(old.metadata)
-                body = entry.frame[5 + n + 64 + 4 :]
-                parent = None
-                if old.metadata.get_bytes(6):
-                    parent = (old.metadata.get_bytes(5), old.metadata.get_bytes(6))
-                frame = _final_frame(
-                    identity, entry.bridge_origin, entry.board, entry.event_id, old.article_id,
-                    old.metadata.get_text(1) or "", body, venue_type_of(entry.venue), posted,
-                    old_meta.marker or model.make_marker(entry.event_id),
-                    old_meta.home_origin or home_origin, old_meta.home_url or home_url, parent,
-                )  # fmt: skip
-                outbox.put(OutboxEntry(**{**entry.__dict__, "frame": frame, "state": "ready"}))
-                result = await _send(bridge_client, outbox, entry.event_id, frame)
-                report.append({"event_id": entry.event_id.hex(), "reposted": True, **result})
-            finally:
-                await bridge_client.close()
+                result = await _flush_one(entry, identity, home_origin, home_url, accounts, outbox)
+            except (VenueError, ProtocolError, FirehoseClientError, OSError) as e:
+                result = {"error": str(e), "state": entry.state}
+            report.append({"event_id": entry.event_id.hex(), **result})
     finally:
         outbox.close()
     return {"entries": report}
+
+
+async def _flush_one(entry, identity, home_origin, home_url, accounts, outbox) -> dict:
+    bridge_client = _client_for(entry.bridge_url)
+    try:
+        await bridge_client.connect(identity, username="")
+        if entry.state == "ready":
+            return await _send(bridge_client, outbox, entry.event_id, entry.frame)
+        spec = accounts.get(entry.venue)
+        adapter = _adapter_for(spec) if spec is not None else None
+        try:
+            if spec is None or adapter is None or "idempotent_post" not in adapter.capabilities:
+                outbox.set_state(entry.event_id, "dropped", "venue can't re-post safely")
+                return {"dropped": True}
+            posted = await _venue_post(
+                spec, adapter, entry.channel, entry.venue_text, entry.reply_to,
+                entry.event_id.hex()[:32],
+            )  # fmt: skip
+        finally:
+            if adapter is not None:
+                await adapter.close()
+        from bonnet.core.record import decode_intent
+
+        n = int.from_bytes(entry.frame[1:5], "big")
+        old = decode_intent(entry.frame[5 : 5 + n])
+        old_meta = BridgeMetadata.from_metadata(old.metadata)
+        body = entry.frame[5 + n + 64 + 4 :]
+        parent = None
+        if old.metadata.get_bytes(6):
+            parent = (old.metadata.get_bytes(5), old.metadata.get_bytes(6))
+        frame = _final_frame(
+            identity, entry.bridge_origin, entry.board, entry.event_id, old.article_id,
+            old.metadata.get_text(1) or "", body, venue_type_of(entry.venue), posted,
+            old_meta.marker or model.make_marker(entry.event_id),
+            old_meta.home_origin or home_origin, old_meta.home_url or home_url, parent,
+        )  # fmt: skip
+        outbox.put(OutboxEntry(**{**entry.__dict__, "frame": frame, "state": "ready"}))
+        result = await _send(bridge_client, outbox, entry.event_id, frame)
+        return {"reposted": True, **result}
+    finally:
+        await bridge_client.close()
 
 
 # ---------------------------------------------------------------------------
