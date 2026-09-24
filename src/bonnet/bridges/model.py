@@ -539,7 +539,7 @@ def merge_metadata(base: MetadataMap, extra: list[MetadataField]) -> MetadataMap
 class BridgePolicy:
     """What a bridge origin's server needs to know to enforce §8.
 
-    Held by the command handler only on origins with `[bridge_runtime]`.
+    Held by the command handler only on origins with a bridges.toml `[runtime]`.
     """
 
     daemon_pubkey: bytes

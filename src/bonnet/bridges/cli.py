@@ -18,7 +18,8 @@
   rebuild-index  rebuild the runtime index from the origin's log
   status         bindings, cursors, mirror and pending counts
 
-Bindings come from config: `run` reconciles them at startup, binding new or
+Bridges are configured in `bridges.toml`, next to the server's
+`config.toml`. Bindings come from its `[runtime]`: `run` reconciles them at startup, binding new or
 changed boards and unbinding boards removed from config.
 """
 
@@ -58,7 +59,9 @@ def _load_config(argv: list[str], prog: str):
     args.port = None
     config = _load_and_validate_config(args)
     if config.bridge_runtime is None:
-        print(f"error: {args.config} has no [bridge_runtime] table", file=sys.stderr)
+        from bonnet.bridges.config import bridges_path
+
+        print(f"error: {bridges_path(args.config)} has no [runtime] table", file=sys.stderr)
         raise SystemExit(1)
     return config, args
 

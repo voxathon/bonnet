@@ -119,6 +119,11 @@ class VenueAdapter(Protocol):
     venue: str
     capabilities: frozenset[str]
     limits: RateLimits
+    # The keys this adapter reads from its venue's `options` table. Others
+    # are warned about and ignored. Optionally, the class also has
+    #   @classmethod check_options(cls, options: dict) -> None
+    # raising ValueError for a value it can't take, before anything starts.
+    options: frozenset[str]
 
     async def poll(self, channel: str, cursor: str | None) -> list[ForeignPost]:
         """Posts newer than `cursor`, oldest first."""
@@ -241,6 +246,29 @@ def missing_adapters(venues: list[VenueConfig]) -> list[str]:
         except (ImportError, AttributeError) as e:
             errors.append(f"{venue.venue}: the adapter for {venue.type!r} failed to load: {e!r}")
     return errors
+
+
+def venue_option_problems(venues: list[VenueConfig]) -> tuple[list[str], list[str]]:
+    """(errors, warnings) about each venue's `options`, as its adapter sees them.
+
+    Call after `missing_adapters` comes back empty: it loads every class.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    for venue in venues:
+        cls = load_adapter_class(venue.type)
+        known: frozenset[str] = getattr(cls, "options", frozenset())
+        for key in sorted(k for k in venue.options if k not in known):
+            warnings.append(
+                f"{venue.venue}: the {venue.type} adapter has no option {key!r} (ignored)"
+            )
+        check = getattr(cls, "check_options", None)
+        if check is not None:
+            try:
+                check(venue.options)
+            except ValueError as e:
+                errors.append(f"{venue.venue}: options: {e}")
+    return errors, warnings
 
 
 def build_adapter(venue: VenueConfig, **kwargs) -> VenueAdapter:

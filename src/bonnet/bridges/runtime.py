@@ -118,7 +118,7 @@ class BridgeRuntime:
         self._server = server
         self._config = config or server.config.bridge_runtime
         if self._config is None:
-            raise ValueError("config has no [bridge_runtime] table: this is not a bridge origin")
+            raise ValueError("bridges.toml has no [runtime] table: this is not a bridge origin")
         self._origin = server.config.origin
         self._clock = clock
         self._max_raw = server.config.max_article_body_size

@@ -397,12 +397,12 @@ class FirehoseCommandHandler:
         # bonnet.bridges.model.BridgePolicy on a bridge origin, else None.
         self._bridge_policy = bridge_policy
         # bonnet.core.bridge_projection.BridgeProjection (bridges.db), and the
-        # venue -> recognized bridge origins map ([[bridges]] + own runtime).
+        # venue -> recognized bridge origins map ([[recognize]] + own runtime).
         self._bridges = bridge_projection
         self._recognized_bridges = dict(recognized_bridges or {})
         self._bridge_venue_types = dict(bridge_venue_types or {})
         # bonnet.bridges.admission.Admission on a bridge origin with
-        # [bridge_admission] enabled, else None (set by BonnetServer).
+        # bridges.toml [admission] enabled, else None (set by BonnetServer).
         self._admission: Any = None
         # Venues whose runtime is running in this process right now; the
         # bridge runtime adds and removes itself (manifest `local`).

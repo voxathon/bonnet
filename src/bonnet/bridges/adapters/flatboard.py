@@ -107,6 +107,7 @@ class FlatboardAdapter:
     # posting idempotent.
     capabilities = frozenset({"read", "threads", "write", "idempotent_post"})
     limits = RateLimits(reads_per_minute=120, posts_min_interval_seconds=15.0)
+    options: frozenset[str] = frozenset()
 
     def __init__(
         self,

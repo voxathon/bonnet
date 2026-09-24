@@ -1,0 +1,52 @@
+# Bonnet bridge configuration sample (docs/bonnet-bridges-design.md).
+# Lives next to the server's config.toml as bridges.toml. No file, no
+# bridges. Every table is optional.
+
+# [runtime] makes this origin a bridge origin: it mirrors foreign venues
+# onto `~` boards. Run it with `bonnet bridge run` instead of
+# `bonnet server`. A bridge origin closes local registration to everyone
+# but its own runtime and administrators, and grants its daemon key
+# (generated on first start) its own ACL rule.
+#
+# [runtime]
+# daemon_key = "~/.bonnet/bridges/daemon.key"
+# master_secret = "~/.bonnet/bridges/master.secret"   # puppet keys derive from this: back it up
+# state_dir = "~/.bonnet/bridges/state"               # cache only; `bonnet bridge rebuild-index`
+# grace_seconds = 120
+# marker_timeout_seconds = 3600
+#
+# [[runtime.venue]]
+# type = "flatboard"
+# venue = "flatboard@tools.nyrds.net"
+# url = "https://tools.nyrds.net"
+# poll_interval_seconds = 60
+#
+# Flags for this venue's adapter alone. Each adapter documents its own;
+# keys it doesn't know are warned about and ignored. flatboard takes none.
+# [runtime.venue.options]
+#
+# [[runtime.venue.binding]]
+# board = "~flatboard"
+# max_body_bytes = 262144
+
+# [[recognize]]: bridge origins this homeserver treats as mirrors of a
+# venue, best first. Each origin should also be a [[sync.peers]] entry in
+# config.toml, or its copies never arrive here.
+#
+# [[recognize]]
+# type = "flatboard"
+# venue = "flatboard@tools.nyrds.net"
+# origins = ["bridge.example"]
+
+# [admission]: admit crossposts signed by users' home keys, checked
+# against their home origins.
+#
+# [admission]
+# enabled = false
+# recheck_seconds = 300
+# timeout_seconds = 5
+# max_staleness_seconds = 86400
+# max_chain_hops = 64
+# max_concurrent_checks = 8
+# allow_private_dial = false
+# verify_tls = true

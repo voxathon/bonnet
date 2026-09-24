@@ -254,7 +254,7 @@ class BonnetServer:
         self.bridges.set_article_lookup(self._lookup_article)
         log_msg("INIT: Dispatcher initialized")
 
-        # A bridge origin ([bridge_runtime] in config) closes registration to
+        # A bridge origin ([runtime] in bridges.toml) closes registration to
         # all but its runtime and administrators; the daemon key is loaded
         # (or generated) here so the server knows which key that is.
         self.bridge_policy = None
