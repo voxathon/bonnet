@@ -298,6 +298,42 @@ async def test_a_rate_limit_pauses_relay_without_counting_a_failure(w):
     assert "patient" in post["text"]
 
 
+def _not_idempotent(w):
+    adapter = w.b1.venue.adapter
+    adapter.capabilities = adapter.capabilities - {"idempotent_post"}
+
+
+async def test_an_uncertain_relay_is_retried_onto_the_same_post(w):
+    art = await w.native("once")
+    w.board.lose_post_responses = 1
+    await w.b1.relay()
+    assert w.b1.runtime.index.relay_state(BOARD, art.article_id) == (1, False)
+    await w.b1.relay()
+    (post,) = w.relay_posts()  # the same key: flatboard handed back the same post
+    assert w.b1.runtime.index.relay_state(BOARD, art.article_id) == (1, True)
+
+
+async def test_an_uncertain_relay_on_a_non_idempotent_venue_is_never_retried(w):
+    _not_idempotent(w)
+    art = await w.native("maybe")
+    w.board.lose_post_responses = 1
+    for _ in range(3):
+        await w.b1.relay()
+    assert len(w.relay_posts()) == 1
+    assert w.b1.runtime.index.relay_state(BOARD, art.article_id) == (0, True)
+
+
+async def test_a_refused_relay_on_a_non_idempotent_venue_is_retried(w):
+    _not_idempotent(w)
+    art = await w.native("refused once")
+    w.board.refuse_posts = 1
+    await w.b1.relay()
+    assert w.relay_posts() == []
+    assert w.b1.runtime.index.relay_state(BOARD, art.article_id) == (1, False)
+    await w.b1.relay()
+    assert len(w.relay_posts()) == 1
+
+
 async def test_no_account_means_no_relay(tmp_path):
     board = FakeFlatboard()
     side = Side(tmp_path, B1, venue_config(relay_egress=True), board)

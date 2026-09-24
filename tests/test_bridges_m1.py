@@ -463,6 +463,38 @@ async def test_marked_post_waits_for_the_marker_timeout(h):
     assert h.runtime.index.pending(BOARD) == []
 
 
+async def test_a_post_from_the_future_holds_nothing_up(h):
+    ahead = h.board.post("clock skew", created=NOW + 86_400)
+    after = h.board.post("settled", created=NOW - 600)
+    assert await h.poll() == 2
+    assert set(h.mirrors()) == {str(ahead), str(after)}
+    # Its stated time is still recorded as the venue gave it.
+    meta = BridgeMetadata.from_metadata(h.mirrors()[str(ahead)].metadata)
+    assert meta.foreign_created_at == NOW + 86_400
+
+
+async def test_a_slightly_fast_venue_clock_still_gets_the_grace_window(h):
+    h.board.post("a little ahead", created=NOW + 60)
+    assert await h.poll() == 0
+    h.clock.t = NOW + 60 + 200
+    assert await h.poll() == 1
+
+
+async def test_a_reply_waits_for_its_pending_parent_and_threads_under_it(h):
+    parent = h.board.post(f"quoting {model.make_marker(os.urandom(32))}", created=NOW - 600)
+    reply = h.board.post("a reply", author="lanternfly", reply_to=parent, created=NOW - 500)
+    await h.poll()
+    assert h.mirrors() == {}
+    assert [p.post.foreign_id for p in h.runtime.index.pending(BOARD)] == [str(parent), str(reply)]
+
+    h.clock.t = NOW + 3601
+    await h.poll()
+    assert set(h.mirrors()) == {str(parent), str(reply)}
+    parent_rec, reply_rec = h.mirrors()[str(parent)], h.mirrors()[str(reply)]
+    assert reply_rec.metadata.get_bytes(6) == parent_rec.article_id
+    assert h.runtime.index.pending(BOARD) == []
+
+
 async def test_long_posts_are_truncated_with_full_bytes_observed(tmp_path):
     harness = Harness(tmp_path, venues=[venue_config(max_body_bytes=100)])
     await harness.start()
