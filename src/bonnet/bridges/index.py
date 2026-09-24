@@ -64,6 +64,15 @@ CREATE TABLE IF NOT EXISTS relayed (
     done INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (board, article_id)
 );
+CREATE TABLE IF NOT EXISTS crossposters (
+    venue TEXT NOT NULL,
+    author_id TEXT NOT NULL,
+    PRIMARY KEY (venue, author_id)
+);
+CREATE TABLE IF NOT EXISTS deletion_cursors (
+    board TEXT PRIMARY KEY,
+    cursor TEXT
+);
 CREATE TABLE IF NOT EXISTS relay_floor (
     board TEXT PRIMARY KEY,
     article_num INTEGER NOT NULL
@@ -206,6 +215,55 @@ class RuntimeIndex:
             self._conn.execute(
                 "DELETE FROM pending WHERE board=? AND venue=? AND channel=? AND foreign_id=?",
                 (board, src.venue, src.channel, src.foreign_id),
+            )
+            self._conn.commit()
+
+    def recent_mirrors(self, board: str, limit: int) -> list[tuple[SourceKey, MirrorEntry]]:
+        """The most recently written mirrors on `board`, newest first (for sweeps)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT venue, channel, foreign_id, event_id, article_id, root_article_id, "
+                "root_foreign_id, digest, revision FROM mirrors WHERE board=? "
+                "ORDER BY rowid DESC LIMIT ?",
+                (board, limit),
+            ).fetchall()
+        return [
+            (
+                SourceKey(r[0], r[1], r[2]),
+                MirrorEntry(bytes(r[3]), bytes(r[4]), bytes(r[5]), r[6], bytes(r[7]), r[8]),
+            )
+            for r in rows
+        ]
+
+    # -- linked grace (§11.1 step 1) and deletion logs (§11.4) ---------------
+
+    def note_crossposter(self, venue: str, author_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO crossposters VALUES (?, ?)", (venue, author_id)
+            )
+            self._conn.commit()
+
+    def is_crossposter(self, venue: str, author_id: str) -> bool:
+        with self._lock:
+            return (
+                self._conn.execute(
+                    "SELECT 1 FROM crossposters WHERE venue=? AND author_id=?", (venue, author_id)
+                ).fetchone()
+                is not None
+            )
+
+    def deletion_cursor(self, board: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT cursor FROM deletion_cursors WHERE board=?", (board,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def set_deletion_cursor(self, board: str, cursor: str | None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO deletion_cursors VALUES (?, ?)", (board, cursor)
             )
             self._conn.commit()
 

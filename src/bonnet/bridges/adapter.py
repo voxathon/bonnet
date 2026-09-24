@@ -68,6 +68,15 @@ class RateLimits:
     posts_min_interval_seconds: float = 0.0
 
 
+@dataclass(frozen=True)
+class Deletion:
+    """One entry of a venue's explicit deletion log (capability `deletion_log`)."""
+
+    foreign_id: str
+    raw: bytes
+    raw_content_type: str = "application/json"
+
+
 class VenueError(Exception):
     """The venue failed in a way worth backing off from."""
 
@@ -122,6 +131,11 @@ class VenueAdapter(Protocol):
         ...
 
     def max_text_bytes(self) -> int: ...
+
+    # Only on adapters with the `deletion_log` capability:
+    #   async def deletions(self, channel, cursor) -> tuple[list[Deletion], str | None]
+    # Entries after `cursor`, oldest first, and the cursor to resume from.
+    # Venues with `edit` are swept with fetch(): a changed text is an edit.
 
     async def close(self) -> None: ...
 

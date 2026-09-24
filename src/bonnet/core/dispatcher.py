@@ -101,6 +101,9 @@ class TrackedProjection(Protocol):
         """Drop everything for `origin`, checkpoint included."""
         ...
 
+    # Optional: `flush()`, called once per dispatch batch, lets a projection
+    # commit a batch at once instead of one record at a time.
+
 
 class Dispatcher:
     """Routes firehose records to projections.
@@ -204,41 +207,57 @@ class Dispatcher:
             return 0
 
         with self._dispatch_lock:
-            checkpoint = self._firehose.get_checkpoint(origin)
-            # A tracked projection that's behind is brought up to the main
-            # checkpoint first, so the records below reach it in order.
-            self._catch_up_origin(origin, checkpoint)
-            highest = self._firehose.get_highest_seq(origin)
-            if checkpoint >= highest:
-                return 0
+            try:
+                return self._dispatch_origin_locked(origin, max_records)
+            finally:
+                self._flush_tracked()
 
-            records = self._firehose.get_events_range(origin, checkpoint + 1, max_records)
-            count = 0
-            for rec in records:
-                try:
-                    self._dispatch_record(rec)
-                except Exception as e:
-                    # Skip and log rather than halt: one bad record must not
-                    # block every later record for this origin forever. The
-                    # checkpoint still advances past it, same as a successful
-                    # dispatch, so the origin doesn't get stuck retrying it.
-                    log_msg(
-                        f"DISPATCH: origin='{origin}' seq={rec.origin_seq} kind='{rec.kind}' "
-                        f"FAILED, skipping: {e}"
-                    )
-                self._firehose.set_checkpoint(origin, rec.origin_seq)
-                for proj in self._tracked:
-                    self._apply_tracked(proj, rec)
-                # Punishment import relies on the policy checkpoint tracking overall
-                # dispatch progress, not just policy-kind records, so that
-                # _policy_current() can't be fooled by intervening
-                # non-policy records into believing the projection is stale.
-                self._policy.set_checkpoint(origin, rec.origin_seq)
-                count += 1
-                log_debug("DISPATCH ok", origin=origin, seq=rec.origin_seq, kind=rec.kind)
-            if count:
-                log_info("DISPATCH done", origin=origin, count=count)
-            return count
+    def _flush_tracked(self) -> None:
+        for proj in self._tracked:
+            flush = getattr(proj, "flush", None)
+            if flush is None:
+                continue
+            try:
+                flush()
+            except Exception as e:
+                log_msg(f"DISPATCH: projection='{proj.name}' flush FAILED: {e}")
+
+    def _dispatch_origin_locked(self, origin: str, max_records: int) -> int:
+        checkpoint = self._firehose.get_checkpoint(origin)
+        # A tracked projection that's behind is brought up to the main
+        # checkpoint first, so the records below reach it in order.
+        self._catch_up_origin(origin, checkpoint)
+        highest = self._firehose.get_highest_seq(origin)
+        if checkpoint >= highest:
+            return 0
+
+        records = self._firehose.get_events_range(origin, checkpoint + 1, max_records)
+        count = 0
+        for rec in records:
+            try:
+                self._dispatch_record(rec)
+            except Exception as e:
+                # Skip and log rather than halt: one bad record must not
+                # block every later record for this origin forever. The
+                # checkpoint still advances past it, same as a successful
+                # dispatch, so the origin doesn't get stuck retrying it.
+                log_msg(
+                    f"DISPATCH: origin='{origin}' seq={rec.origin_seq} kind='{rec.kind}' "
+                    f"FAILED, skipping: {e}"
+                )
+            self._firehose.set_checkpoint(origin, rec.origin_seq)
+            for proj in self._tracked:
+                self._apply_tracked(proj, rec)
+            # Punishment import relies on the policy checkpoint tracking overall
+            # dispatch progress, not just policy-kind records, so that
+            # _policy_current() can't be fooled by intervening
+            # non-policy records into believing the projection is stale.
+            self._policy.set_checkpoint(origin, rec.origin_seq)
+            count += 1
+            log_debug("DISPATCH ok", origin=origin, seq=rec.origin_seq, kind=rec.kind)
+        if count:
+            log_info("DISPATCH done", origin=origin, count=count)
+        return count
 
     # ------------------------------------------------------------------
     # Tracked projections
@@ -262,6 +281,7 @@ class Dispatcher:
                 if self._allowed_origins and origin not in self._allowed_origins:
                     continue
                 total += self._catch_up_origin(origin, self._firehose.get_checkpoint(origin))
+            self._flush_tracked()
         return total
 
     def _catch_up_origin(self, origin: str, target: int, batch: int = 1000) -> int:

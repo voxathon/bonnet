@@ -44,6 +44,8 @@ _VENUE_KEYS = {
     "url",
     "poll_interval_seconds",
     "backfill_pages",
+    "sweep_interval_seconds",
+    "sweep_window",
     "relay_user",
     "relay_token_file",
     "binding",
@@ -77,6 +79,9 @@ class VenueConfig:
     url: str
     poll_interval_seconds: int = 60
     backfill_pages: int = 1
+    # Edit/deletion sweeps, for venues that support either (design doc §11.4).
+    sweep_interval_seconds: int = 600
+    sweep_window: int = 50
     relay_user: str = ""
     relay_token_file: str = ""
     bindings: list[BindingConfig] = field(default_factory=list)
@@ -164,6 +169,8 @@ def parse_bridge_runtime(table: dict, base_dir: str) -> tuple[BridgeRuntimeConfi
             url=_str(v, "url", vw).rstrip("/"),
             poll_interval_seconds=_int(v, "poll_interval_seconds", vw, 60, minimum=1),
             backfill_pages=_int(v, "backfill_pages", vw, 1, minimum=1),
+            sweep_interval_seconds=_int(v, "sweep_interval_seconds", vw, 600, minimum=1),
+            sweep_window=_int(v, "sweep_window", vw, 50),
             relay_user=_str(v, "relay_user", vw, ""),
             relay_token_file=_str(v, "relay_token_file", vw, ""),
         )

@@ -213,6 +213,8 @@ async def test_the_runtime_observes_the_echo_instead_of_mirroring_it(w):
         if r.kind == model.KIND_BRIDGE_OBSERVATION
     ]
     assert obs.target_event_id == art.event_id
+    # The author is now known to crosspost: their next posts get the longer grace.
+    assert w.runtime.index.is_crossposter(FLATBOARD_VENUE, VENUE_USER)
 
 
 async def test_replies_thread_on_the_venue_and_the_bridge(w):

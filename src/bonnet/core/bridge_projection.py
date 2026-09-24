@@ -201,12 +201,25 @@ class BridgeProjection:
         return row[0] if row else 0
 
     def set_checkpoint(self, origin: str, seq: int) -> None:
+        # Not committed here: the dispatcher calls flush() once per batch, so
+        # the checkpoint and the rows it covers land in one transaction.
         with self._lock:
+            self._begin()
             self._conn.execute("INSERT OR REPLACE INTO checkpoints VALUES (?, ?)", (origin, seq))
-            self._conn.commit()
+
+    def flush(self) -> None:
+        """Commit everything applied since the last flush."""
+        with self._lock:
+            if self._conn.in_transaction:
+                self._conn.commit()
+
+    def _begin(self) -> None:
+        if not self._conn.in_transaction:
+            self._conn.execute("BEGIN")
 
     def clear_origin(self, origin: str) -> None:
         with self._lock:
+            self._begin()
             for table in ("copies", "bindings", "observations", "admissions", "checkpoints"):
                 self._conn.execute(f"DELETE FROM {table} WHERE origin=?", (origin,))
             # srcs are shared across origins: keep only those some copy still names.
@@ -217,13 +230,21 @@ class BridgeProjection:
             self._conn.commit()
 
     def apply(self, rec: Record) -> None:
+        """Apply one record inside the batch's transaction.
+
+        A savepoint per record, so a failing record undoes only its own
+        writes and the rest of the batch survives to the next flush().
+        """
         with self._lock:
+            self._begin()
+            self._conn.execute("SAVEPOINT rec")
             try:
                 self._apply(rec)
-                self._conn.commit()
             except Exception:
-                self._conn.rollback()
+                self._conn.execute("ROLLBACK TO rec")
+                self._conn.execute("RELEASE rec")
                 raise
+            self._conn.execute("RELEASE rec")
 
     def _apply(self, rec: Record) -> None:
         kind = rec.kind

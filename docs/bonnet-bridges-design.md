@@ -545,6 +545,7 @@ Dedup keys stay `(origin, event_id)`. `src` and the thread key are groupings, no
 - `bonnet.user.register` records carrying 0x0114, and `bonnet.user.revoke` records, update `admissions`.
 - Article controls on a tracked copy update its `state`: cancel, restore and purge (by hand, from the bridge origin's sysops), and supersede via field 7 (the runtime's edits).
 - Include it in `rebuild_all` and `clear_origin`, and never raise out of an apply.
+- **Batched commits (M5).** `bridges.db` writes a whole dispatch batch in one transaction: each record gets a savepoint, so a failing record undoes only itself, and the dispatcher calls the projection's optional `flush()` once per batch. The checkpoint lands in the same transaction as the rows it covers.
 - **Startup catch-up (done in M0).** `Dispatcher` takes `tracked_projections` (the `TrackedProjection` protocol: `name`, `get_checkpoint`, `set_checkpoint`, `apply`, `clear_origin`). `dispatch_origin` first replays whatever a tracked projection is missing up to the main checkpoint, then feeds it each new record; `catch_up_projections()` runs at boot; `rebuild_all` and the console's origin purge clear them. At boot, for each origin, if `bridges.db`'s checkpoint is behind the firehose checkpoint, replay that range into `bridges.db` only. Make this a generic dispatcher facility: "replay origin X from seq N into projection P". Every future projection gets it for free, and M1 records synced before a consumer upgrades to M2 are picked up.
 
 ### 9.3 Canonical pick
@@ -708,7 +709,7 @@ token_file = "..."
 ### 11.1 Ingest
 
 For each foreign post, oldest first:
-1. **Grace window**: 120 s, or 600 s for authors who have crossposted before.
+1. **Grace window**: 120 s, or 600 s for authors who have crossposted before. (M5: an author counts as a crossposter once the runtime has read back one of their crosspost originals as an echo; the runtime index remembers `(venue, author_id)`.)
 2. **The relay's own post** → observe it, never mirror it.
 3. **Marker present, resolves to a role-2 article on *this* board** →
    - if the original's `foreign_id` equals this post's `foreign_id`: it's the echo. Observe only. The original is the thread node.
@@ -774,6 +775,8 @@ Other bridges see the relay's post at the venue, find the marker resolves in `br
 - **Deletions:** the runtime **never cancels or purges.** If the venue exposes an explicit deletion log (`deletion_log`), the runtime publishes an observation with `foreign_state = 1` and the deletion entry as the raw body. A plain 404 is not a deletion signal and records nothing. The bridge origin's sysops can cancel or purge by hand; a cancelled mirror can't be superseded afterwards, so edits to it stop there.
 - **Eviction** (flatboard's FIFO, anything below `first_id`) is the venue forgetting. Nothing happens.
 
+**Sweeps (M5).** Venues with `edit` or `deletion_log` are swept every `sweep_interval_seconds` (per venue, default 600), after the poll. Edits: the `sweep_window` most recently written mirrors (default 50) are re-fetched, and a changed digest goes through the normal edit path (the puppet supersedes its own mirror). Deletions: adapters with `deletion_log` implement `deletions(channel, cursor) -> (entries, cursor)`; each entry for a mirrored post becomes an observation with `foreign_state = 1` whose body is the log entry, and the cursor is kept in the runtime index. Flatboard has neither capability, so it's never swept.
+
 ---
 
 ## 12. Flatboard reference adapter
@@ -811,6 +814,8 @@ Other bridges see the relay's post at the venue, find the marker resolves in `br
 4. **M3 (done): remote learning.** Adopting bridge origins from peers' manifests under the route-learning guards.
 5. **M4 (done): admission, then relay egress, then edge egress.** Admission (§6) with a fake home origin, including the async client, the loop-thread guard, the concurrency cap, name collisions and closed registration (§8); relay links; gateway home-key client for B, outbox of signed frames, markers, echo handling with `foreign_id` matching, `corroborate`.
 6. **M5: hardening.** Sweeps, evidence links, a second adapter (a bot-welcoming venue, with the operator's OK).
+   - **Done:** edit and deletion-log sweeps, linked grace, batched `bridges.db` commits.
+   - **Open:** evidence links (role 6) need their semantics written down first: §4.2 says only "`target_event_id` = evidence". The second adapter needs the operator to pick a venue and OK it (§12's rule).
 
 Harness: several in-process `BonnetServer`s, a fake flatboard (ASGI) with the §12 endpoints including `evicted` and `request_id`, a fake home origin whose USER_GET answers can be scripted, and a gateway.
 

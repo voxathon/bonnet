@@ -78,6 +78,7 @@ class _Venue:
     config: VenueConfig
     adapter: VenueAdapter
     failures: int = 0
+    last_sweep: float = 0.0
 
 
 def _relay_account(venue: VenueConfig) -> ForeignAccount | None:
@@ -225,6 +226,15 @@ class BridgeRuntime:
         for binding in venue.config.bindings:
             if binding.relay_egress:
                 await self.relay_binding(venue, binding)
+        caps = venue.adapter.capabilities
+        now = self._clock()
+        if ("edit" in caps or "deletion_log" in caps) and (
+            now - venue.last_sweep >= venue.config.sweep_interval_seconds
+        ):
+            venue.last_sweep = now
+            for binding in venue.config.bindings:
+                if binding.ingest:
+                    await self.sweep_binding(venue, binding)
 
     async def ingest_binding(self, venue: _Venue, binding: BindingConfig) -> int:
         """One poll of one binding. Returns the number of posts handled."""
@@ -252,7 +262,12 @@ class BridgeRuntime:
 
         # 1. Grace window: let the venue settle (and, from M4, an edge
         #    gateway finish publishing its original) before mirroring.
-        if post.created_at is not None and now - post.created_at < self._config.grace_seconds:
+        grace = (
+            self._config.linked_grace_seconds
+            if self.index.is_crossposter(post.venue, post.author_id)
+            else self._config.grace_seconds
+        )
+        if post.created_at is not None and now - post.created_at < grace:
             return HOLD
 
         crosspost_of = None
@@ -265,6 +280,10 @@ class BridgeRuntime:
                 # 3. Our own crosspost original or relay-linked article came
                 #    back from the venue: the echo. Observe only.
                 await self._observe(post, local.event_id, model.FOREIGN_PRESENT)
+                if local.role == model.ROLE_CROSSPOST:
+                    # Their next posts get the longer grace: an edge gateway
+                    # may still be publishing the original (§11.1 step 1).
+                    self.index.note_crossposter(post.venue, post.author_id)
                 self.index.drop_pending(board, src)
                 return DONE
             if remote is not None:
@@ -585,19 +604,34 @@ class BridgeRuntime:
         return True
 
     async def _observe(self, post: ForeignPost, target_event_id: bytes, state: int) -> None:
-        raw = post.raw[: self._max_raw]
-        if len(raw) < len(post.raw):
-            log_msg(f"BRIDGE: {post.venue} post {post.foreign_id} raw bytes cut to {self._max_raw}")
+        await self._observe_raw(
+            post.venue,
+            post.channel,
+            post.foreign_id,
+            model.content_digest(post.text),
+            post.raw,
+            post.raw_content_type,
+            target_event_id,
+            state,
+        )
+
+    async def _observe_raw(
+        self,
+        venue: str,
+        channel: str,
+        foreign_id: str,
+        digest16: bytes,
+        raw: bytes,
+        content_type: str,
+        target_event_id: bytes,
+        state: int,
+    ) -> None:
+        if len(raw) > self._max_raw:
+            log_msg(f"BRIDGE: {venue} post {foreign_id} raw bytes cut to {self._max_raw}")
+            raw = raw[: self._max_raw]
         intent = Intent(
             event_id=model.observation_event_id(
-                post.venue,
-                post.channel,
-                post.foreign_id,
-                model.content_digest(post.text),
-                state,
-                raw,
-                self._origin,
-                target_event_id,
+                venue, channel, foreign_id, digest16, state, raw, self._origin, target_event_id
             ),
             kind=model.KIND_BRIDGE_OBSERVATION,
             origin=self._origin,
@@ -609,10 +643,10 @@ class BridgeRuntime:
             metadata=MetadataMap(
                 BridgeMetadata(
                     bridge_role=model.ROLE_OBSERVATION,
-                    venue=post.venue,
-                    channel=post.channel,
-                    foreign_id=post.foreign_id,
-                    foreign_content_type=post.raw_content_type,
+                    venue=venue,
+                    channel=channel,
+                    foreign_id=foreign_id,
+                    foreign_content_type=content_type,
                     foreign_state=state,
                 ).to_fields()
             ),
@@ -620,6 +654,49 @@ class BridgeRuntime:
             body_size=len(raw),
         )
         await self.publisher.publish(self.daemon, intent, raw)
+
+    # ------------------------------------------------------------------
+    # Sweeps (§11.4)
+    # ------------------------------------------------------------------
+
+    async def sweep_binding(self, venue: _Venue, binding: BindingConfig) -> int:
+        """Look back for edits and deletions on venues that report them.
+
+        Edits (capability `edit`): re-fetch the most recent mirrors; a new
+        text supersedes. Deletions (capability `deletion_log`): read the
+        venue's log and observe each deletion of a mirrored post. Never
+        cancels or purges, and a plain 404 means nothing (§11.4).
+        """
+        board = binding.board
+        adapter = venue.adapter
+        changed = 0
+        if "edit" in adapter.capabilities:
+            for src, entry in self.index.recent_mirrors(board, venue.config.sweep_window):
+                got = await adapter.fetch(src.channel, src.foreign_id)
+                if isinstance(got, ForeignPost) and model.foreign_digest(got.text) != entry.digest:
+                    await self._mirror(venue, binding, got)
+                    changed += 1
+        deletions = getattr(adapter, "deletions", None)
+        if "deletion_log" in adapter.capabilities and deletions is not None:
+            entries, cursor = await deletions(binding.channel, self.index.deletion_cursor(board))
+            for d in entries:
+                mirror = self.index.mirror(
+                    board, SourceKey(adapter.venue, binding.channel, d.foreign_id)
+                )
+                if mirror is not None:
+                    await self._observe_raw(
+                        adapter.venue,
+                        binding.channel,
+                        d.foreign_id,
+                        mirror.digest[:16],
+                        d.raw,
+                        d.raw_content_type,
+                        mirror.event_id,
+                        model.FOREIGN_DELETED,
+                    )
+                    changed += 1
+            self.index.set_deletion_cursor(board, cursor)
+        return changed
 
 
 async def serve_bridge(server, runtime: BridgeRuntime, **run_kwargs) -> bool:
