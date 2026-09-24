@@ -438,10 +438,11 @@ def test_bridges_config_parses_and_validates():
     assert entries == [BridgesEntry("flatboard", FLATBOARD_VENUE, ["b.test", "c.test"])]
     assert unknown == ["bridges[0].x"]
     for bad in (
-        [{"type": "t", "venue": FLATBOARD_VENUE, "origins": []}],
-        [{"type": "t", "venue": FLATBOARD_VENUE, "origins": ["a", "a"]}],
-        [{"type": "t", "venue": "nohost", "origins": ["a"]}],
-        [{"type": "t", "venue": FLATBOARD_VENUE, "origins": ["a"]}] * 2,
+        [{"type": "flatboard", "venue": FLATBOARD_VENUE, "origins": []}],
+        [{"type": "flatboard", "venue": FLATBOARD_VENUE, "origins": ["a", "a"]}],
+        [{"type": "flatboard", "venue": "nohost", "origins": ["a"]}],
+        [{"type": "other", "venue": FLATBOARD_VENUE, "origins": ["a"]}],
+        [{"type": "flatboard", "venue": FLATBOARD_VENUE, "origins": ["a"]}] * 2,
     ):
         with pytest.raises(ValueError):
             parse_bridges(bad, _norm)

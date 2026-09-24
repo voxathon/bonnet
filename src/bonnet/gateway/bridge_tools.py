@@ -45,7 +45,7 @@ from dataclasses import dataclass
 
 from bonnet.bridges import model
 from bonnet.bridges.adapter import ForeignAccount, VenueError, build_adapter
-from bonnet.bridges.config import VenueConfig
+from bonnet.bridges.config import VenueConfig, check_venue, venue_type_of
 from bonnet.bridges.model import BridgeMetadata, SourceKey
 from bonnet.core.crypto import Identity
 from bonnet.core.kinds import KIND_ARTICLE
@@ -96,13 +96,14 @@ def load_accounts() -> dict[str, VenueAccountSpec]:
         try:
             with open(os.path.expanduser(a["token_file"]), encoding="utf-8") as tf:
                 token = tf.read().strip()
+            check_venue(a["type"], a["venue"], f"account[{i}]")
             out[a["venue"]] = VenueAccountSpec(
                 venue=a["venue"],
                 type=a["type"],
                 url=a["url"],
                 account=ForeignAccount(a["user"], token),
             )
-        except (KeyError, OSError, TypeError) as e:
+        except (KeyError, OSError, TypeError, ValueError) as e:
             raise ValueError(f"{path}: account[{i}] is unusable: {e!r}") from e
     return out
 
@@ -289,7 +290,7 @@ async def crosspost(
         if entry is None:
             raise ValueError(f"{board!r} is not a live bridge board on {bridge_origin}")
         venue, channel = entry["venue"], entry.get("channel", "")
-        venue_type = entry.get("type", "")
+        venue_type = venue_type_of(venue)
         spec = load_accounts().get(venue)
 
         event_id, article_id = os.urandom(32), os.urandom(32)
@@ -512,7 +513,7 @@ async def flush_outbox(auth: str | None = None) -> dict:
                     parent = (old.metadata.get_bytes(5), old.metadata.get_bytes(6))
                 frame = _final_frame(
                     identity, entry.bridge_origin, entry.board, entry.event_id, old.article_id,
-                    old.metadata.get_text(1) or "", body, _type_of(entry.venue), posted,
+                    old.metadata.get_text(1) or "", body, venue_type_of(entry.venue), posted,
                     old_meta.marker or model.make_marker(entry.event_id),
                     old_meta.home_origin or home_origin, old_meta.home_url or home_url, parent,
                 )  # fmt: skip
@@ -524,10 +525,6 @@ async def flush_outbox(auth: str | None = None) -> dict:
     finally:
         outbox.close()
     return {"entries": report}
-
-
-def _type_of(venue: str) -> str:
-    return venue.partition("@")[0]
 
 
 # ---------------------------------------------------------------------------
