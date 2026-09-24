@@ -24,13 +24,20 @@ with status:u8 (0=success, 1=error).
 
 from __future__ import annotations
 
+import heapq
 import struct
 import threading
 import time
 from contextlib import nullcontext
+from typing import Any
 
 from bonnet.core.acl import ACLEvaluator, AuthContext
-from bonnet.core.board_projection import BoardProjection, board_db_path
+from bonnet.core.board_projection import (
+    ARTICLE_ID_IN,
+    QUERY_FIELD_IDS,
+    BoardProjection,
+    board_db_path,
+)
 from bonnet.core.bodies import BodyStore
 from bonnet.core.crypto import Identity
 from bonnet.core.firehose import (
@@ -66,6 +73,7 @@ from bonnet.core.record import (
     SIG_SIZE,
     ZERO_ID,
     CodecError,
+    Intent,
     compute_body_hash,
     compute_event_hash,
     decode_intent,
@@ -244,6 +252,7 @@ class FirehoseContext:
         role: str = "",
         origin: str = "",
         remote_addr: str = "",
+        via_bridge_runtime: bool = False,
     ):
         self.peer_pubkey = peer_pubkey
         self.is_anonymous = is_anonymous
@@ -252,6 +261,10 @@ class FirehoseContext:
         self.role = role
         self.origin = origin
         self.remote_addr = remote_addr
+        # Set only by the bridge runtime's in-process publisher
+        # (bonnet.bridges.local_publish), never by derive_context, so no
+        # network request can claim it.
+        self.via_bridge_runtime = via_bridge_runtime
 
     def to_auth_context(self) -> AuthContext:
         return AuthContext(
@@ -262,6 +275,70 @@ class FirehoseContext:
             is_unknown=self.is_unknown,
             is_registered=self.is_registered,
         )
+
+
+def derive_context(
+    users: UserProjection | None,
+    origin: str,
+    peer_pubkey: bytes,
+    remote_addr: str,
+    anonymous_pubkey: bytes,
+) -> FirehoseContext:
+    """The request context for an authenticated key, as the HTTP server sees it.
+
+    The single definition of how a key maps to a principal: anonymous, a
+    registered user (with role from its flags), or unknown. Registered means
+    registered here, not revoked, and not superseded. A rotated key stops
+    authenticating as registered the moment the rotation dispatches, which
+    is the point of rotating after a compromise.
+
+    Shared by the HTTP server and the bridge runtime's in-process publisher
+    so the two can't drift; never hand-set `role` anywhere else.
+    """
+    is_anonymous = peer_pubkey == anonymous_pubkey
+    role = ""
+    is_registered = False
+    is_unknown = False
+
+    if not is_anonymous:
+        if users is not None:
+            user = users.get_user_by_pubkey(origin, peer_pubkey)
+            successor = user.get("superseded_by") if user else None
+            if successor is not None:
+                # Logged with the successor so a client still holding the
+                # retired key gets a diagnosable failure instead of an
+                # unexplained demotion to unknown.
+                log_msg(
+                    f"AUTH: origin='{origin}' key "
+                    f"{peer_pubkey.hex()[:16]} was superseded by "
+                    f"{successor.hex()[:16]}; treating as unknown"
+                )
+                is_unknown = True
+            elif user is not None and not user.get("revoked", False):
+                is_registered = True
+                flags = user.get("flags", 0)
+                if flags & 0x01:
+                    role = "administrator"
+                elif flags & 0x02:
+                    role = "moderator"
+            else:
+                is_unknown = True
+        else:
+            is_unknown = True
+
+    return FirehoseContext(
+        peer_pubkey=peer_pubkey,
+        is_anonymous=is_anonymous,
+        is_unknown=is_unknown,
+        is_registered=is_registered,
+        role=role,
+        origin=origin,
+        remote_addr=remote_addr,
+    )
+
+
+# ARTICLE_QUERY filter fields answered from bridges.db (design doc §9.5).
+BRIDGE_QUERY_FIELD_IDS = frozenset({0x0B, 0x0C})
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +369,10 @@ class FirehoseCommandHandler:
         allowed_origins: set = None,
         max_body_size: int = 1024 * 1024,
         wire_max: int = 32,
+        bridge_policy=None,
+        bridge_projection=None,
+        recognized_bridges: dict | None = None,
+        bridge_venue_types: dict | None = None,
     ):
         self._firehose = firehose
         self._identity = server_identity
@@ -313,6 +394,19 @@ class FirehoseCommandHandler:
         self._boards_lock = threading.Lock()
         self._max_body_size = max_body_size
         self._wire_max = max(1, min(32, wire_max))
+        # bonnet.bridges.model.BridgePolicy on a bridge origin, else None.
+        self._bridge_policy = bridge_policy
+        # bonnet.core.bridge_projection.BridgeProjection (bridges.db), and the
+        # venue -> recognized bridge origins map ([[bridges]] + own runtime).
+        self._bridges = bridge_projection
+        self._recognized_bridges = dict(recognized_bridges or {})
+        self._bridge_venue_types = dict(bridge_venue_types or {})
+        # bonnet.bridges.admission.Admission on a bridge origin with
+        # [bridge_admission] enabled, else None (set by BonnetServer).
+        self._admission: Any = None
+        # Venues whose runtime is running in this process right now; the
+        # bridge runtime adds and removes itself (manifest `local`).
+        self.live_bridge_venues: set[str] = set()
         # Serializes the check-then-append span for bonnet.user.register,
         # bonnet.board.create and bonnet.user.key.rotate: without it, two
         # concurrent registrations for the same name can both read "no holder
@@ -587,6 +681,193 @@ class FirehoseCommandHandler:
             return _error(0x0000, "Internal error")
 
     # ------------------------------------------------------------------
+    # Bridge reads (docs/bonnet-bridges-design.md §9.4, §9.5, §10.1)
+    # ------------------------------------------------------------------
+
+    def _dedups(self, board: str) -> bool:
+        """Aggregate reads of `~` boards show one canonical copy per foreign post."""
+        return board.startswith("~") and self._bridges is not None
+
+    def _bridge_view(self):
+        from bonnet.core.bridge_projection import BridgeView
+
+        return BridgeView(self._bridges, self._recognized_bridges)
+
+    def _canonical_article_page(
+        self, board: str, origins: list[str], list_offset: int, limit: int, **flags
+    ) -> list:
+        """A lazy k-way merge over each origin's rows in aggregate order.
+
+        Each origin's rows come in (created_at DESC, article_num) order, so
+        merging on (-created_at, origin, article_num) yields the aggregate
+        order. Non-canonical copies are skipped as they stream past, and
+        batches are pulled until the page is full or every origin runs out.
+        """
+        view = self._bridge_view()
+        batch = max(limit, 50)
+
+        def stream(orig: str):
+            bp = self._get_board_projection(orig, board)
+            pos = 0
+            while True:
+                rows = bp.list_articles(orig, board, offset=pos, limit=batch, **flags)
+                for art in rows:
+                    yield (-art.created_at, orig, art.article_num), art, orig
+                if len(rows) < batch:
+                    return
+                pos += batch
+
+        page: list = []
+        skipped = 0
+        merged = heapq.merge(*(stream(o) for o in origins), key=lambda t: t[0])
+        for _, art, orig in merged:
+            if not view.visible_event(orig, art.event_id):
+                continue
+            if skipped < list_offset:
+                skipped += 1
+                continue
+            page.append((art, orig))
+            if len(page) >= limit:
+                break
+        return page
+
+    def _canonical_search_page(
+        self, board: str, origins: list[str], run_search, list_offset: int, limit: int
+    ) -> tuple[list, int, bool]:
+        """Search rows with non-canonical copies removed; `total` counts survivors.
+
+        Per-origin search results aren't in aggregate order, so there's no
+        merge to stream: the window per origin grows until every origin has
+        returned all its matches (or the search cap is reached, which marks
+        the response truncated), then survivors are sorted and paged.
+        """
+        view = self._bridge_view()
+        cap = max(getattr(self._search, "_max_count", 1000), list_offset + limit)
+        window = list_offset + limit
+        while True:
+            rows: list = []
+            exhausted = True
+            truncated = False
+            for orig in origins:
+                results = run_search(orig, window)
+                if len(results.results) >= window:
+                    exhausted = False
+                elif results.truncated:
+                    truncated = True
+                rows.extend((r, orig) for r in results.results)
+            if exhausted or window >= cap:
+                truncated = truncated or not exhausted
+                break
+            window = min(window * 2, cap)
+        survivors = [(r, o) for r, o in rows if view.visible_article(o, board, r.article_id)]
+        survivors.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
+        return survivors[list_offset : list_offset + limit], len(survivors), truncated
+
+    def _bridge_filter_article_ids(
+        self, origin: str, board: str, field_id: int, operator: int, value
+    ) -> list[bytes] | bytes:
+        """Article ids on (origin, board) matching a bridge filter, or an error frame."""
+        from bonnet.core.bridge_projection import src_from_filter
+
+        if not isinstance(value, str):
+            return _error(0x0006, f"filter field 0x{field_id:02x} takes text")
+        if field_id == 0x0B and operator in (0x01, 0x06):
+            parts = value.split(",") if operator == 0x06 else [value]
+            srcs = [src_from_filter(p.strip()) for p in parts if p.strip()]
+            if any(src is None for src in srcs):
+                return _error(0x0006, "src filter must be venue#channel#foreign_id")
+            return self._bridges.article_ids_for_src(origin, board, srcs)
+        if field_id == 0x0C and operator == 0x01:
+            root = src_from_filter(value)
+            if root is None:
+                return _error(0x0006, "foreign_root filter must be venue#channel#root_foreign_id")
+            return self._bridges.article_ids_for_root(origin, board, root)
+        return _error(0x0006, f"unsupported operator 0x{operator:02x} for field 0x{field_id:02x}")
+
+    def recognized_origins(self, venue: str) -> list[str]:
+        return list(self._recognized_bridges.get(venue, []))
+
+    def recognize_bridge_origin(self, venue: str, origin: str, venue_type: str = "") -> None:
+        """Adopt `origin` for `venue`, after every origin already recognized (M3)."""
+        order = self._recognized_bridges.setdefault(venue, [])
+        if origin not in order:
+            # Replace rather than append in place: a BridgeView built from
+            # the old list mid-request keeps a consistent snapshot.
+            self._recognized_bridges[venue] = [*order, origin]
+        if venue_type:
+            self._bridge_venue_types.setdefault(venue, venue_type)
+
+    def bridges_manifest(self) -> list[dict]:
+        """The discovery document's `bridges` list (§10.1), computed per request.
+
+        One entry per bound (venue, channel): the recognized origins whose
+        binding records for it are synced and active, in preference order.
+        """
+        if self._bridges is None:
+            return []
+        bindings = self._bridges.active_bindings()
+        out = []
+        for venue, order in self._recognized_bridges.items():
+            channels: dict[str, dict[str, dict]] = {}
+            for b in bindings:
+                if b["venue"] == venue and b["origin"] in order:
+                    channels.setdefault(b["channel"], {})[b["origin"]] = b
+            for channel, by_origin in sorted(channels.items()):
+                origins = [o for o in order if o in by_origin]
+                first = (
+                    by_origin[self._origin] if self._origin in by_origin else by_origin[origins[0]]
+                )
+                cap = first.get("max_body_bytes") or self._max_body_size
+                entry = {
+                    "type": self._bridge_venue_types.get(venue, venue.partition("@")[0]),
+                    "venue": venue,
+                    "board": first["board"],
+                    "origins": origins,
+                    "local": venue in self.live_bridge_venues and self._origin in by_origin,
+                    "max_body_bytes": min(cap, self._max_body_size),
+                }
+                if channel:
+                    entry["channel"] = channel
+                out.append(entry)
+        return out
+
+    # ------------------------------------------------------------------
+    # Bridge reservations (docs/bonnet-bridges-design.md §8)
+    # ------------------------------------------------------------------
+
+    def _bridge_reservation_denial(self, intent: Intent, ctx: FirehoseContext) -> bytes | None:
+        """Refuse local publishes that would squat on bridge namespaces.
+
+        Every origin reserves boards starting with `~` for its own bridge
+        runtime. A bridge origin also closes registration: only the runtime
+        (its daemon, and puppets named `<handle>~<type>` for a type it runs)
+        and administrators may register. Crossposters are admitted by
+        appending straight to the firehose, so they never reach this check,
+        and neither do federated records.
+        """
+        if (
+            intent.kind == KIND_BOARD_CREATE
+            and intent.board.startswith("~")
+            and not ctx.via_bridge_runtime
+        ):
+            return _error(0x0004, "Boards starting with '~' are reserved for this origin's bridge")
+        policy = self._bridge_policy
+        if policy is None or intent.kind != KIND_USER_REGISTER or ctx.role == "administrator":
+            return None
+        if ctx.via_bridge_runtime:
+            name = intent.metadata.get_text(1) or ""
+            if intent.actor_pubkey == policy.daemon_pubkey and "~" not in name:
+                return None
+            if policy.is_puppet_name(name):
+                return None
+            return _error(0x0004, "The bridge runtime may only register puppets as <handle>~<type>")
+        return _error(
+            0x0004,
+            "Registration on this bridge origin is closed; crossposters are admitted "
+            "through their home origin",
+        )
+
+    # ------------------------------------------------------------------
     # PUBLISH_RECORD
     # ------------------------------------------------------------------
 
@@ -630,6 +911,21 @@ class FirehoseCommandHandler:
         except ValidationError as e:
             log_warning("PUBLISH deny reason=validation", kind=intent.kind, err=str(e)[:120])
             return _error(0x0006, f"Validation error: {e}")
+
+        # Bridge admission (docs/bonnet-bridges-design.md §6): a crossposter's
+        # home key is checked against its home origin, and admitted on first
+        # contact. Before the ACL check and outside every lock: it may wait on
+        # the network. An admitted key continues as a registered principal.
+        if self._admission is not None:
+            from bonnet.bridges.admission import AdmissionRefused
+
+            try:
+                admitted = self._admission.check(intent, ctx)
+            except AdmissionRefused as e:
+                log_warning("PUBLISH deny reason=admission", err=str(e)[:120])
+                return _error(0x0004, f"Admission refused: {e}")
+            if admitted is not None:
+                ctx = admitted
 
         kind = intent.kind
         board = intent.board
@@ -694,6 +990,10 @@ class FirehoseCommandHandler:
                 return _error(
                     0x0004, "Only an administrator may register a username for another key"
                 )
+
+        reserved = self._bridge_reservation_denial(intent, ctx)
+        if reserved is not None:
+            return reserved
 
         identity_guard = (
             self._identity_lock
@@ -1631,23 +1931,34 @@ class FirehoseCommandHandler:
                 and (not self._allowed_origins or b["origin"] in self._allowed_origins)
             ]
 
-            all_articles = []
-            for orig in origins_with_board:
-                bp = self._get_board_projection(orig, board)
-                articles = bp.list_articles(
-                    orig,
+            if self._dedups(board):
+                page = self._canonical_article_page(
                     board,
-                    offset=0,
-                    limit=list_offset + limit,
+                    origins_with_board,
+                    list_offset,
+                    limit,
                     include_cancelled=include_cancelled,
                     include_superseded=include_superseded,
                     include_purged=include_purged,
                 )
-                for art in articles:
-                    all_articles.append((art, orig))
+            else:
+                all_articles = []
+                for orig in origins_with_board:
+                    bp = self._get_board_projection(orig, board)
+                    articles = bp.list_articles(
+                        orig,
+                        board,
+                        offset=0,
+                        limit=list_offset + limit,
+                        include_cancelled=include_cancelled,
+                        include_superseded=include_superseded,
+                        include_purged=include_purged,
+                    )
+                    for art in articles:
+                        all_articles.append((art, orig))
 
-            all_articles.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
-            page = all_articles[list_offset : list_offset + limit]
+                all_articles.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
+                page = all_articles[list_offset : list_offset + limit]
 
             out = struct.pack(">H", len(page))
             for art, orig in page:
@@ -1706,41 +2017,48 @@ class FirehoseCommandHandler:
                 and (not self._allowed_origins or b["origin"] in self._allowed_origins)
             ]
 
-            all_results = []
-            total = 0
-            truncated = False
-            for orig in origins_with_board:
+            def run_search(orig: str, window: int):
                 bp = self._get_board_projection(orig, board)
                 if body_query:
-                    results = self._search.search_bodies(
+                    return self._search.search_bodies(
                         bp,
                         orig,
                         board,
                         body_query,
                         offset=0,
-                        limit=list_offset + limit,
+                        limit=window,
                         include_cancelled=include_cancelled,
                         include_superseded=include_superseded,
                     )
-                else:
-                    results = self._search.search_metadata(
-                        bp,
-                        orig,
-                        board,
-                        text_query=meta_query,
-                        offset=0,
-                        limit=list_offset + limit,
-                        include_cancelled=include_cancelled,
-                        include_superseded=include_superseded,
-                    )
-                for r in results.results:
-                    all_results.append((r, orig))
-                total += results.total
-                if results.truncated:
-                    truncated = True
+                return self._search.search_metadata(
+                    bp,
+                    orig,
+                    board,
+                    text_query=meta_query,
+                    offset=0,
+                    limit=window,
+                    include_cancelled=include_cancelled,
+                    include_superseded=include_superseded,
+                )
 
-            all_results.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
-            page = all_results[list_offset : list_offset + limit]
+            if self._dedups(board):
+                page, total, truncated = self._canonical_search_page(
+                    board, origins_with_board, run_search, list_offset, limit
+                )
+            else:
+                all_results = []
+                total = 0
+                truncated = False
+                for orig in origins_with_board:
+                    results = run_search(orig, list_offset + limit)
+                    for r in results.results:
+                        all_results.append((r, orig))
+                    total += results.total
+                    if results.truncated:
+                        truncated = True
+
+                all_results.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
+                page = all_results[list_offset : list_offset + limit]
 
             out = struct.pack(">H", len(page))
             out += struct.pack(">I", total)
@@ -1818,7 +2136,7 @@ class FirehoseCommandHandler:
             return _success(struct.pack(">H", 0))
         filter_count, offset = _read_u8(data, offset)
 
-        filters = []
+        filters: list[tuple[int, int, object]] = []
         for _ in range(filter_count):
             field_id, offset = _read_u8(data, offset)
             operator, offset = _read_u8(data, offset)
@@ -1845,6 +2163,14 @@ class FirehoseCommandHandler:
             else:
                 return _error(0x0006, f"Invalid value type 0x{value_type:02x}")
 
+            if field_id in BRIDGE_QUERY_FIELD_IDS and self._bridges is not None:
+                ids = self._bridge_filter_article_ids(origin, board, field_id, operator, value)
+                if isinstance(ids, bytes):
+                    return ids  # an error frame
+                filters.append((ARTICLE_ID_IN, 0x06, ids))
+                continue
+            if field_id not in QUERY_FIELD_IDS:
+                return _error(0x0006, f"unknown filter field 0x{field_id:02x}")
             filters.append((field_id, operator, value))
 
         list_offset, offset = _read_u32(data, offset)

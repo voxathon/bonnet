@@ -35,10 +35,11 @@ import sys
 from bonnet import __version__
 
 _USAGE = """\
-usage: bonnet [--version] [-h] {server,gateway,admin} ...
+usage: bonnet [--version] [-h] {server,gateway,admin,bridge} ...
 
 commands:
   server   run a Bonnet board server (see `bonnet server -h`)
+  bridge   run or inspect a bridge origin (see `bonnet bridge -h`)
   gateway  run the MCP gateway to a board server (see `bonnet gateway -h`)
   admin    run one operator-console command headlessly (see `bonnet admin -h`)
 """
@@ -71,13 +72,18 @@ def main(argv: list[str] | None = None) -> int:
 
         return gateway_run(rest) or 0
 
+    if command == "bridge":
+        from bonnet.bridges.cli import main as bridge_main
+
+        return bridge_main(rest) or 0
+
     if command == "admin":
         from bonnet.app.admin_cli import main as admin_main
 
         return admin_main(rest) or 0
 
     print(
-        f"bonnet: unknown command {command!r} (expected 'server', 'gateway' or 'admin')",
+        f"bonnet: unknown command {command!r} (expected 'server', 'gateway', 'admin' or 'bridge')",
         file=sys.stderr,
     )
     print(_USAGE, file=sys.stderr)

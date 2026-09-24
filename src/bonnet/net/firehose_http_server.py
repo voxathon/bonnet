@@ -240,7 +240,11 @@ class FirehoseHTTPServer:
     # Discovery
     # ------------------------------------------------------------------
 
-    def _capabilities(self) -> list[str]:
+    def _bridges(self) -> list[dict]:
+        manifest = getattr(self._handler, "bridges_manifest", None)
+        return manifest() if manifest is not None else []
+
+    def _capabilities(self, bridges: list[dict] | None = None) -> list[str]:
         """Optional features this server is actually able to serve right now.
 
         Naming: `<layer>.<capability>`, matching the record kinds in
@@ -268,6 +272,11 @@ class FirehoseHTTPServer:
         capabilities = []
         if resolve_rg():
             capabilities.append("bonnet.per-board-body-search")
+        if bridges if bridges is not None else self._bridges():
+            capabilities.append("bonnet.bridge")
+        admission = getattr(self._config, "bridge_admission", None)
+        if admission is not None and admission.enabled:
+            capabilities.append("bonnet.bridge.admission")
         return capabilities
 
     async def _handle_discovery(self, scope, receive, send):
@@ -288,7 +297,13 @@ class FirehoseHTTPServer:
         known_origins = [self._config.origin]
         for peer in getattr(self._config, "peers", []):
             known_origins.append(peer.origin)
+        # Plus origins adopted at runtime (learned bridge origins), which
+        # the read gate now serves too.
+        known_origins.extend(getattr(self._handler, "_allowed_origins", None) or ())
         known_origins = sorted(set(known_origins))
+        # Bridge origins this server recognizes whose bindings it holds,
+        # computed per request from config and synced records (§10.1).
+        bridges = self._bridges()
 
         body = json.dumps(
             {
@@ -308,7 +323,8 @@ class FirehoseHTTPServer:
                 "anonymous_private_key": self._anonymous_identity.private_key.hex(),
                 "command_endpoint": "/command",
                 "known_origins": known_origins,
-                "capabilities": self._capabilities(),
+                "capabilities": self._capabilities(bridges),
+                "bridges": bridges,
                 # Advisory clock tolerance: what this server will accept.
                 # Receiver-side enforcement is unchanged; this just makes
                 # the replay window (~lifetime + 2*skew) visible so peers
@@ -533,51 +549,17 @@ class FirehoseHTTPServer:
             self._rate_limiter.cleanup()
         self._cleanup_counter += 1
 
-        from bonnet.net.firehose_commands import FirehoseContext
+        from bonnet.net.firehose_commands import derive_context
 
-        role = ""
-        is_registered = False
-        is_unknown = False
-
-        if is_anonymous:
-            is_unknown = False
-        else:
-            if self._users is not None:
-                user = self._users.get_user_by_pubkey(self._config.origin, peer_public_key)
-                successor = user.get("superseded_by") if user else None
-                if successor is not None:
-                    # The key rotated. It stops authenticating from the moment
-                    # the rotation dispatches — that is the point of rotating
-                    # after a compromise. Logged with the successor so a
-                    # client still holding the retired key gets a diagnosable
-                    # failure instead of an unexplained demotion to unknown.
-                    log_msg(
-                        f"AUTH: origin='{self._config.origin}' key "
-                        f"{peer_public_key.hex()[:16]} was superseded by "
-                        f"{successor.hex()[:16]}; treating as unknown"
-                    )
-                    is_unknown = True
-                elif user is not None and not user.get("revoked", False):
-                    is_registered = True
-                    flags = user.get("flags", 0)
-                    if flags & 0x01:
-                        role = "administrator"
-                    elif flags & 0x02:
-                        role = "moderator"
-                else:
-                    is_unknown = True
-            else:
-                is_unknown = True
-
-        ctx = FirehoseContext(
-            peer_pubkey=peer_public_key,
-            is_anonymous=is_anonymous,
-            is_unknown=is_unknown,
-            is_registered=is_registered,
-            role=role,
-            origin=self._config.origin,
-            remote_addr=remote_addr,
+        ctx = derive_context(
+            self._users,
+            self._config.origin,
+            peer_public_key,
+            remote_addr,
+            self._anonymous_public_key,
         )
+        role = ctx.role
+        is_registered = ctx.is_registered
 
         try:
             if body:

@@ -114,7 +114,7 @@ def _load_and_validate_config(args) -> FirehoseConfig:
         print(f"error: invalid configuration: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
-    for warning in _acl_rule_warnings(config):
+    for warning in _acl_rule_warnings(config) + _bridges_warnings(config):
         print(f"warning: {warning}", file=sys.stderr)
 
     return config
@@ -143,6 +143,18 @@ def _preflight_bind(host: str, port: int) -> None:
         sock.bind(sockaddr)
     finally:
         sock.close()
+
+
+def _bridges_warnings(config: FirehoseConfig) -> list[str]:
+    """[[bridges]] origins that aren't sync peers: their copies never arrive here."""
+    peers = {p.origin for p in config.peers}
+    return [
+        f"[[bridges]] venue {entry.venue!r} lists origin {origin!r}, which is not a "
+        "[[sync.peers]] entry; its copies won't reach this server"
+        for entry in getattr(config, "bridges", [])
+        for origin in entry.origins
+        if origin != config.origin and origin not in peers
+    ]
 
 
 def _acl_rule_warnings(config: FirehoseConfig) -> list[str]:
@@ -179,8 +191,21 @@ def _acl_rule_warnings(config: FirehoseConfig) -> list[str]:
     return warnings
 
 
-def main(argv: list[str] | None = None):
-    parser = argparse.ArgumentParser(prog="bonnet server", description="Bonnet server")
+def main(argv: list[str] | None = None, bridge: bool = False):
+    """`bonnet server`, or with `bridge=True`, `bonnet bridge run`.
+
+    Bridge mode is the same server plus the bridge runtime in one process
+    (docs/bonnet-bridges-design.md §5.2): it needs a [bridge_runtime] table,
+    and skips the operator REPL unless --console is given.
+    """
+    parser = argparse.ArgumentParser(
+        prog="bonnet bridge run" if bridge else "bonnet server",
+        description="Bonnet bridge origin (server + bridge runtime)" if bridge else "Bonnet server",
+    )
+    if bridge:
+        parser.add_argument(
+            "--console", action="store_true", help="Run the operator REPL alongside the bridge"
+        )
     parser.add_argument(
         "--dir",
         default=None,
@@ -351,6 +376,13 @@ def main(argv: list[str] | None = None):
         return
 
     config = _load_and_validate_config(args)
+    if bridge and config.bridge_runtime is None:
+        print(
+            f"error: {args.config} has no [bridge_runtime] table; "
+            "'bonnet bridge run' needs one (see docs/bonnet-bridges-design.md §10.2)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
     if args.log_level is not None and args.log_level.upper() not in FirehoseConfig.LOG_LEVELS:
         print(
@@ -409,22 +441,32 @@ def main(argv: list[str] | None = None):
         raise SystemExit(1)
 
     server = BonnetServer(config, config_path=args.config)
+    runtime = None
+    if bridge:
+        from bonnet.bridges.runtime import BridgeRuntime
+
+        runtime = BridgeRuntime(server)
 
     started = False
     try:
-        started = asyncio.run(_serve_until_signal(server, args))
+        started = asyncio.run(_serve_until_signal(server, args, runtime))
     except KeyboardInterrupt:
         # Ctrl+C's SIGINT, unrelated to the SIGTERM handling below - asyncio
         # itself raises this one, out of _serve_until_signal's control.
         print("\nShutting down...")
         started = True
+    except Exception as exc:
+        if runtime is None:
+            raise
+        print(f"error: bridge runtime failed: {exc!r}", file=sys.stderr)
+        started = False
     finally:
         server.close()
     if not started:
         raise SystemExit(1)
 
 
-async def _serve_until_signal(server: BonnetServer, args) -> bool:
+async def _serve_until_signal(server: BonnetServer, args, runtime=None) -> bool:
     """Run the server, stopping cleanly on SIGTERM.
 
     A prior version's SIGTERM handler called `raise KeyboardInterrupt`
@@ -443,9 +485,23 @@ async def _serve_until_signal(server: BonnetServer, args) -> bool:
     never an exception thrown into whatever happened to be executing.
     """
     loop = asyncio.get_running_loop()
-    task = asyncio.ensure_future(
-        server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key)
-    )
+    if runtime is not None:
+        from bonnet.bridges.runtime import serve_bridge
+
+        task = asyncio.ensure_future(
+            serve_bridge(
+                server,
+                runtime,
+                port=args.port,
+                ssl_certfile=args.cert,
+                ssl_keyfile=args.key,
+                console=args.console,
+            )
+        )
+    else:
+        task = asyncio.ensure_future(
+            server.run(port=args.port, ssl_certfile=args.cert, ssl_keyfile=args.key)
+        )
     printed_shutting_down = False
 
     def _stop() -> None:
@@ -475,6 +531,9 @@ async def _serve_until_signal(server: BonnetServer, args) -> bool:
         return await task
     except asyncio.CancelledError:
         return True
+    finally:
+        if runtime is not None:
+            await runtime.close()
 
 
 if __name__ == "__main__":
