@@ -309,3 +309,48 @@ def venue_types(config) -> dict[str, str]:
     if runtime is not None:
         out.update({v.venue: v.type for v in runtime.venues})
     return out
+
+
+# ---------------------------------------------------------------------------
+# [bridge_admission]: admitting crossposters' home keys (§6)
+# ---------------------------------------------------------------------------
+
+_ADMISSION_KEYS = {
+    "enabled",
+    "recheck_seconds",
+    "timeout_seconds",
+    "max_staleness_seconds",
+    "max_chain_hops",
+    "max_concurrent_checks",
+    "allow_private_dial",
+    "verify_tls",
+}
+
+
+@dataclass
+class AdmissionConfig:
+    enabled: bool = False
+    recheck_seconds: int = 300
+    timeout_seconds: int = 5
+    max_staleness_seconds: int = 86400
+    max_chain_hops: int = 64
+    max_concurrent_checks: int = 8
+    allow_private_dial: bool = False
+    verify_tls: bool = True
+
+
+def parse_bridge_admission(table) -> tuple[AdmissionConfig, list[str]]:
+    if not isinstance(table, dict):
+        raise ValueError("config: [bridge_admission] must be a table")
+    where = "bridge_admission"
+    cfg = AdmissionConfig(
+        enabled=_bool(table, "enabled", where, False),
+        recheck_seconds=_int(table, "recheck_seconds", where, 300),
+        timeout_seconds=_int(table, "timeout_seconds", where, 5, minimum=1),
+        max_staleness_seconds=_int(table, "max_staleness_seconds", where, 86400),
+        max_chain_hops=_int(table, "max_chain_hops", where, 64, minimum=1),
+        max_concurrent_checks=_int(table, "max_concurrent_checks", where, 8, minimum=1),
+        allow_private_dial=_bool(table, "allow_private_dial", where, False),
+        verify_tls=_bool(table, "verify_tls", where, True),
+    )
+    return cfg, [f"{where}.{k}" for k in table if k not in _ADMISSION_KEYS]

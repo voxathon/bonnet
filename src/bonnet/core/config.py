@@ -146,6 +146,7 @@ _TOP_LEVEL_KEYS = {
     "logging",
     "bridge_runtime",
     "bridges",
+    "bridge_admission",
 }
 
 _INCLUDE_ALLOWED_TOP_KEYS = {"acl", "sync"}
@@ -404,6 +405,7 @@ class FirehoseConfig:
         log_backup_count: int = 5,
         bridge_runtime=None,
         bridges: list | None = None,
+        bridge_admission=None,
     ):
         self.origin = _normalize_origin(origin)
         self.hostname = normalize_hostname(hostname) or self.origin
@@ -444,6 +446,8 @@ class FirehoseConfig:
         self.bridge_runtime = bridge_runtime
         # bonnet.bridges.config.BridgesEntry list: [[bridges]] (§10.1).
         self.bridges = list(bridges or [])
+        # bonnet.bridges.config.AdmissionConfig, or None: [bridge_admission] (§6).
+        self.bridge_admission = bridge_admission
 
     def validate(self) -> None:
         """Raise ValueError if configuration is invalid."""
@@ -718,6 +722,12 @@ class FirehoseConfig:
 
             bridges, bridges_unknown = parse_bridges(data["bridges"], _normalize_origin)
             unknown_keys.extend(bridges_unknown)
+        bridge_admission = None
+        if "bridge_admission" in data:
+            from bonnet.bridges.config import parse_bridge_admission
+
+            bridge_admission, admission_unknown = parse_bridge_admission(data["bridge_admission"])
+            unknown_keys.extend(admission_unknown)
 
         # BONNET_SERVER_HOME (or the per-user default, see core.home) only
         # supplies a *default* for storage paths left unset in config.toml —
@@ -826,6 +836,7 @@ class FirehoseConfig:
             routing=_parse_routing(routing),
             bridge_runtime=bridge_runtime,
             bridges=bridges,
+            bridge_admission=bridge_admission,
         )
 
     @staticmethod

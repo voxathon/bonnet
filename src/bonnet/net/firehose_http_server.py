@@ -274,7 +274,8 @@ class FirehoseHTTPServer:
             capabilities.append("bonnet.per-board-body-search")
         if bridges if bridges is not None else self._bridges():
             capabilities.append("bonnet.bridge")
-        if getattr(self._config, "bridge_admission", None) is not None:
+        admission = getattr(self._config, "bridge_admission", None)
+        if admission is not None and admission.enabled:
             capabilities.append("bonnet.bridge.admission")
         return capabilities
 

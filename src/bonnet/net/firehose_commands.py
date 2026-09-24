@@ -29,6 +29,7 @@ import struct
 import threading
 import time
 from contextlib import nullcontext
+from typing import Any
 
 from bonnet.core.acl import ACLEvaluator, AuthContext
 from bonnet.core.board_projection import (
@@ -400,6 +401,9 @@ class FirehoseCommandHandler:
         self._bridges = bridge_projection
         self._recognized_bridges = dict(recognized_bridges or {})
         self._bridge_venue_types = dict(bridge_venue_types or {})
+        # bonnet.bridges.admission.Admission on a bridge origin with
+        # [bridge_admission] enabled, else None (set by BonnetServer).
+        self._admission: Any = None
         # Venues whose runtime is running in this process right now; the
         # bridge runtime adds and removes itself (manifest `local`).
         self.live_bridge_venues: set[str] = set()
@@ -907,6 +911,21 @@ class FirehoseCommandHandler:
         except ValidationError as e:
             log_warning("PUBLISH deny reason=validation", kind=intent.kind, err=str(e)[:120])
             return _error(0x0006, f"Validation error: {e}")
+
+        # Bridge admission (docs/bonnet-bridges-design.md §6): a crossposter's
+        # home key is checked against its home origin, and admitted on first
+        # contact. Before the ACL check and outside every lock: it may wait on
+        # the network. An admitted key continues as a registered principal.
+        if self._admission is not None:
+            from bonnet.bridges.admission import AdmissionRefused
+
+            try:
+                admitted = self._admission.check(intent, ctx)
+            except AdmissionRefused as e:
+                log_warning("PUBLISH deny reason=admission", err=str(e)[:120])
+                return _error(0x0004, f"Admission refused: {e}")
+            if admitted is not None:
+                ctx = admitted
 
         kind = intent.kind
         board = intent.board

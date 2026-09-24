@@ -261,3 +261,43 @@ async def read(server, frame: bytes) -> bytes:
     anon = server.anonymous_identity.public_key
     ctx = derive_context(server.users, server.config.origin, anon, "test", anon)
     return await asyncio.to_thread(server.command_handler.handle, frame, ctx)
+
+
+async def publish_as(server, identity, intent, body: bytes = b""):
+    """Publish with the context an HTTP request signed by `identity` would get."""
+    import asyncio
+
+    from bonnet.core.record import encode_intent, sign_intent
+    from bonnet.net.firehose_commands import derive_context
+    from bonnet.net.firehose_wire import build_publish_record, parse_publish_response
+
+    frame = build_publish_record(intent, sign_intent(identity, encode_intent(intent)), body)
+    ctx = derive_context(
+        server.users,
+        server.config.origin,
+        identity.public_key,
+        "test",
+        server.anonymous_identity.public_key,
+    )
+    resp = await asyncio.to_thread(server.command_handler.handle, frame, ctx)
+    return parse_publish_response(resp)
+
+
+def asgi_transport_factory(servers_by_url: dict, trust_store_path: str):
+    """An admission transport factory that dials in-process servers by URL."""
+    import httpx
+
+    from bonnet.bridges.admission import HomeUnreachable
+    from bonnet.net.firehose_transport import FirehoseTransport
+
+    def make(url: str):
+        server = servers_by_url.get(url)
+        if server is None:
+            raise HomeUnreachable(f"no such home {url}")
+        t = FirehoseTransport(url, verify=False, trust_store_path=trust_store_path)
+        t._http = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=server.http_server), base_url=url
+        )
+        return t
+
+    return make

@@ -353,6 +353,31 @@ class BonnetServer:
         )
         log_msg("INIT: FirehoseCommandHandler initialized")
 
+        # The event loop run() serves on; admission submits home checks to it.
+        self.loop: asyncio.AbstractEventLoop | None = None
+        if config.bridge_admission is not None and config.bridge_admission.enabled:
+            from bonnet.bridges.admission import (
+                Admission,
+                AdmissionClient,
+                default_transport_factory,
+            )
+
+            adm = config.bridge_admission
+            self.command_handler._admission = Admission(
+                self.command_handler,
+                adm,
+                origin_identity=lambda: self.server_identity,
+                client=AdmissionClient(
+                    default_transport_factory(
+                        os.path.join(config.data_dir, "admission_trust.db"),
+                        adm.verify_tls,
+                        adm.allow_private_dial,
+                    )
+                ),
+                loop_getter=lambda: self.loop,
+            )
+            log_msg("INIT: bridge admission enabled")
+
         from bonnet.bridges.adoption import BridgeAdopter
 
         self.bridge_adopter = BridgeAdopter(self)
@@ -913,6 +938,7 @@ class BonnetServer:
 
         import uvicorn
 
+        self.loop = asyncio.get_running_loop()
         listen_port = port or self.config.port
         if ssl_certfile is None and self.config.tls_enabled and self.config.tls_cert_path:
             ssl_certfile = self.config.tls_cert_path

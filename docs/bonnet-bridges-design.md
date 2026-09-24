@@ -426,7 +426,7 @@ Names on B are first-come, like on any open origin. Someone registered as `moxxi
 For any publish on B by a key whose registration carries a pin:
 
 - Look up the pin (from `bridges.db`'s `admissions` table, fed by dispatch from registration records carrying 0x0114).
-- **Every crosspost carries its home.** A role-2 article must carry `home_origin` and `home_url` equal to the pin; a missing or different value → refuse with 0x0004 ("home_origin does not match this key's admission"). Every crosspost record then states, and B has vouched for, where its author comes from, so clients can render the home without looking up the registration.
+- **Every crosspost carries its home.** Implemented (M4) for every article by an admitted key, not just role 2, so the native fallback of §11.2 step 4 carries it too. A role-2 article must carry `home_origin` and `home_url` equal to the pin; a missing or different value → refuse with 0x0004 ("home_origin does not match this key's admission"). Every crosspost record then states, and B has vouched for, where its author comes from, so clients can render the home without looking up the registration.
 - If the cached home check is younger than `recheck_seconds` (default 300) → proceed.
 - Otherwise USER_GET(`home_origin`, K) with a hard timeout (default 5 s), still before any lock:
   - live, not revoked, not superseded → refresh the cache, proceed.
@@ -446,6 +446,8 @@ The user rotates K1 → K2 on A. K1's next write on B is refused (§6.3). K2's f
    - If K1 has an active ban or permaban on B, refuse. Rotating at home doesn't escape B's moderation; B's sysops can lift it by hand.
    - Otherwise append, as the origin identity, `bonnet.user.revoke` for K1 (targeting K1's admission registration), then the §6.2 registration for K2 **with K1's B name**, suffix included. Revocation frees the name (`username_holder`), and K1's old articles keep the author check they were dispatched with.
 4. If the head isn't K2 → refuse. If the chain is longer than the cap → refuse.
+
+**Implementation notes (M4):** `bonnet/bridges/admission.py`. USER_GET answers an unknown key with error 0x0001 ("User not found"), which admission reads as "not registered at home"; any other failure is "unreachable". A restarted server has no in-memory check cache, so the admission registration's own `created_at` counts as the last good check. The home is pinned through a `FirehoseTransport` trust store at `<data_dir>/admission_trust.db`.
 
 ### 6.5 What admission doesn't do
 

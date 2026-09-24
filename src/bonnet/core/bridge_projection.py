@@ -516,6 +516,19 @@ class BridgeProjection:
             for r in rows
         ]
 
+    def admission_for_home(self, origin: str, home_origin: str, home_username: str) -> dict | None:
+        """The active admission on `origin` for one home identity, with its key."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT pubkey FROM admissions WHERE origin=? AND home_origin=? "
+                "AND home_username=? AND active=1",
+                (origin, home_origin, home_username),
+            ).fetchone()
+        if row is None:
+            return None
+        found = self.admission(origin, bytes(row[0]))
+        return None if found is None else {**found, "pubkey": bytes(row[0])}
+
     def admission(self, origin: str, pubkey: bytes) -> dict | None:
         with self._lock:
             row = self._conn.execute(
