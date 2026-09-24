@@ -91,6 +91,15 @@ class VenueAuthError(VenueError):
     out whole IPs after repeated bad tokens."""
 
 
+class VenueRateLimited(VenueError):
+    """The venue refused a request for rate. It took nothing, so the same
+    request may be retried once `retry_after` seconds (if known) have passed."""
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 @dataclass(frozen=True)
 class ForeignAccount:
     """An account at a venue: the relay's, or a user's own (edge egress)."""
@@ -162,6 +171,10 @@ class ReadLimiter:
                 await self._sleep(self._next - now)
                 now = self._next
             self._next = now + self._interval
+
+    def defer(self, seconds: float) -> None:
+        """Hold the next request until `seconds` from now (a venue's retry-after)."""
+        self._next = max(self._next, self._clock() + seconds)
 
 
 class AdapterNotFound(ValueError):

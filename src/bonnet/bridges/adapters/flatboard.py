@@ -39,6 +39,7 @@ from bonnet.bridges.adapter import (
     ReadLimiter,
     VenueAuthError,
     VenueError,
+    VenueRateLimited,
 )
 from bonnet.bridges.config import VenueConfig
 from bonnet.bridges.model import normalize_foreign_text, truncate_utf8
@@ -75,6 +76,22 @@ def _id(value) -> str | None:
     if isinstance(value, str) and value.isdigit() and int(value) > 0:
         return str(int(value))
     return None
+
+
+def _retry_after(resp: httpx.Response) -> float | None:
+    """Seconds to wait from a 429: the body's `retry_after`, else the header."""
+    try:
+        body = resp.json()
+        value = body.get("retry_after") if isinstance(body, dict) else None
+    except ValueError:
+        value = None
+    if value is None:
+        value = resp.headers.get("retry-after")
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
 
 
 def _canonical(msg: dict) -> bytes:
@@ -236,6 +253,8 @@ class FlatboardAdapter:
             raise VenueError(f"flatboard post: {type(e).__name__}") from None
         if resp.status_code in (401, 403):
             raise VenueAuthError(f"flatboard rejected the credentials for {account.user!r}")
+        if resp.status_code == 429:
+            raise VenueRateLimited("flatboard post: rate limited", _retry_after(resp))
         if resp.status_code != 200:
             raise VenueError(f"flatboard post: HTTP {resp.status_code}")
         try:

@@ -102,6 +102,17 @@ class World:
         monkeypatch.setattr(
             bridge_tools, "_adapter_for", lambda spec: self.board.adapter(venue_config())
         )
+        # Post spacing on a fake clock: waits are recorded, never slept.
+        self.now = 0.0
+        self.slept: list[float] = []
+
+        async def sleep(seconds):
+            self.slept.append(seconds)
+            self.now += seconds
+
+        monkeypatch.setattr(bridge_tools, "_gates", {})
+        monkeypatch.setattr(bridge_tools, "_clock", lambda: self.now)
+        monkeypatch.setattr(bridge_tools, "_sleep", sleep)
 
     def _client(self, url: str) -> FirehoseHTTPClient:
         servers = {B_URL: self.bridge, HOME_URL: self.home}
@@ -311,6 +322,74 @@ async def test_a_pending_frame_on_a_non_idempotent_venue_is_dropped(w, monkeypat
     flushed = await bridge_tools.flush_outbox()
     assert flushed["entries"] == [{"event_id": flushed["entries"][0]["event_id"], "dropped": True}]
     assert len(w.venue_posts()) == 1
+
+
+async def test_posts_are_spaced_per_account_across_calls(w):
+    await w.crosspost("one")
+    await w.crosspost("two")
+    assert w.slept == [15.0]
+    assert len(w.venue_posts()) == 2
+
+
+async def test_a_short_rate_limit_is_waited_out_and_retried(w):
+    w.board.rate_limit_posts = 1
+    result = await w.crosspost()
+    assert result["egress"] == "posted" and result["published"] is True
+    assert w.slept == [15.0]
+    assert len(w.venue_posts()) == 1
+
+
+async def test_a_long_rate_limit_is_reported_and_the_post_stays_native(w):
+    w.board.rate_limit_posts = 1
+    w.board.retry_after = 3600
+    result = await w.crosspost()
+    assert result["egress"] == "failed" and "rate limited" in result["venue_error"]
+    assert result["published"] is True and w.venue_posts() == []
+    assert w.slept == []
+    # The next post waits out the venue's retry-after first.
+    await w.crosspost("later")
+    assert w.slept == [3600.0]
+
+
+async def test_rejected_credentials_are_never_sent_again(w):
+    w.board.accounts[VENUE_USER] = "a-new-token"
+    first = await w.crosspost("one")
+    assert first["egress"] == "failed" and first["published"] is True
+    assert w.board.auth_failures == 1
+
+    second = await w.crosspost("two")
+    assert second["egress"] == "failed" and "not sending them again" in second["venue_error"]
+    assert w.board.auth_failures == 1  # the venue never saw the token again
+
+    (w.tmp_path / "venue.token").write_text("a-new-token")
+    third = await w.crosspost("three")
+    assert third["egress"] == "posted"
+    assert [m["text"].split("\n")[0] for m in w.venue_posts()] == ["three"]
+    assert bridge_tools._read_auth_failures() == {}
+
+
+async def test_flush_carries_on_past_an_entry_the_venue_refuses(w, monkeypatch):
+    # Entry 1: pending (the gateway died after the venue post).
+    real_final = bridge_tools._final_frame
+    monkeypatch.setattr(
+        bridge_tools, "_final_frame", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
+    )
+    with pytest.raises(RuntimeError):
+        await w.crosspost("pending one")
+    monkeypatch.setattr(bridge_tools, "_final_frame", real_final)
+    # Entry 2: ready (the bridge was unreachable).
+    w.fail_send = 1
+    await w.crosspost("ready one")
+
+    w.board.rate_limit_posts = 1
+    w.board.retry_after = 3600
+    flushed = await bridge_tools.flush_outbox()
+    by_state = {e.get("state", "sent"): e for e in flushed["entries"]}
+    assert "rate limited" in by_state["pending"]["error"]
+    assert by_state["sent"]["published"] is True
+    (pending,) = _outbox().by_state("pending")
+    assert _outbox().by_state("ready") == []
+    assert pending.venue_text.startswith("pending one")
 
 
 async def test_crosspost_refuses_a_board_that_is_not_a_live_bridge(w):

@@ -39,6 +39,7 @@ from bonnet.bridges.adapter import (
     VenueAdapter,
     VenueAuthError,
     VenueError,
+    VenueRateLimited,
     build_adapter,
 )
 from bonnet.bridges.bindings import Bindings
@@ -502,6 +503,10 @@ class BridgeRuntime:
             except VenueAuthError as e:
                 self._relay_stopped.add(board)
                 log_msg(f"BRIDGE: relay for '{board}' stopped, venue rejected the account: {e}")
+                return relayed
+            except VenueRateLimited as e:
+                # Not the article's fault: try again next pass, uncounted.
+                log_msg(f"BRIDGE: relay for '{board}' paused until the next poll: {e}")
                 return relayed
             except VenueError as e:
                 failures = self.index.relay_failed(board, art.article_id)

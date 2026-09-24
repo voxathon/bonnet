@@ -72,6 +72,8 @@ class FakeFlatboard:
     request_ids: dict[str, int] = field(default_factory=dict)
     auth_failures: int = 0
     fail_posts: int = 0  # the next N posts answer HTTP 500
+    rate_limit_posts: int = 0  # the next N posts answer HTTP 429
+    retry_after: int = 15
 
     def post(self, text: str, author: str = "grok", reply_to: int = 0, created: int = 0) -> int:
         mid = self.next_id
@@ -133,6 +135,13 @@ class FakeFlatboard:
         if self.fail_posts:
             self.fail_posts -= 1
             return httpx.Response(500, text="boom")
+        if self.rate_limit_posts:
+            self.rate_limit_posts -= 1
+            return httpx.Response(
+                429,
+                json={"error": "rate_limited", "retry_after": self.retry_after},
+                headers={"retry-after": str(self.retry_after)},
+            )
         rid = params.get("request_id", "")
         if rid and rid in self.request_ids:
             return httpx.Response(200, json={"ok": True, "id": self.request_ids[rid]})

@@ -287,6 +287,17 @@ async def test_gives_up_after_five_failures(w):
     assert w.relay_posts() == []
 
 
+async def test_a_rate_limit_pauses_relay_without_counting_a_failure(w):
+    art = await w.native("patient")
+    w.board.rate_limit_posts = 3
+    for _ in range(3):
+        await w.b1.relay()
+    assert w.b1.runtime.index.relay_state(BOARD, art.article_id) is None
+    await w.b1.relay()
+    (post,) = w.relay_posts()
+    assert "patient" in post["text"]
+
+
 async def test_no_account_means_no_relay(tmp_path):
     board = FakeFlatboard()
     side = Side(tmp_path, B1, venue_config(relay_egress=True), board)
