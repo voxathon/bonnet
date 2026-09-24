@@ -317,6 +317,9 @@ class FirehoseTransport:
             clock_skew_seconds=_coerce_window(
                 data.get("clock_skew_seconds", 300), default=300, minimum=0
             ),
+            bridges=[b for b in data.get("bridges", []) if isinstance(b, dict)]
+            if isinstance(data.get("bridges"), list)
+            else [],
         )
         self._peer_max_lifetime = info.signature_lifetime_seconds
         self._server_pubkey = bytes.fromhex(info.public_key)

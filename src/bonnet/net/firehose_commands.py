@@ -780,6 +780,19 @@ class FirehoseCommandHandler:
             return self._bridges.article_ids_for_root(origin, board, root)
         return _error(0x0006, f"unsupported operator 0x{operator:02x} for field 0x{field_id:02x}")
 
+    def recognized_origins(self, venue: str) -> list[str]:
+        return list(self._recognized_bridges.get(venue, []))
+
+    def recognize_bridge_origin(self, venue: str, origin: str, venue_type: str = "") -> None:
+        """Adopt `origin` for `venue`, after every origin already recognized (M3)."""
+        order = self._recognized_bridges.setdefault(venue, [])
+        if origin not in order:
+            # Replace rather than append in place: a BridgeView built from
+            # the old list mid-request keeps a consistent snapshot.
+            self._recognized_bridges[venue] = [*order, origin]
+        if venue_type:
+            self._bridge_venue_types.setdefault(venue, venue_type)
+
     def bridges_manifest(self) -> list[dict]:
         """The discovery document's `bridges` list (§10.1), computed per request.
 

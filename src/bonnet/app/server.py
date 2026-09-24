@@ -222,6 +222,9 @@ class BonnetServer:
         allowed_origins = {config.origin}
         for peer in config.peers:
             allowed_origins.add(peer.origin)
+        # Shared by reference with the dispatcher and command handler, so an
+        # origin adopted at runtime (bonnet.bridges.adoption) becomes readable.
+        self.allowed_origins = allowed_origins
 
         punishment_import_policy = {
             peer.origin: peer.imported_punishment_types() for peer in config.peers
@@ -349,6 +352,11 @@ class BonnetServer:
             bridge_venue_types=_bridge_venue_types(config),
         )
         log_msg("INIT: FirehoseCommandHandler initialized")
+
+        from bonnet.bridges.adoption import BridgeAdopter
+
+        self.bridge_adopter = BridgeAdopter(self)
+        self.sync_manager.set_bridge_adopter(self.bridge_adopter)
 
         self.replay_ledger = ReplayLedger(
             config.replay_db_path,

@@ -634,7 +634,14 @@ origins = ["bridge.knolastna.me", "bridge.someoneelse.net"]   # order = canonica
 - `capabilities` gains `bonnet.bridge` while `bridges` is non-empty, and `bonnet.bridge.admission` on origins with admission enabled.
 - Update the spec's discovery table to document the key.
 
-**Learning from remote manifests.** A peer's `bridges` section is treated exactly like learned routes: advisory by default, adopted only under the opt-in policy when a trusted origin carried it. Adopted origins become peers and enter the preference list after the configured ones.
+**Learning from remote manifests (M3, done).** A peer's `bridges` section is treated exactly like learned routes: advisory by default, adopted only under the opt-in policy when a trusted origin carried it. Adopted origins become peers and enter the preference list after the configured ones.
+
+How it works (`bonnet/bridges/adoption.py`):
+- The sync client already fetches the peer's discovery document to connect; `DiscoveryInfo` now also keeps its optional `bridges` list (an additive parse; old documents yield `[]`). After each connect, `SyncManager` hands it to the adopter.
+- Policy: `[routing] auto_dial = "trusted-peers-only"`, and the advertising peer is a `[[sync.peers]]` origin or in `route_trust`. Otherwise nothing happens.
+- An advertised origin already syncing is adopted directly. One that isn't is dialed only through its **live learned route** (`bonnet.route.announce`), via the same `learn_transitive_route` as routes, so the learned cap, SSRF guards and TOFU pinning apply. With no route it stays advisory (logged once) until a route arrives.
+- Adopted origins join `allowed_origins`, so their records are dispatched and readable, and discovery's `known_origins` lists them. They're appended to the venue's preference list after configured ones.
+- Adoptions are in memory; they're re-learned on the first sync after a restart.
 
 ### 10.2 A bridge origin
 
@@ -773,7 +780,7 @@ Other bridges see the relay's post at the venue, find the marker resolves in `br
    - (l) puppet names: `~` in a handle is replaced, long handles are capped with a hex tail, and the only `~` is the type suffix
 2. **M1 (done): `bonnet bridge` read-only portal.** Runtime, TaskGroup startup, flatboard read adapter, ingest with observations, puppets (name read-back), `~` binding, `~` board and puppet-username reservations. Ship first: the signed archive of flatboard.
 3. **M2 (done): `bridges.db`, `[[bridges]]`, manifest `bridges`, per-thread canonical merge, digest check, filters 0x0B/0x0C.** Test: two bridge origins mirroring the same fake flatboard, one started after posts were evicted. A third server peering with both shows each post once in aggregate lists, including replies whose parents only one bridge has, and both copies in per-origin lists.
-4. **M3: remote learning.** Adopting bridge origins from peers' manifests under the route-learning guards.
+4. **M3 (done): remote learning.** Adopting bridge origins from peers' manifests under the route-learning guards.
 5. **M4: admission, then relay egress, then edge egress.** Admission (§6) with a fake home origin, including the async client, the loop-thread guard, the concurrency cap, name collisions and closed registration (§8); relay links; gateway home-key client for B, outbox of signed frames, markers, echo handling with `foreign_id` matching, `corroborate`.
 6. **M5: hardening.** Sweeps, evidence links, a second adapter (a bot-welcoming venue, with the operator's OK).
 

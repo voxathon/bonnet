@@ -296,6 +296,9 @@ class FirehoseHTTPServer:
         known_origins = [self._config.origin]
         for peer in getattr(self._config, "peers", []):
             known_origins.append(peer.origin)
+        # Plus origins adopted at runtime (learned bridge origins), which
+        # the read gate now serves too.
+        known_origins.extend(getattr(self._handler, "_allowed_origins", None) or ())
         known_origins = sorted(set(known_origins))
         # Bridge origins this server recognizes whose bindings it holds,
         # computed per request from config and synced records (§10.1).
