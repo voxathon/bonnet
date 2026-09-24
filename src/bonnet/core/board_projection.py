@@ -361,18 +361,24 @@ class BoardProjection:
         ).fetchone()
         return row is not None and row[0] == VISIBILITY_SUPERSEDED
 
-    def _resolve_head_id(self, origin: str, board: str, article_id: bytes) -> bytes:
+    def resolve_head_id(self, origin: str, board: str, article_id: bytes) -> bytes:
         """Follow the supersede chain to the live head article ID.
 
         Supersede is a move, not a copy: the replacement inherits the old
         row's live state, so controls naming an old ID must land on the
         head. No locking — callers hold `_lock` (and usually a transaction).
-        A visited-set caps chains against corrupt loops; unknown IDs resolve
+        A visited-set guards against corrupt loops; unknown IDs resolve
         to themselves.
+
+        There is deliberately no depth cap: every link points from an
+        older row to the row inserted after it (`article_id` is unique per
+        board), so a chain can only move forward in time and can never
+        cycle. Capping the walk would stop early on a long-but-legitimate
+        edit chain and return an already-superseded row.
         """
         seen = {article_id}
         current = article_id
-        for _ in range(16):
+        while True:
             row = self._conn.execute(
                 "SELECT replacement_article_id FROM articles "
                 "WHERE origin=? AND board=? AND article_id=?",
@@ -385,7 +391,10 @@ class BoardProjection:
                 return current
             seen.add(nxt)
             current = nxt
-        return current
+
+    def _resolve_head_id(self, origin: str, board: str, article_id: bytes) -> bytes:
+        """Alias kept for backward compatibility; see `resolve_head_id`."""
+        return self.resolve_head_id(origin, board, article_id)
 
     def apply_article(self, rec: Record, author_check: str = AUTHOR_UNCHECKED) -> None:
         """Insert or update an article projection from a bonnet.article record.
@@ -421,32 +430,66 @@ class BoardProjection:
                     # old row (impossible same-origin under seq-ordered
                     # dispatch, possible in a hand-built log) degrades to
                     # defaults with the UPDATEs below simply matching nothing.
+                    # A non-live old row (superseded, cancelled, or purged)
+                    # degrades the same way on purpose: moving state off it
+                    # would fork the chain (a second replacement alongside
+                    # the first) or silently undo a cancel/purge. The new
+                    # article still lands as a standalone row so every
+                    # replica resolves the same record the same way.
                     old_state = self._conn.execute(
-                        "SELECT pin_state, thread_state FROM articles "
+                        "SELECT pin_state, thread_state, visibility, body_state FROM articles "
                         "WHERE origin=? AND board=? AND article_id=?",
                         (rec.origin, rec.board, superseded_id),
                     ).fetchone()
-                    carried_pin = old_state[0] if old_state else "unpinned"
-                    carried_thread = old_state[1] if old_state else "open"
-                    self._conn.execute(
-                        "UPDATE articles SET visibility='superseded', "
-                        "replacement_article_id=?, latest_control_seq=?, "
-                        "pin_state='unpinned' "
-                        "WHERE origin=? AND board=? AND article_id=?",
-                        (rec.article_id, rec.origin_seq, rec.origin, rec.board, superseded_id),
+                    supersede_live = (
+                        old_state is not None
+                        and old_state[2] == VISIBILITY_ACTIVE
+                        and old_state[3] != BODY_PURGED
                     )
-                    self._conn.execute(
-                        "UPDATE articles SET root_article_id=? "
-                        "WHERE origin=? AND board=? AND root_article_id=? "
-                        "AND article_id != ?",
-                        (rec.article_id, rec.origin, rec.board, superseded_id, rec.article_id),
-                    )
-                    self._conn.execute(
-                        "UPDATE articles SET reply_to_article_id=? "
-                        "WHERE origin=? AND board=? AND reply_to_article_id=? "
-                        "AND article_id != ?",
-                        (rec.article_id, rec.origin, rec.board, superseded_id, rec.article_id),
-                    )
+                    if supersede_live:
+                        assert old_state is not None
+                        carried_pin = old_state[0]
+                        carried_thread = old_state[1]
+                        self._conn.execute(
+                            "UPDATE articles SET visibility='superseded', "
+                            "replacement_article_id=?, latest_control_seq=?, "
+                            "pin_state='unpinned' "
+                            "WHERE origin=? AND board=? AND article_id=?",
+                            (
+                                rec.article_id,
+                                rec.origin_seq,
+                                rec.origin,
+                                rec.board,
+                                superseded_id,
+                            ),
+                        )
+                        self._conn.execute(
+                            "UPDATE articles SET root_article_id=? "
+                            "WHERE origin=? AND board=? AND root_article_id=? "
+                            "AND article_id != ?",
+                            (
+                                rec.article_id,
+                                rec.origin,
+                                rec.board,
+                                superseded_id,
+                                rec.article_id,
+                            ),
+                        )
+                        self._conn.execute(
+                            "UPDATE articles SET reply_to_article_id=? "
+                            "WHERE origin=? AND board=? AND reply_to_article_id=? "
+                            "AND article_id != ?",
+                            (
+                                rec.article_id,
+                                rec.origin,
+                                rec.board,
+                                superseded_id,
+                                rec.article_id,
+                            ),
+                        )
+                    else:
+                        carried_pin = "unpinned"
+                        carried_thread = "open"
                 else:
                     carried_pin = "unpinned"
                     carried_thread = "open"
@@ -593,7 +636,7 @@ class BoardProjection:
                     return
 
                 priority = rec.metadata.get_i64(1) or 0
-                head_id = self._resolve_head_id(
+                head_id = self.resolve_head_id(
                     rec.target_origin, rec.target_board, rec.target_article_id
                 )
                 updated = self._conn.execute(
@@ -624,7 +667,7 @@ class BoardProjection:
                     self._set_checkpoint(rec.origin, rec.origin_seq)
                     return
 
-                head_id = self._resolve_head_id(
+                head_id = self.resolve_head_id(
                     rec.target_origin, rec.target_board, rec.target_article_id
                 )
                 updated = self._conn.execute(
@@ -649,7 +692,7 @@ class BoardProjection:
                     self._set_checkpoint(rec.origin, rec.origin_seq)
                     return
 
-                head_id = self._resolve_head_id(
+                head_id = self.resolve_head_id(
                     rec.target_origin, rec.target_board, rec.target_article_id
                 )
                 updated = self._conn.execute(
@@ -674,7 +717,7 @@ class BoardProjection:
                     self._set_checkpoint(rec.origin, rec.origin_seq)
                     return
 
-                head_id = self._resolve_head_id(
+                head_id = self.resolve_head_id(
                     rec.target_origin, rec.target_board, rec.target_article_id
                 )
                 updated = self._conn.execute(
@@ -753,28 +796,28 @@ class BoardProjection:
                 elif kind == "bonnet.article.purge":
                     self._apply_purge_inline(pending_rec)
                 elif kind == "bonnet.article.pin":
-                    head_id = self._resolve_head_id(
+                    head_id = self.resolve_head_id(
                         pending_rec.target_origin,
                         pending_rec.target_board,
                         pending_rec.target_article_id,
                     )
                     self._apply_pin_inline(pending_rec, head_id)
                 elif kind == "bonnet.article.unpin":
-                    head_id = self._resolve_head_id(
+                    head_id = self.resolve_head_id(
                         pending_rec.target_origin,
                         pending_rec.target_board,
                         pending_rec.target_article_id,
                     )
                     self._apply_unpin_inline(pending_rec, head_id)
                 elif kind == "bonnet.thread.close":
-                    head_id = self._resolve_head_id(
+                    head_id = self.resolve_head_id(
                         pending_rec.target_origin,
                         pending_rec.target_board,
                         pending_rec.target_article_id,
                     )
                     self._apply_thread_close_inline(pending_rec, head_id)
                 elif kind == "bonnet.thread.reopen":
-                    head_id = self._resolve_head_id(
+                    head_id = self.resolve_head_id(
                         pending_rec.target_origin,
                         pending_rec.target_board,
                         pending_rec.target_article_id,

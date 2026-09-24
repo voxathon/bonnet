@@ -37,6 +37,7 @@ from bonnet.core.firehose import (
     KIND_ORIGIN_KEY_ROTATE,
     AcceptResult,
     ArticleIdCollision,
+    ArticleNumMismatch,
     ChainBreak,
     EventIdCollision,
     FirehoseStore,
@@ -689,7 +690,7 @@ class SyncManager:
                 return await self._diagnose_chain_break(origin, client, local_seq, e)
             except SignatureInvalid as e:
                 return self._diagnose_signature_failure(origin, e)
-            except (EventIdCollision, ArticleIdCollision) as e:
+            except (EventIdCollision, ArticleIdCollision, ArticleNumMismatch) as e:
                 return self._diagnose_id_collision(origin, batch_records, e)
 
             log_msg(
@@ -871,12 +872,13 @@ class SyncManager:
         batch_records: list[Record],
         err: Exception,
     ) -> AcceptResult:
-        """Halt on a reused event or article ID with the peer bytes as evidence.
+        """Halt on a reused event/article ID or a bad article_num, with peer bytes as evidence.
 
-        A colliding ID can never resolve by retrying: the peer keeps serving
-        the same bytes and this end keeps refusing them. Prior batches stay
-        committed. The first record of the batch is stored as evidence so an
-        operator can inspect what the peer sent.
+        A colliding ID or a non-sequential article_num can never resolve by
+        retrying: the peer keeps serving the same bytes and this end keeps
+        refusing them. Prior batches stay committed. The first record of the
+        batch is stored as evidence so an operator can inspect what the peer
+        sent.
         """
         if batch_records:
             try:
@@ -885,11 +887,11 @@ class SyncManager:
                     batch_records[0].origin_seq,
                     encode_record(batch_records[0]),
                     self._hostname,
-                    f"id collision: {err}",
+                    f"record rejected: {err}",
                 )
             except Exception:
                 pass
-        detail = f"id collision, peer must re-mint: {err}"
+        detail = f"unacceptable record, peer must re-mint: {err}"
         self._firehose.set_sync_status(origin, "diverged", detail)
         log_msg(
             f"SYNC_ONCE: origin='{origin}' DIVERGED — {detail}. Sync halted; "

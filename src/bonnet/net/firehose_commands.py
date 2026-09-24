@@ -922,17 +922,18 @@ class FirehoseCommandHandler:
                     # These controls chase supersede chains to the live head:
                     # validating the named (possibly superseded) row would
                     # approve state that lands nowhere visible, while the
-                    # projection applies to the head. Cap the walk against
-                    # corrupt loops; a broken chain validates the last row
-                    # found, same as projection does.
-                    for _ in range(16):
-                        repl = target.replacement_article_id
-                        if not repl:
-                            break
-                        nxt = bp.get_article_by_id(intent.target_origin, intent.target_board, repl)
-                        if nxt is None:
-                            break
-                        target = nxt
+                    # projection applies to the head. The walk is unbounded
+                    # (same helper the projection uses): supersede links only
+                    # ever point forward in time, so a cap would validate a
+                    # superseded row on a long-but-legitimate edit chain.
+                    target_id = bp.resolve_head_id(
+                        intent.target_origin, intent.target_board, intent.target_article_id
+                    )
+                    head = bp.get_article_by_id(
+                        intent.target_origin, intent.target_board, target_id
+                    )
+                    if head is not None:
+                        target = head
 
                 if kind == KIND_ARTICLE_CANCEL:
                     if target.author_pubkey != intent.actor_pubkey:
@@ -987,6 +988,16 @@ class FirehoseCommandHandler:
                             return _error(
                                 0x0004, "Only the original author may supersede an article"
                             )
+                    # A supersede is a move of live state: the target must
+                    # still be live. Superseding a superseded row would fork
+                    # the chain (replies/pins already moved to the first
+                    # replacement), and superseding a cancelled or purged row
+                    # would silently undo moderation. Same 0x0009 state
+                    # conflict cancel already uses for superseded rows.
+                    if target.visibility != "active":
+                        return _error(0x0009, "Cannot supersede a non-active article")
+                    if target.body_state == "purged":
+                        return _error(0x0009, "Cannot supersede a purged article")
 
             if intent.body_size > 0:
                 if intent.body_size > self._max_body_size:

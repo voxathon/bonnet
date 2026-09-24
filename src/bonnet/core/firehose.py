@@ -82,6 +82,10 @@ class ArticleIdCollision(FirehoseError):
     pass
 
 
+class ArticleNumMismatch(FirehoseError):
+    pass
+
+
 class ChainBreak(FirehoseError):
     pass
 
@@ -732,6 +736,21 @@ class FirehoseStore:
                 conflict_found = False
                 derived_keys = self._derive_batch_keys(origin, records, origin_pubkey)
 
+                # Per-board article_num high-water marks, seeded from what is
+                # already stored. A bonnet.article must carry max+1 for its
+                # board; every other kind must carry 0. Without this, a peer
+                # — broken or malicious — can reuse an article_num and
+                # silently replace a projection row (plus its body file,
+                # keyed by article_num) with no cancel or supersede on
+                # record: a quiet edit the signed log would not show.
+                board_article_max: dict[str, int] = {}
+                for board_row in self._conn.execute(
+                    "SELECT board, MAX(article_num) FROM events "
+                    "WHERE origin=? AND kind=? GROUP BY board",
+                    (origin, KIND_ARTICLE),
+                ).fetchall():
+                    board_article_max[board_row[0]] = board_row[1] or 0
+
                 for rec in records:
                     if rec.origin != origin:
                         self._conn.execute("ROLLBACK")
@@ -836,6 +855,30 @@ class FirehoseStore:
                         self._conn.execute("ROLLBACK")
                         raise SignatureInvalid(
                             f"actor signature verification failed at seq {rec.origin_seq}"
+                        )
+
+                    # Article-number continuity, checked after the signatures
+                    # so a forged record still reports as a signature failure.
+                    # Records already held (idempotent path above) were
+                    # accepted under whatever rule was in force then and are
+                    # never re-judged here. A violation is signed and cannot
+                    # resolve by retrying, so it raises (the sync layer marks
+                    # the origin diverged, same as an ID collision) rather
+                    # than returning a retryable refusal.
+                    if rec.kind == KIND_ARTICLE:
+                        expected_num = board_article_max.get(rec.board, 0) + 1
+                        if rec.article_num != expected_num:
+                            self._conn.execute("ROLLBACK")
+                            raise ArticleNumMismatch(
+                                f"article_num {rec.article_num} at seq {rec.origin_seq} "
+                                f"is not {expected_num} (max+1 for board {rec.board!r})"
+                            )
+                        board_article_max[rec.board] = rec.article_num
+                    elif rec.article_num != 0:
+                        self._conn.execute("ROLLBACK")
+                        raise ArticleNumMismatch(
+                            f"non-article record at seq {rec.origin_seq} "
+                            f"carries article_num {rec.article_num}, expected 0"
                         )
 
                     self._conn.execute(
