@@ -171,7 +171,9 @@ class ArticleListItem:
     author_pubkey: str
     author_username: str = ""
     author_registrar: str = ""
-    author_check: str = "unchecked"  # unchecked, unregistered, registry, retired, foreign — see ArticleView
+    author_check: str = (
+        "unchecked"  # unchecked, unregistered, registry, retired, foreign — see ArticleView
+    )
     subject: str = ""
     tags: str = ""
     content_type: str = ""

@@ -540,9 +540,7 @@ def _rotate_key(users, old, new, seq):
                     metadata_bytes(1, new.public_key),
                     metadata_bytes(
                         2,
-                        sign_key_rotation_proof(
-                            new, ORIGIN, old.public_key, new.public_key
-                        ),
+                        sign_key_rotation_proof(new, ORIGIN, old.public_key, new.public_key),
                     ),
                 ]
             ),
