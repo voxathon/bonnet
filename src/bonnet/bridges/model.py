@@ -102,6 +102,7 @@ F_HOME_ORIGIN = 0x0114
 F_HOME_URL = 0x0115
 F_HOME_USERNAME = 0x0116
 
+F_BINDING_GENERATION = 0x0120
 F_BINDING_INGEST = 0x0121
 F_BINDING_RELAY_EGRESS = 0x0122
 F_BINDING_EDGE_EGRESS_DEFAULT = 0x0123
@@ -422,6 +423,7 @@ _FIELD_SPECS: dict[str, tuple[int, object]] = {
     "home_origin": (F_HOME_ORIGIN, _text),
     "home_url": (F_HOME_URL, _text),
     "home_username": (F_HOME_USERNAME, _text),
+    "binding_generation": (F_BINDING_GENERATION, metadata_u64),
     "binding_ingest": (F_BINDING_INGEST, metadata_bool),
     "binding_relay_egress": (F_BINDING_RELAY_EGRESS, metadata_bool),
     "binding_edge_egress_default": (F_BINDING_EDGE_EGRESS_DEFAULT, metadata_bool),
@@ -458,6 +460,7 @@ class BridgeMetadata:
     home_origin: str | None = None
     home_url: str | None = None
     home_username: str | None = None
+    binding_generation: int | None = None
     binding_ingest: bool | None = None
     binding_relay_egress: bool | None = None
     binding_edge_egress_default: bool | None = None
@@ -518,3 +521,24 @@ def merge_metadata(base: MetadataMap, extra: list[MetadataField]) -> MetadataMap
         if a.field_id == b.field_id:
             raise ValueError(f"metadata field 0x{a.field_id:04x} given twice")
     return MetadataMap(merged)
+
+
+# ---------------------------------------------------------------------------
+# Server-side reservations (§8)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BridgePolicy:
+    """What a bridge origin's server needs to know to enforce §8.
+
+    Held by the command handler only on origins with `[bridge_runtime]`.
+    """
+
+    daemon_pubkey: bytes
+    venue_types: frozenset[str]
+
+    def is_puppet_name(self, name: str) -> bool:
+        """`<handle>~<type>` for a type this origin runs, with exactly one `~`."""
+        handle, sep, venue_type = name.rpartition("~")
+        return bool(sep) and bool(handle) and "~" not in handle and venue_type in self.venue_types

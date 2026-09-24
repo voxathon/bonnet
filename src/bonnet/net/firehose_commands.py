@@ -66,6 +66,7 @@ from bonnet.core.record import (
     SIG_SIZE,
     ZERO_ID,
     CodecError,
+    Intent,
     compute_body_hash,
     compute_event_hash,
     decode_intent,
@@ -357,6 +358,7 @@ class FirehoseCommandHandler:
         allowed_origins: set = None,
         max_body_size: int = 1024 * 1024,
         wire_max: int = 32,
+        bridge_policy=None,
     ):
         self._firehose = firehose
         self._identity = server_identity
@@ -378,6 +380,8 @@ class FirehoseCommandHandler:
         self._boards_lock = threading.Lock()
         self._max_body_size = max_body_size
         self._wire_max = max(1, min(32, wire_max))
+        # bonnet.bridges.model.BridgePolicy on a bridge origin, else None.
+        self._bridge_policy = bridge_policy
         # Serializes the check-then-append span for bonnet.user.register,
         # bonnet.board.create and bonnet.user.key.rotate: without it, two
         # concurrent registrations for the same name can both read "no holder
@@ -652,6 +656,42 @@ class FirehoseCommandHandler:
             return _error(0x0000, "Internal error")
 
     # ------------------------------------------------------------------
+    # Bridge reservations (docs/bonnet-bridges-design.md §8)
+    # ------------------------------------------------------------------
+
+    def _bridge_reservation_denial(self, intent: Intent, ctx: FirehoseContext) -> bytes | None:
+        """Refuse local publishes that would squat on bridge namespaces.
+
+        Every origin reserves boards starting with `~` for its own bridge
+        runtime. A bridge origin also closes registration: only the runtime
+        (its daemon, and puppets named `<handle>~<type>` for a type it runs)
+        and administrators may register. Crossposters are admitted by
+        appending straight to the firehose, so they never reach this check,
+        and neither do federated records.
+        """
+        if (
+            intent.kind == KIND_BOARD_CREATE
+            and intent.board.startswith("~")
+            and not ctx.via_bridge_runtime
+        ):
+            return _error(0x0004, "Boards starting with '~' are reserved for this origin's bridge")
+        policy = self._bridge_policy
+        if policy is None or intent.kind != KIND_USER_REGISTER or ctx.role == "administrator":
+            return None
+        if ctx.via_bridge_runtime:
+            name = intent.metadata.get_text(1) or ""
+            if intent.actor_pubkey == policy.daemon_pubkey and "~" not in name:
+                return None
+            if policy.is_puppet_name(name):
+                return None
+            return _error(0x0004, "The bridge runtime may only register puppets as <handle>~<type>")
+        return _error(
+            0x0004,
+            "Registration on this bridge origin is closed; crossposters are admitted "
+            "through their home origin",
+        )
+
+    # ------------------------------------------------------------------
     # PUBLISH_RECORD
     # ------------------------------------------------------------------
 
@@ -759,6 +799,10 @@ class FirehoseCommandHandler:
                 return _error(
                     0x0004, "Only an administrator may register a username for another key"
                 )
+
+        reserved = self._bridge_reservation_denial(intent, ctx)
+        if reserved is not None:
+            return reserved
 
         identity_guard = (
             self._identity_lock

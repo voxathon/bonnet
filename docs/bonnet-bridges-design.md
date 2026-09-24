@@ -364,13 +364,17 @@ class VenueAdapter(Protocol):
     type: str; venue: str
     capabilities: frozenset[str]   # {"read","write","edit","deletion_log","threads","channels","idempotent_post"}
     limits: RateLimits
-    async def poll(self, channel: str, cursor: str | None) -> tuple[list[ForeignPost], str]: ...
+    async def poll(self, channel: str, cursor: str | None) -> list[ForeignPost]: ...  # oldest first
+    def cursor_after(self, post: ForeignPost) -> str: ...        # resume just after `post`
+    def cursor_from_ids(self, foreign_ids: list[str]) -> str | None: ...  # index rebuild
     async def fetch(self, channel: str, foreign_id: str) -> ForeignPost | Gone: ...
     async def post(self, account: ForeignAccount, channel: str, text: str,
                    reply_to: str | None, idempotency_key: str) -> ForeignPost: ...
     def render_outbound(self, text: str, marker: str, attribution: str | None) -> str: ...
     def max_text_bytes(self) -> int: ...
 ```
+
+The runtime advances the cursor post by post with `cursor_after`, and stops at the first post still inside the grace window, so held posts are read again next poll, in order (implemented in M1).
 
 `root_id` rule for adapters: top-level post → its own id. Reply → the venue's stated root if it has one; otherwise the root recorded in the index for `reply_to`; otherwise `None`. Adapters never walk a venue's reply chain to find a root.
 
@@ -482,6 +486,7 @@ A binding = (venue, channel) ↔ (bridge origin, bridge board) plus options, pub
 
 | ID | Name | Type |
 |---|---|---|
+| 0x0120 | `generation` | U64 (0 for a board's first binding, +1 per change) |
 | 0x0121 | `ingest` | BOOL |
 | 0x0122 | `relay_egress` | BOOL |
 | 0x0123 | `edge_egress_default` | BOOL (default **true**) |
@@ -490,6 +495,7 @@ A binding = (venue, channel) ↔ (bridge origin, bridge board) plus options, pub
 | 0x0126 | `foreign_capabilities` | TEXT_LIST |
 
 - A board's active binding is the latest binding record naming it with no later unbind. Changing options means a new generation plus an unbind of the old one.
+- **Bindings come from config (M1).** At startup the runtime reconciles `[[bridge_runtime.venue.binding]]` against the active bindings on record: new or changed boards get a binding (and the old generation an unbind), boards removed from config get an unbind, and unchanged ones publish nothing. There are no separate `bind`/`unbind` commands.
 
 **Board names.** `~<type>` for flat venues (e.g. `~flatboard`), `~<type>.<channel>` otherwise (e.g. `~lainchan.tech`). If one type has several venue instances, the type name must be unique per instance (`~flatboard`, `~flatboard-foo`).
 
@@ -626,7 +632,8 @@ A normal homeserver config plus:
 
 ```toml
 [bridge_runtime]
-daemon_key = "~/.bonnet/bridges/daemon.key"
+daemon_key = "~/.bonnet/bridges/daemon.key"   # generated on first start
+daemon_username = "bridge"
 master_secret = "~/.bonnet/bridges/master.secret"
 state_dir = "~/.bonnet/bridges/state"          # cache only
 grace_seconds = 120
@@ -636,7 +643,9 @@ marker_timeout_seconds = 3600
 [[bridge_runtime.venue]]
 type = "flatboard"
 venue = "flatboard@tools.nyrds.net"
+url = "https://tools.nyrds.net"                 # where the adapter dials
 poll_interval_seconds = 60
+backfill_pages = 1                              # pages read on the very first poll
 relay_user = "bonnet_bridge"                    # optional
 relay_token_file = "~/.bonnet/bridges/flatboard/relay.token"
 
@@ -660,7 +669,7 @@ allow_private_dial = false
 
 Setup:
 - **Choose the origin name once.** It's in every record and every puppet's registrar.
-- ACL: the daemon rule; a `registered` grant for `bonnet.article` on `~*`; the shipped `unknown → bonnet.user.register` (puppets need it; the server-side check in §8 closes it to everyone else).
+- ACL: a `registered` grant for `bonnet.article` on `~*`; the shipped `unknown → bonnet.user.register` (puppets need it; the server-side check in §8 closes it to everyone else). **The daemon rule is synthesized by the server** (M1), like the root admin rule, because the daemon key is generated on first start: `write` on `PUBLISH_RECORD` for `bonnet.bridge.*`, `bonnet.board.create` and `bonnet.article` on boards `["~*", ""]`. Operator deny rules still win.
 - The admin key announces the bridge origin's own route.
 - The homepage and manifest say plainly that it's a bridge, that its `*~<type>` users are puppets, and that its other users are admitted crossposters whose home origin is stated on every post they make.
 
@@ -731,14 +740,15 @@ Other bridges see the relay's post at the venue, find the marker resolves in `br
 - **Write:** `GET /board/post?user=&token=&text=&reply_to=&request_id=&format=json` → `{"ok":true,"id":N}`. `request_id` is idempotent.
 - **Limits:** posts 1/15 s, 20/h per user, 40/h per IP. Reads 120/min per IP. **10 wrong tokens per hour per IP locks all auth**, so never retry on 401.
 - **Cap:** 2048 bytes. Immutable, and `request_id` makes posting idempotent, so capabilities = `{read, write, threads, idempotent_post}`.
-- `raw` = the exact `/board/msg/<id>.json` bytes.
+- `raw` = the exact `/board/msg/<id>.json` bytes when fetched singly. Polling reads pages, so a polled post's `raw` is the canonical JSON of its page entry (sorted keys, compact), not a second request per post, which would halve the read budget.
+- **Unverified:** the page envelope. The adapter accepts a bare list or `{"messages": [...]}` (optionally with `first_id`). The venue wasn't reachable from where M1 was built; check it against the live API before enabling.
 - Tell the operator before enabling relay egress.
 
 ---
 
 ## 13. Milestones
 
-1. **M0: foundations and proof tests.** `bonnet/bridges/model.py` (H, codecs, fields), `derive_context` extraction, gateway `extra_metadata`, the generic projection catch-up facility, `query_articles` unknown-filter error. Tests against in-process servers:
+1. **M0 (done): foundations and proof tests.** `bonnet/bridges/model.py` (H, codecs, fields), `derive_context` extraction, gateway `extra_metadata`, the generic projection catch-up facility, `query_articles` unknown-filter error. Tests against in-process servers:
    - (a) observation publish via `handle` with a daemon context
    - (b) article with 0x0100+ fields and a `src:` tag
    - (c) idempotent re-publish, including the body re-staging path
@@ -751,7 +761,7 @@ Other bridges see the relay's post at the venue, find the marker resolves in `br
    - (j) a projection added after records were dispatched catches up at boot
    - (k) observation IDs differ for a different `foreign_state` or different raw bytes, and match for an identical retry
    - (l) puppet names: `~` in a handle is replaced, long handles are capped with a hex tail, and the only `~` is the type suffix
-2. **M1: `bonnet bridge` read-only portal.** Runtime, TaskGroup startup, flatboard read adapter, ingest with observations, puppets (name read-back), `~` binding, `~` board and puppet-username reservations. Ship first: the signed archive of flatboard.
+2. **M1 (done): `bonnet bridge` read-only portal.** Runtime, TaskGroup startup, flatboard read adapter, ingest with observations, puppets (name read-back), `~` binding, `~` board and puppet-username reservations. Ship first: the signed archive of flatboard.
 3. **M2: `bridges.db`, `[[bridges]]`, manifest `bridges`, per-thread canonical merge, digest check, filters 0x0B/0x0C.** Test: two bridge origins mirroring the same fake flatboard, one started after posts were evicted. A third server peering with both shows each post once in aggregate lists, including replies whose parents only one bridge has, and both copies in per-origin lists.
 4. **M3: remote learning.** Adopting bridge origins from peers' manifests under the route-learning guards.
 5. **M4: admission, then relay egress, then edge egress.** Admission (§6) with a fake home origin, including the async client, the loop-thread guard, the concurrency cap, name collisions and closed registration (§8); relay links; gateway home-key client for B, outbox of signed frames, markers, echo handling with `foreign_id` matching, `corroborate`.

@@ -94,6 +94,31 @@ def _synthesize_acl(rules, admin_pubkey_hex: str, server_pubkey: bytes):
     return final, admin_rule
 
 
+def _with_bridge_daemon_rule(rules, bridge_policy):
+    """Append the bridge daemon's grant on a bridge origin (docs/bonnet-bridges-design.md §7).
+
+    Synthesized like the server's own admin rule because the daemon key is
+    generated on first start, so an operator can't name it in config ahead
+    of time. It grants exactly what the runtime publishes: bridge records,
+    boards and articles on `~` boards (and board-less bridge records).
+    Operator deny rules still win over it.
+    """
+    if bridge_policy is None:
+        return rules
+    from bonnet.core.acl import ACLRule, PrincipalMatcher
+
+    return list(rules) + [
+        ACLRule(
+            effect="allow",
+            matcher=PrincipalMatcher(pubkey=bridge_policy.daemon_pubkey),
+            actions=["write"],
+            commands=["PUBLISH_RECORD"],
+            kinds=["bonnet.bridge.*", "bonnet.board.create", "bonnet.article"],
+            boards=["~*", ""],
+        )
+    ]
+
+
 class BonnetServer:
     """Complete Bonnet server: all components wired and runnable."""
 
@@ -107,6 +132,8 @@ class BonnetServer:
         # here so a signal handler racing with startup has something to
         # check rather than an AttributeError.
         self._uvicorn_server: Any = None
+        # Set by run() once the port is bound and the banner printed.
+        self.started = asyncio.Event()
 
         os.makedirs(config.data_dir, exist_ok=True)
         os.makedirs(config.boards_dir, exist_ok=True)
@@ -202,6 +229,23 @@ class BonnetServer:
         )
         log_msg("INIT: Dispatcher initialized")
 
+        # A bridge origin ([bridge_runtime] in config) closes registration to
+        # all but its runtime and administrators; the daemon key is loaded
+        # (or generated) here so the server knows which key that is.
+        self.bridge_policy = None
+        if config.bridge_runtime is not None:
+            from bonnet.bridges.config import load_daemon_identity
+            from bonnet.bridges.model import BridgePolicy
+
+            self.bridge_policy = BridgePolicy(
+                daemon_pubkey=load_daemon_identity(config.bridge_runtime).public_key,
+                venue_types=config.bridge_runtime.venue_types,
+            )
+            log_msg(
+                f"INIT: bridge origin, daemon={self.bridge_policy.daemon_pubkey.hex()[:16]} "
+                f"venues={sorted(self.bridge_policy.venue_types)}"
+            )
+
         # Tracks the one ACL rule (if any) that grants admin by the server's
         # own key because nothing else in config did — as opposed to a rule
         # an operator wrote into config.toml themselves. Only this rule is
@@ -219,7 +263,7 @@ class BonnetServer:
         final_rules, self._acl_admin_rule = _synthesize_acl(
             acl._rules, config.admin_pubkey_hex, self.server_identity.public_key
         )
-        acl._rules = final_rules
+        acl._rules = _with_bridge_daemon_rule(final_rules, self.bridge_policy)
         if not had_rules:
             log_msg("INIT: no ACL rules configured, defaulting to server identity as admin")
         elif not had_server_admin and self._acl_admin_rule is not None:
@@ -280,6 +324,7 @@ class BonnetServer:
             allowed_origins=allowed_origins,
             max_body_size=config.max_article_body_size,
             wire_max=config.witness.wire_max,
+            bridge_policy=self.bridge_policy,
         )
         log_msg("INIT: FirehoseCommandHandler initialized")
 
@@ -523,6 +568,7 @@ class BonnetServer:
             new_rules, new_admin_rule = _synthesize_acl(
                 fresh.acl._rules, fresh.admin_pubkey_hex, self.server_identity.public_key
             )
+            new_rules = _with_bridge_daemon_rule(new_rules, self.bridge_policy)
         except Exception as exc:
             log_msg(f"ACL_RELOAD: reason={reason} synthesis failed ({exc}), keeping {old_n} rules")
             return f"Error: ACL reload failed, keeping {old_n} rules: {exc}"
@@ -812,9 +858,18 @@ class BonnetServer:
         return "\n".join(lines)
 
     async def run(
-        self, port: int = None, ssl_certfile: str = None, ssl_keyfile: str = None
+        self,
+        port: int = None,
+        ssl_certfile: str = None,
+        ssl_keyfile: str = None,
+        console: bool = True,
     ) -> bool:
-        """Run until shutdown. Returns False if the server never managed to start."""
+        """Run until shutdown. Returns False if the server never managed to start.
+
+        `self.started` is set once the port is bound, so a caller running
+        something alongside (the bridge runtime) can wait for it. `console`
+        False skips the operator REPL even on a TTY.
+        """
         import sys
 
         import uvicorn
@@ -910,7 +965,7 @@ class BonnetServer:
             stdin_is_tty = sys.stdin.isatty()
         except (OSError, ValueError):
             stdin_is_tty = False
-        if stdin_is_tty:
+        if stdin_is_tty and console:
             tasks.append(asyncio.create_task(OperatorConsole(self).repl_loop()))
         else:
             print("No interactive terminal on stdin - operator REPL disabled, serving only.")
@@ -932,6 +987,7 @@ class BonnetServer:
             self.sync_manager.start_origin(peer.origin, client, self.config.sync_interval_seconds)
             log_msg(f"SYNC: started background sync for peer '{peer.origin}' from {base_url}")
 
+        self.started.set()
         try:
             await server.main_loop()
         finally:

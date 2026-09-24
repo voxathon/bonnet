@@ -144,6 +144,7 @@ _TOP_LEVEL_KEYS = {
     "include",
     "witnesses",
     "logging",
+    "bridge_runtime",
 }
 
 _INCLUDE_ALLOWED_TOP_KEYS = {"acl", "sync"}
@@ -400,6 +401,7 @@ class FirehoseConfig:
         log_keep_files: int = 20,
         log_max_bytes: int = 10 * 1024 * 1024,
         log_backup_count: int = 5,
+        bridge_runtime=None,
     ):
         self.origin = _normalize_origin(origin)
         self.hostname = normalize_hostname(hostname) or self.origin
@@ -435,6 +437,9 @@ class FirehoseConfig:
         self.unknown_keys = list(unknown_keys or [])
         self.witness = witness or WitnessConfig()
         self.trusted_forwarders = list(trusted_forwarders or [])
+        # bonnet.bridges.config.BridgeRuntimeConfig when this origin is a
+        # bridge origin ([bridge_runtime] present), else None.
+        self.bridge_runtime = bridge_runtime
 
     def validate(self) -> None:
         """Raise ValueError if configuration is invalid."""
@@ -464,6 +469,15 @@ class FirehoseConfig:
             raise ValueError(
                 f"config: max_request_size must be positive, got {self.max_request_size}"
             )
+        if self.bridge_runtime is not None:
+            for venue in self.bridge_runtime.venues:
+                for binding in venue.bindings:
+                    if binding.max_body_bytes > self.max_article_body_size:
+                        raise ValueError(
+                            f"config: binding {binding.board!r} max_body_bytes "
+                            f"({binding.max_body_bytes}) exceeds limits.max_article_body_size "
+                            f"({self.max_article_body_size})"
+                        )
         if self.max_article_body_size <= 0:
             raise ValueError(
                 f"config: max_article_body_size must be positive, got {self.max_article_body_size}"
@@ -684,6 +698,12 @@ class FirehoseConfig:
         routing = data.get("routing", {})
         if not isinstance(routing, dict):
             raise ValueError("config: [routing] must be a table")
+        bridge_runtime = None
+        if "bridge_runtime" in data:
+            from bonnet.bridges.config import parse_bridge_runtime
+
+            bridge_runtime, bridge_unknown = parse_bridge_runtime(data["bridge_runtime"], base_dir)
+            unknown_keys.extend(bridge_unknown)
 
         # BONNET_SERVER_HOME (or the per-user default, see core.home) only
         # supplies a *default* for storage paths left unset in config.toml —
@@ -790,6 +810,7 @@ class FirehoseConfig:
                 wire_max=witnesses.get("wire_max", 32),
             ),
             routing=_parse_routing(routing),
+            bridge_runtime=bridge_runtime,
         )
 
     @staticmethod
