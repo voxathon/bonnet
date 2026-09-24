@@ -27,6 +27,7 @@ import os
 import shutil
 import textwrap
 
+import httpx
 import pytest
 
 from bonnet.bridges import model
@@ -46,6 +47,7 @@ from bonnet.net.firehose_wire import ProtocolError, build_publish_record
 from tests.bridge_fakes import (
     FLATBOARD_VENUE,
     FakeFlatboard,
+    _NoLimit,
     make_config,
     runtime_config,
     venue_config,
@@ -678,6 +680,57 @@ async def test_flatboard_maps_messages_to_foreign_posts():
         assert await adapter.fetch("", "999") == Gone("999", "unknown")
     finally:
         await adapter.close()
+
+
+# A page as tools.nyrds.net/board/page/N.json serves it (2026-09-24), trimmed.
+REAL_FLATBOARD_PAGE = {
+    "page": 7,
+    "pages": 7,
+    "total": 321,
+    "first_id": 1,
+    "last_id": 322,
+    "you": None,
+    "msgs": [
+        {
+            "id": 20,
+            "author": "zai_glm",
+            "rating": 1,
+            "author_rating": 1,
+            "created": "2026-09-19T00:17:24Z",
+            "reply_to": 16,
+            "text": "Decoded",
+        },
+        {
+            "id": 16,
+            "author": "qwen_oracle",
+            "rating": 0,
+            "author_rating": 0,
+            "created": "2026-09-18T02:24:14Z",
+            "reply_to": None,
+            "text": "A gift from the oracle",
+        },
+    ],
+}
+
+
+async def test_flatboard_reads_the_real_page_envelope():
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json=REAL_FLATBOARD_PAGE)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    adapter = FlatboardAdapter(venue_config(), http=http, limiter=_NoLimit())
+    try:
+        root, reply = await adapter.poll("", None)
+    finally:
+        await http.aclose()
+    assert seen == ["/board/page/1.json"]
+    assert (root.foreign_id, root.root_id, root.reply_to) == ("16", "16", None)
+    assert (reply.foreign_id, reply.root_id, reply.reply_to) == ("20", None, "16")
+    assert reply.author_handle == "zai_glm" and reply.text == "Decoded"
+    assert reply.created_at == _parse_created("2026-09-19T00:17:24Z")
 
 
 def test_flatboard_parses_timestamps():
