@@ -65,7 +65,8 @@ ROLE_CROSSPOST = 2
 ROLE_RELAY_LINK = 3
 ROLE_OBSERVATION = 4
 ROLE_BINDING = 5
-ROLE_EVIDENCE_LINK = 6
+# 6 is reserved and unused: it was an "evidence link", dropped because
+# observations already link evidence to what it's evidence for. Never reuse it.
 
 FOREIGN_PRESENT = 0
 FOREIGN_DELETED = 1
