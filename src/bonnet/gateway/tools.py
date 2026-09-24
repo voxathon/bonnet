@@ -3728,3 +3728,21 @@ async def get_event_body(
         return body.decode("utf-8", errors="replace") if body else ""
     finally:
         await client.close()
+
+
+# Bridge tools live in bonnet.gateway.bridge_tools as plain functions;
+# registered here so they sit in this namespace like every other tool.
+from bonnet.gateway import bridge_tools as _bridge_tools  # noqa: E402
+
+list_bridges = mcp.tool(tags={NEEDS_ORIGIN})(needs(commands=[])(_bridge_tools.list_bridges))
+# crosspost and flush_outbox publish on the *bridge* origin, not the active
+# one, so the active origin's PERMISSIONS can't speak for them: no commands.
+crosspost = mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})(
+    needs(commands=[])(_bridge_tools.crosspost)
+)
+flush_outbox = mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})(
+    needs(commands=[])(_bridge_tools.flush_outbox)
+)
+corroborate = mcp.tool(tags={NEEDS_ORIGIN})(
+    needs(commands=["ARTICLE_GET", "ARTICLE_QUERY"])(_bridge_tools.corroborate)
+)

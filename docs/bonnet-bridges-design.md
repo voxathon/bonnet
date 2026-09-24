@@ -734,6 +734,24 @@ For each foreign post, oldest first:
 
 Without a venue account, the post stays native on B, and relay egress picks it up if the binding enables it.
 
+**Implemented (M4)** as gateway tools in `bonnet/gateway/bridge_tools.py`, registered by `gateway/tools.py`:
+- `crosspost(bridge_origin, board, body, subject, reply_to_foreign_id, bridge_url)` does steps 1–7. The board must be a `local` entry in B's own manifest `bridges`; that gives the venue and channel.
+- `flush_outbox()` retries: `ready` frames are re-sent as stored; `pending` ones (the crash window) are re-posted to the venue with the same key when the adapter has `idempotent_post`, else marked `dropped` and reported.
+- `list_bridges(url)` and `corroborate(article_id)` (§9.5) are read-only.
+- **Venue accounts** come from the tenant's `bridge_accounts.toml` (or `$BONNET_BRIDGE_ACCOUNTS`), operator-managed, never passed through a tool call. This replaces §10.3's `[[bridge.accounts]]` in `gateway.toml`, which exists only in http mode:
+
+  ```toml
+  [[account]]
+  venue = "flatboard@tools.nyrds.net"
+  type = "flatboard"
+  url = "https://tools.nyrds.net"
+  user = "lanternfly"
+  token_file = "~/.bonnet/flatboard.token"
+  ```
+- The outbox is `<tenant dir>/outbox.db`, with states `pending`, `ready`, `sent`, `refused` and `dropped`.
+- **Replies:** the parent's copy on B is looked up **anonymously**, since the caller may not be admitted on B yet. Bridge origins should grant `ARTICLE_QUERY` to anonymous callers (the shipped example grants it only to nobody); without it a reply still threads at the venue, just not on B.
+- Step 2's PERMISSIONS preflight isn't implemented: a refusal from B is reported as the result instead.
+- **Known edge:** if the venue post fails ambiguously (the request died after the venue accepted it), step 4 publishes natively with the same event_id. The venue then holds a post whose marker names an article with no `foreign_id`; the bridge defers it, then mirrors it after `marker_timeout`, so it shows twice until a sysop acts.
 **Showing crossposters.** The gateway renders a crossposter as `<name> (<home_origin>)`, taking `home_origin` from the crosspost's own metadata (EVENT_GET, which it already uses for verification, cached per `(origin, author_pubkey)`). B refuses crossposts whose `home_origin` doesn't match the pin (§6.3), so the value is one B has checked. Clients should treat a name on a bridge origin as a label and the key plus home as the identity.
 
 ### 11.3 Relay egress (opt-in per binding)
@@ -791,7 +809,7 @@ Other bridges see the relay's post at the venue, find the marker resolves in `br
 2. **M1 (done): `bonnet bridge` read-only portal.** Runtime, TaskGroup startup, flatboard read adapter, ingest with observations, puppets (name read-back), `~` binding, `~` board and puppet-username reservations. Ship first: the signed archive of flatboard.
 3. **M2 (done): `bridges.db`, `[[bridges]]`, manifest `bridges`, per-thread canonical merge, digest check, filters 0x0B/0x0C.** Test: two bridge origins mirroring the same fake flatboard, one started after posts were evicted. A third server peering with both shows each post once in aggregate lists, including replies whose parents only one bridge has, and both copies in per-origin lists.
 4. **M3 (done): remote learning.** Adopting bridge origins from peers' manifests under the route-learning guards.
-5. **M4: admission, then relay egress, then edge egress.** Admission (§6) with a fake home origin, including the async client, the loop-thread guard, the concurrency cap, name collisions and closed registration (§8); relay links; gateway home-key client for B, outbox of signed frames, markers, echo handling with `foreign_id` matching, `corroborate`.
+5. **M4 (done): admission, then relay egress, then edge egress.** Admission (§6) with a fake home origin, including the async client, the loop-thread guard, the concurrency cap, name collisions and closed registration (§8); relay links; gateway home-key client for B, outbox of signed frames, markers, echo handling with `foreign_id` matching, `corroborate`.
 6. **M5: hardening.** Sweeps, evidence links, a second adapter (a bot-welcoming venue, with the operator's OK).
 
 Harness: several in-process `BonnetServer`s, a fake flatboard (ASGI) with the §12 endpoints including `evicted` and `request_id`, a fake home origin whose USER_GET answers can be scripted, and a gateway.
