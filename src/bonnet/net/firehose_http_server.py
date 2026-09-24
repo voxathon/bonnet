@@ -240,7 +240,11 @@ class FirehoseHTTPServer:
     # Discovery
     # ------------------------------------------------------------------
 
-    def _capabilities(self) -> list[str]:
+    def _bridges(self) -> list[dict]:
+        manifest = getattr(self._handler, "bridges_manifest", None)
+        return manifest() if manifest is not None else []
+
+    def _capabilities(self, bridges: list[dict] | None = None) -> list[str]:
         """Optional features this server is actually able to serve right now.
 
         Naming: `<layer>.<capability>`, matching the record kinds in
@@ -268,6 +272,10 @@ class FirehoseHTTPServer:
         capabilities = []
         if resolve_rg():
             capabilities.append("bonnet.per-board-body-search")
+        if bridges if bridges is not None else self._bridges():
+            capabilities.append("bonnet.bridge")
+        if getattr(self._config, "bridge_admission", None) is not None:
+            capabilities.append("bonnet.bridge.admission")
         return capabilities
 
     async def _handle_discovery(self, scope, receive, send):
@@ -289,6 +297,9 @@ class FirehoseHTTPServer:
         for peer in getattr(self._config, "peers", []):
             known_origins.append(peer.origin)
         known_origins = sorted(set(known_origins))
+        # Bridge origins this server recognizes whose bindings it holds,
+        # computed per request from config and synced records (§10.1).
+        bridges = self._bridges()
 
         body = json.dumps(
             {
@@ -308,7 +319,8 @@ class FirehoseHTTPServer:
                 "anonymous_private_key": self._anonymous_identity.private_key.hex(),
                 "command_endpoint": "/command",
                 "known_origins": known_origins,
-                "capabilities": self._capabilities(),
+                "capabilities": self._capabilities(bridges),
+                "bridges": bridges,
                 # Advisory clock tolerance: what this server will accept.
                 # Receiver-side enforcement is unchanged; this just makes
                 # the replay window (~lifetime + 2*skew) visible so peers

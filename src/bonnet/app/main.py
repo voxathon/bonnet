@@ -114,7 +114,7 @@ def _load_and_validate_config(args) -> FirehoseConfig:
         print(f"error: invalid configuration: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
-    for warning in _acl_rule_warnings(config):
+    for warning in _acl_rule_warnings(config) + _bridges_warnings(config):
         print(f"warning: {warning}", file=sys.stderr)
 
     return config
@@ -143,6 +143,18 @@ def _preflight_bind(host: str, port: int) -> None:
         sock.bind(sockaddr)
     finally:
         sock.close()
+
+
+def _bridges_warnings(config: FirehoseConfig) -> list[str]:
+    """[[bridges]] origins that aren't sync peers: their copies never arrive here."""
+    peers = {p.origin for p in config.peers}
+    return [
+        f"[[bridges]] venue {entry.venue!r} lists origin {origin!r}, which is not a "
+        "[[sync.peers]] entry; its copies won't reach this server"
+        for entry in getattr(config, "bridges", [])
+        for origin in entry.origins
+        if origin != config.origin and origin not in peers
+    ]
 
 
 def _acl_rule_warnings(config: FirehoseConfig) -> list[str]:

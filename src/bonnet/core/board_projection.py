@@ -188,6 +188,11 @@ class ArticleProjection:
 # ARTICLE_QUERY filter field IDs this projection answers (see query_articles).
 QUERY_FIELD_IDS = frozenset(range(0x01, 0x0B))
 
+# Internal filter: article_id IN (list). Wider than a u8, so no request can
+# name it; the command handler uses it to apply filters resolved elsewhere
+# (the bridge filters, answered from bridges.db).
+ARTICLE_ID_IN = 0x1000
+
 
 class UnknownQueryField(ValueError):
     """An ARTICLE_QUERY filter named a field ID this server doesn't know."""
@@ -1297,6 +1302,13 @@ class BoardProjection:
                 if op == 0x01:
                     where_parts.append(f"{col}=?")
                     params.append(value)
+            elif field_id == ARTICLE_ID_IN:
+                ids = list(value)
+                if not ids:
+                    where_parts.append("0")
+                else:
+                    where_parts.append(f"article_id IN ({','.join('?' * len(ids))})")
+                    params.extend(ids)
             else:
                 # Ignoring it would widen the result set to everything the
                 # other filters match, silently answering a different query.

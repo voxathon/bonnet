@@ -523,7 +523,8 @@ copies(src_venue, src_channel, src_foreign_id,
        origin, board, article_id, event_id, article_num, created_at,
        role, digest, revision, state,    -- one row per mirror, crosspost original, or relay-linked native article
        PRIMARY KEY(origin, event_id))
-threads(src_venue, src_channel, root_foreign_id, canonical_origin, PRIMARY KEY(...))
+srcs(venue, channel, foreign_id, root, conflict)   -- the root stated for each foreign post by any copy;
+                                                   -- conflict = copies stated different roots
 bindings(origin, event_id, venue, channel, target_origin, target_board, mode, flags, generation, max_body_bytes, active)
 observations(origin, event_id, target_origin, target_event_id, venue, channel, foreign_id, foreign_state)
 admissions(origin, pubkey, username, home_origin, home_url, home_username, reg_event_id, active)   -- only rows for this origin are used
@@ -532,6 +533,8 @@ applied_events(origin, event_id)  +  per-origin checkpoints
 ```
 
 Dedup keys stay `(origin, event_id)`. `src` and the thread key are groupings, not identities.
+
+**Implemented (M2)** in `core/bridge_projection.py`. The projection stores facts only. Which copy is canonical depends on *this* server's `[[bridges]]` order, so it's computed at read time by `BridgeView`, one per request, with a per-request cache, and never stored.
 
 ### 9.2 Feeding it
 
@@ -550,6 +553,8 @@ Dedup keys stay `(origin, event_id)`. `src` and the thread key are groupings, no
 3. otherwise its own `foreign_id` (a thread of one).
 
 If copies of the same `src` state *different* roots, that `src` isn't collapsed: every copy shows.
+
+**Implementation note (M2):** the ranking below and the "no live root copy anywhere" fallback are one sort. Recognized origins holding any live copy in the thread are ordered by: holds a live root copy, then rule 1, 2, 3, 4, where rules 1 and 3 look at the root copy if the origin holds one and at its thread copies otherwise.
 
 **Canonical origin for a thread**, among recognized origins (`[[bridges]]` in §10.1, plus adopted ones) holding a live copy of the root:
 1. An origin whose root copy is a crosspost original (role 2) or a relay-linked native article (role 3). The authored post and its thread stay together.
@@ -572,6 +577,8 @@ For `origin=""` ARTICLE_LIST and ARTICLE_SEARCH on a board whose name starts wit
 - Run a k-way merge. Skip any row that `bridges.db` marks as a non-canonical copy (`(origin, event_id)` for list rows, `(origin, board, article_id)` for search rows).
 - Skip `offset` surviving rows, then collect `limit`. Keep pulling batches until the page is full or every cursor is exhausted.
 - `total` in search responses counts surviving rows.
+- **Search (M2):** per-origin search results aren't in aggregate order (body search returns ripgrep order), so there's no stream to merge. Instead the per-origin window doubles until every origin has returned all its matches or the search cap (`[search] max_count`) is reached; survivors are then sorted and paged. `total` is exact below the cap, and the response is marked truncated at it.
+- Rows whose copy isn't live (cancelled or superseded, shown because the request's flags asked for them) always pass: the flags decide those.
 - Cost: a page at `offset` reads at least `offset + limit` rows, plus every non-canonical row skipped along the way. That's the same order as today's offset paging, with a constant factor for the number of recognized bridges. Accepted for v1; keyset paging would be a wire change and is out of scope.
 
 Per-origin reads are untouched. Boards without `~` take the existing path unchanged.
@@ -582,10 +589,12 @@ New ARTICLE_QUERY filter IDs (u8, additive), backed by `bridges.db` joined on `(
 
 | ID | Field | Operators |
 |---|---|---|
-| 0x0B | `src` (`venue#channel#foreign_id`, unescaped components) | EQ, IN |
-| 0x0C | `foreign_root` (`venue#channel#root_foreign_id`) | EQ |
+| 0x0B | `src` (`venue#channel#foreign_id`, components escaped as in the `src:` tag) | EQ, IN (comma-separated) |
+| 0x0C | `foreign_root` (`venue#channel#root_foreign_id`, escaped the same way) | EQ |
 
-Both are exact matches. `query_articles` gets an `else` branch: an unknown field ID returns 0x0006 "unknown filter field".
+Both are exact matches. `query_articles` gets an `else` branch: an unknown field ID returns 0x0006 "unknown filter field". Any other operator on 0x0B/0x0C, or a value that doesn't parse, is also 0x0006. The escaping is the tag's (`%`, `#`, `,` percent-encoded), because channel and foreign ids may contain `#` or `,`.
+
+The foreign_root filter answers from the thread grouping, not from stated roots: a copy that couldn't state its root (its bridge started after the root was evicted) still matches through another copy of the same post.
 
 A client corroborates a post with the `src:` tag it already has, the manifest's `bridges[].origins` for that venue, and a per-origin ARTICLE_QUERY with filter 0x0B on each listed origin. The gateway wraps this as `corroborate(article)`.
 
@@ -620,6 +629,7 @@ origins = ["bridge.knolastna.me", "bridge.someoneelse.net"]   # order = canonica
 ```
 
 - An origin is listed for a venue only if its binding records for that venue are synced and active. `local: true` if this origin's own runtime is live for that venue.
+- One entry per bound (venue, channel); entries for a non-empty channel carry a `channel` key. `board` is this origin's own bridge board when it has one, otherwise the most preferred origin's.
 - `max_body_bytes` is this origin's own cap when `local`, otherwise the value from the bridge origin's binding record. It never exceeds the origin's hard `max_body_size`.
 - `capabilities` gains `bonnet.bridge` while `bridges` is non-empty, and `bonnet.bridge.admission` on origins with admission enabled.
 - Update the spec's discovery table to document the key.
@@ -762,7 +772,7 @@ Other bridges see the relay's post at the venue, find the marker resolves in `br
    - (k) observation IDs differ for a different `foreign_state` or different raw bytes, and match for an identical retry
    - (l) puppet names: `~` in a handle is replaced, long handles are capped with a hex tail, and the only `~` is the type suffix
 2. **M1 (done): `bonnet bridge` read-only portal.** Runtime, TaskGroup startup, flatboard read adapter, ingest with observations, puppets (name read-back), `~` binding, `~` board and puppet-username reservations. Ship first: the signed archive of flatboard.
-3. **M2: `bridges.db`, `[[bridges]]`, manifest `bridges`, per-thread canonical merge, digest check, filters 0x0B/0x0C.** Test: two bridge origins mirroring the same fake flatboard, one started after posts were evicted. A third server peering with both shows each post once in aggregate lists, including replies whose parents only one bridge has, and both copies in per-origin lists.
+3. **M2 (done): `bridges.db`, `[[bridges]]`, manifest `bridges`, per-thread canonical merge, digest check, filters 0x0B/0x0C.** Test: two bridge origins mirroring the same fake flatboard, one started after posts were evicted. A third server peering with both shows each post once in aggregate lists, including replies whose parents only one bridge has, and both copies in per-origin lists.
 4. **M3: remote learning.** Adopting bridge origins from peers' manifests under the route-learning guards.
 5. **M4: admission, then relay egress, then edge egress.** Admission (§6) with a fake home origin, including the async client, the loop-thread guard, the concurrency cap, name collisions and closed registration (§8); relay links; gateway home-key client for B, outbox of signed frames, markers, echo handling with `foreign_id` matching, `corroborate`.
 6. **M5: hardening.** Sweeps, evidence links, a second adapter (a bot-welcoming venue, with the operator's OK).

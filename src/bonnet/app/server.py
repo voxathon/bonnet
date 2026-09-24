@@ -94,6 +94,18 @@ def _synthesize_acl(rules, admin_pubkey_hex: str, server_pubkey: bytes):
     return final, admin_rule
 
 
+def recognized_bridges(config):
+    from bonnet.bridges.config import recognized_bridges as _recognized
+
+    return _recognized(config)
+
+
+def _bridge_venue_types(config):
+    from bonnet.bridges.config import venue_types
+
+    return venue_types(config)
+
+
 def _with_bridge_daemon_rule(rules, bridge_policy):
     """Append the bridge daemon's grant on a bridge origin (docs/bonnet-bridges-design.md §7).
 
@@ -215,6 +227,11 @@ class BonnetServer:
             peer.origin: peer.imported_punishment_types() for peer in config.peers
         }
 
+        from bonnet.core.bridge_projection import BridgeProjection
+
+        # bridges.db (docs/bonnet-bridges-design.md §9): a tracked projection,
+        # so it catches up from the log if it's behind (e.g. after an upgrade).
+        self.bridges = BridgeProjection(config.bridges_db_path)
         self.dispatcher = Dispatcher(
             firehose=self.firehose,
             nav=self.nav,
@@ -226,7 +243,9 @@ class BonnetServer:
             local_origin=config.origin,
             punishment_import_policy=punishment_import_policy,
             routes=self.routes,
+            tracked_projections=[self.bridges],
         )
+        self.bridges.set_article_lookup(self._lookup_article)
         log_msg("INIT: Dispatcher initialized")
 
         # A bridge origin ([bridge_runtime] in config) closes registration to
@@ -325,6 +344,9 @@ class BonnetServer:
             max_body_size=config.max_article_body_size,
             wire_max=config.witness.wire_max,
             bridge_policy=self.bridge_policy,
+            bridge_projection=self.bridges,
+            recognized_bridges=recognized_bridges(config),
+            bridge_venue_types=_bridge_venue_types(config),
         )
         log_msg("INIT: FirehoseCommandHandler initialized")
 
@@ -377,6 +399,15 @@ class BonnetServer:
         )
 
         log_msg("INIT: complete")
+
+    def _lookup_article(self, origin: str, board: str, article_id: bytes):
+        """(event_id, article_num, created_at) of an article, for relay links in bridges.db."""
+        art = self.dispatcher._get_board_projection(origin, board).get_article_by_id(
+            origin, board, article_id
+        )
+        if art is None:
+            return None
+        return art.event_id, art.article_num, art.created_at
 
     def _verify_origin_tips(self) -> None:
         """Check each origin's recorded tip against the record stored at it.
@@ -1021,6 +1052,7 @@ class BonnetServer:
             self.users,
             self.policy,
             self.routes,
+            self.bridges,
             self.replay_ledger,
         ]
         for closer in closers:

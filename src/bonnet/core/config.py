@@ -145,6 +145,7 @@ _TOP_LEVEL_KEYS = {
     "witnesses",
     "logging",
     "bridge_runtime",
+    "bridges",
 }
 
 _INCLUDE_ALLOWED_TOP_KEYS = {"acl", "sync"}
@@ -402,6 +403,7 @@ class FirehoseConfig:
         log_max_bytes: int = 10 * 1024 * 1024,
         log_backup_count: int = 5,
         bridge_runtime=None,
+        bridges: list | None = None,
     ):
         self.origin = _normalize_origin(origin)
         self.hostname = normalize_hostname(hostname) or self.origin
@@ -440,6 +442,8 @@ class FirehoseConfig:
         # bonnet.bridges.config.BridgeRuntimeConfig when this origin is a
         # bridge origin ([bridge_runtime] present), else None.
         self.bridge_runtime = bridge_runtime
+        # bonnet.bridges.config.BridgesEntry list: [[bridges]] (§10.1).
+        self.bridges = list(bridges or [])
 
     def validate(self) -> None:
         """Raise ValueError if configuration is invalid."""
@@ -659,6 +663,10 @@ class FirehoseConfig:
         return os.path.join(self.data_dir, "routes.db")
 
     @property
+    def bridges_db_path(self) -> str:
+        return os.path.join(self.data_dir, "bridges.db")
+
+    @property
     def replay_db_path(self) -> str:
         return os.path.join(self.data_dir, "replay.db")
 
@@ -704,6 +712,12 @@ class FirehoseConfig:
 
             bridge_runtime, bridge_unknown = parse_bridge_runtime(data["bridge_runtime"], base_dir)
             unknown_keys.extend(bridge_unknown)
+        bridges: list = []
+        if "bridges" in data:
+            from bonnet.bridges.config import parse_bridges
+
+            bridges, bridges_unknown = parse_bridges(data["bridges"], _normalize_origin)
+            unknown_keys.extend(bridges_unknown)
 
         # BONNET_SERVER_HOME (or the per-user default, see core.home) only
         # supplies a *default* for storage paths left unset in config.toml —
@@ -811,6 +825,7 @@ class FirehoseConfig:
             ),
             routing=_parse_routing(routing),
             bridge_runtime=bridge_runtime,
+            bridges=bridges,
         )
 
     @staticmethod

@@ -201,3 +201,63 @@ def make_config(
     for d in (config.data_dir, config.boards_dir, config.events_bodies_dir):
         os.makedirs(d, exist_ok=True)
     return config
+
+
+class ServerSyncClient:
+    """Serves one BonnetServer's firehose to another in process (a SyncClient)."""
+
+    def __init__(self, server):
+        self._server = server
+
+    async def fetch_head(self, origin):
+        return self._server.firehose.get_head(origin), b""
+
+    async def fetch_range(self, origin, start_seq, max_count):
+        import time
+
+        from bonnet.core.record import compute_event_hash, encode_record, make_origin_witness
+
+        out = []
+        for rec in self._server.firehose.get_events_range(origin, start_seq, max_count):
+            w = make_origin_witness(
+                origin,
+                rec.event_id,
+                compute_event_hash(encode_record(rec)),
+                rec.origin_seq,
+                self._server.server_identity,
+                origin,
+                origin,
+                int(time.time()),
+            )
+            out.append((rec, [w]))
+        return out
+
+    def peer_identity(self):
+        return self._server.server_identity.public_key, self._server.config.origin
+
+    async def fetch_key_epochs(self, origin):
+        return self._server.firehose.get_key_epochs(origin)
+
+    async def close(self):
+        pass
+
+
+async def sync_from(consumer, source) -> None:
+    """Pull `source`'s whole log into `consumer` and dispatch it."""
+    origin = source.config.origin
+    result = await consumer.sync_manager._sync_once(
+        origin, ServerSyncClient(source), skip_allowlist=True
+    )
+    assert result.accepted or result.reason == "already up to date", result.reason
+    consumer.dispatcher.dispatch_origin(origin)
+
+
+async def read(server, frame: bytes) -> bytes:
+    """Run a read frame through `server` as its anonymous principal."""
+    import asyncio
+
+    from bonnet.net.firehose_commands import derive_context
+
+    anon = server.anonymous_identity.public_key
+    ctx = derive_context(server.users, server.config.origin, anon, "test", anon)
+    return await asyncio.to_thread(server.command_handler.handle, frame, ctx)

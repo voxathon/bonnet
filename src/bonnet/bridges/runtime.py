@@ -132,12 +132,17 @@ class BridgeRuntime:
 
     async def run(self) -> None:
         await self.setup()
-        if not self.venues:
-            log_msg("BRIDGE: no venues configured; serving only")
-            await asyncio.Event().wait()
-        async with asyncio.TaskGroup() as tg:
-            for v in self.venues:
-                tg.create_task(self._venue_loop(v))
+        live = self._server.command_handler.live_bridge_venues
+        live.update(v.config.venue for v in self.venues)
+        try:
+            if not self.venues:
+                log_msg("BRIDGE: no venues configured; serving only")
+                await asyncio.Event().wait()
+            async with asyncio.TaskGroup() as tg:
+                for v in self.venues:
+                    tg.create_task(self._venue_loop(v))
+        finally:
+            live.difference_update(v.config.venue for v in self.venues)
 
     async def _venue_loop(self, venue: _Venue) -> None:
         interval = venue.config.poll_interval_seconds

@@ -706,7 +706,8 @@ async def test_j_projection_added_later_catches_up_at_boot(tmp_path, monkeypatch
 
     class WithProjection(real):
         def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs, tracked_projections=[proj])
+            kwargs["tracked_projections"] = [*kwargs.get("tracked_projections", []), proj]
+            super().__init__(*args, **kwargs)
 
     monkeypatch.setattr(server_mod, "Dispatcher", WithProjection)
     from bonnet.app.server import BonnetServer

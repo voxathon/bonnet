@@ -234,3 +234,78 @@ def load_master_secret(cfg: BridgeRuntimeConfig) -> bytes:
     puppets' names stay held by keys nobody can sign with any more.
     """
     return _read_or_create(cfg.master_secret, lambda: os.urandom(32))
+
+
+# ---------------------------------------------------------------------------
+# [[bridges]]: which bridge origins a homeserver recognizes (§10.1)
+# ---------------------------------------------------------------------------
+
+_BRIDGES_KEYS = {"type", "venue", "origins"}
+
+
+@dataclass
+class BridgesEntry:
+    """Recognized bridge origins for one venue, in canonical preference order."""
+
+    type: str
+    venue: str
+    origins: list[str]
+
+
+def parse_bridges(tables, normalize_origin) -> tuple[list[BridgesEntry], list[str]]:
+    """Parse `[[bridges]]`. Returns the entries and any unrecognized keys."""
+    if not isinstance(tables, list):
+        raise ValueError("config: [[bridges]] must be an array of tables")
+    entries: list[BridgesEntry] = []
+    unknown: list[str] = []
+    venues: set[str] = set()
+    for i, t in enumerate(tables):
+        where = f"bridges[{i}]"
+        if not isinstance(t, dict):
+            raise ValueError(f"config: {where} must be a table")
+        unknown.extend(f"{where}.{k}" for k in t if k not in _BRIDGES_KEYS)
+        origins = t.get("origins")
+        if (
+            not isinstance(origins, list)
+            or not origins
+            or not all(isinstance(o, str) and o for o in origins)
+        ):
+            raise ValueError(f"config: {where}.origins must be a non-empty list of origin names")
+        normalized = [normalize_origin(o) for o in origins]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError(f"config: {where}.origins lists an origin twice")
+        entry = BridgesEntry(
+            type=_str(t, "type", where), venue=_str(t, "venue", where), origins=normalized
+        )
+        if "@" not in entry.venue:
+            raise ValueError(f"config: {where}.venue must look like '<type>@<host>'")
+        if entry.venue in venues:
+            raise ValueError(f"config: venue {entry.venue!r} appears in [[bridges]] twice")
+        venues.add(entry.venue)
+        entries.append(entry)
+    return entries, unknown
+
+
+def recognized_bridges(config) -> dict[str, list[str]]:
+    """Venue -> recognized bridge origins, best first.
+
+    `[[bridges]]` order, plus this origin itself for each venue its own
+    runtime runs: first, unless `[[bridges]]` places it explicitly.
+    """
+    out = {e.venue: list(e.origins) for e in getattr(config, "bridges", [])}
+    runtime = getattr(config, "bridge_runtime", None)
+    if runtime is not None:
+        for venue in runtime.venues:
+            order = out.setdefault(venue.venue, [])
+            if config.origin not in order:
+                order.insert(0, config.origin)
+    return out
+
+
+def venue_types(config) -> dict[str, str]:
+    """Venue -> type, from `[[bridges]]` and this origin's own runtime."""
+    out = {e.venue: e.type for e in getattr(config, "bridges", [])}
+    runtime = getattr(config, "bridge_runtime", None)
+    if runtime is not None:
+        out.update({v.venue: v.type for v in runtime.venues})
+    return out
