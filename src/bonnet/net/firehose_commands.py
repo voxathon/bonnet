@@ -764,8 +764,7 @@ class FirehoseCommandHandler:
                     if prior is not None:
                         return _error(
                             0x0009,
-                            "New key is already registered at this origin; "
-                            "rotate onto a fresh key",
+                            "New key is already registered at this origin; rotate onto a fresh key",
                         )
 
             # Same rule, same reason, for board names: first writer wins.
