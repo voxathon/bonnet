@@ -219,12 +219,15 @@ class BonnetServer:
         )
         log_msg(f"INIT: BodyStore at boards={config.boards_dir}, events={config.events_bodies_dir}")
 
-        allowed_origins = {config.origin}
+        # The origins this relay dispatches and serves reads for. One set,
+        # shared by reference with the dispatcher, the command handler, the
+        # sync manager and discovery, so an origin added at runtime becomes
+        # readable: the sync manager adds one when it learns a transitive
+        # route (and removes it when it stops), and bonnet.bridges.adoption
+        # adds each bridge origin it adopts.
+        self.allowed_origins = {config.origin}
         for peer in config.peers:
-            allowed_origins.add(peer.origin)
-        # Shared by reference with the dispatcher and command handler, so an
-        # origin adopted at runtime (bonnet.bridges.adoption) becomes readable.
-        self.allowed_origins = allowed_origins
+            self.allowed_origins.add(peer.origin)
 
         punishment_import_policy = {
             peer.origin: peer.imported_punishment_types() for peer in config.peers
@@ -242,7 +245,7 @@ class BonnetServer:
             policy=self.policy,
             boards_dir=config.boards_dir,
             body_store=self.body_store,
-            allowed_origins=allowed_origins,
+            allowed_origins=self.allowed_origins,
             local_origin=config.origin,
             punishment_import_policy=punishment_import_policy,
             routes=self.routes,
@@ -317,6 +320,7 @@ class BonnetServer:
             allow_private_learned=config.routing.allow_private_learned,
             max_learned=config.routing.max_learned,
             interval=config.sync_interval_seconds,
+            readable_origins=self.allowed_origins,
         )
         if config.peers:
             for peer in config.peers:
@@ -343,7 +347,7 @@ class BonnetServer:
             dispatcher=self.dispatcher,
             sync_manager=self.sync_manager,
             peer_map=peer_map,
-            allowed_origins=allowed_origins,
+            allowed_origins=self.allowed_origins,
             max_body_size=config.max_article_body_size,
             wire_max=config.witness.wire_max,
             bridge_policy=self.bridge_policy,
@@ -400,6 +404,7 @@ class BonnetServer:
             replay_ledger=self.replay_ledger,
             rate_limiter=self.rate_limiter,
             users_projection=self.users,
+            known_origins=self.allowed_origins,
         )
         log_msg("INIT: FirehoseHTTPServer initialized")
 

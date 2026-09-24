@@ -350,6 +350,7 @@ class SyncManager:
         self._routing_max_learned = 32
         self._routing_interval = 300
         self._learned_origins: set[str] = set()
+        self._readable_origins: set[str] | None = None
         # Called as fn(via, entries) with each synced peer's advertised
         # bridges (bonnet.bridges.adoption); None = bridges are not learned.
         self._bridge_adopter = None
@@ -384,14 +385,18 @@ class SyncManager:
         allow_private_learned: bool = False,
         max_learned: int = 32,
         interval: int = 300,
+        readable_origins: set[str] | None = None,
     ) -> None:
         """Attach the transitive-discovery policy (opt-in, default off).
 
         `routes` is the RouteProjection to read live routes from.
         `trusted_vias` are origins whose delivered routes may be dialed
         (static peers plus routing.route_trust) — a route learned via
-        anyone else stays advisory. Must be called before sync starts;
-        safe to call again to rotate policy live.
+        anyone else stays advisory. `readable_origins` is the relay's
+        shared allowed-origins set, mutated in place: a learned origin
+        is added when its sync starts and removed when it stops, so what
+        is dialed is also dispatched and served. Must be called before
+        sync starts; safe to call again to rotate policy live.
         """
         with self._lock:
             self._routes = routes
@@ -400,6 +405,7 @@ class SyncManager:
             self._routing_allow_private = allow_private_learned
             self._routing_max_learned = max_learned
             self._routing_interval = interval
+            self._readable_origins = readable_origins
 
     def learn_transitive_route(self, origin: str, route: dict, via: str) -> tuple[bool, str]:
         """Dial a learned route, if policy allows. Returns (started, reason).
@@ -440,6 +446,8 @@ class SyncManager:
             return False, f"unsafe dial target: {e}"
         with self._lock:
             self._learned_origins.add(origin)
+            if self._readable_origins is not None:
+                self._readable_origins.add(origin)
         log_msg(f"SYNC: learned transitive route to '{origin}' via '{via}' ({base_url})")
         return True, base_url
 
@@ -519,7 +527,12 @@ class SyncManager:
         with self._lock:
             task = self._tasks.pop(origin, None)
             client = self._clients.pop(origin, None)
-            self._learned_origins.discard(origin)
+            # Only a learned origin leaves the readable set here; a
+            # configured peer's membership is config's, not ours.
+            if origin in self._learned_origins:
+                self._learned_origins.discard(origin)
+                if self._readable_origins is not None:
+                    self._readable_origins.discard(origin)
             if task:
                 task.cancel()
         if client is not None:

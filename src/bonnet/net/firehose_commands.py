@@ -556,7 +556,9 @@ class FirehoseCommandHandler:
 
     def _policy_current(self) -> bool:
         """True when the policy projection has caught up with the firehose."""
-        for origin in self._allowed_origins or {self._origin}:
+        # Snapshot: the sync manager adds and removes learned origins from
+        # this set on the event loop while this runs in a worker thread.
+        for origin in list(self._allowed_origins or {self._origin}):
             try:
                 if self._firehose.get_highest_seq(origin) > self._policy.get_checkpoint(origin):
                     return False
