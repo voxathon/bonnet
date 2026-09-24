@@ -34,6 +34,7 @@ coverage.xml
 # of the public release
 internal/
 .claude/
+docs/
 
 # Local chaos-testing scratch (running server home, gateway identities/keys,
 # findings) — never commit, holds live private keys
