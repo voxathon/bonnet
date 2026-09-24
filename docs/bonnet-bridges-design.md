@@ -190,7 +190,7 @@ Reserved **0x0100–0x01FF**, used only on bridge-written records (and on crossp
 | ID | Name | Type | Meaning |
 |---|---|---|---|
 | 0x0100 | `bridge_version` | U64 | 1 |
-| 0x0101 | `bridge_role` | U64 | 1 mirror, 2 edge crosspost, 3 relay link, 4 observation, 5 binding, 6 evidence link (phase 2) |
+| 0x0101 | `bridge_role` | U64 | 1 mirror, 2 edge crosspost, 3 relay link, 4 observation, 5 binding; 6 is reserved, never to be reused (was the dropped evidence link, see §16) |
 | 0x0102 | `venue` | TEXT | `<type>@<host>`, e.g. `flatboard@tools.nyrds.net` |
 | 0x0103 | `channel` | TEXT | Venue-local channel, empty for flat venues |
 | 0x0104 | `foreign_id` | TEXT | The venue's native post id |
@@ -229,7 +229,6 @@ Binding fields (0x0120+) are in §8. TEXT is ≤ 4096 bytes and NFC; truncate, n
 | `bonnet.bridge.observation` role 4 | daemon key | bridge origin | empty | `target_origin` + `target_event_id` | raw venue bytes |
 | `bonnet.bridge.binding` role 5 | daemon key | bridge origin | empty | `target_origin` + `target_board` = host board | optional note |
 | `bonnet.bridge.unbind` | daemon key | bridge origin | empty | `target_event_id` = binding | optional reason |
-| `bonnet.bridge.link` role 6 (phase 2) | daemon key | bridge origin | empty | `target_event_id` = evidence | none |
 
 - **Every mirror gets an observation**, pure foreign posts included. The mirror body is the normalized, possibly truncated text; the observation body is the exact venue bytes (`raw`), up to the origin's hard `max_body_size`. That is what survives a deletion at the venue.
 - **Echo mirrors:** when a crosspost original lives on B1, other bridge origins bridging the same venue (B2…) see its echo and mirror it like any foreign post, adding `crosspost_of_*` → the original. B1 itself never mirrors the echo (§11.1).
@@ -813,9 +812,10 @@ Other bridges see the relay's post at the venue, find the marker resolves in `br
 3. **M2 (done): `bridges.db`, `[[bridges]]`, manifest `bridges`, per-thread canonical merge, digest check, filters 0x0B/0x0C.** Test: two bridge origins mirroring the same fake flatboard, one started after posts were evicted. A third server peering with both shows each post once in aggregate lists, including replies whose parents only one bridge has, and both copies in per-origin lists.
 4. **M3 (done): remote learning.** Adopting bridge origins from peers' manifests under the route-learning guards.
 5. **M4 (done): admission, then relay egress, then edge egress.** Admission (§6) with a fake home origin, including the async client, the loop-thread guard, the concurrency cap, name collisions and closed registration (§8); relay links; gateway home-key client for B, outbox of signed frames, markers, echo handling with `foreign_id` matching, `corroborate`.
-6. **M5: hardening.** Sweeps, evidence links, a second adapter (a bot-welcoming venue, with the operator's OK).
+6. **M5: hardening.** Sweeps, a second adapter (a bot-welcoming venue, with the operator's OK).
    - **Done:** edit and deletion-log sweeps, linked grace, batched `bridges.db` commits.
-   - **Open:** evidence links (role 6) need their semantics written down first: §4.2 says only "`target_event_id` = evidence". The second adapter needs the operator to pick a venue and OK it (§12's rule).
+   - **Dropped:** evidence links (role 6); see §16.
+   - **Open:** the second adapter needs the operator to pick a venue and OK it (§12's rule).
 
 Harness: several in-process `BonnetServer`s, a fake flatboard (ASGI) with the §12 endpoints including `evicted` and `request_id`, a fake home origin whose USER_GET answers can be scripted, and a gateway.
 
@@ -913,6 +913,7 @@ Harness: several in-process `BonnetServer`s, a fake flatboard (ASGI) with the §
 22. **Admission I/O** runs on the server loop through a dedicated async client, capped in concurrency, never under a lock.
 23. **Observation IDs** cover the observed state and the exact raw bytes.
 24. **Origins, not hostnames:** anything B derives or shows about a home uses `home_origin`. `home_url` is only where to dial.
+25. **No evidence links.** Role 6 (`bonnet.bridge.link` with `target_event_id` = evidence) is dropped, and the number stays reserved. An observation is already evidence plus link: it's signed by the bridge, carries the venue's raw bytes, and targets the copy it's about (mirror, relay-linked native article or crosspost original, including deletions and each edit's revision). Evidence from other origins is found by the foreign post's key in `bridges.db`, not by links, so a bridge-signed link to another origin's evidence would add only an endorsement, which isn't evidence, plus a cross-origin edge the no-crawling rule keeps out. The remaining gap is venue posts a bridge sees but never mirrors (a relay-authored post with no resolvable marker), which have no evidence at all. A link can't close that; only an observation with its own target rules could.
 
 ---
 
