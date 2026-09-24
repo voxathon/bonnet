@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from typing import Protocol
 
 from bonnet.core.board_projection import (
     AUTHOR_FOREIGN,
@@ -74,6 +75,33 @@ from bonnet.core.logging import log_debug, log_info, log_msg
 from bonnet.core.record import ZERO_ID, Record
 
 
+class TrackedProjection(Protocol):
+    """A projection that sees every record and keeps its own checkpoints.
+
+    For projections added after an origin's records were already dispatched
+    (a new feature on an upgraded server, or records synced before a
+    consumer learned to read them). The dispatcher replays whatever a
+    tracked projection is missing before feeding it anything new, so it
+    never sees a gap, and `catch_up_projections` does the same at boot.
+
+    `apply` must not raise for a record it doesn't understand; if it does,
+    the error is logged and the record is skipped, the same as the main
+    dispatch path.
+    """
+
+    name: str
+
+    def get_checkpoint(self, origin: str) -> int: ...
+
+    def set_checkpoint(self, origin: str, seq: int) -> None: ...
+
+    def apply(self, rec: Record) -> None: ...
+
+    def clear_origin(self, origin: str) -> None:
+        """Drop everything for `origin`, checkpoint included."""
+        ...
+
+
 class Dispatcher:
     """Routes firehose records to projections.
 
@@ -94,6 +122,7 @@ class Dispatcher:
         local_origin: str = "",
         punishment_import_policy: dict = None,
         routes: RouteProjection | None = None,
+        tracked_projections: list[TrackedProjection] | None = None,
     ):
         self._firehose = firehose
         self._nav = nav
@@ -112,6 +141,7 @@ class Dispatcher:
         self._board_projections: dict[tuple[str, str], BoardProjection] = {}
         self._boards_lock = threading.RLock()
         self._dispatch_lock = threading.RLock()
+        self._tracked: list[TrackedProjection] = list(tracked_projections or [])
 
         # Registry (kind -> handler) built once here rather than an inline
         # elif chain, so a new kind is added in one place: a KIND_* constant
@@ -175,6 +205,9 @@ class Dispatcher:
 
         with self._dispatch_lock:
             checkpoint = self._firehose.get_checkpoint(origin)
+            # A tracked projection that's behind is brought up to the main
+            # checkpoint first, so the records below reach it in order.
+            self._catch_up_origin(origin, checkpoint)
             highest = self._firehose.get_highest_seq(origin)
             if checkpoint >= highest:
                 return 0
@@ -194,6 +227,8 @@ class Dispatcher:
                         f"FAILED, skipping: {e}"
                     )
                 self._firehose.set_checkpoint(origin, rec.origin_seq)
+                for proj in self._tracked:
+                    self._apply_tracked(proj, rec)
                 # Punishment import relies on the policy checkpoint tracking overall
                 # dispatch progress, not just policy-kind records, so that
                 # _policy_current() can't be fooled by intervening
@@ -204,6 +239,75 @@ class Dispatcher:
             if count:
                 log_info("DISPATCH done", origin=origin, count=count)
             return count
+
+    # ------------------------------------------------------------------
+    # Tracked projections
+    # ------------------------------------------------------------------
+
+    def register_projection(self, proj: TrackedProjection) -> None:
+        """Add a tracked projection. Call `catch_up_projections` afterwards."""
+        with self._dispatch_lock:
+            self._tracked.append(proj)
+
+    def catch_up_projections(self) -> int:
+        """Replay, for every known origin, what each tracked projection is missing.
+
+        Only up to the main firehose checkpoint: records past it haven't been
+        dispatched yet and will reach every projection through
+        `dispatch_origin`. Returns the number of records replayed.
+        """
+        total = 0
+        with self._dispatch_lock:
+            for origin in self._firehose.list_origins():
+                if self._allowed_origins and origin not in self._allowed_origins:
+                    continue
+                total += self._catch_up_origin(origin, self._firehose.get_checkpoint(origin))
+        return total
+
+    def _catch_up_origin(self, origin: str, target: int, batch: int = 1000) -> int:
+        """Replay `origin` from each tracked projection's checkpoint up to `target`."""
+        replayed = 0
+        for proj in self._tracked:
+            start = proj.get_checkpoint(origin)
+            if start >= target:
+                continue
+            log_info(
+                "DISPATCH catch-up",
+                projection=proj.name,
+                origin=origin,
+                start=start + 1,
+                end=target,
+            )
+            seq = start
+            while seq < target:
+                records = self._firehose.get_events_range(origin, seq + 1, min(batch, target - seq))
+                if not records:
+                    break
+                for rec in records:
+                    if rec.origin_seq > target:
+                        break
+                    self._apply_tracked(proj, rec)
+                    seq = rec.origin_seq
+                    replayed += 1
+        return replayed
+
+    def _apply_tracked(self, proj: TrackedProjection, rec: Record) -> None:
+        if rec.origin_seq <= proj.get_checkpoint(rec.origin):
+            return
+        try:
+            proj.apply(rec)
+        except Exception as e:
+            log_msg(
+                f"DISPATCH: projection='{proj.name}' origin='{rec.origin}' "
+                f"seq={rec.origin_seq} kind='{rec.kind}' FAILED, skipping: {e}"
+            )
+        proj.set_checkpoint(rec.origin, rec.origin_seq)
+
+    def clear_tracked_origin(self, origin: str) -> None:
+        """Clear every tracked projection's state for `origin`."""
+        with self._dispatch_lock:
+            for proj in self._tracked:
+                proj.clear_origin(origin)
 
     def _dispatch_record(self, rec: Record) -> None:
         """Route a single record to the appropriate projection(s)."""
@@ -410,6 +514,8 @@ class Dispatcher:
             self._policy.clear_origin(origin)
             if self._routes is not None:
                 self._routes.clear_origin(origin)
+            for proj in self._tracked:
+                proj.clear_origin(origin)
 
             self._firehose.set_checkpoint(origin, 0)
 

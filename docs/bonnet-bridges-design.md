@@ -265,7 +265,7 @@ puppet_register.event_id = H(b"puppet.register", bridge_origin, venue, foreign_a
   - Sanitize: NFC, `~` → `-`, reserved characters dropped.
   - Cap the sanitized handle at 24 bytes (UTF-8 boundary). If it was cut, end it with `-<4 hex of sha256(foreign_author_id)>` inside the cap.
   - If the result is invalid or held by another key, insert `-<6 hex of sha256(foreign_author_id)>` before `~<type>`.
-  - Example: handle `moxxie~sys.knolastna.me` → `moxxie-sys.knolas-3fa2~flatboard`. The exact handle stays in 0x0105 `foreign_author`.
+  - Examples: handle `moxxie~sys.knolastna.me` → `moxxie-sys.knolastna.me~flatboard` (23 bytes, not cut); a 36-byte handle is cut to 19 bytes plus `-<4 hex>`. The exact handle stays in 0x0105 `foreign_author`.
 - The name is chosen **once**, at registration. After that the runtime reads the puppet's name back from the users projection (`get_user_by_pubkey`) and never recomputes it, so retries and index rebuilds produce identical intents.
 - Registration: a self-registration under the puppet's own context, flags 0. "Already registered to this key" is success.
 - Anonymous foreign posts → `anonymous~<type>`.
@@ -300,7 +300,8 @@ bonnet/
     config.py              # CHANGED: [[bridges]], [bridge_runtime], [bridge_admission] (§10)
     board_projection.py    # CHANGED: new ARTICLE_QUERY filters; unknown filter IDs raise (§9.5)
   net/
-    firehose_http_server.py  # CHANGED: manifest "bridges"; capabilities += "bonnet.bridge"; derive_context extracted
+    firehose_http_server.py  # CHANGED: manifest "bridges"; capabilities += "bonnet.bridge"; uses derive_context
+    firehose_commands.py     # CHANGED (M0): derive_context(), FirehoseContext.via_bridge_runtime, unknown filter IDs → 0x0006
     firehose_commands.py     # CHANGED: aggregate canonical merge (§9.4); reservations (§8); admission hook (§6)
   bridges/
     model.py               # field ids, roles, kinds, H(), puppet_seed, marker + src codecs, BridgeMetadata
@@ -533,7 +534,7 @@ Dedup keys stay `(origin, event_id)`. `src` and the thread key are groupings, no
 - `bonnet.user.register` records carrying 0x0114, and `bonnet.user.revoke` records, update `admissions`.
 - Article controls on a tracked copy update its `state`: cancel, restore and purge (by hand, from the bridge origin's sysops), and supersede via field 7 (the runtime's edits).
 - Include it in `rebuild_all` and `clear_origin`, and never raise out of an apply.
-- **Startup catch-up.** At boot, for each origin, if `bridges.db`'s checkpoint is behind the firehose checkpoint, replay that range into `bridges.db` only. Make this a generic dispatcher facility: "replay origin X from seq N into projection P". Every future projection gets it for free, and M1 records synced before a consumer upgrades to M2 are picked up.
+- **Startup catch-up (done in M0).** `Dispatcher` takes `tracked_projections` (the `TrackedProjection` protocol: `name`, `get_checkpoint`, `set_checkpoint`, `apply`, `clear_origin`). `dispatch_origin` first replays whatever a tracked projection is missing up to the main checkpoint, then feeds it each new record; `catch_up_projections()` runs at boot; `rebuild_all` and the console's origin purge clear them. At boot, for each origin, if `bridges.db`'s checkpoint is behind the firehose checkpoint, replay that range into `bridges.db` only. Make this a generic dispatcher facility: "replay origin X from seq N into projection P". Every future projection gets it for free, and M1 records synced before a consumer upgrades to M2 are picked up.
 
 ### 9.3 Canonical pick
 
@@ -867,5 +868,9 @@ Found while reviewing v4; all fixed in `4e4f1bf`, `9271536`, `c477d07`. Listed s
 6. `resolve_head_id` has no depth cap.
 7. Supersede requires an active, non-purged target (publish) and is applied as a standalone article otherwise (projection).
 8. Remote `article_num` must be max + 1 per board for articles and 0 for other kinds; violations mark the origin diverged.
+
+Found during M0 and fixed on this branch:
+
+9. `FirehoseStore.append_record` returned the stored record for an identical re-append from inside `BEGIN IMMEDIATE`, without ending the transaction. The next append on that connection failed with "cannot start a transaction within a transaction", and the publish came back as an internal error. Any client retrying an identical publish could trigger it. It now rolls back before returning (`tests/test_firehose_store.py::test_idempotent_append_leaves_no_open_transaction`).
 
 Not a bug: user and origin rotation proofs share one domain tag (`DOMAIN_KEY_ROTATION_PROOF`). The proof only records the new key's consent to succeed the old key on that origin, and every rotation record also needs the old key's signature. The root rotation reuses one proof for both records on purpose. Worth one sentence in the spec's rotation proof section saying the tag is shared deliberately.

@@ -185,6 +185,18 @@ class ArticleProjection:
 # ---------------------------------------------------------------------------
 
 
+# ARTICLE_QUERY filter field IDs this projection answers (see query_articles).
+QUERY_FIELD_IDS = frozenset(range(0x01, 0x0B))
+
+
+class UnknownQueryField(ValueError):
+    """An ARTICLE_QUERY filter named a field ID this server doesn't know."""
+
+    def __init__(self, field_id: int):
+        super().__init__(f"unknown filter field 0x{field_id:02x}")
+        self.field_id = field_id
+
+
 class BoardProjection:
     """Per-board SQLite projection database."""
 
@@ -1285,6 +1297,10 @@ class BoardProjection:
                 if op == 0x01:
                     where_parts.append(f"{col}=?")
                     params.append(value)
+            else:
+                # Ignoring it would widen the result set to everything the
+                # other filters match, silently answering a different query.
+                raise UnknownQueryField(field_id)
 
         if not has_visibility_filter:
             where_parts.append("visibility = 'active'")

@@ -533,51 +533,17 @@ class FirehoseHTTPServer:
             self._rate_limiter.cleanup()
         self._cleanup_counter += 1
 
-        from bonnet.net.firehose_commands import FirehoseContext
+        from bonnet.net.firehose_commands import derive_context
 
-        role = ""
-        is_registered = False
-        is_unknown = False
-
-        if is_anonymous:
-            is_unknown = False
-        else:
-            if self._users is not None:
-                user = self._users.get_user_by_pubkey(self._config.origin, peer_public_key)
-                successor = user.get("superseded_by") if user else None
-                if successor is not None:
-                    # The key rotated. It stops authenticating from the moment
-                    # the rotation dispatches — that is the point of rotating
-                    # after a compromise. Logged with the successor so a
-                    # client still holding the retired key gets a diagnosable
-                    # failure instead of an unexplained demotion to unknown.
-                    log_msg(
-                        f"AUTH: origin='{self._config.origin}' key "
-                        f"{peer_public_key.hex()[:16]} was superseded by "
-                        f"{successor.hex()[:16]}; treating as unknown"
-                    )
-                    is_unknown = True
-                elif user is not None and not user.get("revoked", False):
-                    is_registered = True
-                    flags = user.get("flags", 0)
-                    if flags & 0x01:
-                        role = "administrator"
-                    elif flags & 0x02:
-                        role = "moderator"
-                else:
-                    is_unknown = True
-            else:
-                is_unknown = True
-
-        ctx = FirehoseContext(
-            peer_pubkey=peer_public_key,
-            is_anonymous=is_anonymous,
-            is_unknown=is_unknown,
-            is_registered=is_registered,
-            role=role,
-            origin=self._config.origin,
-            remote_addr=remote_addr,
+        ctx = derive_context(
+            self._users,
+            self._config.origin,
+            peer_public_key,
+            remote_addr,
+            self._anonymous_public_key,
         )
+        role = ctx.role
+        is_registered = ctx.is_registered
 
         try:
             if body:

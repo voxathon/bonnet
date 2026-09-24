@@ -316,6 +316,12 @@ class BonnetServer:
             if count:
                 log_msg(f"INIT: dispatched remote origin '{remote}' ({count} records)")
 
+        # Projections added after records were already dispatched (e.g. on an
+        # upgrade) replay what they're missing; a no-op when all are current.
+        replayed = self.dispatcher.catch_up_projections()
+        if replayed:
+            log_msg(f"INIT: tracked projections caught up ({replayed} records)")
+
         self._sweep_orphaned_staged_bodies()
         self._verify_origin_tips()
         self._verify_key_epochs()

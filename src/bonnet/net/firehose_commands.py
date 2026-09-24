@@ -30,7 +30,7 @@ import time
 from contextlib import nullcontext
 
 from bonnet.core.acl import ACLEvaluator, AuthContext
-from bonnet.core.board_projection import BoardProjection, board_db_path
+from bonnet.core.board_projection import QUERY_FIELD_IDS, BoardProjection, board_db_path
 from bonnet.core.bodies import BodyStore
 from bonnet.core.crypto import Identity
 from bonnet.core.firehose import (
@@ -244,6 +244,7 @@ class FirehoseContext:
         role: str = "",
         origin: str = "",
         remote_addr: str = "",
+        via_bridge_runtime: bool = False,
     ):
         self.peer_pubkey = peer_pubkey
         self.is_anonymous = is_anonymous
@@ -252,6 +253,10 @@ class FirehoseContext:
         self.role = role
         self.origin = origin
         self.remote_addr = remote_addr
+        # Set only by the bridge runtime's in-process publisher
+        # (bonnet.bridges.local_publish), never by derive_context, so no
+        # network request can claim it.
+        self.via_bridge_runtime = via_bridge_runtime
 
     def to_auth_context(self) -> AuthContext:
         return AuthContext(
@@ -262,6 +267,66 @@ class FirehoseContext:
             is_unknown=self.is_unknown,
             is_registered=self.is_registered,
         )
+
+
+def derive_context(
+    users: UserProjection | None,
+    origin: str,
+    peer_pubkey: bytes,
+    remote_addr: str,
+    anonymous_pubkey: bytes,
+) -> FirehoseContext:
+    """The request context for an authenticated key, as the HTTP server sees it.
+
+    The single definition of how a key maps to a principal: anonymous, a
+    registered user (with role from its flags), or unknown. Registered means
+    registered here, not revoked, and not superseded. A rotated key stops
+    authenticating as registered the moment the rotation dispatches, which
+    is the point of rotating after a compromise.
+
+    Shared by the HTTP server and the bridge runtime's in-process publisher
+    so the two can't drift; never hand-set `role` anywhere else.
+    """
+    is_anonymous = peer_pubkey == anonymous_pubkey
+    role = ""
+    is_registered = False
+    is_unknown = False
+
+    if not is_anonymous:
+        if users is not None:
+            user = users.get_user_by_pubkey(origin, peer_pubkey)
+            successor = user.get("superseded_by") if user else None
+            if successor is not None:
+                # Logged with the successor so a client still holding the
+                # retired key gets a diagnosable failure instead of an
+                # unexplained demotion to unknown.
+                log_msg(
+                    f"AUTH: origin='{origin}' key "
+                    f"{peer_pubkey.hex()[:16]} was superseded by "
+                    f"{successor.hex()[:16]}; treating as unknown"
+                )
+                is_unknown = True
+            elif user is not None and not user.get("revoked", False):
+                is_registered = True
+                flags = user.get("flags", 0)
+                if flags & 0x01:
+                    role = "administrator"
+                elif flags & 0x02:
+                    role = "moderator"
+            else:
+                is_unknown = True
+        else:
+            is_unknown = True
+
+    return FirehoseContext(
+        peer_pubkey=peer_pubkey,
+        is_anonymous=is_anonymous,
+        is_unknown=is_unknown,
+        is_registered=is_registered,
+        role=role,
+        origin=origin,
+        remote_addr=remote_addr,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1845,6 +1910,8 @@ class FirehoseCommandHandler:
             else:
                 return _error(0x0006, f"Invalid value type 0x{value_type:02x}")
 
+            if field_id not in QUERY_FIELD_IDS:
+                return _error(0x0006, f"unknown filter field 0x{field_id:02x}")
             filters.append((field_id, operator, value))
 
         list_offset, offset = _read_u32(data, offset)

@@ -25,11 +25,13 @@ from __future__ import annotations
 import os
 from urllib.parse import urlparse
 
+from bonnet.bridges.model import merge_metadata
 from bonnet.core.crypto import Identity
 from bonnet.core.hostname import normalize_hostname
 from bonnet.core.record import (
     ZERO_ID,
     Intent,
+    MetadataField,
     MetadataMap,
     compute_body_hash,
     compute_event_hash,
@@ -252,8 +254,14 @@ class FirehoseHTTPClient(FirehoseTransport):
         root_article_id: bytes = None,
         reply_to_article_id: bytes = None,
         supersedes_article_id: bytes = None,
+        extra_metadata: list[MetadataField] | None = None,
     ) -> PublishResult:
-        """Publish an article to the connected server."""
+        """Publish an article to the connected server.
+
+        `extra_metadata` adds fields beyond the article's own (e.g. the bridge
+        block at 0x0100+). They're merged in ascending ID order; an ID that
+        collides with one this method sets raises ValueError.
+        """
         if self._identity is None or self._server_origin is None:
             raise FirehoseClientError("not connected")
         eid = event_id or os.urandom(32)
@@ -268,6 +276,8 @@ class FirehoseHTTPClient(FirehoseTransport):
             m.fields.append(metadata_bytes(6, reply_to_article_id))
         if supersedes_article_id:
             m.fields.append(metadata_bytes(7, supersedes_article_id))
+        if extra_metadata:
+            m = merge_metadata(m, extra_metadata)
 
         intent = Intent(
             event_id=eid,

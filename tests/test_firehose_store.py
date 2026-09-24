@@ -184,6 +184,25 @@ class TestSequenceAllocation:
         assert rec.origin_seq == 1
         assert rec.previous_event_hash == ZERO_HASH
 
+    def test_idempotent_append_leaves_no_open_transaction(self, store):
+        """An identical re-append returns the stored record and ends its transaction.
+
+        It used to return from inside BEGIN IMMEDIATE, leaving the write
+        transaction open, so the next append on the connection failed with
+        "cannot start a transaction within a transaction".
+        """
+        store.init_origin_key("bbs.a", ORIGIN_A_PUB)
+        intent = _make_article_intent("bbs.a", _random_id(1), _random_id(2))
+        sig = _sign_intent(intent)
+        first = store.append_record(ORIGIN_A, intent, sig, b"test body")
+        again = store.append_record(ORIGIN_A, intent, sig, b"test body")
+        assert again.origin_seq == first.origin_seq
+        assert not store._conn.in_transaction
+
+        nxt = _make_article_intent("bbs.a", _random_id(3), _random_id(4))
+        rec = store.append_record(ORIGIN_A, nxt, _sign_intent(nxt), b"test body")
+        assert rec.origin_seq == 2
+
     def test_second_record_seq_2(self, store):
         store.init_origin_key("bbs.a", ORIGIN_A_PUB)
         for i in range(2):
