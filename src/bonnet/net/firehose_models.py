@@ -293,6 +293,9 @@ class DiscoveryInfo:
     known_origins: list = field(default_factory=list)
     signature_lifetime_seconds: int = 300
     clock_skew_seconds: int = 300
+    # Bridge origins the server recognizes per venue (bridges design §10.1).
+    # Advisory; absent on servers without bridges.
+    bridges: list = field(default_factory=list)
 
 
 @dataclass

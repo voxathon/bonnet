@@ -259,3 +259,26 @@ boards = ["*"]
 # (firehose/event rows kept for forensics), and the empty name may be
 # reclaimed by an ordinary later board.create — don't grant purge rights
 # you don't mean.
+
+# Bridge origin (docs/bonnet-bridges-design.md). Uncomment to make this
+# origin mirror a foreign venue onto a `~` board; run it with
+# `bonnet bridge run` instead of `bonnet server`. A bridge origin closes
+# local registration to everyone but its own runtime and administrators,
+# and grants its daemon key (generated on first start) its own ACL rule.
+#
+# [bridge_runtime]
+# daemon_key = "~/.bonnet/bridges/daemon.key"
+# master_secret = "~/.bonnet/bridges/master.secret"   # puppet keys derive from this: back it up
+# state_dir = "~/.bonnet/bridges/state"               # cache only; `bonnet bridge rebuild-index`
+# grace_seconds = 120
+# marker_timeout_seconds = 3600
+#
+# [[bridge_runtime.venue]]
+# type = "flatboard"
+# venue = "flatboard@tools.nyrds.net"
+# url = "https://tools.nyrds.net"
+# poll_interval_seconds = 60
+#
+# [[bridge_runtime.venue.binding]]
+# board = "~flatboard"
+# max_body_bytes = 262144

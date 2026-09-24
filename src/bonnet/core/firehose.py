@@ -342,6 +342,10 @@ class FirehoseStore:
                     existing_rec = decode_record(bytes(existing[0]))
                     existing_intent = reconstruct_intent_from_record(existing_rec)
                     if encode_intent(existing_intent) == encoded_intent:
+                        # Nothing was written yet; end the transaction before
+                        # leaving, or BEGIN IMMEDIATE stays open on this
+                        # connection and the next append fails.
+                        self._conn.execute("ROLLBACK")
                         return existing_rec
                     raise EventIdCollision(
                         f"event_id {intent.event_id.hex()[:16]} already at seq {existing_rec.origin_seq} with different content"

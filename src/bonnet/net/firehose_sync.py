@@ -164,6 +164,10 @@ class SyncClient:
         """
         return None
 
+    def discovered_bridges(self) -> list[dict]:
+        """The peer's advertised `bridges` manifest entries (advisory), if known."""
+        return []
+
     async def close(self) -> None:
         pass
 
@@ -221,6 +225,10 @@ class HttpSyncClient(SyncClient):
         cmd = build_event_range(origin, start_seq, max_count)
         resp = await self._client.send_command(cmd)
         return parse_event_range_response(resp)
+
+    def discovered_bridges(self) -> list[dict]:
+        discovery = self._client.discovery
+        return list(discovery.bridges) if discovery is not None else []
 
     def peer_identity(self) -> tuple[bytes, str]:
         """The key and origin settled during discovery, and pinned there.
@@ -343,6 +351,9 @@ class SyncManager:
         self._routing_interval = 300
         self._learned_origins: set[str] = set()
         self._readable_origins: set[str] | None = None
+        # Called as fn(via, entries) with each synced peer's advertised
+        # bridges (bonnet.bridges.adoption); None = bridges are not learned.
+        self._bridge_adopter = None
 
     def set_identity(self, identity: Identity) -> None:
         """Hot-swap the identity used to sign relay witnesses for future
@@ -439,6 +450,31 @@ class SyncManager:
                 self._readable_origins.add(origin)
         log_msg(f"SYNC: learned transitive route to '{origin}' via '{via}' ({base_url})")
         return True, base_url
+
+    def set_bridge_adopter(self, adopter) -> None:
+        self._bridge_adopter = adopter
+
+    @property
+    def routing_policy(self) -> tuple[str, frozenset[str]]:
+        """(auto_dial, trusted vias): the policy learned bridges share with routes."""
+        with self._lock:
+            return self._routing_auto_dial, frozenset(self._routing_trust)
+
+    def is_syncing(self, origin: str) -> bool:
+        with self._lock:
+            return origin in self._clients
+
+    def _maybe_adopt_bridges(self, via: str, client: SyncClient) -> None:
+        """Offer a synced peer's advertised bridges to the adopter. Never raises."""
+        adopter = self._bridge_adopter
+        if adopter is None:
+            return
+        try:
+            entries = client.discovered_bridges()
+            if entries:
+                adopter(via, entries)
+        except Exception as e:
+            log_msg(f"SYNC: bridge adoption from '{via}' failed: {e}")
 
     def _maybe_adopt_routes(self, via: str) -> None:
         """After a successful sync from `via`, dial newly learned routes.
@@ -613,6 +649,8 @@ class SyncManager:
             return AcceptResult(accepted=False, reason="origin diverged; sync halted")
 
         head, head_bytes = await client.fetch_head(origin)
+        # Connected, so the peer's discovery document is in hand.
+        self._maybe_adopt_bridges(origin, client)
 
         local_seq = self._firehose.get_highest_seq(origin)
 

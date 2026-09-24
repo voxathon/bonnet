@@ -54,6 +54,9 @@ dev = [
 [project.scripts]
 bonnet = "bonnet.cli:main"
 
+[project.entry-points."bonnet.bridges.adapters"]
+flatboard = "bonnet.bridges.adapters.flatboard:FlatboardAdapter"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/bonnet"]
 

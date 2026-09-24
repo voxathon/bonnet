@@ -1,0 +1,227 @@
+# Copyright 2026 The Bonnet Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Bindings: which venue channel a bridge board mirrors (design doc §8).
+
+Config is the source of intent and the log is the record. At startup the
+runtime reconciles the two: a board whose options changed gets a new
+binding generation and an unbind of the old one, and a board no longer in
+config gets an unbind. An unchanged binding publishes nothing.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, replace
+
+from bonnet.bridges.config import BindingConfig, VenueConfig
+from bonnet.bridges.local_publish import LocalPublisher
+from bonnet.bridges.model import (
+    KIND_BRIDGE_BINDING,
+    KIND_BRIDGE_UNBIND,
+    ROLE_BINDING,
+    BridgeMetadata,
+    binding_event_id,
+    unbind_event_id,
+)
+from bonnet.core.crypto import Identity
+from bonnet.core.firehose import FirehoseStore
+from bonnet.core.global_projections import NavProjection, UserProjection
+from bonnet.core.kinds import KIND_BOARD_CREATE, KIND_USER_REGISTER
+from bonnet.core.logging import log_msg
+from bonnet.core.record import (
+    Intent,
+    MetadataMap,
+    compute_body_hash,
+    metadata_bytes,
+    metadata_text,
+    metadata_u64,
+)
+
+
+class BindingError(Exception):
+    """A binding could not be put in place."""
+
+
+@dataclass(frozen=True)
+class ActiveBinding:
+    event_id: bytes
+    board: str
+    generation: int
+    meta: BridgeMetadata
+
+
+def binding_metadata(venue: VenueConfig, binding: BindingConfig, capabilities) -> BridgeMetadata:
+    return BridgeMetadata(
+        bridge_role=ROLE_BINDING,
+        venue=venue.venue,
+        channel=binding.channel,
+        binding_ingest=binding.ingest,
+        binding_relay_egress=binding.relay_egress,
+        binding_edge_egress_default=binding.edge_egress_default,
+        binding_relay_account=venue.relay_user if binding.relay_egress else None,
+        binding_max_body_bytes=binding.max_body_bytes,
+        binding_foreign_capabilities=tuple(sorted(capabilities)),
+    )
+
+
+def read_bindings(
+    firehose: FirehoseStore, origin: str, batch: int = 1000
+) -> dict[str, ActiveBinding]:
+    """Active bindings on `origin`, by board: the latest binding with no later unbind."""
+    latest: dict[str, ActiveBinding] = {}
+    unbound: set[bytes] = set()
+    seq = 0
+    while True:
+        records = firehose.get_events_range(origin, seq + 1, batch)
+        if not records:
+            break
+        for rec in records:
+            seq = rec.origin_seq
+            if rec.kind == KIND_BRIDGE_BINDING:
+                meta = BridgeMetadata.from_metadata(rec.metadata)
+                gen = meta.binding_generation or 0
+                prev = latest.get(rec.target_board)
+                if prev is None or gen >= prev.generation:
+                    latest[rec.target_board] = ActiveBinding(
+                        rec.event_id, rec.target_board, gen, meta
+                    )
+            elif rec.kind == KIND_BRIDGE_UNBIND:
+                unbound.add(rec.target_event_id)
+    return {b: a for b, a in latest.items() if a.event_id not in unbound}
+
+
+class Bindings:
+    def __init__(
+        self,
+        publisher: LocalPublisher,
+        firehose: FirehoseStore,
+        nav: NavProjection,
+        users: UserProjection,
+        origin: str,
+        daemon: Identity,
+        daemon_username: str,
+    ):
+        self._publisher = publisher
+        self._firehose = firehose
+        self._nav = nav
+        self._users = users
+        self._origin = origin
+        self._daemon = daemon
+        self._daemon_username = daemon_username
+
+    def _intent(self, kind: str, **fields) -> Intent:
+        return Intent(
+            kind=kind,
+            origin=self._origin,
+            actor_pubkey=self._daemon.public_key,
+            actor_username=self._daemon_username,
+            actor_registrar=self._origin,
+            **fields,
+        )
+
+    async def ensure_daemon(self) -> None:
+        user = self._users.get_user_by_pubkey(self._origin, self._daemon.public_key)
+        if user is not None and not user.get("revoked") and user.get("superseded_by") is None:
+            if user["username"] != self._daemon_username:
+                raise BindingError(
+                    f"daemon key is registered as {user['username']!r}, "
+                    f"config says {self._daemon_username!r}"
+                )
+            return
+        intent = Intent(
+            event_id=os.urandom(32),
+            kind=KIND_USER_REGISTER,
+            origin=self._origin,
+            actor_pubkey=self._daemon.public_key,
+            actor_registrar=self._origin,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, self._daemon_username),
+                    metadata_bytes(2, self._daemon.public_key),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        )
+        await self._publisher.publish(self._daemon, intent)
+        log_msg(f"BRIDGE: registered daemon as '{self._daemon_username}'")
+
+    async def ensure_board(self, board: str) -> None:
+        existing = self._nav.get_board(self._origin, board)
+        if existing is not None:
+            if existing["owner_pubkey"] != self._daemon.public_key:
+                raise BindingError(f"board {board!r} exists but is not owned by the bridge daemon")
+            return
+        await self._publisher.publish(
+            self._daemon,
+            self._intent(
+                KIND_BOARD_CREATE,
+                event_id=os.urandom(32),
+                board=board,
+                metadata=MetadataMap([metadata_bytes(1, self._daemon.public_key)]),
+            ),
+        )
+        log_msg(f"BRIDGE: created board '{board}'")
+
+    async def _unbind(self, active: ActiveBinding, reason: str) -> None:
+        body = reason.encode("utf-8")
+        await self._publisher.publish(
+            self._daemon,
+            self._intent(
+                KIND_BRIDGE_UNBIND,
+                event_id=unbind_event_id(active.event_id),
+                target_event_id=active.event_id,
+                body_hash=compute_body_hash(body),
+                body_size=len(body),
+            ),
+            body,
+        )
+        log_msg(f"BRIDGE: unbound '{active.board}' ({reason})")
+
+    async def reconcile(
+        self, venues: list[VenueConfig], capabilities: dict[str, frozenset]
+    ) -> None:
+        """Make the log's active bindings match config. `capabilities` is by venue type."""
+        active = read_bindings(self._firehose, self._origin)
+        wanted: set[str] = set()
+        for venue in venues:
+            for binding in venue.bindings:
+                wanted.add(binding.board)
+                await self.ensure_board(binding.board)
+                meta = binding_metadata(venue, binding, capabilities.get(venue.type, frozenset()))
+                current = active.get(binding.board)
+                if current is not None and replace(current.meta, binding_generation=None) == meta:
+                    continue
+                generation = current.generation + 1 if current is not None else 0
+                fields = replace(meta, binding_generation=generation).to_fields()
+                await self._publisher.publish(
+                    self._daemon,
+                    self._intent(
+                        KIND_BRIDGE_BINDING,
+                        event_id=binding_event_id(
+                            venue.venue, binding.channel, self._origin, binding.board, generation
+                        ),
+                        target_origin=self._origin,
+                        target_board=binding.board,
+                        metadata=MetadataMap(fields),
+                    ),
+                )
+                log_msg(
+                    f"BRIDGE: bound '{binding.board}' to {venue.venue} (generation {generation})"
+                )
+                if current is not None:
+                    await self._unbind(current, "options changed")
+        for board, current in active.items():
+            if board not in wanted:
+                await self._unbind(current, "removed from config")

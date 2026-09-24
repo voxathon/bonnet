@@ -2179,6 +2179,7 @@ class OperatorConsole:
             self.users.clear_origin(origin)
             self.policy.clear_origin(origin)
             self.routes.clear_origin(origin)
+            self.dispatcher.clear_tracked_origin(origin)
             manifest["steps"].append({"action": "clear_global_projections"})
 
             counts = self.firehose.delete_origin_data(origin)
