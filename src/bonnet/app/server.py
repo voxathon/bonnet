@@ -590,6 +590,25 @@ class BonnetServer:
             if existing is not None:
                 return
 
+            # Chain-aware guard: `root` may already be held by a live key
+            # further along the rotation chain (normal case after
+            # apply_key_rotation moved it via bonnet.user.key.rotate), or
+            # by any other live key. Appending a competing register would
+            # be rejected by the projection (first-writer-wins) and spam
+            # the log with a dead record on every restart — so only
+            # register when the name is genuinely free.
+            try:
+                holder = self.users.username_holder(self.config.origin, "root")
+            except Exception:
+                holder = None
+            if holder is not None:
+                log_msg(
+                    "INIT: root username already held by "
+                    f"{holder.hex()[:16]}; not re-registering for "
+                    f"{self.server_identity.public_key.hex()[:16]}"
+                )
+                return
+
             import os as _os
 
             from bonnet.core.record import (
@@ -641,7 +660,11 @@ class BonnetServer:
 
         Publishes the bonnet.origin.key.rotate record (old key signs the
         record, new key signs the proof — the mutual-consent scheme
-        firehose.py._apply_rotation_locked verifies), persists the new
+        firehose.py._apply_rotation_locked verifies) plus a
+        bonnet.user.key.rotate carrying the root user row (name + flags)
+        from the old key to the new one — without the second record the
+        old key would stay a live administrator and the new key would
+        boot as `unknown`. Then persists the new
         private key to identity_path (old one backed up alongside it), then
         hot-swaps every component that captured the old Identity object:
         command_handler (signs future local publishes), http_server (signs
@@ -672,16 +695,33 @@ class BonnetServer:
         origin = self.config.origin
         old_identity = self.server_identity
 
+        # A key is single-use per origin: rotating onto an already-
+        # registered key would make the follow-up user.key.rotate below
+        # dead on arrival (projection drops it — see
+        # UserProjection.apply_user_key_rotate). Refuse upfront so the
+        # origin.key.rotate isn't appended for a rotation that can't
+        # complete.
+        try:
+            prior = self.users.get_user_by_pubkey(origin, new_identity.public_key)
+        except Exception:
+            prior = None
+        if prior is not None:
+            raise ValueError(
+                "New key is already registered at this origin; "
+                "rotate onto a fresh key"
+            )
+
         proof = sign_key_rotation_proof(
             new_identity, origin, old_identity.public_key, new_identity.public_key
         )
         existing = self.users.get_user_by_pubkey(origin, old_identity.public_key)
+        root_username = existing["username"] if existing is not None else "root"
         intent = Intent(
             event_id=os.urandom(32),
             kind="bonnet.origin.key.rotate",
             origin=origin,
             actor_pubkey=old_identity.public_key,
-            actor_username=existing["username"] if existing is not None else "root",
+            actor_username=root_username,
             actor_registrar=origin,
             metadata=MetadataMap(
                 [
@@ -692,6 +732,39 @@ class BonnetServer:
         )
         actor_sig = sign_intent(old_identity, encode_intent(intent))
         self.firehose.append_record(old_identity, intent, actor_sig, b"")
+
+        # Move the root user row (name + flags) from the old key to the
+        # new one, or the old key stays a live administrator and the new
+        # key boots as `unknown`. The proof payload (origin, old, new)
+        # is identical for both rotate kinds, so the same proof bytes
+        # validate here. Actor-signed by the OLD key (it is the identity
+        # being succeeded); origin-signed by the NEW key (the epoch
+        # already advanced past the record above, so the head from here
+        # on belongs to the successor). Skipped only when there is no
+        # user row for the old key — nothing to carry forward.
+        if existing is not None:
+            user_intent = Intent(
+                event_id=os.urandom(32),
+                kind="bonnet.user.key.rotate",
+                origin=origin,
+                actor_pubkey=old_identity.public_key,
+                actor_username=root_username,
+                actor_registrar=origin,
+                metadata=MetadataMap(
+                    [
+                        metadata_bytes(1, new_identity.public_key),
+                        metadata_bytes(2, proof),
+                    ]
+                ),
+            )
+            user_sig = sign_intent(old_identity, encode_intent(user_intent))
+            self.firehose.append_record(new_identity, user_intent, user_sig, b"")
+        else:
+            log_msg(
+                f"ROTATE: no user row for old key "
+                f"{old_identity.public_key.hex()[:16]}; "
+                f"root identity not carried forward"
+            )
         self.dispatcher.dispatch_origin(origin)
 
         identity_path = self.config.identity_path
