@@ -58,6 +58,7 @@ from bonnet.core.kinds import (
     KIND_PUNISHMENT_PERMABAN,
     KIND_THREAD_CLOSE,
     KIND_THREAD_REOPEN,
+    KIND_USER_KEY_ROTATE,
     KIND_USER_REGISTER,
 )
 from bonnet.core.logging import log_debug, log_info, log_msg, log_warning
@@ -312,14 +313,15 @@ class FirehoseCommandHandler:
         self._boards_lock = threading.Lock()
         self._max_body_size = max_body_size
         self._wire_max = max(1, min(32, wire_max))
-        # Serializes the check-then-append span for bonnet.user.register and
-        # bonnet.board.create: without it, two concurrent registrations for
-        # the same name can both read "no holder yet" before either appends,
-        # so both get appended as distinct signed records even though the
-        # projection later resolves only one of them as the winner. Held
-        # across the dispatcher call too (dispatch_origin runs synchronously
-        # here), so a blocked second registration re-checks against a
-        # projection that has already caught up with the first.
+        # Serializes the check-then-append span for bonnet.user.register,
+        # bonnet.board.create and bonnet.user.key.rotate: without it, two
+        # concurrent registrations for the same name can both read "no holder
+        # yet" before either appends, so both get appended as distinct signed
+        # records even though the projection later resolves only one of them
+        # as the winner (and likewise two concurrent rotates onto one key).
+        # Held across the dispatcher call too (dispatch_origin runs
+        # synchronously here), so a blocked second registration re-checks
+        # against a projection that has already caught up with the first.
         self._identity_lock = threading.Lock()
         # Per-board striped locks for the closed-board write gate. Article
         # publishes are high-volume, so a single global lock would serialize
@@ -695,7 +697,7 @@ class FirehoseCommandHandler:
 
         identity_guard = (
             self._identity_lock
-            if kind in (KIND_USER_REGISTER, KIND_BOARD_CREATE)
+            if kind in (KIND_USER_REGISTER, KIND_BOARD_CREATE, KIND_USER_KEY_ROTATE)
             else nullcontext()
         )
         # Stripe key: the board this publish would mutate, so a close racing
@@ -743,6 +745,27 @@ class FirehoseCommandHandler:
                         return _error(
                             0x0009,
                             f"Username '{requested}' is already registered to this key",
+                        )
+
+            # A key is single-use per origin: rotating onto a key this origin
+            # has ever registered — a previous key of this user, another
+            # user's key, a revoked key — would either cycle the succession
+            # (both keys reading superseded, nobody able to authenticate) or
+            # silently merge two identities. UserProjection enforces this too
+            # and has to, since federated rotates never reach this handler —
+            # but refusing here is what lets a local caller see why.
+            if kind == KIND_USER_KEY_ROTATE:
+                new_pubkey = intent.metadata.get_bytes(1)
+                if new_pubkey is not None:
+                    try:
+                        prior = self._users.get_user_by_pubkey(intent.origin, new_pubkey)
+                    except Exception:
+                        prior = None
+                    if prior is not None:
+                        return _error(
+                            0x0009,
+                            "New key is already registered at this origin; "
+                            "rotate onto a fresh key",
                         )
 
             # Same rule, same reason, for board names: first writer wins.
@@ -818,6 +841,17 @@ class FirehoseCommandHandler:
                         return _error(
                             0x0004,
                             "actor_username is not the name this origin issued to that key",
+                        )
+                    # A retired key may no longer publish under its old name:
+                    # the rotation carried the identity to its successor.
+                    # Best-effort — authentication ran before this handler,
+                    # so a write already past auth can still land after a
+                    # racing rotation; the dispatch-time `retired` verdict
+                    # in Dispatcher._resolve_author_check is authoritative.
+                    if registered.get("superseded_by") is not None:
+                        return _error(
+                            0x0004,
+                            "actor key has been rotated; publish with its successor",
                         )
 
             # An ack must name a real punishment that actually targets the
@@ -1920,6 +1954,11 @@ class FirehoseCommandHandler:
         out += struct.pack(">B", 1 if user["revoked"] else 0)
         revoked_seq = user.get("revoked_seq") or 0
         out += struct.pack(">Q", revoked_seq)
+        superseded_by = user.get("superseded_by")
+        if superseded_by is not None:
+            out += struct.pack(">B", 1) + bytes(superseded_by)
+        else:
+            out += struct.pack(">B", 0)
         return _success(out)
 
     # ------------------------------------------------------------------

@@ -84,6 +84,10 @@ class ArticleView:
                          author_username is '' and there is nothing to check.
       - 'registry':      the naming origin's own registration log credits this
                          name to this key.
+      - 'retired':       the naming origin did issue this name to this key,
+                         but the key has since been succeeded by a rotation
+                         and this record was published after it. Records from
+                         before the rotation keep 'registry'.
       - 'unregistered':  the naming origin is the publishing origin, and its
                          registration log does not back the claim.
       - 'foreign':       the record credits a *different* origin as registrar;
@@ -145,7 +149,7 @@ class ArticleView:
     thread_state: str = "open"
     body: bytes | None = None
     body_check: str = "unchecked"  # unchecked, matched, mismatched
-    author_check: str = "unchecked"  # unchecked, unregistered, registry, foreign
+    author_check: str = "unchecked"  # unchecked, unregistered, registry, retired, foreign
 
 
 @dataclass
@@ -167,7 +171,7 @@ class ArticleListItem:
     author_pubkey: str
     author_username: str = ""
     author_registrar: str = ""
-    author_check: str = "unchecked"  # unchecked, unregistered, registry, foreign — see ArticleView
+    author_check: str = "unchecked"  # unchecked, unregistered, registry, retired, foreign — see ArticleView
     subject: str = ""
     tags: str = ""
     content_type: str = ""
@@ -232,6 +236,10 @@ class UserInfo:
     revoked: bool
     revoked_seq: int = 0
     origin: str = ""
+    # Hex of the key that succeeded this one, or "" if it is still current.
+    # A retired key keeps its row so old signatures still resolve a name,
+    # but it no longer authenticates or holds the username.
+    superseded_by: str = ""
 
 
 @dataclass

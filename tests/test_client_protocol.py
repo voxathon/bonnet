@@ -18,6 +18,7 @@ Tests round-trip encoding/decoding of all 13 command builders and response
 parsers. Uses mock data — no HTTP required.
 """
 
+import os
 import struct
 
 import pytest
@@ -645,6 +646,37 @@ class TestUserGet:
         assert user.flags == 0x01
         assert not user.revoked
         assert user.revoked_seq == 0
+        assert user.superseded_by == ""
+
+    def test_parse_legacy_response_without_superseded_by(self):
+        """Responses from older relays omit the trailing field entirely."""
+        pk = ACTOR_PUB
+        out = struct.pack(">B", 32) + pk
+        out += _enc_text16("alice")
+        out += struct.pack(">Q", 0)
+        out += struct.pack(">Q", 1)
+        out += struct.pack(">q", 1700000000)
+        out += struct.pack(">B", 0)
+        out += struct.pack(">Q", 0)
+        resp = _success(out)
+
+        assert parse_user_get_response(resp).superseded_by == ""
+
+    def test_parse_superseded_by(self):
+        successor = os.urandom(32)
+        pk = ACTOR_PUB
+        out = struct.pack(">B", 32) + pk
+        out += _enc_text16("alice")
+        out += struct.pack(">Q", 0)
+        out += struct.pack(">Q", 1)
+        out += struct.pack(">q", 1700000000)
+        out += struct.pack(">B", 0)
+        out += struct.pack(">Q", 0)
+        out += struct.pack(">B", 1) + successor
+        resp = _success(out)
+
+        user = parse_user_get_response(resp)
+        assert user.superseded_by == successor.hex()
 
 
 # ---------------------------------------------------------------------------

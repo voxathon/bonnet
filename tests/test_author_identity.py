@@ -38,6 +38,7 @@ import pytest
 from bonnet.core.board_projection import (
     AUTHOR_FOREIGN,
     AUTHOR_REGISTRY,
+    AUTHOR_RETIRED,
     AUTHOR_UNCHECKED,
     AUTHOR_UNREGISTERED,
 )
@@ -54,6 +55,7 @@ from bonnet.core.record import (
     metadata_text,
     metadata_u64,
     sign_intent,
+    sign_key_rotation_proof,
 )
 from bonnet.net.firehose_commands import FirehoseContext
 from bonnet.net.firehose_sync import SyncClient, SyncManager
@@ -136,6 +138,32 @@ def _register(wired, identity, username):
 
 def _registered_ctx(identity):
     return FirehoseContext(peer_pubkey=identity.public_key, is_registered=True, origin=ORIGIN)
+
+
+def _rotate(wired, old, new, username):
+    """Publish a bonnet.user.key.rotate through the handler as `old`."""
+    proof = sign_key_rotation_proof(new, ORIGIN, old.public_key, new.public_key)
+    intent = Intent(
+        event_id=os.urandom(32),
+        kind="bonnet.user.key.rotate",
+        origin=ORIGIN,
+        actor_pubkey=old.public_key,
+        actor_username=username,
+        metadata=MetadataMap(
+            [
+                metadata_bytes(1, new.public_key),
+                metadata_bytes(2, proof),
+            ]
+        ),
+    )
+    encoded = encode_intent(intent)
+    req = struct.pack(">B", OP_PUBLISH_RECORD)
+    req += struct.pack(">I", len(encoded)) + encoded
+    req += sign_intent(old, encoded)
+    req += struct.pack(">I", 0)
+    resp = wired["handler"].handle(req, _registered_ctx(old))
+    wired["dispatcher"].dispatch_origin(ORIGIN)
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +500,157 @@ def test_a_same_origin_claim_with_no_registration_reads_unregistered(wired):
     )
 
     assert wired["dispatcher"]._resolve_author_check(rec) == AUTHOR_UNREGISTERED
+
+
+# ---------------------------------------------------------------------------
+# retired keys
+# ---------------------------------------------------------------------------
+
+
+def _register_key(users, identity, username, seq):
+    users.apply_user_register(
+        Record(
+            origin=ORIGIN,
+            origin_seq=seq,
+            event_id=os.urandom(32),
+            kind="bonnet.user.register",
+            actor_pubkey=identity.public_key,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, username),
+                    metadata_bytes(2, identity.public_key),
+                    metadata_u64(3, 0),
+                ]
+            ),
+            created_at=seq,
+        )
+    )
+
+
+def _rotate_key(users, old, new, seq):
+    users.apply_user_key_rotate(
+        Record(
+            origin=ORIGIN,
+            origin_seq=seq,
+            event_id=os.urandom(32),
+            kind="bonnet.user.key.rotate",
+            actor_pubkey=old.public_key,
+            metadata=MetadataMap(
+                [
+                    metadata_bytes(1, new.public_key),
+                    metadata_bytes(
+                        2,
+                        sign_key_rotation_proof(
+                            new, ORIGIN, old.public_key, new.public_key
+                        ),
+                    ),
+                ]
+            ),
+            created_at=seq,
+        )
+    )
+
+
+def _named_article(identity, username, seq):
+    return Record(
+        origin=ORIGIN,
+        origin_seq=seq,
+        event_id=os.urandom(32),
+        kind="bonnet.article",
+        actor_pubkey=identity.public_key,
+        actor_username=username,
+        actor_registrar=ORIGIN,
+        board="general",
+        article_id=os.urandom(32),
+        article_num=seq,
+        metadata=MetadataMap([metadata_text(1, "Hi"), metadata_text(4, "text/plain")]),
+        created_at=seq,
+    )
+
+
+def test_pre_rotation_article_stays_registry(wired):
+    """History is pinned at dispatch: rotating later must not rewrite it."""
+    old, new = Identity.generate(), Identity.generate()
+    _register_key(wired["users"], old, "alice", 1)
+    _rotate_key(wired["users"], old, new, 5)
+
+    rec = _named_article(old, "alice", 3)
+    assert wired["dispatcher"]._resolve_author_check(rec) == AUTHOR_REGISTRY
+
+
+def test_post_rotation_article_by_retired_key_is_retired(wired):
+    old, new = Identity.generate(), Identity.generate()
+    _register_key(wired["users"], old, "alice", 1)
+    _rotate_key(wired["users"], old, new, 5)
+
+    rec = _named_article(old, "alice", 7)
+    assert wired["dispatcher"]._resolve_author_check(rec) == AUTHOR_RETIRED
+
+
+def test_successor_key_still_resolves_registry(wired):
+    old, new = Identity.generate(), Identity.generate()
+    _register_key(wired["users"], old, "alice", 1)
+    _rotate_key(wired["users"], old, new, 5)
+
+    rec = _named_article(new, "alice", 7)
+    assert wired["dispatcher"]._resolve_author_check(rec) == AUTHOR_REGISTRY
+
+
+def test_rotating_onto_a_registered_key_is_refused(wired):
+    alice, bob = Identity.generate(), Identity.generate()
+    assert _register(wired, alice, "alice")[0] == 0
+    assert _register(wired, bob, "bob")[0] == 0
+
+    resp = _rotate(wired, alice, bob, "alice")
+
+    assert resp[0] == 1
+    assert b"already registered" in resp
+    assert wired["users"].get_key_successor(ORIGIN, alice.public_key) is None
+    assert wired["users"].username_holder(ORIGIN, "alice") == alice.public_key
+
+
+def test_rotating_back_to_a_previous_key_is_refused(wired):
+    k1, k2 = Identity.generate(), Identity.generate()
+    assert _register(wired, k1, "alice")[0] == 0
+    assert _rotate(wired, k1, k2, "alice")[0] == 0
+
+    resp = _rotate(wired, k2, k1, "alice")
+
+    assert resp[0] == 1
+    assert b"already registered" in resp
+    assert wired["users"].get_key_successor(ORIGIN, k2.public_key) is None
+    assert wired["users"].username_holder(ORIGIN, "alice") == k2.public_key
+
+
+def test_a_retired_key_cannot_publish_under_its_old_name(wired):
+    old, new = Identity.generate(), Identity.generate()
+    assert _register(wired, old, "alice")[0] == 0
+    assert _rotate(wired, old, new, "alice")[0] == 0
+
+    resp = _publish(
+        wired["handler"],
+        old,
+        _registered_ctx(old),
+        **_article_fields(actor_username="alice", actor_registrar=ORIGIN),
+    )
+
+    assert resp[0] == 1
+    assert b"rotated" in resp
+
+
+def test_the_successor_key_can_publish_after_rotation(wired):
+    """The rotation must move the identity, not end it."""
+    old, new = Identity.generate(), Identity.generate()
+    assert _register(wired, old, "alice")[0] == 0
+    assert _rotate(wired, old, new, "alice")[0] == 0
+
+    resp = _publish(
+        wired["handler"],
+        new,
+        _registered_ctx(new),
+        **_article_fields(actor_username="alice", actor_registrar=ORIGIN),
+    )
+    assert resp[0] == 0, resp[:120]
 
 
 # ---------------------------------------------------------------------------

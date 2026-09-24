@@ -1467,6 +1467,85 @@ class TestUserProjection:
 
         assert user_proj.get_key_successor("bbs.a", old.public_key) is None
 
+    def test_holder_is_the_live_key_after_rotation(self, user_proj):
+        old, new = Identity.generate(), Identity.generate()
+        self._register(user_proj, old.public_key, username="dave")
+        user_proj.apply_user_key_rotate(self._rotate_rec(old, new))
+
+        assert user_proj.username_holder("bbs.a", "dave") == new.public_key
+
+    def test_holder_follows_a_two_hop_chain(self, user_proj):
+        k1, k2, k3 = Identity.generate(), Identity.generate(), Identity.generate()
+        self._register(user_proj, k1.public_key, username="dave")
+        user_proj.apply_user_key_rotate(self._rotate_rec(k1, k2))
+        user_proj.apply_user_key_rotate(self._rotate_rec(k2, k3, seq=3))
+
+        assert user_proj.username_holder("bbs.a", "dave") == k3.public_key
+
+    def test_list_users_hides_superseded_keys(self, user_proj):
+        k1, k2, k3 = Identity.generate(), Identity.generate(), Identity.generate()
+        self._register(user_proj, k1.public_key, username="dave")
+        user_proj.apply_user_key_rotate(self._rotate_rec(k1, k2))
+        user_proj.apply_user_key_rotate(self._rotate_rec(k2, k3, seq=3))
+
+        live = user_proj.list_users("bbs.a")
+        assert [u["username"] for u in live] == ["dave"]
+        assert live[0]["user_pubkey"] == k3.public_key
+
+    def test_revoked_head_frees_the_name(self, user_proj):
+        """A revoked live head must not fall back to the retired predecessor."""
+        old, new = Identity.generate(), Identity.generate()
+        self._register(user_proj, old.public_key, username="dave")
+        user_proj.apply_user_key_rotate(self._rotate_rec(old, new))
+        user_proj.apply_user_revoke(
+            Record(
+                origin="bbs.a",
+                origin_seq=3,
+                event_id=_rid(3),
+                kind="bonnet.user.revoke",
+                actor_pubkey=ACTOR_PUB,
+                target_origin="bbs.a",
+                target_event_id=_rid(1),
+                metadata=MetadataMap([metadata_bytes(1, new.public_key)]),
+            )
+        )
+
+        assert user_proj.username_holder("bbs.a", "dave") is None
+
+    def test_rotate_back_to_a_previous_key_is_dropped(self, user_proj):
+        """K2→K1 must not append: both keys would read superseded and
+        nobody could authenticate."""
+        k1, k2 = Identity.generate(), Identity.generate()
+        self._register(user_proj, k1.public_key, username="dave")
+        user_proj.apply_user_key_rotate(self._rotate_rec(k1, k2))
+
+        user_proj.apply_user_key_rotate(self._rotate_rec(k2, k1, seq=3))
+
+        assert user_proj.get_key_successor("bbs.a", k1.public_key) == k2.public_key
+        assert user_proj.get_key_successor("bbs.a", k2.public_key) is None
+        assert user_proj.get_user_by_pubkey("bbs.a", k2.public_key)["superseded_by"] is None
+        assert user_proj.username_holder("bbs.a", "dave") == k2.public_key
+
+    def test_rotate_to_an_unrelated_registered_key_is_dropped(self, user_proj):
+        alice, bob = Identity.generate(), Identity.generate()
+        self._register(user_proj, alice.public_key, username="alice", seq=1)
+        self._register(user_proj, bob.public_key, username="bob", seq=2)
+
+        user_proj.apply_user_key_rotate(self._rotate_rec(alice, bob, seq=3))
+
+        assert user_proj.get_key_successor("bbs.a", alice.public_key) is None
+        assert user_proj.get_user_by_pubkey("bbs.a", bob.public_key)["username"] == "bob"
+        assert user_proj.username_holder("bbs.a", "alice") == alice.public_key
+
+    def test_rotation_seq_is_reported(self, user_proj):
+        old, new = Identity.generate(), Identity.generate()
+        self._register(user_proj, old.public_key, username="dave")
+
+        assert user_proj.get_rotation_seq("bbs.a", old.public_key) is None
+        user_proj.apply_user_key_rotate(self._rotate_rec(old, new))
+        assert user_proj.get_rotation_seq("bbs.a", old.public_key) == 2
+        assert user_proj.get_rotation_seq("bbs.a", new.public_key) is None
+
     def test_list_users_excludes_revoked(self, user_proj):
         for i in range(3):
             user_pubkey = _rid(20 + i)

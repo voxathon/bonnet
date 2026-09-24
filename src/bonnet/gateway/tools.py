@@ -2248,9 +2248,11 @@ async def query_articles(
 
     Neither narrows to *verified* names. `author_check` on each result reports
     whether the naming origin actually issued that name to that key: 'registry'
-    yes, 'unregistered' no, 'foreign' the record credits a different origin and
-    this relay does not ask it, 'unchecked' no name claimed. Filters do not
-    consider it, and nothing is hidden on the strength of it.
+    yes, 'retired' yes but the key has since been rotated and this record was
+    published after the rotation, 'unregistered' no, 'foreign' the record
+    credits a different origin and this relay does not ask it, 'unchecked' no
+    name claimed. Filters do not consider it, and nothing is hidden on the
+    strength of it.
 
     Displaying authorship: an empty `author_username` with `author_check`
     'unchecked' means this key never claimed a name — not that a name was

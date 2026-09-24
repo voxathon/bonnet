@@ -433,9 +433,12 @@ class UserProjection(_BaseProjection):
         """The key holding `username` at `origin`, or None if it is free.
 
         Revoked registrations do not hold a name — revocation frees it, or a
-        squatter would burn every good name permanently. A superseded key still
-        does: `apply_user_key_rotate` carries the name forward to the successor,
-        so the identity is live even though that particular key is retired.
+        squatter would burn every good name permanently. Neither do
+        superseded keys: `apply_user_key_rotate` carries the name forward to
+        the successor, so only the live head holds it. The old row survives
+        so records signed by the retired key still resolve a username, but
+        it must never win the holder lookup — otherwise the retired key
+        (lower reg_seq) shadows its own successor.
 
         A federated registration whose username carries a control character
         or reserved character is likewise never bound here — see
@@ -443,8 +446,12 @@ class UserProjection(_BaseProjection):
         """
         with self._lock:
             row = self._conn.execute(
-                "SELECT user_pubkey FROM users WHERE origin=? AND username=? AND revoked=0 "
-                "ORDER BY reg_seq LIMIT 1",
+                "SELECT u.user_pubkey FROM users u "
+                "LEFT JOIN user_key_rotations r "
+                "  ON r.origin = u.origin AND r.old_pubkey = u.user_pubkey "
+                "WHERE u.origin=? AND u.username=? AND u.revoked=0 "
+                "AND r.new_pubkey IS NULL "
+                "ORDER BY u.reg_seq DESC LIMIT 1",
                 (origin, username),
             ).fetchone()
             return bytes(row[0]) if row else None
@@ -490,8 +497,12 @@ class UserProjection(_BaseProjection):
                     return
 
                 holder = self._conn.execute(
-                    "SELECT user_pubkey FROM users "
-                    "WHERE origin=? AND username=? AND revoked=0 ORDER BY reg_seq LIMIT 1",
+                    "SELECT u.user_pubkey FROM users u "
+                    "LEFT JOIN user_key_rotations r "
+                    "  ON r.origin = u.origin AND r.old_pubkey = u.user_pubkey "
+                    "WHERE u.origin=? AND u.username=? AND u.revoked=0 "
+                    "AND r.new_pubkey IS NULL "
+                    "ORDER BY u.reg_seq DESC LIMIT 1",
                     (rec.origin, username),
                 ).fetchone()
                 if holder is not None and bytes(holder[0]) != user_pubkey:
@@ -597,6 +608,28 @@ class UserProjection(_BaseProjection):
 
                 username, flags, created_at = row[0], row[1], row[2]
 
+                # A key is single-use per origin: rotating onto a key this
+                # origin has ever registered — a previous key of this user,
+                # another user's key, a revoked key — would either cycle the
+                # succession (both keys reading superseded, nobody able to
+                # authenticate) or silently merge two identities. Drop it
+                # rather than raise, for the same wedge-avoidance reason as
+                # every other defensive return in this method.
+                prior = self._conn.execute(
+                    "SELECT 1 FROM users WHERE origin=? AND user_pubkey=?",
+                    (rec.origin, new_pubkey),
+                ).fetchone()
+                if prior is not None:
+                    log_msg(
+                        f"USER_ROTATE: origin='{rec.origin}' "
+                        f"old={old_pubkey.hex()[:16]} new={new_pubkey.hex()[:16]} rejected "
+                        f"(new key already registered at this origin)"
+                    )
+                    self._mark_applied(rec)
+                    self._set_checkpoint(rec.origin, rec.origin_seq)
+                    self._commit()
+                    return
+
                 self._conn.execute(
                     "INSERT OR REPLACE INTO user_key_rotations "
                     "(origin, old_pubkey, new_pubkey, rotated_seq, event_id) "
@@ -663,31 +696,53 @@ class UserProjection(_BaseProjection):
             ).fetchone()
             return bytes(row[0]) if row else None
 
+    def get_rotation_seq(self, origin: str, pubkey: bytes) -> int | None:
+        """The origin_seq at which `pubkey` was succeeded, or None if current."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT rotated_seq FROM user_key_rotations WHERE origin=? AND old_pubkey=?",
+                (origin, pubkey),
+            ).fetchone()
+            return int(row[0]) if row else None
+
     def list_users(self, origin: str = None, include_revoked: bool = False) -> list[dict]:
+        # Superseded keys are never listed: the old row survives so records
+        # signed by a retired key still resolve a username, but it is not a
+        # live user. Without this a twice-rotated name shows up three times.
+        # `include_revoked` still shows revoked rows — revocation and
+        # rotation stay tellable apart.
         with self._lock:
             if origin:
                 if include_revoked:
                     rows = self._conn.execute(
-                        "SELECT origin, user_pubkey, username, flags, reg_seq, created_at, revoked, revoked_seq "
-                        "FROM users WHERE origin=? ORDER BY username ASC",
+                        "SELECT u.origin, u.user_pubkey, u.username, u.flags, u.reg_seq, u.created_at, u.revoked, u.revoked_seq "
+                        "FROM users u LEFT JOIN user_key_rotations r "
+                        "  ON r.origin = u.origin AND r.old_pubkey = u.user_pubkey "
+                        "WHERE u.origin=? AND r.new_pubkey IS NULL ORDER BY u.username ASC",
                         (origin,),
                     ).fetchall()
                 else:
                     rows = self._conn.execute(
-                        "SELECT origin, user_pubkey, username, flags, reg_seq, created_at, revoked, revoked_seq "
-                        "FROM users WHERE origin=? AND revoked=0 ORDER BY username ASC",
+                        "SELECT u.origin, u.user_pubkey, u.username, u.flags, u.reg_seq, u.created_at, u.revoked, u.revoked_seq "
+                        "FROM users u LEFT JOIN user_key_rotations r "
+                        "  ON r.origin = u.origin AND r.old_pubkey = u.user_pubkey "
+                        "WHERE u.origin=? AND u.revoked=0 AND r.new_pubkey IS NULL ORDER BY u.username ASC",
                         (origin,),
                     ).fetchall()
             else:
                 if include_revoked:
                     rows = self._conn.execute(
-                        "SELECT origin, user_pubkey, username, flags, reg_seq, created_at, revoked, revoked_seq "
-                        "FROM users ORDER BY origin ASC, username ASC"
+                        "SELECT u.origin, u.user_pubkey, u.username, u.flags, u.reg_seq, u.created_at, u.revoked, u.revoked_seq "
+                        "FROM users u LEFT JOIN user_key_rotations r "
+                        "  ON r.origin = u.origin AND r.old_pubkey = u.user_pubkey "
+                        "WHERE r.new_pubkey IS NULL ORDER BY u.origin ASC, u.username ASC"
                     ).fetchall()
                 else:
                     rows = self._conn.execute(
-                        "SELECT origin, user_pubkey, username, flags, reg_seq, created_at, revoked, revoked_seq "
-                        "FROM users WHERE revoked=0 ORDER BY origin ASC, username ASC"
+                        "SELECT u.origin, u.user_pubkey, u.username, u.flags, u.reg_seq, u.created_at, u.revoked, u.revoked_seq "
+                        "FROM users u LEFT JOIN user_key_rotations r "
+                        "  ON r.origin = u.origin AND r.old_pubkey = u.user_pubkey "
+                        "WHERE u.revoked=0 AND r.new_pubkey IS NULL ORDER BY u.origin ASC, u.username ASC"
                     ).fetchall()
             return [
                 {

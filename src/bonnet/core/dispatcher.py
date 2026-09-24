@@ -27,6 +27,7 @@ from collections.abc import Callable
 from bonnet.core.board_projection import (
     AUTHOR_FOREIGN,
     AUTHOR_REGISTRY,
+    AUTHOR_RETIRED,
     AUTHOR_UNCHECKED,
     AUTHOR_UNREGISTERED,
     BoardProjection,
@@ -258,6 +259,14 @@ class Dispatcher:
             return AUTHOR_FOREIGN
         user = self._users.get_user_by_pubkey(rec.origin, rec.actor_pubkey)
         if user is not None and user["username"] == rec.actor_username:
+            # A retired key's row survives so old signatures still resolve
+            # a name — but a record it signed *after* its rotation was
+            # dispatched is reported, not verified. Dispatch walks in strict
+            # origin_seq order, so rotated_seq is always known by the time a
+            # later record is resolved here. Earlier records keep `registry`.
+            rotated_seq = self._users.get_rotation_seq(rec.origin, rec.actor_pubkey)
+            if rotated_seq is not None and rec.origin_seq > rotated_seq:
+                return AUTHOR_RETIRED
             return AUTHOR_REGISTRY
         return AUTHOR_UNREGISTERED
 

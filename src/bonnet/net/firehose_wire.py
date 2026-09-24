@@ -1020,6 +1020,13 @@ def parse_user_get_response(resp: bytes) -> UserInfo:
     created_at, offset = _read_i64(payload, offset)
     revoked, offset = _read_u8(payload, offset)
     revoked_seq, offset = _read_u64(payload, offset)
+    # Trailing superseded_by, appended after revoked_seq: absent on
+    # responses from older relays, which remain parseable.
+    superseded_by = b""
+    if offset != len(payload):
+        has, offset = _read_u8(payload, offset)
+        if has:
+            superseded_by, offset = _read_bytes(payload, offset, 32, "superseded_by")
     _expect_end(payload, offset, "user get response")
     return UserInfo(
         pubkey=pubkey.hex(),
@@ -1029,6 +1036,7 @@ def parse_user_get_response(resp: bytes) -> UserInfo:
         created_at=created_at,
         revoked=bool(revoked),
         revoked_seq=revoked_seq,
+        superseded_by=superseded_by.hex() if superseded_by else "",
     )
 
 

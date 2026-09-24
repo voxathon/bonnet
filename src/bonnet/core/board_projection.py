@@ -55,6 +55,11 @@ THREAD_CLOSED = "closed"
 # The check is deliberately not a network lookup. See AUTHOR_FOREIGN.
 #: This origin's registry issued this name to this key.
 AUTHOR_REGISTRY = "registry"
+#: The registrar names this origin and did issue that name to that key, but
+#: the key has since been succeeded by a rotation — and this record was
+#: published after the rotation. Pre-rotation records keep `registry`: the
+#: verdict is pinned at dispatch, so history is never rewritten.
+AUTHOR_RETIRED = "retired"
 #: The registrar names this origin, which did not issue that name to that key
 #: — either the key holds no registration, or it holds one under another name.
 AUTHOR_UNREGISTERED = "unregistered"
