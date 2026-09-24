@@ -749,7 +749,7 @@ Without a venue account, the post stays native on B, and relay egress picks it u
   token_file = "~/.bonnet/flatboard.token"
   ```
 - The outbox is `<tenant dir>/outbox.db`, with states `pending`, `ready`, `sent`, `refused` and `dropped`.
-- **Replies:** the parent's copy on B is looked up **anonymously**, since the caller may not be admitted on B yet. Bridge origins should grant `ARTICLE_QUERY` to anonymous callers (the shipped example grants it only to nobody); without it a reply still threads at the venue, just not on B.
+- **Replies:** the parent's copy on B is looked up **anonymously**, since the caller may not be admitted on B yet. Bridge origins should grant `ARTICLE_QUERY` to anonymous callers (the shipped example config grants it to no one); without it a reply still threads at the venue, just not on B.
 - Step 2's PERMISSIONS preflight isn't implemented: a refusal from B is reported as the result instead.
 - **Known edge:** if the venue post fails ambiguously (the request died after the venue accepted it), step 4 publishes natively with the same event_id. The venue then holds a post whose marker names an article with no `foreign_id`; the bridge defers it, then mirrors it after `marker_timeout`, so it shows twice until a sysop acts.
 **Showing crossposters.** The gateway renders a crossposter as `<name> (<home_origin>)`, taking `home_origin` from the crosspost's own metadata (EVENT_GET, which it already uses for verification, cached per `(origin, author_pubkey)`). B refuses crossposts whose `home_origin` doesn't match the pin (§6.3), so the value is one B has checked. Clients should treat a name on a bridge origin as a label and the key plus home as the identity.
