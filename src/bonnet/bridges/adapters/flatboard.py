@@ -40,6 +40,7 @@ from bonnet.bridges.adapter import (
     VenueAuthError,
     VenueError,
     VenueRateLimited,
+    VenueUncertain,
 )
 from bonnet.bridges.config import VenueConfig
 from bonnet.bridges.model import normalize_foreign_text, truncate_utf8
@@ -250,22 +251,30 @@ class FlatboardAdapter:
         try:
             resp = await self._http.get(f"{self._base}/board/post", params=params)
         except httpx.HTTPError as e:
-            raise VenueError(f"flatboard post: {type(e).__name__}") from None
+            raise VenueUncertain(f"flatboard post: {type(e).__name__}") from None
         if resp.status_code in (401, 403):
             raise VenueAuthError(f"flatboard rejected the credentials for {account.user!r}")
         if resp.status_code == 429:
             raise VenueRateLimited("flatboard post: rate limited", _retry_after(resp))
+        if resp.status_code >= 500:
+            raise VenueUncertain(f"flatboard post: HTTP {resp.status_code}")
         if resp.status_code != 200:
             raise VenueError(f"flatboard post: HTTP {resp.status_code}")
         try:
             data = resp.json()
         except ValueError:
-            raise VenueError("flatboard post: bad JSON") from None
+            # A 200 we can't read may still be a post that landed.
+            raise VenueUncertain("flatboard post: bad JSON") from None
         foreign_id = _id(data.get("id")) if isinstance(data, dict) else None
         if not isinstance(data, dict) or not data.get("ok") or foreign_id is None:
             error = data.get("error") if isinstance(data, dict) else None
             raise VenueError(f"flatboard post refused: {error or 'no id in response'}")
-        fetched = await self.fetch(channel, foreign_id)
+        # The post is made: reading it back is a nicety, and must never turn
+        # a post the venue took into an error.
+        try:
+            fetched = await self.fetch(channel, foreign_id)
+        except VenueError:
+            fetched = None
         if isinstance(fetched, ForeignPost):
             return fetched
         msg = {"id": int(foreign_id), "author": account.user, "reply_to": reply_to, "text": text}

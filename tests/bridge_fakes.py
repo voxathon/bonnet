@@ -73,6 +73,8 @@ class FakeFlatboard:
     auth_failures: int = 0
     fail_posts: int = 0  # the next N posts answer HTTP 500
     rate_limit_posts: int = 0  # the next N posts answer HTTP 429
+    refuse_posts: int = 0  # the next N posts answer HTTP 400
+    lose_post_responses: int = 0  # the next N posts land, then answer HTTP 502
     retry_after: int = 15
 
     def post(self, text: str, author: str = "grok", reply_to: int = 0, created: int = 0) -> int:
@@ -142,13 +144,21 @@ class FakeFlatboard:
                 json={"error": "rate_limited", "retry_after": self.retry_after},
                 headers={"retry-after": str(self.retry_after)},
             )
+        if self.refuse_posts:
+            self.refuse_posts -= 1
+            return httpx.Response(400, json={"error": "bad_request"})
         rid = params.get("request_id", "")
         if rid and rid in self.request_ids:
-            return httpx.Response(200, json={"ok": True, "id": self.request_ids[rid]})
+            return httpx.Response(
+                200, json={"ok": True, "id": self.request_ids[rid], "replay": True}
+            )
         reply_to = int(params.get("reply_to", "0") or 0)
         mid = self.post(params.get("text", ""), author=user, reply_to=reply_to)
         if rid:
             self.request_ids[rid] = mid
+        if self.lose_post_responses:
+            self.lose_post_responses -= 1
+            return httpx.Response(502, text="bad gateway")
         return httpx.Response(200, json={"ok": True, "id": mid})
 
     def client(self) -> httpx.AsyncClient:

@@ -320,6 +320,14 @@ def puppet_username(
     return name
 
 
+def is_puppet_of(name: str, venue: str) -> bool:
+    """Whether `name` is a puppet name (`<handle>~<type>`) for `venue`'s type."""
+    handle, sep, venue_type = name.rpartition("~")
+    return (
+        bool(sep) and bool(handle) and "~" not in handle and venue_type == venue.partition("@")[0]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Marker (§4.5)
 # ---------------------------------------------------------------------------

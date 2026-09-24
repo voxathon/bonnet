@@ -76,10 +76,10 @@ def binding_metadata(venue: VenueConfig, binding: BindingConfig, capabilities) -
     )
 
 
-def read_bindings(
+def _scan_bindings(
     firehose: FirehoseStore, origin: str, batch: int = 1000
-) -> dict[str, ActiveBinding]:
-    """Active bindings on `origin`, by board: the latest binding with no later unbind."""
+) -> tuple[dict[str, ActiveBinding], set[bytes]]:
+    """(the highest-generation binding per board, the unbound event ids)."""
     latest: dict[str, ActiveBinding] = {}
     unbound: set[bytes] = set()
     seq = 0
@@ -99,6 +99,14 @@ def read_bindings(
                     )
             elif rec.kind == KIND_BRIDGE_UNBIND:
                 unbound.add(rec.target_event_id)
+    return latest, unbound
+
+
+def read_bindings(
+    firehose: FirehoseStore, origin: str, batch: int = 1000
+) -> dict[str, ActiveBinding]:
+    """Active bindings on `origin`, by board: the latest binding with no later unbind."""
+    latest, unbound = _scan_bindings(firehose, origin, batch)
     return {b: a for b, a in latest.items() if a.event_id not in unbound}
 
 
@@ -193,7 +201,8 @@ class Bindings:
         self, venues: list[VenueConfig], capabilities: dict[str, frozenset]
     ) -> None:
         """Make the log's active bindings match config. `capabilities` is by venue type."""
-        active = read_bindings(self._firehose, self._origin)
+        latest, unbound = _scan_bindings(self._firehose, self._origin)
+        active = {b: a for b, a in latest.items() if a.event_id not in unbound}
         wanted: set[str] = set()
         for venue in venues:
             for binding in venue.bindings:
@@ -203,7 +212,11 @@ class Bindings:
                 current = active.get(binding.board)
                 if current is not None and replace(current.meta, binding_generation=None) == meta:
                     continue
-                generation = current.generation + 1 if current is not None else 0
+                # Past every generation the board ever had, unbound ones
+                # included: a board re-added after removal would otherwise
+                # reuse generation 0's event id, which is already unbound.
+                ever = latest.get(binding.board)
+                generation = ever.generation + 1 if ever is not None else 0
                 fields = replace(meta, binding_generation=generation).to_fields()
                 await self._publisher.publish(
                     self._daemon,

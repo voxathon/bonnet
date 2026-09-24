@@ -43,6 +43,7 @@ from bonnet.bridges.model import (
     ROLE_RELAY_LINK,
     BridgeMetadata,
     SourceKey,
+    is_puppet_of,
     parse_src_tag,
 )
 from bonnet.core.kinds import (
@@ -285,6 +286,7 @@ class BridgeProjection:
             )
         elif kind == KIND_BRIDGE_OBSERVATION:
             meta = BridgeMetadata.from_metadata(rec.metadata)
+            self._confirm_crosspost(rec, meta)
             self._conn.execute(
                 "INSERT OR REPLACE INTO observations VALUES (?,?,?,?,?,?,?,?)",
                 (
@@ -323,6 +325,20 @@ class BridgeProjection:
                 (rec.origin, rec.target_event_id, rec.metadata.get_bytes(1) or b""),
             )
 
+    def _confirm_crosspost(self, rec: Record, meta: BridgeMetadata) -> None:
+        """An observation of one of this origin's crossposts confirms it: only
+        now does the root it states count (see `observed`)."""
+        if rec.target_origin != rec.origin:
+            return
+        row = self._conn.execute(
+            "SELECT venue, channel, foreign_id, root_foreign_id FROM copies "
+            "WHERE origin=? AND event_id=? AND role=?",
+            (rec.origin, rec.target_event_id, ROLE_CROSSPOST),
+        ).fetchone()
+        if row is None or (row[0], row[1], row[2]) != (meta.venue, meta.channel, meta.foreign_id):
+            return
+        self._note_root(SourceKey(row[0], row[1], row[2]), row[3])
+
     def _insert_copy(self, c: Copy) -> None:
         self._conn.execute(
             f"INSERT OR REPLACE INTO copies ({_COPY_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -343,7 +359,10 @@ class BridgeProjection:
                 c.state,
             ),
         )
-        self._note_root(c.src, c.root_foreign_id)
+        if c.role != ROLE_CROSSPOST:
+            # A crosspost is its author's claim until observed; a false root
+            # could otherwise mark a real thread as conflicted.
+            self._note_root(c.src, c.root_foreign_id)
 
     def _note_root(self, src: SourceKey, root: str | None) -> None:
         """Record the thread root stated for `src`, flagging disagreement."""
@@ -377,6 +396,10 @@ class BridgeProjection:
         meta = BridgeMetadata.from_metadata(rec.metadata)
         src = meta.src
         if meta.bridge_role not in (ROLE_MIRROR, ROLE_CROSSPOST) or src is None:
+            return
+        if meta.bridge_role == ROLE_MIRROR and not is_puppet_of(rec.actor_username, src.venue):
+            # Only a bridge's puppets mirror; anything else claiming to is
+            # an ordinary article.
             return
         self._insert_copy(
             Copy(
@@ -476,6 +499,28 @@ class BridgeProjection:
                 (len(prefix), prefix),
             ).fetchall()
         return [_copy(r) for r in rows]
+
+    def observed(self, copy: Copy) -> bool:
+        """Whether `copy`'s own origin has observed its foreign post at the venue.
+
+        A crosspost is signed by its author, who can claim any foreign post;
+        it counts as a copy only once the bridge reads the venue post back
+        and finds the marker naming it.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM observations WHERE origin=? AND target_origin=? "
+                "AND target_event_id=? AND venue=? AND channel=? AND foreign_id=? LIMIT 1",
+                (
+                    copy.origin,
+                    copy.origin,
+                    copy.event_id,
+                    copy.src.venue,
+                    copy.src.channel,
+                    copy.src.foreign_id,
+                ),
+            ).fetchone()
+        return row is not None
 
     def copies_of(self, src: SourceKey) -> list[Copy]:
         with self._lock:
@@ -601,6 +646,7 @@ class BridgeView:
         self._recognized = recognized
         self._shown: dict[SourceKey, set[tuple[str, bytes]] | None] = {}
         self._ranks: dict[tuple[str, str, str], list[str]] = {}
+        self._observed: dict[tuple[str, bytes], bool] = {}
 
     def _pref(self, venue: str, origin: str) -> int | None:
         order = self._recognized.get(venue)
@@ -608,13 +654,25 @@ class BridgeView:
             return None
         return order.index(origin)
 
+    def _counts(self, copy: Copy) -> bool:
+        """Whether `copy` takes part in dedup: live, recognized, and, for a
+        crosspost, observed at the venue by its own origin."""
+        if copy.state != ACTIVE or self._pref(copy.src.venue, copy.origin) is None:
+            return False
+        if copy.role != ROLE_CROSSPOST:
+            return True
+        key = (copy.origin, copy.event_id)
+        if key not in self._observed:
+            self._observed[key] = self._p.observed(copy)
+        return self._observed[key]
+
     def visible(self, copy: Copy | None) -> bool:
         """Whether an aggregate read should show this row."""
         if copy is None or copy.state != ACTIVE:
             # Not a bridge copy, or one the caller asked to see despite its
             # state (cancelled, superseded): the read's own flags decide.
             return True
-        if self._pref(copy.src.venue, copy.origin) is None:
+        if not self._counts(copy):
             return True
         shown = self._shown_for(copy.src)
         return shown is None or (copy.origin, copy.event_id) in shown
@@ -634,11 +692,7 @@ class BridgeView:
         return result
 
     def _compute_shown(self, src: SourceKey) -> set[tuple[str, bytes]] | None:
-        live = [
-            c
-            for c in self._p.copies_of(src)
-            if c.state == ACTIVE and self._pref(src.venue, c.origin) is not None
-        ]
+        live = [c for c in self._p.copies_of(src) if self._counts(c)]
         if len(live) < 2:
             return None
         # Digest check: a recognized bridge serving altered text can't hide
@@ -666,11 +720,7 @@ class BridgeView:
         return self._ranks[key]
 
     def _compute_rank(self, venue: str, channel: str, root: str) -> list[str]:
-        copies = [
-            c
-            for c in self._p.thread_copies(venue, channel, root)
-            if c.state == ACTIVE and self._pref(venue, c.origin) is not None
-        ]
+        copies = [c for c in self._p.thread_copies(venue, channel, root) if self._counts(c)]
         per_origin: dict[str, list[Copy]] = {}
         for c in copies:
             per_origin.setdefault(c.origin, []).append(c)

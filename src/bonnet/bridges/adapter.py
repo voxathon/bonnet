@@ -91,6 +91,12 @@ class VenueAuthError(VenueError):
     out whole IPs after repeated bad tokens."""
 
 
+class VenueUncertain(VenueError):
+    """A post failed in a way that doesn't say whether the venue took it (the
+    connection dropped, the venue answered 5xx). On a venue with
+    `idempotent_post`, retrying with the same key settles it either way."""
+
+
 class VenueRateLimited(VenueError):
     """The venue refused a request for rate. It took nothing, so the same
     request may be retried once `retry_after` seconds (if known) have passed."""

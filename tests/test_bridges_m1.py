@@ -368,6 +368,17 @@ async def test_binding_removed_from_config_is_unbound(h):
     assert set(active) == {"~flatboard.other"}
 
 
+async def test_a_binding_removed_then_re_added_is_active_again(h):
+    await h.stop()
+    await h.start([venue_config("~flatboard.other")])
+    await h.stop()
+    await h.start([venue_config("~flatboard.other"), venue_config()])
+    active = read_bindings(h.firehose, ORIGIN)
+    assert set(active) == {"~flatboard", "~flatboard.other"}
+    assert active["~flatboard"].generation == 1
+    assert "~flatboard" in {b["board"] for b in h.server.bridges.active_bindings()}
+
+
 # ---------------------------------------------------------------------------
 # Ingest
 # ---------------------------------------------------------------------------

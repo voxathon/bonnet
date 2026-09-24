@@ -274,6 +274,140 @@ async def test_copies_that_disagree_on_digest_both_show(s):
     assert {r.origin for r in rows} == {B1, B2}
 
 
+def _register_crossposter(server, name: str = "mallory"):
+    """A key admitted on a bridge origin, registered the way admission does it."""
+    from bonnet.bridges import model
+    from bonnet.core.crypto import Identity
+    from bonnet.core.kinds import KIND_USER_REGISTER
+    from bonnet.core.record import (
+        encode_intent,
+        metadata_bytes,
+        metadata_text,
+        metadata_u64,
+        sign_intent,
+    )
+
+    key = Identity.generate()
+    root = server.server_identity
+    origin = server.config.origin
+    reg = Intent(
+        event_id=os.urandom(32),
+        kind=KIND_USER_REGISTER,
+        origin=origin,
+        actor_pubkey=root.public_key,
+        actor_registrar=origin,
+        metadata=MetadataMap(
+            [
+                metadata_text(1, name),
+                metadata_bytes(2, key.public_key),
+                metadata_u64(3, 0),
+                metadata_text(model.F_HOME_ORIGIN, HOME),
+                metadata_text(model.F_HOME_URL, f"https://{HOME}"),
+            ]
+        ),
+    )
+    server.firehose.append_record(root, reg, sign_intent(root, encode_intent(reg)), b"")
+    server.dispatcher.dispatch_origin(origin)
+    return key
+
+
+def _forged_copy(server, key, name, src, role, digest):
+    """An article claiming to be a copy of `src`, with a lowest-possible event id."""
+    from bonnet.bridges import model
+    from bonnet.core.record import compute_body_hash, metadata_text, metadata_text_list
+
+    body = b"FORGED TEXT"
+    meta = model.BridgeMetadata(
+        bridge_role=role,
+        venue=src.venue,
+        channel=src.channel,
+        foreign_id=src.foreign_id,
+        foreign_author="moxxie",
+        foreign_root_id=src.foreign_id,
+        foreign_digest=digest,
+        home_origin=HOME,
+        home_url=f"https://{HOME}",
+    )
+    fields = [
+        metadata_text(1, "separate post"),
+        metadata_text_list(2, model.bridge_tags("flatboard", src)),
+        metadata_text(4, "text/plain"),
+    ]
+    intent = Intent(
+        event_id=b"\x00" * 31 + b"\x01",
+        kind="bonnet.article",
+        origin=server.config.origin,
+        actor_pubkey=key.public_key,
+        actor_username=name,
+        actor_registrar=server.config.origin,
+        board=BOARD,
+        article_id=os.urandom(32),
+        metadata=model.merge_metadata(MetadataMap(fields), meta.to_fields()),
+        body_hash=compute_body_hash(body),
+        body_size=len(body),
+    )
+    return intent, body
+
+
+async def _shown_for(s, foreign_id):
+    """Aggregate rows that are copies of `foreign_id` (ordinary rows skipped)."""
+    out = []
+    for r in await s.aggregate():
+        c = s.home.bridges.copy_by_event(r.origin, bytes.fromhex(r.event_id))
+        if c is not None and c.src.foreign_id == str(foreign_id):
+            out.append(r)
+    return out
+
+
+async def test_only_the_runtime_may_publish_a_mirror(s):
+    from bonnet.bridges import model
+    from tests.bridge_fakes import publish_as
+
+    srv = s.b1.server
+    key = _register_crossposter(srv)
+    src = SourceKey(FLATBOARD_VENUE, "", str(s.p4))
+    real = srv.bridges.copies_of(src)[0]
+    intent, body = _forged_copy(srv, key, "mallory", src, model.ROLE_MIRROR, real.digest)
+    with pytest.raises(ProtocolError, match="Only the bridge runtime may publish mirrors"):
+        await publish_as(srv, key, intent, body)
+
+
+async def test_an_unobserved_crosspost_hides_nothing(s):
+    from bonnet.bridges import model
+    from tests.bridge_fakes import publish_as
+
+    srv = s.b1.server
+    key = _register_crossposter(srv)
+    src = SourceKey(FLATBOARD_VENUE, "", str(s.p4))
+    real = srv.bridges.copies_of(src)[0]
+    intent, body = _forged_copy(srv, key, "mallory", src, model.ROLE_CROSSPOST, real.digest)
+    await publish_as(srv, key, intent, body)
+    await s.sync()
+    shown = {r.event_id for r in await _shown_for(s, s.p4)}
+    # The real mirror stays; the claim shows as the ordinary article it is.
+    assert real.event_id.hex() in shown
+
+
+async def test_a_mirror_by_anyone_but_a_puppet_is_not_a_copy(s):
+    from bonnet.bridges import model
+    from bonnet.core.record import encode_intent, sign_intent
+
+    # An origin that doesn't enforce the publish check: appended straight
+    # to its log, then synced like any record.
+    srv = s.b1.server
+    key = _register_crossposter(srv)
+    src = SourceKey(FLATBOARD_VENUE, "", str(s.p4))
+    real = srv.bridges.copies_of(src)[0]
+    intent, body = _forged_copy(srv, key, "mallory", src, model.ROLE_MIRROR, real.digest)
+    root = srv.server_identity
+    srv.firehose.append_record(root, intent, sign_intent(key, encode_intent(intent)), body)
+    srv.dispatcher.dispatch_origin(B1)
+    await s.sync()
+    assert s.home.bridges.copy_by_event(B1, intent.event_id) is None
+    shown = [r.event_id for r in await _shown_for(s, s.p4)]
+    assert shown == [real.event_id.hex()]
+
+
 async def test_unrecognized_origins_are_never_deduplicated(tmp_path):
     sc = Scenario(tmp_path)
     await sc.build(order=(B1,))

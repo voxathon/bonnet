@@ -54,6 +54,7 @@ from bonnet.bridges.adapter import (
     VenueAuthError,
     VenueError,
     VenueRateLimited,
+    VenueUncertain,
     build_adapter,
 )
 from bonnet.bridges.config import VenueConfig, check_venue, venue_type_of
@@ -225,8 +226,9 @@ def _note_auth(spec: VenueAccountSpec, failed: bool) -> None:
 async def _venue_post(spec: VenueAccountSpec, adapter, channel, text, reply_to, key):
     """Post as `spec`: spaced per account, never with rejected credentials.
 
-    A rate-limited post is retried once when the wait is short; the venue
-    took nothing, so the retry can't duplicate it.
+    Retried once, with the same key, when that's safe: after a short rate
+    limit (the venue took nothing), or after an uncertain failure on a venue
+    with idempotent posting (the key lands on the same post either way).
     """
     blocked = _auth_blocked(spec)
     if blocked is not None:
@@ -239,6 +241,10 @@ async def _venue_post(spec: VenueAccountSpec, adapter, channel, text, reply_to, 
         except VenueAuthError:
             _note_auth(spec, failed=True)
             raise
+        except VenueUncertain:
+            if attempt or "idempotent_post" not in adapter.capabilities:
+                raise
+            continue
         except VenueRateLimited as e:
             wait = e.retry_after
             if wait is not None:
@@ -491,6 +497,17 @@ async def crosspost(
                     event_id.hex()[:32],
                 )  # fmt: skip
             except VenueError as e:
+                if isinstance(e, VenueUncertain) and "idempotent_post" in adapter.capabilities:
+                    # The venue may hold the post, and a native copy on B
+                    # would then sit beside it. Keep the frame pending:
+                    # flush_outbox finishes it with the same key.
+                    return {
+                        "egress": "uncertain",
+                        "venue_error": str(e),
+                        "published": False,
+                        "queued": True,
+                        "note": "run flush_outbox to finish: it re-posts with the same key",
+                    }
                 # §11.2 step 4: the venue refused; keep the post on B, natively.
                 frame = native()
                 outbox.put(
