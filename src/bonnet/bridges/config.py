@@ -131,6 +131,27 @@ def _str(table: dict, key: str, where: str, default: str | None = None) -> str:
     return value
 
 
+def check_venue(venue_type: str, venue: str, where: str) -> None:
+    """A venue is named `<type>@<host>`, after the type it runs as.
+
+    Code that only has the venue name (the outbox, the discovery manifest,
+    peers adopting a bridge) reads the type back from it, so the two must
+    agree.
+    """
+    prefix, at, host = venue.partition("@")
+    if not at or not prefix or not host:
+        raise ValueError(f"config: {where}.venue must look like '<type>@<host>', got {venue!r}")
+    if prefix != venue_type:
+        raise ValueError(
+            f"config: {where}.venue {venue!r} must start with its type, '{venue_type}@'"
+        )
+
+
+def venue_type_of(venue: str) -> str:
+    """The type a venue name carries (see `check_venue`)."""
+    return venue.partition("@")[0]
+
+
 def parse_bridge_runtime(table: dict, base_dir: str) -> tuple[BridgeRuntimeConfig, list[str]]:
     """Parse `[bridge_runtime]`. Returns the config and any unrecognized keys."""
     if not isinstance(table, dict):
@@ -176,8 +197,7 @@ def parse_bridge_runtime(table: dict, base_dir: str) -> tuple[BridgeRuntimeConfi
         )
         if not venue.type or "~" in venue.type or "." in venue.type:
             raise ValueError(f"config: {vw}.type must be non-empty with no '~' or '.'")
-        if "@" not in venue.venue:
-            raise ValueError(f"config: {vw}.venue must look like '<type>@<host>'")
+        check_venue(venue.type, venue.venue, vw)
         bindings = v.get("binding", [])
         if not isinstance(bindings, list) or not bindings:
             raise ValueError(f"config: {vw} needs at least one [[...binding]]")
@@ -284,8 +304,7 @@ def parse_bridges(tables, normalize_origin) -> tuple[list[BridgesEntry], list[st
         entry = BridgesEntry(
             type=_str(t, "type", where), venue=_str(t, "venue", where), origins=normalized
         )
-        if "@" not in entry.venue:
-            raise ValueError(f"config: {where}.venue must look like '<type>@<host>'")
+        check_venue(entry.type, entry.venue, where)
         if entry.venue in venues:
             raise ValueError(f"config: venue {entry.venue!r} appears in [[bridges]] twice")
         venues.add(entry.venue)

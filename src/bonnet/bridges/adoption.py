@@ -28,6 +28,7 @@ sync with the peer that carried them.
 
 from __future__ import annotations
 
+from bonnet.bridges.config import venue_type_of
 from bonnet.core.logging import log_msg
 from bonnet.core.record import normalize_origin
 
@@ -59,7 +60,9 @@ class BridgeAdopter:
             origins = entry.get("origins")
             if not isinstance(venue, str) or "@" not in venue or not isinstance(origins, list):
                 continue
-            venue_type = entry.get("type") if isinstance(entry.get("type"), str) else ""
+            # The venue name carries its type; a peer's `type` field that
+            # disagrees with it is ignored.
+            venue_type = venue_type_of(venue)
             for raw in origins:
                 if not isinstance(raw, str) or not raw:
                     continue

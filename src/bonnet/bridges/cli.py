@@ -64,12 +64,17 @@ def _load_config(argv: list[str], prog: str):
 
 
 def _rebuild(argv: list[str]) -> int:
-    from bonnet.bridges.adapter import build_adapter
+    from bonnet.bridges.adapter import build_adapter, missing_adapters
     from bonnet.bridges.index import RuntimeIndex
     from bonnet.core.firehose import FirehoseStore
 
     config, args = _load_config(argv, "bonnet bridge rebuild-index")
     rt = config.bridge_runtime
+    errors = missing_adapters(rt.venues)
+    if errors:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        return 1
     firehose = FirehoseStore(config.events_db_path)
     index = RuntimeIndex(rt.state_dir)
     adapters = [build_adapter(v) for v in rt.venues]

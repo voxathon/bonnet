@@ -82,7 +82,7 @@ class FakeFlatboard:
             "rating": 0,
             "author_rating": 0,
             "created": created,
-            "reply_to": reply_to,
+            "reply_to": reply_to or None,
             "text": text,
         }
         return mid
@@ -104,7 +104,15 @@ class FakeFlatboard:
             since = int(request.url.params.get("since", "0") or 0)
             ids = sorted((m for m in self.messages if m > since), reverse=True)
             chunk = ids[(page - 1) * PAGE_SIZE : page * PAGE_SIZE]
-            body = {"first_id": self.first_id, "messages": [self.messages[i] for i in chunk]}
+            body = {
+                "page": page,
+                "pages": max(1, -(-len(ids) // PAGE_SIZE)),
+                "total": len(self.messages),
+                "first_id": self.first_id,
+                "last_id": self.next_id - 1,
+                "you": None,
+                "msgs": [self.messages[i] for i in chunk],
+            }
             return httpx.Response(200, json=body)
         if path.startswith("/board/msg/") and path.endswith(".json"):
             mid = int(path[len("/board/msg/") : -len(".json")])
@@ -121,7 +129,7 @@ class FakeFlatboard:
         user, token = params.get("user", ""), params.get("token", "")
         if self.accounts.get(user) != token:
             self.auth_failures += 1
-            return httpx.Response(401, json={"ok": False, "error": "bad token"})
+            return httpx.Response(401, json={"error": "auth_failed"})
         if self.fail_posts:
             self.fail_posts -= 1
             return httpx.Response(500, text="boom")

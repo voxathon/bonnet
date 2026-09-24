@@ -18,9 +18,9 @@ Flatboard is one flat, immutable board with a FIFO: old messages are
 evicted, never edited. Pages are newest first, 50 per page. Reads are
 limited to 120/min per IP, so this adapter spaces its requests.
 
-The page envelope is accepted either as a bare list of messages or as an
-object with a `messages` list (and optionally `first_id`, the oldest id the
-venue still holds). Each message is
+API reference: `/board/llms.txt` on the venue. A page is
+`{page, pages, total, first_id, last_id, you, msgs}`, where `first_id` and
+`last_id` bound the ids the FIFO still holds. Each message in `msgs` is
 `{id, author, rating, author_rating, created, reply_to, text}`.
 """
 
@@ -131,7 +131,7 @@ class FlatboardAdapter:
             data = resp.json()
         except ValueError as e:
             raise VenueError(f"flatboard page {n}: bad JSON: {e}") from e
-        messages = data.get("messages") if isinstance(data, dict) else data
+        messages = data.get("msgs") if isinstance(data, dict) else None
         if not isinstance(messages, list):
             raise VenueError(f"flatboard page {n}: no message list")
         return [m for m in messages if isinstance(m, dict) and _id(m.get("id")) is not None]

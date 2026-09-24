@@ -19,19 +19,24 @@ venue's reply chain: a reply's `root_id` is the venue's stated root if it
 has one, otherwise None, and the runtime fills it from its own index.
 
 Adapters register under the entry point group `bonnet.bridges.adapters`,
-keyed by venue type. Built-ins are also listed in `BUILTIN_ADAPTERS`, so
-they load even from a source tree that was never installed.
+keyed by venue type. Built-ins are listed in `BUILTIN_ADAPTERS` and always
+win over entry points: an adapter runs next to the master secret and the
+relay tokens, so installing a package must never swap out one the operator
+already runs. A type no built-in covers must be claimed by exactly one
+installed package.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 import time
 from dataclasses import dataclass, field
 from importlib import metadata
 from typing import Literal, Protocol
 
 from bonnet.bridges.config import VenueConfig
+from bonnet.core.logging import log_msg
 
 ENTRY_POINT_GROUP = "bonnet.bridges.adapters"
 
@@ -159,18 +164,64 @@ class ReadLimiter:
             self._next = now + self._interval
 
 
-def load_adapter_class(venue_type: str) -> type:
-    """The adapter class for `venue_type`, from entry points or the built-ins."""
-    target = None
+class AdapterNotFound(ValueError):
+    """No adapter, or more than one, is installed for a venue type."""
+
+
+def _claims(venue_type: str) -> list[metadata.EntryPoint]:
+    """Entry points claiming `venue_type`, one per distinct target."""
+    out: dict[str, metadata.EntryPoint] = {}
     for ep in metadata.entry_points(group=ENTRY_POINT_GROUP):
         if ep.name == venue_type:
-            return ep.load()
-    target = BUILTIN_ADAPTERS.get(venue_type)
-    if target is None:
-        raise ValueError(f"no bridge adapter for venue type {venue_type!r}")
-    module_name, _, attr = target.partition(":")
-    module = __import__(module_name, fromlist=[attr])
-    return getattr(module, attr)
+            out.setdefault(ep.value, ep)
+    return list(out.values())
+
+
+def load_adapter_class(venue_type: str) -> type:
+    """The adapter class for `venue_type`: the built-in, else the one
+    installed package that claims it."""
+    builtin = BUILTIN_ADAPTERS.get(venue_type)
+    if builtin is not None:
+        for ep in _claims(venue_type):
+            if ep.value != builtin:
+                log_msg(
+                    f"BRIDGE: ignoring {ep.value} for venue type {venue_type!r}: "
+                    "built-in adapters can't be replaced"
+                )
+        module_name, _, attr = builtin.partition(":")
+        return getattr(importlib.import_module(module_name), attr)
+    claims = _claims(venue_type)
+    if not claims:
+        known = sorted({*BUILTIN_ADAPTERS, *adapter_types()})
+        raise AdapterNotFound(
+            f"no bridge adapter for venue type {venue_type!r}: install the package "
+            "that provides it into the same environment as bonnet "
+            f"(e.g. `uvx --with <package> bonnet`); installed types: {', '.join(known)}"
+        )
+    if len(claims) > 1:
+        raise AdapterNotFound(
+            f"venue type {venue_type!r} is claimed by more than one installed package "
+            f"({', '.join(sorted(ep.value for ep in claims))}): uninstall all but one"
+        )
+    return claims[0].load()
+
+
+def adapter_types() -> set[str]:
+    """Venue types installed packages claim, built-ins not included."""
+    return {ep.name for ep in metadata.entry_points(group=ENTRY_POINT_GROUP)}
+
+
+def missing_adapters(venues: list[VenueConfig]) -> list[str]:
+    """One error per venue whose adapter can't be loaded; empty if all can."""
+    errors = []
+    for venue in venues:
+        try:
+            load_adapter_class(venue.type)
+        except AdapterNotFound as e:
+            errors.append(f"{venue.venue}: {e}")
+        except (ImportError, AttributeError) as e:
+            errors.append(f"{venue.venue}: the adapter for {venue.type!r} failed to load: {e!r}")
+    return errors
 
 
 def build_adapter(venue: VenueConfig, **kwargs) -> VenueAdapter:

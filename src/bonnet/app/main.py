@@ -383,6 +383,16 @@ def main(argv: list[str] | None = None, bridge: bool = False):
             file=sys.stderr,
         )
         raise SystemExit(1)
+    if bridge:
+        # Before binding a port: a venue type with no adapter would
+        # otherwise surface as a traceback from BridgeRuntime.
+        from bonnet.bridges.adapter import missing_adapters
+
+        errors = missing_adapters(config.bridge_runtime.venues)
+        if errors:
+            for error in errors:
+                print(f"error: {error}", file=sys.stderr)
+            raise SystemExit(1)
 
     if args.log_level is not None and args.log_level.upper() not in FirehoseConfig.LOG_LEVELS:
         print(

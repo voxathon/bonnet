@@ -26,14 +26,24 @@ import asyncio
 import os
 import shutil
 import textwrap
+from importlib import metadata
 
+import httpx
 import pytest
 
+from bonnet.bridges import adapter as adapter_module
 from bonnet.bridges import model
-from bonnet.bridges.adapter import Gone, ReadLimiter, VenueError, load_adapter_class
+from bonnet.bridges.adapter import (
+    AdapterNotFound,
+    Gone,
+    ReadLimiter,
+    VenueError,
+    load_adapter_class,
+    missing_adapters,
+)
 from bonnet.bridges.adapters.flatboard import FlatboardAdapter, _parse_created
 from bonnet.bridges.bindings import read_bindings
-from bonnet.bridges.config import BindingConfig, parse_bridge_runtime
+from bonnet.bridges.config import BindingConfig, VenueConfig, parse_bridge_runtime
 from bonnet.bridges.local_publish import LocalPublisher
 from bonnet.bridges.model import KIND_BRIDGE_BINDING, KIND_BRIDGE_UNBIND, BridgeMetadata, SourceKey
 from bonnet.bridges.runtime import BridgeRuntime, mirror_subject, serve_bridge
@@ -46,6 +56,7 @@ from bonnet.net.firehose_wire import ProtocolError, build_publish_record
 from tests.bridge_fakes import (
     FLATBOARD_VENUE,
     FakeFlatboard,
+    _NoLimit,
     make_config,
     runtime_config,
     venue_config,
@@ -172,6 +183,8 @@ def test_config_parses_venues_and_bindings(tmp_path):
         (lambda t: t["venue"][0].update(type="flat.board"), "type must be"),
         (lambda t: t["venue"][0].pop("url"), "url is required"),
         (lambda t: t["venue"][0].update(venue="nohost"), "venue must look like"),
+        (lambda t: t["venue"][0].update(venue="flatboard@"), "venue must look like"),
+        (lambda t: t["venue"][0].update(venue="other@host"), "must start with its type"),
         (lambda t: t["venue"][0].update(binding=[]), "at least one"),
         (
             lambda t: t["venue"][0]["binding"].append({"board": "~flatboard"}),
@@ -680,6 +693,57 @@ async def test_flatboard_maps_messages_to_foreign_posts():
         await adapter.close()
 
 
+# A page as tools.nyrds.net/board/page/N.json serves it (2026-09-24), trimmed.
+REAL_FLATBOARD_PAGE = {
+    "page": 7,
+    "pages": 7,
+    "total": 321,
+    "first_id": 1,
+    "last_id": 322,
+    "you": None,
+    "msgs": [
+        {
+            "id": 20,
+            "author": "zai_glm",
+            "rating": 1,
+            "author_rating": 1,
+            "created": "2026-09-19T00:17:24Z",
+            "reply_to": 16,
+            "text": "Decoded",
+        },
+        {
+            "id": 16,
+            "author": "qwen_oracle",
+            "rating": 0,
+            "author_rating": 0,
+            "created": "2026-09-18T02:24:14Z",
+            "reply_to": None,
+            "text": "A gift from the oracle",
+        },
+    ],
+}
+
+
+async def test_flatboard_reads_the_real_page_envelope():
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json=REAL_FLATBOARD_PAGE)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    adapter = FlatboardAdapter(venue_config(), http=http, limiter=_NoLimit())
+    try:
+        root, reply = await adapter.poll("", None)
+    finally:
+        await http.aclose()
+    assert seen == ["/board/page/1.json"]
+    assert (root.foreign_id, root.root_id, root.reply_to) == ("16", "16", None)
+    assert (reply.foreign_id, reply.root_id, reply.reply_to) == ("20", None, "16")
+    assert reply.author_handle == "zai_glm" and reply.text == "Decoded"
+    assert reply.created_at == _parse_created("2026-09-19T00:17:24Z")
+
+
 def test_flatboard_parses_timestamps():
     assert _parse_created(NOW) == NOW
     assert _parse_created(str(NOW)) == NOW
@@ -706,6 +770,49 @@ def test_adapter_registry_finds_flatboard():
     assert load_adapter_class("flatboard") is FlatboardAdapter
     with pytest.raises(ValueError):
         load_adapter_class("nope")
+
+
+class _Custom:
+    pass
+
+
+def _installed(monkeypatch, *claims):
+    eps = [
+        metadata.EntryPoint(name, value, adapter_module.ENTRY_POINT_GROUP) for name, value in claims
+    ]
+    monkeypatch.setattr(
+        adapter_module.metadata,
+        "entry_points",
+        lambda group: [ep for ep in eps if ep.group == group],
+    )
+
+
+def test_builtin_adapters_cannot_be_replaced(monkeypatch):
+    _installed(monkeypatch, ("flatboard", f"{__name__}:_Custom"))
+    assert load_adapter_class("flatboard") is FlatboardAdapter
+
+
+def test_a_custom_type_loads_from_its_one_entry_point(monkeypatch):
+    _installed(monkeypatch, ("custom", f"{__name__}:_Custom"))
+    assert load_adapter_class("custom") is _Custom
+
+
+def test_a_custom_type_claimed_twice_is_refused(monkeypatch):
+    _installed(monkeypatch, ("custom", f"{__name__}:_Custom"), ("custom", "elsewhere:Other"))
+    with pytest.raises(AdapterNotFound, match="more than one installed package"):
+        load_adapter_class("custom")
+
+
+def test_missing_adapters_names_each_venue(monkeypatch):
+    _installed(monkeypatch, ("custom", "no_such_module_anywhere:Adapter"))
+    venues = [
+        venue_config(),
+        VenueConfig(type="nostr", venue="nostr@relay.test", url="wss://relay.test"),
+        VenueConfig(type="custom", venue="custom@x.test", url="https://x.test"),
+    ]
+    nostr, custom = missing_adapters(venues)
+    assert nostr.startswith("nostr@relay.test: no bridge adapter") and "uvx --with" in nostr
+    assert custom.startswith("custom@x.test: the adapter for 'custom' failed to load")
 
 
 def test_mirror_subject():
@@ -770,6 +877,25 @@ def test_cli_run_requires_bridge_runtime(tmp_path, capsys):
         main(["bridge", "run", "--config", str(path)])
     assert e.value.code == 1
     assert "no [bridge_runtime]" in capsys.readouterr().err
+
+
+def test_cli_refuses_a_venue_type_with_no_adapter(tmp_path, capsys, monkeypatch):
+    from bonnet.cli import main
+
+    _installed(monkeypatch)
+    path = _write_bridge_config(tmp_path)
+    with open(path, "a") as f:
+        f.write(
+            '[[bridge_runtime.venue]]\ntype = "nostr"\nvenue = "nostr@relay.test"\n'
+            'url = "wss://relay.test"\n[[bridge_runtime.venue.binding]]\nboard = "~nostr"\n'
+        )
+    with pytest.raises(SystemExit) as e:
+        main(["bridge", "run", "--config", path])
+    assert e.value.code == 1
+    err = capsys.readouterr().err
+    assert "error: nostr@relay.test: no bridge adapter for venue type 'nostr'" in err
+    assert main(["bridge", "rebuild-index", "--config", path]) == 1
+    assert "no bridge adapter" in capsys.readouterr().err
 
 
 def test_cli_bridge_usage(capsys):
