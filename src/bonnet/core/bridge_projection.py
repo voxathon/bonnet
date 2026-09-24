@@ -22,7 +22,7 @@ boards are bound to which venues; observations; admissions.
 
 Which copy is canonical is not a fact but this server's opinion, since it
 depends on which bridge origins this server recognizes. `BridgeView` answers
-that at read time from the facts plus the `[[bridges]]` preference order.
+that at read time from the facts plus the `[[recognize]]` preference order.
 Nothing here is authoritative; `clear_origin` and a replay rebuild it.
 """
 

@@ -420,7 +420,7 @@ async def test_no_loop_means_refused(w):
 
 def test_admission_config_parses():
     cfg, unknown = parse_bridge_admission({"enabled": True, "timeout_seconds": 2, "odd": 1})
-    assert cfg.enabled and cfg.timeout_seconds == 2 and unknown == ["bridge_admission.odd"]
+    assert cfg.enabled and cfg.timeout_seconds == 2 and unknown == ["admission.odd"]
     with pytest.raises(ValueError):
         parse_bridge_admission({"max_chain_hops": 0})
 

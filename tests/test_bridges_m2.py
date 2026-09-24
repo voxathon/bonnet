@@ -570,7 +570,7 @@ def test_bridges_config_parses_and_validates():
         _norm,
     )
     assert entries == [BridgesEntry("flatboard", FLATBOARD_VENUE, ["b.test", "c.test"])]
-    assert unknown == ["bridges[0].x"]
+    assert unknown == ["recognize[0].x"]
     for bad in (
         [{"type": "flatboard", "venue": FLATBOARD_VENUE, "origins": []}],
         [{"type": "flatboard", "venue": FLATBOARD_VENUE, "origins": ["a", "a"]}],

@@ -146,9 +146,6 @@ _TOP_LEVEL_KEYS = {
     "include",
     "witnesses",
     "logging",
-    "bridge_runtime",
-    "bridges",
-    "bridge_admission",
 }
 
 _INCLUDE_ALLOWED_TOP_KEYS = {"acl", "sync"}
@@ -444,11 +441,11 @@ class FirehoseConfig:
         self.witness = witness or WitnessConfig()
         self.trusted_forwarders = list(trusted_forwarders or [])
         # bonnet.bridges.config.BridgeRuntimeConfig when this origin is a
-        # bridge origin ([bridge_runtime] present), else None.
+        # bridge origin ([runtime] in bridges.toml), else None.
         self.bridge_runtime = bridge_runtime
-        # bonnet.bridges.config.BridgesEntry list: [[bridges]] (§10.1).
+        # bonnet.bridges.config.BridgesEntry list: bridges.toml [[recognize]] (§10.1).
         self.bridges = list(bridges or [])
-        # bonnet.bridges.config.AdmissionConfig, or None: [bridge_admission] (§6).
+        # bonnet.bridges.config.AdmissionConfig, or None: bridges.toml [admission] (§6).
         self.bridge_admission = bridge_admission
 
     def validate(self) -> None:
@@ -484,7 +481,7 @@ class FirehoseConfig:
                 for binding in venue.bindings:
                     if binding.max_body_bytes > self.max_article_body_size:
                         raise ValueError(
-                            f"config: binding {binding.board!r} max_body_bytes "
+                            f"config: bridges.toml binding {binding.board!r} max_body_bytes "
                             f"({binding.max_body_bytes}) exceeds limits.max_article_body_size "
                             f"({self.max_article_body_size})"
                         )
@@ -712,24 +709,11 @@ class FirehoseConfig:
         routing = data.get("routing", {})
         if not isinstance(routing, dict):
             raise ValueError("config: [routing] must be a table")
-        bridge_runtime = None
-        if "bridge_runtime" in data:
-            from bonnet.bridges.config import parse_bridge_runtime
+        # Bridges live in their own file next to this one (bridges.toml).
+        from bonnet.bridges.config import bridges_path, load_bridges_file
 
-            bridge_runtime, bridge_unknown = parse_bridge_runtime(data["bridge_runtime"], base_dir)
-            unknown_keys.extend(bridge_unknown)
-        bridges: list = []
-        if "bridges" in data:
-            from bonnet.bridges.config import parse_bridges
-
-            bridges, bridges_unknown = parse_bridges(data["bridges"], _normalize_origin)
-            unknown_keys.extend(bridges_unknown)
-        bridge_admission = None
-        if "bridge_admission" in data:
-            from bonnet.bridges.config import parse_bridge_admission
-
-            bridge_admission, admission_unknown = parse_bridge_admission(data["bridge_admission"])
-            unknown_keys.extend(admission_unknown)
+        bridges_file = load_bridges_file(bridges_path(path), _normalize_origin)
+        unknown_keys.extend(bridges_file.unknown_keys)
 
         # BONNET_SERVER_HOME (or the per-user default, see core.home) only
         # supplies a *default* for storage paths left unset in config.toml —
@@ -836,9 +820,9 @@ class FirehoseConfig:
                 wire_max=witnesses.get("wire_max", 32),
             ),
             routing=_parse_routing(routing),
-            bridge_runtime=bridge_runtime,
-            bridges=bridges,
-            bridge_admission=bridge_admission,
+            bridge_runtime=bridges_file.runtime,
+            bridges=bridges_file.recognize,
+            bridge_admission=bridges_file.admission,
         )
 
     @staticmethod

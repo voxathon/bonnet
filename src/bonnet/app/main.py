@@ -76,8 +76,13 @@ def _load_and_validate_config(args) -> FirehoseConfig:
     --check-config alike - never let a config problem escape as a raw
     traceback.
     """
+    from bonnet.bridges.config import BridgesConfigError
+
     try:
         config = FirehoseConfig.load(args.config)
+    except BridgesConfigError as exc:
+        print(f"error: invalid bridge configuration in {exc}", file=sys.stderr)
+        raise SystemExit(1)
     except FileNotFoundError:
         print(f"error: config file not found: {args.config}", file=sys.stderr)
         # README's "Running a board" walkthrough only ever mentions --init
@@ -146,10 +151,10 @@ def _preflight_bind(host: str, port: int) -> None:
 
 
 def _bridges_warnings(config: FirehoseConfig) -> list[str]:
-    """[[bridges]] origins that aren't sync peers: their copies never arrive here."""
+    """[[recognize]] origins that aren't sync peers: their copies never arrive here."""
     peers = {p.origin for p in config.peers}
     return [
-        f"[[bridges]] venue {entry.venue!r} lists origin {origin!r}, which is not a "
+        f"bridges.toml [[recognize]] venue {entry.venue!r} lists origin {origin!r}, which is not a "
         "[[sync.peers]] entry; its copies won't reach this server"
         for entry in getattr(config, "bridges", [])
         for origin in entry.origins
@@ -195,7 +200,8 @@ def main(argv: list[str] | None = None, bridge: bool = False):
     """`bonnet server`, or with `bridge=True`, `bonnet bridge run`.
 
     Bridge mode is the same server plus the bridge runtime in one process
-    (docs/bonnet-bridges-design.md §5.2): it needs a [bridge_runtime] table,
+    (docs/bonnet-bridges-design.md §5.2): it needs a bridges.toml with a
+    [runtime] table next to config.toml,
     and skips the operator REPL unless --console is given.
     """
     parser = argparse.ArgumentParser(
@@ -377,18 +383,25 @@ def main(argv: list[str] | None = None, bridge: bool = False):
 
     config = _load_and_validate_config(args)
     if bridge and config.bridge_runtime is None:
+        from bonnet.bridges.config import bridges_path
+
         print(
-            f"error: {args.config} has no [bridge_runtime] table; "
+            f"error: {bridges_path(args.config)} has no [runtime] table; "
             "'bonnet bridge run' needs one (see docs/bonnet-bridges-design.md §10.2)",
             file=sys.stderr,
         )
         raise SystemExit(1)
     if bridge:
-        # Before binding a port: a venue type with no adapter would
-        # otherwise surface as a traceback from BridgeRuntime.
-        from bonnet.bridges.adapter import missing_adapters
+        # Before binding a port: a venue type with no adapter, or options
+        # it can't take, would otherwise surface as a traceback from
+        # BridgeRuntime.
+        from bonnet.bridges.adapter import missing_adapters, venue_option_problems
 
         errors = missing_adapters(config.bridge_runtime.venues)
+        if not errors:
+            errors, warnings = venue_option_problems(config.bridge_runtime.venues)
+            for warning in warnings:
+                print(f"warning: {warning}", file=sys.stderr)
         if errors:
             for error in errors:
                 print(f"error: {error}", file=sys.stderr)

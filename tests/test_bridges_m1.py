@@ -166,7 +166,7 @@ def _table(**over):
 
 def test_config_parses_venues_and_bindings(tmp_path):
     cfg, unknown = parse_bridge_runtime(_table(surprise=1), str(tmp_path))
-    assert unknown == ["bridge_runtime.surprise"]
+    assert unknown == ["runtime.surprise"]
     assert cfg.state_dir == str(tmp_path / "state")
     assert cfg.daemon_key.endswith(os.path.join(".bonnet", "bridges", "daemon.key"))
     (venue,) = cfg.venues
@@ -210,13 +210,21 @@ def test_config_file_loads_bridge_runtime_and_checks_body_cap(tmp_path):
             origin = "{ORIGIN}"
             [limits]
             max_article_body_size = 500
-            [bridge_runtime]
+            """
+        )
+    )
+    (tmp_path / "bridges.toml").write_text(
+        textwrap.dedent(
+            f"""
+            [runtime]
             state_dir = "state"
-            [[bridge_runtime.venue]]
+            [[runtime.venue]]
             type = "flatboard"
             venue = "{FLATBOARD_VENUE}"
             url = "https://flatboard.test"
-            [[bridge_runtime.venue.binding]]
+            [runtime.venue.options]
+            flavor = "plain"
+            [[runtime.venue.binding]]
             board = "~flatboard"
             max_body_bytes = 1000
             """
@@ -224,8 +232,69 @@ def test_config_file_loads_bridge_runtime_and_checks_body_cap(tmp_path):
     )
     config = FirehoseConfig.load(str(path))
     assert config.bridge_runtime is not None and not config.unknown_keys
+    assert config.bridge_runtime.state_dir == str(tmp_path / "state")
+    assert config.bridge_runtime.venues[0].options == {"flavor": "plain"}
     with pytest.raises(ValueError, match="exceeds limits.max_article_body_size"):
         config.validate()
+
+
+def test_bridge_tables_in_config_toml_are_just_unknown_keys(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f'[server]\norigin = "{ORIGIN}"\n[bridge_runtime]\nstate_dir = "s"\n'
+        '[[bridges]]\ntype = "flatboard"\n[bridge_admission]\nenabled = true\n'
+    )
+    config = FirehoseConfig.load(str(path))
+    assert config.bridge_runtime is None and config.bridges == []
+    assert config.bridge_admission is None
+    assert sorted(config.unknown_keys) == ["bridge_admission", "bridge_runtime", "bridges"]
+
+
+def test_bridges_file_reports_its_own_unknown_keys_and_errors(tmp_path):
+    from bonnet.bridges.config import BridgesConfigError
+
+    path = tmp_path / "config.toml"
+    path.write_text(f'[server]\norigin = "{ORIGIN}"\n')
+    bridges = tmp_path / "bridges.toml"
+    bridges.write_text("surprise = 1\n[admission]\nodd = 2\n")
+    config = FirehoseConfig.load(str(path))
+    assert config.unknown_keys == ["bridges.toml:surprise", "bridges.toml:admission.odd"]
+
+    bridges.write_text("[admission]\nmax_chain_hops = 0\n")
+    with pytest.raises(BridgesConfigError, match="bridges.toml: admission.max_chain_hops"):
+        FirehoseConfig.load(str(path))
+    bridges.write_text("[runtime\n")
+    with pytest.raises(BridgesConfigError, match="could not parse"):
+        FirehoseConfig.load(str(path))
+    bridges.write_text(
+        f'[[runtime.venue]]\ntype = "flatboard"\nvenue = "{FLATBOARD_VENUE}"\n'
+        'url = "u"\noptions = 3\n'
+    )
+    with pytest.raises(BridgesConfigError, match="options must be a table"):
+        FirehoseConfig.load(str(path))
+
+
+def test_venue_options_go_to_the_adapter(monkeypatch):
+    from bonnet.bridges import adapter as adapter_mod
+    from bonnet.bridges.adapter import venue_option_problems
+
+    class Picky:
+        options = frozenset({"relays"})
+
+        @classmethod
+        def check_options(cls, options):
+            if not isinstance(options.get("relays", []), list):
+                raise ValueError("relays must be a list")
+
+    monkeypatch.setattr(adapter_mod, "load_adapter_class", lambda venue_type: Picky)
+
+    def venue(**options):
+        return VenueConfig(type="picky", venue="picky@host", url="u", options=options)
+
+    assert venue_option_problems([venue(relays=["a"])]) == ([], [])
+    errors, warnings = venue_option_problems([venue(relays="a", typo=1)])
+    assert errors == ["picky@host: options: relays must be a list"]
+    assert warnings == ["picky@host: the picky adapter has no option 'typo' (ignored)"]
 
 
 # ---------------------------------------------------------------------------
@@ -879,15 +948,21 @@ def _write_bridge_config(tmp_path) -> str:
             data_dir = "data"
             boards_dir = "boards"
             events_bodies_dir = "event_bodies"
-            [bridge_runtime]
+            """
+        )
+    )
+    (tmp_path / "bridges.toml").write_text(
+        textwrap.dedent(
+            f"""
+            [runtime]
             daemon_key = "keys/daemon.key"
             master_secret = "keys/master.secret"
             state_dir = "state"
-            [[bridge_runtime.venue]]
+            [[runtime.venue]]
             type = "flatboard"
             venue = "{FLATBOARD_VENUE}"
             url = "https://flatboard.test"
-            [[bridge_runtime.venue.binding]]
+            [[runtime.venue.binding]]
             board = "~flatboard"
             """
         )
@@ -919,7 +994,7 @@ def test_cli_run_requires_bridge_runtime(tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         main(["bridge", "run", "--config", str(path)])
     assert e.value.code == 1
-    assert "no [bridge_runtime]" in capsys.readouterr().err
+    assert "bridges.toml has no [runtime]" in capsys.readouterr().err
 
 
 def test_cli_refuses_a_venue_type_with_no_adapter(tmp_path, capsys, monkeypatch):
@@ -927,10 +1002,10 @@ def test_cli_refuses_a_venue_type_with_no_adapter(tmp_path, capsys, monkeypatch)
 
     _installed(monkeypatch)
     path = _write_bridge_config(tmp_path)
-    with open(path, "a") as f:
+    with open(tmp_path / "bridges.toml", "a") as f:
         f.write(
-            '[[bridge_runtime.venue]]\ntype = "nostr"\nvenue = "nostr@relay.test"\n'
-            'url = "wss://relay.test"\n[[bridge_runtime.venue.binding]]\nboard = "~nostr"\n'
+            '[[runtime.venue]]\ntype = "nostr"\nvenue = "nostr@relay.test"\n'
+            'url = "wss://relay.test"\n[[runtime.venue.binding]]\nboard = "~nostr"\n'
         )
     with pytest.raises(SystemExit) as e:
         main(["bridge", "run", "--config", path])

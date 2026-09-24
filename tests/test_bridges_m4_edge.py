@@ -545,3 +545,20 @@ def test_accounts_file_is_validated(tmp_path, monkeypatch):
         bridge_tools.load_accounts()
     monkeypatch.setenv("BONNET_BRIDGE_ACCOUNTS", str(tmp_path / "missing.toml"))
     assert bridge_tools.load_accounts() == {}
+
+
+def test_accounts_carry_venue_options(tmp_path, monkeypatch):
+    token = tmp_path / "t"
+    token.write_text("tok")
+    accounts = tmp_path / "a.toml"
+    base = (
+        f'[[account]]\nvenue = "{FLATBOARD_VENUE}"\ntype = "flatboard"\n'
+        f'url = "https://flatboard.test"\nuser = "u"\ntoken_file = "{token}"\n'
+    )
+    accounts.write_text(base + '[account.options]\nflavor = "plain"\n')
+    monkeypatch.setenv("BONNET_BRIDGE_ACCOUNTS", str(accounts))
+    (spec,) = bridge_tools.load_accounts().values()
+    assert spec.options == {"flavor": "plain"}
+    accounts.write_text(base + "options = 3\n")
+    with pytest.raises(ValueError, match="options must be a table"):
+        bridge_tools.load_accounts()

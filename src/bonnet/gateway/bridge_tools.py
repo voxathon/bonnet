@@ -31,6 +31,7 @@ a tool call:
     url = "https://tools.nyrds.net"
     user = "lanternfly"
     token_file = "~/.bonnet/flatboard.token"
+    # [account.options]  flags for this venue's adapter, as in bridges.toml
 
 Plain functions: `bonnet.gateway.tools` registers them as MCP tools (and
 declares their Needs) at its end, so this module never touches `mcp` and
@@ -45,7 +46,7 @@ import json
 import os
 import time
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from bonnet.bridges import model
 from bonnet.bridges.adapter import (
@@ -56,8 +57,9 @@ from bonnet.bridges.adapter import (
     VenueRateLimited,
     VenueUncertain,
     build_adapter,
+    venue_option_problems,
 )
-from bonnet.bridges.config import VenueConfig, check_venue, venue_type_of
+from bonnet.bridges.config import VenueConfig, check_venue, parse_options, venue_type_of
 from bonnet.bridges.model import BridgeMetadata, SourceKey
 from bonnet.core.crypto import Identity
 from bonnet.core.kinds import KIND_ARTICLE
@@ -88,6 +90,7 @@ class VenueAccountSpec:
     type: str
     url: str
     account: ForeignAccount
+    options: dict = field(default_factory=dict)
 
 
 def accounts_path() -> str:
@@ -114,6 +117,7 @@ def load_accounts() -> dict[str, VenueAccountSpec]:
                 type=a["type"],
                 url=a["url"],
                 account=ForeignAccount(a["user"], token),
+                options=parse_options(a, f"account[{i}]"),
             )
         except (KeyError, OSError, TypeError, ValueError) as e:
             raise ValueError(f"{path}: account[{i}] is unusable: {e!r}") from e
@@ -136,7 +140,11 @@ def _client_for(url: str):
 
 
 def _adapter_for(spec: VenueAccountSpec):
-    return build_adapter(VenueConfig(type=spec.type, venue=spec.venue, url=spec.url))
+    venue = VenueConfig(type=spec.type, venue=spec.venue, url=spec.url, options=spec.options)
+    errors, _ = venue_option_problems([venue])
+    if errors:
+        raise ValueError(f"{accounts_path()}: {'; '.join(errors)}")
+    return build_adapter(venue)
 
 
 # ---------------------------------------------------------------------------
