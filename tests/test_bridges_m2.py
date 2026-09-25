@@ -482,6 +482,42 @@ async def test_bad_bridge_filters_are_errors(s, flt):
     assert e.value.code == 0x0006
 
 
+async def _query_all(sc, filters, offset=0, limit=100):
+    resp = await read(sc.home, build_article_query("", BOARD, filters, offset, limit))
+    return parse_article_query_response(resp, aggregate=True).results
+
+
+async def test_aggregate_query_shows_each_post_once_with_its_origin(s):
+    """origin="" used to answer nothing; a homeserver asked about a board
+    only peers hold showed it empty. It now queries every origin holding
+    the board and, on a `~` board, keeps one canonical copy per post."""
+    rows = await _query_all(s, [])
+    assert _shown(s, rows) == {str(i): B1 for i in (s.p1, s.p2, s.p3, s.p4, s.p5)}
+    assert all(r.origin == B1 for r in rows)
+    # Grouped by origin, each group in article_num order.
+    assert [r.article_num for r in rows] == sorted(r.article_num for r in rows)
+
+
+async def test_aggregate_query_pages_completely(s):
+    everything = await _query_all(s, [])
+    paged = []
+    for offset in range(0, 6, 2):
+        paged.extend(await _query_all(s, [], offset=offset, limit=2))
+    assert [(r.origin, r.event_id) for r in paged] == [(r.origin, r.event_id) for r in everything]
+
+
+async def test_aggregate_query_resolves_bridge_filters_per_origin(s):
+    """A src filter names a foreign post, which is a different article id on
+    each bridge origin: it has to be resolved against each one."""
+    (hit,) = await _query_all(s, [(0x0B, 0x01, 0x02, _src_value(s.p4))])
+    assert (hit.origin, s.foreign_id(hit.origin, hit)) == (B1, str(s.p4))
+
+
+async def test_aggregate_query_of_an_unknown_board_is_empty(s):
+    resp = await read(s.home, build_article_query("", "nowhere", []))
+    assert parse_article_query_response(resp, aggregate=True).results == []
+
+
 # ---------------------------------------------------------------------------
 # Manifest (§10.1)
 # ---------------------------------------------------------------------------

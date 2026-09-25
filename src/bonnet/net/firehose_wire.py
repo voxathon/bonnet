@@ -953,13 +953,20 @@ def build_article_query(
     return out
 
 
-def parse_article_query_response(resp: bytes) -> QueryResponse:
-    """Parse an ARTICLE_QUERY response. Returns QueryResponse."""
+def parse_article_query_response(resp: bytes, aggregate: bool = False) -> QueryResponse:
+    """Parse an ARTICLE_QUERY response. Returns QueryResponse.
+
+    `aggregate`: the request named no origin, so each row carries its own.
+    """
     status, payload = parse_response(resp)
     count, offset = _read_u16(payload, 0)
     items = []
     for _ in range(count):
+        item_origin = ""
+        if aggregate:
+            item_origin, offset = _read_text16(payload, offset)
         item, offset = _decode_article_list_item(payload, offset)
+        item.origin = item_origin
         items.append(item)
     _expect_end(payload, offset, "article query response")
     return QueryResponse(results=items)

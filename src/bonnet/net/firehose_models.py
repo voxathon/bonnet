@@ -150,6 +150,10 @@ class ArticleView:
     body: bytes | None = None
     body_check: str = "unchecked"  # unchecked, matched, mismatched
     author_check: str = "unchecked"  # unchecked, unregistered, registry, retired, foreign
+    # Why `body` is None although the article has one, when a fetch was tried
+    # and failed (an unaccepted origin key, a refused redirect, a network
+    # error). Empty when the body arrived or wasn't asked for.
+    body_unavailable_reason: str = ""
 
 
 @dataclass

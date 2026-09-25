@@ -68,8 +68,38 @@ async def test_a_public_relay_cannot_redirect_us_inward(redirecting, target):
     private ranges. A relay on the public internet has no business sending
     anyone to any of them."""
     client = redirecting("https://relay.test", target)
-    with pytest.raises(FirehoseClientError, match="unsafe target"):
+    with pytest.raises(FirehoseClientError, match=f"won't dial: .*address \\({target}\\)"):
         await client.get_article_body("origin.test", "general", 1)
+    await client.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "resolved, reason",
+    [
+        ("127.0.0.1", "it resolves to a loopback address (127.0.0.1)"),
+        ("10.0.0.5", "it resolves to a private address (10.0.0.5)"),
+        (None, "it does not resolve"),
+    ],
+)
+async def test_a_refused_redirect_says_why(redirecting, monkeypatch, resolved, reason):
+    """A hosts-file entry and a missing DNS record are fixed in different
+    places; one bare "unsafe" for both left an operator guessing which."""
+    import socket
+
+    def fake_getaddrinfo(host, port, *a, **kw):
+        if resolved is None:
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (resolved, port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    client = redirecting("https://relay.test", "bridge.test", 443)
+    with pytest.raises(FirehoseClientError) as err:
+        await client.get_article_body("origin.test", "general", 1)
+    message = str(err.value)
+    assert "relay.test redirected this body to bridge.test:443" in message
+    assert "origin.test" in message
+    assert reason in message
     await client.close()
 
 

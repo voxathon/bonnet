@@ -19,7 +19,7 @@ every logged IP to the socket peer (loopback through the tunnel), because the
 origin only ever read scope["client"]. These tests cover the fix:
 
 - config: `trusted_forwarders` parses, validates and is a known section key.
-- origin: the forwarded client IP (CF-Connecting-IP / X-Real-IP / leftmost
+- origin: the forwarded client IP (CF-Connecting-IP / X-Real-IP / rightmost
   X-Forwarded-For) is logged alongside the socket peer, and the anonymous
   rate limiter buckets on it when — and only when — the connecting IP is on
   the trusted_forwarders list.
@@ -96,7 +96,8 @@ def test_config_validate_rejects_garbage_forwarders():
 
 
 async def test_forwarded_ips_precedence(server_stack):  # noqa: F811
-    """CF-Connecting-IP wins, then X-Real-IP, then leftmost X-Forwarded-For."""
+    """CF-Connecting-IP wins, then X-Real-IP, then rightmost X-Forwarded-For
+    (the entry the trusted peer appended; the rest came from its caller)."""
     server = server_stack["server"]
 
     scope = {
@@ -117,7 +118,7 @@ async def test_forwarded_ips_precedence(server_stack):  # noqa: F811
     assert server._forwarded_ips(scope) == "198.51.100.8"
 
     scope = {"headers": [(b"x-forwarded-for", b"198.51.100.7, 10.0.0.1")]}
-    assert server._forwarded_ips(scope) == "198.51.100.7"
+    assert server._forwarded_ips(scope) == "10.0.0.1"
 
     assert server._forwarded_ips({"headers": []}) == ""
     assert server._forwarded_ips({"headers": [(b"host", b"bbs.test")]}) == ""
@@ -277,18 +278,100 @@ async def test_gateway_exports_nothing_without_forwarded_data(server_stack):  # 
     assert forwarded_for_ctx.get() == ""
 
 
-def test_forwarded_for_from_request_parsing():
+class _Req:
+    def __init__(self, headers, peer="127.0.0.1"):
+        self.headers = headers
+        self.client = type("C", (), {"host": peer})() if peer else None
+
+
+@pytest.fixture
+def gateway_trusts(monkeypatch):
+    from bonnet.net import firehose_transport
+
+    def _trust(*ips):
+        monkeypatch.setattr(firehose_transport, "_gateway_trusted_forwarders", frozenset(ips))
+
+    return _trust
+
+
+def test_forwarded_for_from_request_parsing(gateway_trusts):
+    """From a trusted proxy: CF-Connecting-IP, else the rightmost XFF entry,
+    which is the one that proxy appended."""
     from bonnet.gateway.server import _forwarded_for_from_request
 
-    class _Req:
-        def __init__(self, headers):
-            self.headers = headers
-
+    gateway_trusts("127.0.0.1")
     assert (
-        _forwarded_for_from_request(_Req({"x-forwarded-for": "198.51.100.7, 10.0.0.1"}))
-        == "198.51.100.7"
+        _forwarded_for_from_request(_Req({"x-forwarded-for": "198.51.100.7, 203.0.113.5"}))
+        == "203.0.113.5"
     )
     assert _forwarded_for_from_request(_Req({"x-forwarded-for": "198.51.100.7"})) == "198.51.100.7"
     assert _forwarded_for_from_request(_Req({"cf-connecting-ip": "198.51.100.9"})) == "198.51.100.9"
-    assert _forwarded_for_from_request(_Req({})) == ""
-    assert _forwarded_for_from_request(_Req({"x-forwarded-for": ""})) == ""
+    # A trusted proxy that named no one: the proxy itself is the client.
+    assert _forwarded_for_from_request(_Req({})) == "127.0.0.1"
+    assert _forwarded_for_from_request(_Req({"x-forwarded-for": ""})) == "127.0.0.1"
+    assert _forwarded_for_from_request(_Req({}, peer=None)) == ""
+
+
+def test_an_untrusted_caller_cannot_pick_its_forwarded_ip(gateway_trusts):
+    """The hole: the gateway passed the leftmost X-Forwarded-For through from
+    anyone, and an origin trusting the gateway bucketed on it, so a caller
+    could choose a fresh anonymous rate-limit bucket per request."""
+    from bonnet.gateway.server import _forwarded_for_from_request
+
+    gateway_trusts("127.0.0.1")
+    spoofed = {"x-forwarded-for": "1.2.3.4", "cf-connecting-ip": "5.6.7.8", "x-real-ip": "9.9.9.9"}
+    assert _forwarded_for_from_request(_Req(spoofed, peer="198.51.100.20")) == "198.51.100.20"
+
+
+def test_nobody_is_trusted_by_default():
+    from bonnet.gateway.server import _forwarded_for_from_request
+    from bonnet.net import firehose_transport
+
+    assert firehose_transport._gateway_trusted_forwarders == frozenset()
+    assert (
+        _forwarded_for_from_request(_Req({"x-forwarded-for": "1.2.3.4"}, peer="127.0.0.1"))
+        == "127.0.0.1"
+    )
+
+
+def test_a_trusted_proxy_passes_on_the_leftmost_only_as_what_it_is(gateway_trusts):
+    """Behind cloudflared, a caller's own X-Forwarded-For arrives with the
+    real client appended after it; the caller's part is ignored."""
+    from bonnet.gateway.server import _forwarded_for_from_request
+
+    gateway_trusts("127.0.0.1")
+    req = _Req({"x-forwarded-for": "1.2.3.4, 198.51.100.7"})
+    assert _forwarded_for_from_request(req) == "198.51.100.7"
+
+
+# ---------------------------------------------------------------------------
+# uvicorn's own proxy-header rewrite is off, on both servers
+# ---------------------------------------------------------------------------
+
+
+async def test_server_runs_uvicorn_without_proxy_headers(tmp_path, monkeypatch):
+    """uvicorn's default rewrites scope["client"] from X-Forwarded-For for any
+    peer on 127.0.0.1, so `remote=` was never the socket and a
+    trusted_forwarders entry of 127.0.0.1 could never match."""
+    import uvicorn
+
+    from bonnet.app.server import BonnetServer
+    from tests.bridge_fakes import make_config
+
+    captured = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_config(*args, **kwargs):
+        captured.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr(uvicorn, "Config", fake_config)
+    server = BonnetServer(make_config(tmp_path, "bbs.test"))
+    try:
+        with pytest.raises(_Stop):
+            await server.run(port=0, console=False)
+    finally:
+        server.close()
+    assert captured["proxy_headers"] is False

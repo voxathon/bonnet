@@ -38,12 +38,18 @@ acl_poll_interval_seconds = 30
 # Or point at a file instead of inlining the key (a secrets mount, a path an
 # orchestrator injects) — set exactly one of the two:
 # admin_pubkey_file = "/run/secrets/bonnet_admin_pubkey"
-# Proxy IPs whose forwarded-client headers (CF-Connecting-IP, X-Real-IP,
-# X-Forwarded-For) are trusted: when a connection arrives from an address on
-# this list, the logged REQ lines carry the forwarded client IP alongside the
-# socket peer, and the anonymous rate limiter buckets on the forwarded IP
-# instead of the proxy's. Anything else arriving with such headers is logged
-# as-is and bucketed on its own socket address. Exact IPs only — no CIDRs.
+# Proxy IPs whose forwarded-client headers (CF-Connecting-IP, X-Real-IP, then
+# the rightmost X-Forwarded-For entry) are trusted: when a connection arrives
+# from an address on this list, the logged REQ lines carry the forwarded
+# client IP alongside the socket peer, and the anonymous rate limiter buckets
+# on the forwarded IP instead of the proxy's. Anything else arriving with
+# such headers is logged as-is and bucketed on its own socket address. Exact
+# IPs only — no CIDRs. This is the only rule: the server no longer lets
+# uvicorn rewrite the client from X-Forwarded-For for 127.0.0.1 on its own,
+# so a tunnel or gateway on this machine (cloudflared, `bonnet gateway`)
+# needs 127.0.0.1 here, or every request it carries shares one bucket.
+# Anything that can connect from a listed address can claim any client IP
+# (for logs and rate limits only; never for authentication).
 # trusted_forwarders = ["127.0.0.1"]
 
 [limits]

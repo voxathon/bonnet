@@ -168,3 +168,58 @@ def test_gateway_toml_transport_is_the_lowest_precedence_layer(gw):
     gateway_run([])
 
     assert calls[-1]["transport"] == "http"
+
+
+# --- trusted_forwarders -------------------------------------------------------
+
+
+@pytest.fixture
+def trusted(monkeypatch):
+    from bonnet.net import firehose_transport
+
+    monkeypatch.delenv("BONNET_GATEWAY_TRUSTED_FORWARDERS", raising=False)
+    # Restored after the test: run() sets it for the whole process.
+    monkeypatch.setattr(firehose_transport, "_gateway_trusted_forwarders", frozenset())
+    return lambda: firehose_transport._gateway_trusted_forwarders
+
+
+def test_the_gateway_runs_uvicorn_without_proxy_headers(gw, trusted):
+    """uvicorn's default rewrites request.client from X-Forwarded-For for any
+    peer on 127.0.0.1: the gateway's own trust list has to be the only one."""
+    home, calls = gw
+    gateway_run(["--http"])
+    assert calls[-1]["uvicorn_config"]["proxy_headers"] is False
+
+
+def test_trusted_forwarders_default_to_no_one(gw, trusted):
+    gateway_run(["--http"])
+    assert trusted() == frozenset()
+
+
+def test_trusted_forwarders_come_from_gateway_toml(gw, trusted):
+    home, calls = gw
+    os.makedirs(home, exist_ok=True)
+    (home / "gateway.toml").write_text(
+        '[gateway]\ntrusted_forwarders = ["127.0.0.1", "::1"]\n', encoding="utf-8"
+    )
+    gateway_run(["--http"])
+    assert trusted() == frozenset({"127.0.0.1", "::1"})
+
+
+def test_the_env_wins_over_gateway_toml(gw, trusted, monkeypatch):
+    home, calls = gw
+    os.makedirs(home, exist_ok=True)
+    (home / "gateway.toml").write_text(
+        '[gateway]\ntrusted_forwarders = ["127.0.0.1"]\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("BONNET_GATEWAY_TRUSTED_FORWARDERS", "10.0.0.2, 10.0.0.3")
+    gateway_run(["--http"])
+    assert trusted() == frozenset({"10.0.0.2", "10.0.0.3"})
+
+
+def test_a_trusted_forwarder_must_be_an_ip():
+    cfg = gateway_config.GatewayConfig(trusted_forwarders=["cloudflared"])
+    with pytest.raises(ValueError, match="not a valid IP"):
+        gateway_config.validate(cfg)
+    with pytest.raises(ValueError, match="must be a list"):
+        gateway_config.validate(gateway_config.GatewayConfig(trusted_forwarders="127.0.0.1"))

@@ -2145,17 +2145,19 @@ class FirehoseCommandHandler:
         offset = 0
         origin, offset = _read_text16(data, offset)
         origin = normalize_origin(origin)
-        if not origin:
-            return _success(struct.pack(">H", 0))
-        self._maybe_queue_remote_sync(origin)
-        if origin and self._allowed_origins and origin not in self._allowed_origins:
-            return _success(struct.pack(">H", 0))
+        if origin:
+            self._maybe_queue_remote_sync(origin)
+            if self._allowed_origins and origin not in self._allowed_origins:
+                return _success(struct.pack(">H", 0))
         board, offset = _read_text16(data, offset)
         if not self._board_read_allowed(ctx, "ARTICLE_QUERY", board):
             return _success(struct.pack(">H", 0))
         filter_count, offset = _read_u8(data, offset)
 
+        # Bridge filters resolve to article ids per origin, so they're kept
+        # aside and resolved once the origins being queried are known.
         filters: list[tuple[int, int, object]] = []
+        bridge_filters: list[tuple[int, int, object]] = []
         for _ in range(filter_count):
             field_id, offset = _read_u8(data, offset)
             operator, offset = _read_u8(data, offset)
@@ -2183,10 +2185,7 @@ class FirehoseCommandHandler:
                 return _error(0x0006, f"Invalid value type 0x{value_type:02x}")
 
             if field_id in BRIDGE_QUERY_FIELD_IDS and self._bridges is not None:
-                ids = self._bridge_filter_article_ids(origin, board, field_id, operator, value)
-                if isinstance(ids, bytes):
-                    return ids  # an error frame
-                filters.append((ARTICLE_ID_IN, 0x06, ids))
+                bridge_filters.append((field_id, operator, value))
                 continue
             if field_id not in QUERY_FIELD_IDS:
                 return _error(0x0006, f"unknown filter field 0x{field_id:02x}")
@@ -2197,19 +2196,80 @@ class FirehoseCommandHandler:
         limit = max(1, min(limit, 65535))
         _require_request_end(data, offset, "article query request")
 
-        bp = self._get_board_projection(origin, board)
-        articles = bp.query_articles(
-            origin,
-            board,
-            filters,
-            offset=list_offset,
-            limit=limit,
-        )
+        def filters_for(orig: str) -> list | bytes:
+            out = list(filters)
+            for field_id, operator, value in bridge_filters:
+                ids = self._bridge_filter_article_ids(orig, board, field_id, operator, value)
+                if isinstance(ids, bytes):
+                    return ids  # an error frame
+                out.append((ARTICLE_ID_IN, 0x06, ids))
+            return out
 
-        out = struct.pack(">H", len(articles))
-        for art in articles:
+        if origin:
+            resolved = filters_for(origin)
+            if isinstance(resolved, bytes):
+                return resolved
+            bp = self._get_board_projection(origin, board)
+            articles = bp.query_articles(origin, board, resolved, offset=list_offset, limit=limit)
+            out = struct.pack(">H", len(articles))
+            for art in articles:
+                out += self._encode_article_view(art, include_body=False)
+            return _success(out)
+
+        origins_with_board = sorted(
+            {
+                b["origin"]
+                for b in self._nav.list_boards()
+                if b["board"] == board
+                and (not self._allowed_origins or b["origin"] in self._allowed_origins)
+            }
+        )
+        per_origin: dict[str, list] = {}
+        for orig in origins_with_board:
+            resolved = filters_for(orig)
+            if isinstance(resolved, bytes):
+                return resolved
+            per_origin[orig] = resolved
+        page = self._aggregate_query_page(board, per_origin, list_offset, limit)
+        out = struct.pack(">H", len(page))
+        for art, orig in page:
+            out += _enc_text16(orig)
             out += self._encode_article_view(art, include_body=False)
         return _success(out)
+
+    def _aggregate_query_page(
+        self, board: str, per_origin: dict[str, list], list_offset: int, limit: int
+    ) -> list:
+        """One page of ARTICLE_QUERY across origins: (article, origin) pairs.
+
+        Each origin's matches come in article_num order, and article numbers
+        from different origins aren't comparable, so the aggregate order is
+        origin (sorted) then article_num: every origin's matches in turn.
+        On a `~` board, non-canonical copies are skipped as they stream past,
+        as the aggregate list does.
+        """
+        view = self._bridge_view() if self._dedups(board) else None
+        batch = max(limit, 50)
+        page: list = []
+        skipped = 0
+        for orig, orig_filters in per_origin.items():
+            bp = self._get_board_projection(orig, board)
+            pos = 0
+            while True:
+                rows = bp.query_articles(orig, board, orig_filters, offset=pos, limit=batch)
+                for art in rows:
+                    if view is not None and not view.visible_event(orig, art.event_id):
+                        continue
+                    if skipped < list_offset:
+                        skipped += 1
+                        continue
+                    page.append((art, orig))
+                    if len(page) >= limit:
+                        return page
+                if len(rows) < batch:
+                    break
+                pos += batch
+        return page
 
     # ------------------------------------------------------------------
     # ARTICLE_BODY

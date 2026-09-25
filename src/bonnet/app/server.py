@@ -960,6 +960,11 @@ class BonnetServer:
             ssl_keyfile=ssl_keyfile,
             log_level="info",
             access_log=False,
+            # uvicorn's default rewrites scope["client"] from X-Forwarded-For
+            # for any peer on 127.0.0.1, under a trust list the operator never
+            # set. Off: the peer is the real socket, and [server]
+            # trusted_forwarders is the only rule (net/forwarding.py).
+            proxy_headers=False,
         )
         server = uvicorn.Server(uv_config)
         self._uvicorn_server = server

@@ -49,6 +49,7 @@ KNOWN_KEYS = frozenset(
         "log_keep_files",
         "metrics_enabled",
         "admin_token",
+        "trusted_forwarders",
     }
 )
 
@@ -102,6 +103,12 @@ _SAMPLE = """\
 # # can read the gateway home dir can read this file. Unset in both places
 # # means /admin answers 404 (disabled).
 # # admin_token = "change-me"
+# # Socket peers whose forwarded-client headers (CF-Connecting-IP, X-Real-IP,
+# # X-Forwarded-For) this gateway believes: a reverse proxy or tunnel in front
+# # of it, e.g. cloudflared on this machine. Exact IPs only. Requests from
+# # anyone else are forwarded upstream as coming from their own socket
+# # address. $BONNET_GATEWAY_TRUSTED_FORWARDERS (comma-separated) wins.
+# # trusted_forwarders = ["127.0.0.1"]
 """
 
 
@@ -120,6 +127,7 @@ class GatewayConfig:
     log_keep_files: int | None = None
     metrics_enabled: bool | None = None
     admin_token: str | None = None
+    trusted_forwarders: list | None = None
     unknown_keys: list[str] = field(default_factory=list)
 
 
@@ -153,6 +161,7 @@ def load(path: str) -> GatewayConfig | None:
         log_keep_files=table.get("log_keep_files"),
         metrics_enabled=table.get("metrics_enabled"),
         admin_token=table.get("admin_token") or None,
+        trusted_forwarders=table.get("trusted_forwarders"),
         unknown_keys=unknown,
     )
 
@@ -174,6 +183,18 @@ def create_default_config(path: str, force: bool = False) -> None:
 
 def validate(cfg: GatewayConfig) -> None:
     """Raise ValueError on any invalid [gateway] value."""
+    if cfg.trusted_forwarders is not None:
+        from bonnet.net.forwarding import parse_trusted
+
+        if not isinstance(cfg.trusted_forwarders, list):
+            raise ValueError(
+                "config: gateway.trusted_forwarders must be a list of IP addresses, "
+                f"got {cfg.trusted_forwarders!r}"
+            )
+        try:
+            parse_trusted(cfg.trusted_forwarders)
+        except ValueError as e:
+            raise ValueError(f"config: gateway.{e}") from None
     if cfg.transport is not None and cfg.transport not in ("stdio", "http", "sse"):
         raise ValueError(
             f"config: gateway.transport must be stdio, http or sse, got {cfg.transport!r}"
@@ -261,3 +282,15 @@ def _validate_url(raw: object) -> None:
             f"config: gateway.url takes just scheme+host+port, got {raw!r} "
             "(with no path, query or fragment)"
         )
+
+
+def trusted_forwarders(cfg: GatewayConfig | None) -> frozenset[str]:
+    """The gateway's trusted forwarders: env, else this file, else none."""
+    from bonnet.net.forwarding import parse_trusted
+
+    env = os.environ.get("BONNET_GATEWAY_TRUSTED_FORWARDERS")
+    if env is not None:
+        return parse_trusted(v for v in env.split(",") if v.strip())
+    if cfg is not None and cfg.trusted_forwarders:
+        return parse_trusted(cfg.trusted_forwarders)
+    return frozenset()
