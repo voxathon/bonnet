@@ -190,7 +190,7 @@ async def replies_point_at_their_parent(fake: VenueFake, adapter: VenueAdapter) 
 async def outbound_text_fits_and_ends_with_the_marker(
     fake: VenueFake, adapter: VenueAdapter
 ) -> None:
-    marker = model.make_marker(os.urandom(32))
+    marker = model.make_marker(os.urandom(32), "bridge.example")
     for text in ("short", "x" * (adapter.max_text_bytes() * 2)):
         for attribution in (None, "someone"):
             out = adapter.render_outbound(text, marker, attribution)
@@ -201,7 +201,9 @@ async def outbound_text_fits_and_ends_with_the_marker(
 @_needs("write")
 async def posts_land_and_read_back(fake: VenueFake, adapter: VenueAdapter) -> None:
     account = fake.good_account()  # type: ignore[attr-defined]
-    text = adapter.render_outbound("hello venue", model.make_marker(os.urandom(32)), None)
+    text = adapter.render_outbound(
+        "hello venue", model.make_marker(os.urandom(32), "bridge.example"), None
+    )
     posted = await adapter.post(account, CHANNEL, text, None, os.urandom(16).hex())
     assert posted.foreign_id in fake.venue_posts()
     polled = {p.foreign_id: p for p in await _poll_all(adapter)}
@@ -274,7 +276,9 @@ async def signup_instructions_say_how(fake: VenueFake, adapter: VenueAdapter) ->
 async def registered_accounts_can_post(fake: VenueFake, adapter: VenueAdapter) -> None:
     account = await adapter.register("newcomer")  # type: ignore[attr-defined]
     assert isinstance(account, ForeignAccount) and account.user and account.token
-    text = adapter.render_outbound("first post", model.make_marker(os.urandom(32)), None)
+    text = adapter.render_outbound(
+        "first post", model.make_marker(os.urandom(32), "bridge.example"), None
+    )
     posted = await adapter.post(account, CHANNEL, text, None, os.urandom(16).hex())
     assert posted.foreign_id in fake.venue_posts()
 

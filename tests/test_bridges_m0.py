@@ -876,29 +876,25 @@ def test_src_tag_round_trips_escaped_components():
     assert model.parse_src_tag("venue:x") is None
 
 
-def test_marker_round_trip_and_last_wins():
-    eid = bytes(range(32))
-    m = model.make_marker(eid)
-    assert m == "[bnt:0001020304050607]"
-    assert model.find_marker(f"copied [bnt:{'a' * 16}] then real {m}") == "0001020304050607"
-    assert model.find_marker("no marker") is None
-
-
-def test_addressed_markers_carry_origin_and_full_id():
+def test_markers_carry_origin_and_full_id():
     eid = bytes(range(32))
     m = model.make_marker(eid, "sys.knolastna.me")
     assert m == f"[bnt:sys.knolastna.me/{eid.hex()}]"
     parsed = model.parse_marker(f"hello\n{m}")
-    assert parsed == model.Marker("0001020304050607", "sys.knolastna.me", eid)
+    assert parsed == model.Marker("sys.knolastna.me", eid)
+    assert parsed.prefix == "0001020304050607"
     assert parsed.names(eid) and not parsed.names(eid[:8] + bytes(24))
-    # The short form still parses, and matches on the prefix alone.
-    short = model.parse_marker(model.make_marker(eid))
-    assert short == model.Marker("0001020304050607") and short.names(eid[:8] + bytes(24))
-    # The last marker wins, whichever its form.
-    assert model.parse_marker(f"{m} then [bnt:{'b' * 16}]").origin is None
-    assert model.find_marker(m) == "0001020304050607"
-    # Not markers: uppercase hex, a short id with an origin, an origin with a path.
-    for bad in (f"[bnt:x.test/{'A' * 64}]", f"[bnt:x.test/{'a' * 16}]", f"[bnt:a/b/{'a' * 64}]"):
+    # The last marker wins.
+    other = model.make_marker(bytes(32), "b.test")
+    assert model.parse_marker(f"copied {m} then real {other}").origin == "b.test"
+    assert model.parse_marker("no marker") is None
+    # Not markers: uppercase hex, a short id, no origin, an origin with a path.
+    for bad in (
+        f"[bnt:x.test/{'A' * 64}]",
+        f"[bnt:x.test/{'a' * 16}]",
+        f"[bnt:{'a' * 16}]",
+        f"[bnt:a/b/{'a' * 64}]",
+    ):
         assert model.parse_marker(bad) is None, bad
 
 

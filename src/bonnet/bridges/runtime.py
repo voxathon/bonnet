@@ -431,7 +431,7 @@ class BridgeRuntime:
             for c in bridges.copies_by_event_prefix(marker.prefix)
             if c.role in (model.ROLE_CROSSPOST, model.ROLE_RELAY_LINK)
             and marker.names(c.event_id)
-            and (marker.origin is None or c.origin == marker.origin)
+            and c.origin == marker.origin
         ]
         same = [
             c
@@ -452,12 +452,7 @@ class BridgeRuntime:
         crosspost or relay link its author signed, stating this very venue
         post; else None, and the post waits as before.
         """
-        if (
-            self.remote is None
-            or marker.origin is None
-            or marker.event_id is None
-            or marker.origin == self._origin
-        ):
+        if self.remote is None or marker.origin == self._origin:
             return None
         key = (marker.origin, marker.event_id)
         if key in self._rejected_marks:
