@@ -489,6 +489,34 @@ enabled = "false"
         FirehoseConfig.load(path)
 
 
+def test_tls_ca_bundle_is_an_unknown_key(tmp_path):
+    """`[tls] ca_bundle` used to be accepted and stored, but no outbound
+    client ever read it, so setting it changed nothing. It must warn as
+    unknown instead of looking like it configured a CA bundle."""
+    path = _write_config(
+        tmp_path,
+        """
+[server]
+origin = "bbs.test"
+
+[tls]
+enabled = false
+ca_bundle = "/etc/ssl/private-ca.pem"
+""",
+    )
+    c = FirehoseConfig.load(path)
+    assert c.unknown_keys == ["tls.ca_bundle"]
+    assert not hasattr(c, "tls_ca_bundle")
+
+
+@pytest.mark.parametrize("tls_paths", [None, ("/certs/b.crt", "/certs/b.key")])
+def test_sample_config_does_not_offer_ca_bundle(tmp_path, tls_paths):
+    path = str(tmp_path / "config.toml")
+    FirehoseConfig.create_default_config(path, tls_paths=tls_paths)
+    with open(path) as f:
+        assert "ca_bundle" not in f.read()
+
+
 # ---------------------------------------------------------------------------
 # Missing config behavior
 # ---------------------------------------------------------------------------
