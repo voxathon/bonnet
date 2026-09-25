@@ -939,7 +939,7 @@ def test_mirror_subject():
 
 
 def _write_bridge_config(tmp_path) -> str:
-    path = tmp_path / "config.toml"
+    path = tmp_path / "bridge.toml"
     path.write_text(
         textwrap.dedent(
             f"""
@@ -989,7 +989,7 @@ def test_cli_status_and_rebuild(tmp_path, capsys):
 def test_cli_run_requires_bridge_runtime(tmp_path, capsys):
     from bonnet.cli import main
 
-    path = tmp_path / "config.toml"
+    path = tmp_path / "bridge.toml"
     path.write_text(f'[server]\norigin = "{ORIGIN}"\n')
     with pytest.raises(SystemExit) as e:
         main(["bridge", "run", "--config", str(path)])
@@ -1014,6 +1014,17 @@ def test_cli_refuses_a_venue_type_with_no_adapter(tmp_path, capsys, monkeypatch)
     assert "error: nostr@relay.test: no bridge adapter for venue type 'nostr'" in err
     assert main(["bridge", "rebuild-index", "--config", path]) == 1
     assert "no bridge adapter" in capsys.readouterr().err
+
+
+def test_cli_status_refuses_a_homeserver_home(tmp_path, capsys, monkeypatch):
+    from bonnet.cli import main
+
+    monkeypatch.setenv("BONNET_BRIDGE_HOME", str(tmp_path / "unused"))  # restored after --dir
+    (tmp_path / "config.toml").write_text(f'[server]\norigin = "{ORIGIN}"\n')
+    with pytest.raises(SystemExit) as e:
+        main(["bridge", "status", "--dir", str(tmp_path)])
+    assert e.value.code == 1
+    assert "holds config.toml, so it is a server's home" in capsys.readouterr().err
 
 
 def test_cli_bridge_usage(capsys):

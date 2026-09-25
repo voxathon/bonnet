@@ -18,8 +18,10 @@
   rebuild-index  rebuild the runtime index from the origin's log
   status         bindings, cursors, mirror and pending counts
 
-Bridges are configured in `bridges.toml`, next to the server's
-`config.toml`. Bindings come from its `[runtime]`: `run` reconciles them at startup, binding new or
+A bridge origin has its own home ($BONNET_BRIDGE_HOME, or `--dir` for one
+run) and its server config is `bridge.toml`, never a homeserver's
+`config.toml`. Bridges are configured in `bridges.toml` next to it. Bindings
+come from its `[runtime]`: `run` reconciles them at startup, binding new or
 changed boards and unbinding boards removed from config.
 """
 
@@ -43,18 +45,22 @@ commands:
 
 def _load_config(argv: list[str], prog: str):
     from bonnet.app.main import _load_and_validate_config
-    from bonnet.core.home import resolve_home
+    from bonnet.core.home import BRIDGE, home_conflict, resolve_home
 
     parser = argparse.ArgumentParser(prog=prog)
-    parser.add_argument("--dir", default=None, help="Server home directory")
-    parser.add_argument("--config", default=None, help="Path to config file")
+    parser.add_argument("--dir", default=None, help="Bridge home directory, for this run only")
+    parser.add_argument("--config", default=None, help="Path to config file (bridge.toml)")
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     args = parser.parse_args(argv)
-    home = (
-        os.path.expanduser(args.dir) if args.dir else resolve_home("server", "BONNET_SERVER_HOME")
-    )
+    if args.dir:
+        os.environ[BRIDGE.env_var] = os.path.expanduser(args.dir)
+    home = resolve_home(BRIDGE.component, BRIDGE.env_var)
     if args.config is None:
-        args.config = os.path.join(home, "config.toml")
+        args.config = os.path.join(home, BRIDGE.config_name)
+    conflict = home_conflict(BRIDGE, args.config, home if os.environ.get(BRIDGE.env_var) else None)
+    if conflict:
+        print(f"error: {conflict}", file=sys.stderr)
+        raise SystemExit(1)
     args.host = None
     args.port = None
     config = _load_and_validate_config(args)

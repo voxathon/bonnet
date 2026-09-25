@@ -14,7 +14,8 @@
 
 """`bridges.toml`: bridge configuration, and the runtime's key files.
 
-Bridges have their own file, next to the server's `config.toml`:
+Bridges have their own file, next to the server's `config.toml` (a bridge
+origin's own server config is `bridge.toml`, in its own home: core.home):
 
   [runtime]      makes this origin a bridge origin (design doc §10.2):
                  `bonnet bridge run` starts the runtime next to the server,
@@ -427,7 +428,8 @@ class BridgesFile:
 
 
 def bridges_path(config_path: str) -> str:
-    """The `bridges.toml` that goes with the server config at `config_path`."""
+    """The `bridges.toml` that goes with the server config at `config_path`
+    (a homeserver's `config.toml` or a bridge origin's `bridge.toml`)."""
     return os.path.join(os.path.dirname(os.path.abspath(config_path)), BRIDGES_FILE)
 
 

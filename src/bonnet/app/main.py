@@ -26,7 +26,7 @@ import tomllib
 from bonnet.app.server import BonnetServer
 from bonnet.core.acl import ACLError
 from bonnet.core.config import FirehoseConfig
-from bonnet.core.home import resolve_home, set_home
+from bonnet.core.home import BRIDGE, SERVER, home_conflict, resolve_home, set_home
 from bonnet.core.logging import enable_request_mirror, init_logging
 from bonnet.core.tlsutil import OpenSSLNotFoundError, generate_self_signed_cert
 
@@ -45,12 +45,20 @@ def _make_self_signed_cert(config_path: str, force: bool = False) -> tuple[str, 
     return (cert_path.replace(os.sep, "/"), key_path.replace(os.sep, "/"))
 
 
-def _print_next_steps(config_path: str, tls_enabled: bool, port: int = 2272) -> None:
+def _print_next_steps(
+    config_path: str, tls_enabled: bool, port: int = 2272, bridge: bool = False
+) -> None:
     scheme = "https" if tls_enabled else "http"
     print()
     print("Next steps:")
-    print("  1. Start the server:")
-    print(f"       uv run bonnet server --config {config_path}")
+    if bridge:
+        print("  0. Write bridges.toml next to it, with a [runtime] table (see")
+        print("     bridges.example.toml), and give the bridge its own origin and port.")
+        print("  1. Start the bridge:")
+        print(f"       uv run bonnet bridge run --config {config_path}")
+    else:
+        print("  1. Start the server:")
+        print(f"       uv run bonnet server --config {config_path}")
     print(f"     It will listen on {scheme}://127.0.0.1:{port} and print its own public key.")
     print("  2. The server's REPL (the 'bonnet>' prompt after startup) is already an")
     print("     administrator - no key setup needed for local use.")
@@ -89,9 +97,14 @@ def _load_and_validate_config(args) -> FirehoseConfig:
         # (which also generates TLS certs and prints next steps); a first-run
         # user following it literally used to be told about --create-config
         # instead, which writes a config with no certs and no guidance.
-        print("run 'bonnet server --init' to generate a config and get started", file=sys.stderr)
+        cmd = (
+            "bonnet bridge run"
+            if os.path.basename(args.config) == BRIDGE.config_name
+            else "bonnet server"
+        )
+        print(f"run '{cmd} --init' to generate a config and get started", file=sys.stderr)
         print(
-            "(or 'bonnet server --create-config' for just a sample config, no TLS setup)",
+            f"(or '{cmd} --create-config' for just a sample config, no TLS setup)",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -201,9 +214,11 @@ def main(argv: list[str] | None = None, bridge: bool = False):
 
     Bridge mode is the same server plus the bridge runtime in one process
     (docs/bonnet-bridges-design.md §5.2): it needs a bridges.toml with a
-    [runtime] table next to config.toml,
-    and skips the operator REPL unless --console is given.
+    [runtime] table next to its bridge.toml, and skips the operator REPL
+    unless --console is given. A bridge has its own home (BONNET_BRIDGE_HOME)
+    and never runs out of a server's (core.home).
     """
+    kind = BRIDGE if bridge else SERVER
     parser = argparse.ArgumentParser(
         prog="bonnet bridge run" if bridge else "bonnet server",
         description="Bonnet bridge origin (server + bridge runtime)" if bridge else "Bonnet server",
@@ -216,12 +231,24 @@ def main(argv: list[str] | None = None, bridge: bool = False):
         "--dir",
         default=None,
         help=(
-            "This server's home directory (config.toml, and data/boards/event_bodies "
-            "defaults). Remembered for future runs — see BONNET_SERVER_HOME below."
+            f"This {kind.component}'s home directory ({kind.config_name}, and "
+            "data/boards/event_bodies defaults), for this run only: it wins over "
+            f"${kind.env_var} and is not remembered (see --set-default-dir)."
         ),
     )
     parser.add_argument(
-        "--config", default=None, help="Path to config file (default: <home>/config.toml)"
+        "--set-default-dir",
+        default=None,
+        metavar="PATH",
+        help=(
+            f"Remember PATH as the {kind.component} home for later runs that give "
+            f"neither --dir nor ${kind.env_var}, then exit."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=f"Path to config file (default: <home>/{kind.config_name})",
     )
     parser.add_argument("--port", type=int, default=None, help="Override listen port")
     parser.add_argument("--host", default=None, help="Override bind host")
@@ -264,26 +291,37 @@ def main(argv: list[str] | None = None, bridge: bool = False):
     )
     args = parser.parse_args(argv)
 
+    if args.set_default_dir:
+        path = os.path.abspath(os.path.expanduser(args.set_default_dir))
+        set_home(kind.component, path)
+        print(f"{kind.component} home for runs without --dir or ${kind.env_var}: {path}")
+        return
+
+    # --dir is process-local and wins over the environment, as the gateway's
+    # does: it sets the env var for this process alone, so config loading
+    # (storage defaults) and logging see the same home, and no run leaks its
+    # directory into another's. Remembering one is --set-default-dir's job.
     if args.dir:
         args.dir = os.path.expanduser(args.dir)
-    server_home = args.dir or resolve_home("server", "BONNET_SERVER_HOME")
+        os.environ[kind.env_var] = args.dir
+    server_home = resolve_home(kind.component, kind.env_var)
     if os.path.exists(server_home) and not os.path.isdir(server_home):
         print(
-            f"error: server home '{server_home}' exists but is not a directory "
-            "(check BONNET_SERVER_HOME / --dir)",
+            f"error: {kind.component} home '{server_home}' exists but is not a directory "
+            f"(check ${kind.env_var} / --dir)",
             file=sys.stderr,
         )
         raise SystemExit(1)
-    # Only remember --dir for future runs that omit it entirely. A process
-    # with BONNET_SERVER_HOME set always resolves via that override anyway
-    # (see resolve_home) - writing to the pointer file here would only
-    # leak this run's --dir into other processes on the same machine that
-    # rely on their *own* BONNET_SERVER_HOME for isolation, since the
-    # pointer file isn't scoped by that env var.
-    if args.dir and not os.environ.get("BONNET_SERVER_HOME"):
-        set_home("server", args.dir)
     if args.config is None:
-        args.config = os.path.join(server_home, "config.toml")
+        args.config = os.path.join(server_home, kind.config_name)
+    # The home in play is the one storage defaults use: the env var's if set,
+    # else the config file's own directory (core.config); both are checked.
+    conflict = home_conflict(
+        kind, args.config, server_home if os.environ.get(kind.env_var) else None
+    )
+    if conflict:
+        print(f"error: {conflict}", file=sys.stderr)
+        raise SystemExit(1)
 
     if args.init:
         init_port = args.port if args.port is not None else 2272
@@ -310,14 +348,16 @@ def main(argv: list[str] | None = None, bridge: bool = False):
         except NotADirectoryError:
             print(
                 f"error: cannot create {args.config} - a path component "
-                "already exists as a file, not a directory (check BONNET_SERVER_HOME / --dir)",
+                f"already exists as a file, not a directory (check ${kind.env_var} / --dir)",
                 file=sys.stderr,
             )
             raise SystemExit(1)
         print(f"Wrote sample config to {args.config}")
         if tls_paths:
             print(f"Generated self-signed TLS certificate at {tls_paths[0]} (CN=localhost)")
-        _print_next_steps(args.config, tls_enabled=tls_paths is not None, port=init_port)
+        _print_next_steps(
+            args.config, tls_enabled=tls_paths is not None, port=init_port, bridge=bridge
+        )
         return
 
     if args.create_config:
@@ -349,7 +389,7 @@ def main(argv: list[str] | None = None, bridge: bool = False):
         except NotADirectoryError:
             print(
                 f"error: cannot create {args.config} - a path component "
-                "already exists as a file, not a directory (check BONNET_SERVER_HOME / --dir)",
+                f"already exists as a file, not a directory (check ${kind.env_var} / --dir)",
                 file=sys.stderr,
             )
             raise SystemExit(1)
@@ -415,12 +455,11 @@ def main(argv: list[str] | None = None, bridge: bool = False):
         )
         raise SystemExit(1)
 
-    # Logs live next to whatever config.toml this run actually loaded, not
-    # the globally-remembered `--dir`/`--init` pointer `server_home` falls
-    # back to (see core.config.from_toml's matching fix) — an explicit
-    # `--config PATH` with no `--dir`/`BONNET_SERVER_HOME` would otherwise
-    # log to a stale, unrelated prior invocation's home directory.
-    if args.dir or os.environ.get("BONNET_SERVER_HOME"):
+    # Logs live next to whatever config file this run actually loaded, not
+    # the remembered `--set-default-dir` pointer `server_home` falls back to
+    # (see core.config.from_toml's matching fix) — an explicit `--config PATH`
+    # with no `--dir`/env var would otherwise log to an unrelated home.
+    if os.environ.get(kind.env_var):
         log_home = server_home
     else:
         log_home = os.path.dirname(os.path.abspath(args.config))
