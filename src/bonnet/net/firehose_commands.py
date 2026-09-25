@@ -701,8 +701,8 @@ class FirehoseCommandHandler:
     ) -> list:
         """A lazy k-way merge over each origin's rows in aggregate order.
 
-        Each origin's rows come in (created_at DESC, article_num DESC) order, so
-        merging on (-created_at, origin, -article_num) yields the aggregate
+        Each origin's rows come in (created_at DESC, article_num) order, so
+        merging on (-created_at, origin, article_num) yields the aggregate
         order. Non-canonical copies are skipped as they stream past, and
         batches are pulled until the page is full or every origin runs out.
         """
@@ -715,7 +715,7 @@ class FirehoseCommandHandler:
             while True:
                 rows = bp.list_articles(orig, board, offset=pos, limit=batch, **flags)
                 for art in rows:
-                    yield (-art.created_at, orig, -art.article_num), art, orig
+                    yield (-art.created_at, orig, art.article_num), art, orig
                 if len(rows) < batch:
                     return
                 pos += batch
@@ -763,7 +763,7 @@ class FirehoseCommandHandler:
                 break
             window = min(window * 2, cap)
         survivors = [(r, o) for r, o in rows if view.visible_article(o, board, r.article_id)]
-        survivors.sort(key=lambda x: (-x[0].created_at, x[1], -x[0].article_num))
+        survivors.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
         return survivors[list_offset : list_offset + limit], len(survivors), truncated
 
     def _bridge_filter_article_ids(
@@ -1999,7 +1999,7 @@ class FirehoseCommandHandler:
                     for art in articles:
                         all_articles.append((art, orig))
 
-                all_articles.sort(key=lambda x: (-x[0].created_at, x[1], -x[0].article_num))
+                all_articles.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
                 page = all_articles[list_offset : list_offset + limit]
 
             out = struct.pack(">H", len(page))
@@ -2099,7 +2099,7 @@ class FirehoseCommandHandler:
                     if results.truncated:
                         truncated = True
 
-                all_results.sort(key=lambda x: (-x[0].created_at, x[1], -x[0].article_num))
+                all_results.sort(key=lambda x: (-x[0].created_at, x[1], x[0].article_num))
                 page = all_results[list_offset : list_offset + limit]
 
             out = struct.pack(">H", len(page))
