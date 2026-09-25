@@ -29,6 +29,7 @@ import tomllib
 from dataclasses import dataclass, field
 
 from bonnet.core.acl import ACLEvaluator
+from bonnet.core.home import kind_for_config
 from bonnet.core.hostname import normalize_hostname
 from bonnet.core.record import normalize_origin
 
@@ -729,7 +730,10 @@ class FirehoseConfig:
         # comment above; `--dir`/`--init` continue to work unchanged, since
         # they set `args.config` to `<dir>/config.toml`, making `base_dir`
         # equal to the directory they named.
-        env_server_home = os.environ.get("BONNET_SERVER_HOME")
+        # A bridge origin's bridge.toml reads BONNET_BRIDGE_HOME instead, so
+        # a BONNET_SERVER_HOME in the same environment never points a bridge's
+        # storage into the homeserver's (see core.home).
+        env_server_home = os.environ.get(kind_for_config(path).env_var)
         server_home = os.path.expanduser(env_server_home) if env_server_home else base_dir
 
         def _storage_default(subdir: str) -> str:

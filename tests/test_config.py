@@ -851,6 +851,20 @@ def test_storage_paths_do_not_collide_across_concurrent_configs(tmp_path, monkey
     assert c_a.data_dir != c_b.data_dir
 
 
+def test_bridge_toml_reads_bonnet_bridge_home_not_server_home(tmp_path, monkeypatch):
+    """A bridge origin's storage never follows BONNET_SERVER_HOME, which the
+    homeserver on the same box may have set."""
+    monkeypatch.setenv("BONNET_SERVER_HOME", str(tmp_path / "srv"))
+    monkeypatch.setenv("BONNET_BRIDGE_HOME", str(tmp_path / "bridge"))
+    path = tmp_path / "b" / "bridge.toml"
+    path.parent.mkdir()
+    path.write_text('[server]\norigin = "bridge.test"\n')
+
+    c = FirehoseConfig.load(str(path))
+
+    assert c.data_dir == os.path.join(str(tmp_path / "bridge"), "data")
+
+
 # ---------------------------------------------------------------------------
 # Unknown key detection
 # ---------------------------------------------------------------------------
