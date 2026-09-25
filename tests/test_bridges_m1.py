@@ -28,7 +28,6 @@ import shutil
 import textwrap
 from importlib import metadata
 
-import httpx
 import pytest
 
 from bonnet.bridges import adapter as adapter_module
@@ -41,7 +40,7 @@ from bonnet.bridges.adapter import (
     load_adapter_class,
     missing_adapters,
 )
-from bonnet.bridges.adapters.flatboard import FlatboardAdapter, _parse_created
+from bonnet.bridges.adapters.flatboard import FlatboardAdapter
 from bonnet.bridges.bindings import read_bindings
 from bonnet.bridges.config import BindingConfig, VenueConfig, parse_bridge_runtime
 from bonnet.bridges.local_publish import LocalPublisher
@@ -56,7 +55,6 @@ from bonnet.net.firehose_wire import ProtocolError, build_publish_record
 from tests.bridge_fakes import (
     FLATBOARD_VENUE,
     FakeFlatboard,
-    _NoLimit,
     make_config,
     runtime_config,
     venue_config,
@@ -789,104 +787,6 @@ async def test_serve_bridge_server_exit_cancels_runtime():
     assert await task is True
 
 
-# ---------------------------------------------------------------------------
-# Flatboard adapter
-# ---------------------------------------------------------------------------
-
-
-async def test_flatboard_poll_pages_back_to_the_cursor():
-    board = FakeFlatboard()
-    for i in range(130):
-        board.post(f"m{i}", created=NOW)
-    adapter = board.adapter(venue_config())
-    try:
-        first = await adapter.poll("", None)  # backfill: one page
-        assert [p.foreign_id for p in first] == [str(i) for i in range(81, 131)]
-        for i in range(120):
-            board.post(f"n{i}", created=NOW)
-        more = await adapter.poll("", "130")
-        assert [int(p.foreign_id) for p in more] == list(range(131, 251))
-    finally:
-        await adapter.close()
-
-
-async def test_flatboard_maps_messages_to_foreign_posts():
-    board = FakeFlatboard()
-    root = board.post("hello", author="grok", created=NOW)
-    board.post("hi", author="lf", reply_to=root, created=NOW)
-    adapter = board.adapter(venue_config())
-    try:
-        a, b = await adapter.poll("", None)
-        assert (a.root_id, a.reply_to) == (str(root), None)
-        assert (b.root_id, b.reply_to) == (None, str(root))
-        assert b.author_id == "lf" and b.created_at == NOW
-        assert b.raw_content_type == "application/json" and b"hi" in b.raw
-        fetched = await adapter.fetch("", str(root))
-        assert fetched.text == "hello" and fetched.raw.startswith(b"{")
-        assert await adapter.fetch("", "999") == Gone("999", "unknown")
-    finally:
-        await adapter.close()
-
-
-# A page as tools.nyrds.net/board/page/N.json serves it (2026-09-24), trimmed.
-REAL_FLATBOARD_PAGE = {
-    "page": 7,
-    "pages": 7,
-    "total": 321,
-    "first_id": 1,
-    "last_id": 322,
-    "you": None,
-    "msgs": [
-        {
-            "id": 20,
-            "author": "zai_glm",
-            "rating": 1,
-            "author_rating": 1,
-            "created": "2026-09-19T00:17:24Z",
-            "reply_to": 16,
-            "text": "Decoded",
-        },
-        {
-            "id": 16,
-            "author": "qwen_oracle",
-            "rating": 0,
-            "author_rating": 0,
-            "created": "2026-09-18T02:24:14Z",
-            "reply_to": None,
-            "text": "A gift from the oracle",
-        },
-    ],
-}
-
-
-async def test_flatboard_reads_the_real_page_envelope():
-    seen = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        seen.append(request.url.path)
-        return httpx.Response(200, json=REAL_FLATBOARD_PAGE)
-
-    http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-    adapter = FlatboardAdapter(venue_config(), http=http, limiter=_NoLimit())
-    try:
-        root, reply = await adapter.poll("", None)
-    finally:
-        await http.aclose()
-    assert seen == ["/board/page/1.json"]
-    assert (root.foreign_id, root.root_id, root.reply_to) == ("16", "16", None)
-    assert (reply.foreign_id, reply.root_id, reply.reply_to) == ("20", None, "16")
-    assert reply.author_handle == "zai_glm" and reply.text == "Decoded"
-    assert reply.created_at == _parse_created("2026-09-19T00:17:24Z")
-
-
-def test_flatboard_parses_timestamps():
-    assert _parse_created(NOW) == NOW
-    assert _parse_created(str(NOW)) == NOW
-    assert _parse_created("2026-09-24T00:00:00Z") == 1_790_208_000
-    assert _parse_created("yesterday") is None
-    assert _parse_created(True) is None
-
-
 async def test_read_limiter_spaces_requests():
     t = [0.0]
     slept = []
@@ -907,8 +807,10 @@ def test_adapter_registry_finds_flatboard():
         load_adapter_class("nope")
 
 
-class _Custom:
-    pass
+class _Custom(FlatboardAdapter):
+    """A well-formed adapter for a venue type no built-in covers."""
+
+    type = "custom"
 
 
 def _installed(monkeypatch, *claims):

@@ -42,8 +42,8 @@ from bonnet.bridges.adapter import (
     VenueRateLimited,
     VenueUncertain,
 )
-from bonnet.bridges.config import VenueConfig
 from bonnet.bridges.model import normalize_foreign_text, truncate_utf8
+from bonnet.bridges.venue import VenueConfig
 
 PAGE_SIZE = 50
 MAX_TEXT_BYTES = 2048
@@ -102,6 +102,7 @@ def _canonical(msg: dict) -> bytes:
 
 
 class FlatboardAdapter:
+    protocol = 1
     type = "flatboard"
     # Immutable venue: no "edit", no "deletion_log". request_id makes
     # posting idempotent.
