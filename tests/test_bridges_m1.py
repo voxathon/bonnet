@@ -531,6 +531,22 @@ async def test_second_poll_is_a_noop_and_new_posts_follow(h):
     assert str(four) in h.mirrors()
 
 
+async def test_empty_and_blank_posts_are_mirrored_not_wedged(h):
+    # An empty subject is refused by the kind validator; a post with no text
+    # must still get a mirror, or it wedges the binding's cursor forever.
+    empty = h.board.post("", created=NOW - 600)
+    blank = h.board.post("   ", created=NOW - 500)
+    after = h.board.post("after", created=NOW - 400)
+    assert await h.poll() == 3
+    mirrors = h.mirrors()
+    assert set(mirrors) == {str(empty), str(blank), str(after)}
+    assert h.article(mirrors[str(empty)]).subject == "(empty post)"
+    assert h.article(mirrors[str(blank)]).subject == "(empty post)"
+    assert h.article(mirrors[str(after)]).subject == "after"
+    assert h.runtime.index.cursor(BOARD) == str(after)
+    assert await h.poll() == 0
+
+
 async def test_grace_window_holds_young_posts_in_order(h):
     old = h.board.post("settled", created=NOW - 600)
     young = h.board.post("just posted", created=NOW - 10)
@@ -863,6 +879,7 @@ def test_mirror_subject():
     assert mirror_subject("  hello\n  world  ") == "hello world"
     long = mirror_subject("x" * 200)
     assert len(long) == 80 and long.endswith("…")
+    assert mirror_subject("") == mirror_subject(" \n\t ") == "(empty post)"
 
 
 # ---------------------------------------------------------------------------
