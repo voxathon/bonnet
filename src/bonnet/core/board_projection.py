@@ -1043,7 +1043,7 @@ class BoardProjection:
                 f"latest_control_seq, author_check "
                 f"FROM articles WHERE origin=? AND board=? "
                 f"AND visibility IN ({placeholders}){where_extra} "
-                f"ORDER BY created_at DESC, article_num ASC LIMIT ? OFFSET ?",
+                f"ORDER BY created_at DESC, article_num DESC LIMIT ? OFFSET ?",
                 [origin, board] + states + [limit, offset],
             ).fetchall()
             return [
@@ -1137,7 +1137,7 @@ class BoardProjection:
                 f"root_article_id, reply_to_article_id, replacement_article_id, "
                 f"latest_control_seq, author_check "
                 f"FROM articles WHERE {where_clause} "
-                f"ORDER BY created_at DESC, article_num ASC LIMIT ? OFFSET ?",
+                f"ORDER BY created_at DESC, article_num DESC LIMIT ? OFFSET ?",
                 params + [limit, offset],
             ).fetchall()
 
