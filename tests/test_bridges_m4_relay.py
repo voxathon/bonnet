@@ -193,7 +193,7 @@ async def test_relay_posts_with_attribution_and_marker_then_links(w):
     assert await w.b1.relay() == 1
 
     (msg,) = w.relay_posts()
-    assert msg["text"] == f"operator@{B1}: hello venue\n{model.make_marker(art.event_id)}"
+    assert msg["text"] == f"operator@{B1}: hello venue\n{model.make_marker(art.event_id, B1)}"
     assert w.board.request_ids == {art.event_id.hex()[:32]: msg["id"]}
 
     (link,) = _records(w.b1.server, B1, model.KIND_BRIDGE_LINK)

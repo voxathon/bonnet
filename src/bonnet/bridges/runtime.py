@@ -56,6 +56,7 @@ from bonnet.bridges.index import MirrorEntry, RuntimeIndex
 from bonnet.bridges.local_publish import LocalPublisher
 from bonnet.bridges.model import BridgeMetadata, SourceKey
 from bonnet.bridges.puppets import PuppetError, Puppets
+from bonnet.bridges.remote import RemoteEvents
 from bonnet.core.crypto import Identity
 from bonnet.core.kinds import KIND_ARTICLE
 from bonnet.core.logging import log_msg
@@ -63,9 +64,12 @@ from bonnet.core.record import (
     Intent,
     MetadataMap,
     compute_body_hash,
+    encode_intent,
     metadata_bytes,
     metadata_text,
     metadata_text_list,
+    reconstruct_intent_from_record,
+    verify_intent_signature,
 )
 from bonnet.net.firehose_wire import ProtocolError
 
@@ -152,6 +156,20 @@ class BridgeRuntime:
         # Bindings whose relay credentials the venue rejected: relaying stops
         # there until restart, since venues lock out IPs over bad tokens.
         self._relay_stopped: set[str] = set()
+        self.remote: RemoteEvents | None = None
+        # Fetched records that didn't check out. Records never change, so
+        # neither does the answer.
+        self._rejected_marks: set[tuple[str, bytes]] = set()
+        if self._config.resolve_markers:
+            from bonnet.bridges.admission import default_transport_factory
+
+            self.remote = RemoteEvents(
+                default_transport_factory(
+                    os.path.join(server.config.bridges_state_dir, "marker_trust.db"),
+                    verify_tls=True,
+                    allow_private_dial=False,
+                )
+            )
 
     @property
     def daemon(self) -> Identity:
@@ -302,11 +320,15 @@ class BridgeRuntime:
             return HOLD
 
         crosspost_of = None
-        prefix = model.find_marker(post.text)
-        if prefix is not None:
+        marker = model.parse_marker(post.text)
+        if marker is not None:
             # 3-5. A marker is a hint: it counts only when the copy it names
             #      states this same foreign post.
-            local, remote, anything = self._resolve_marker(board, prefix, post)
+            local, remote, anything = self._resolve_marker(board, marker, post)
+            if local is None and remote is None and not anything:
+                # 5a. An addressed marker says where its original lives: ask
+                #     there rather than wait for the record to sync here.
+                remote = await self._fetch_marked(marker, post)
             if local is not None:
                 # 3. Our own crosspost original or relay-linked article came
                 #    back from the venue: the echo. Observe only.
@@ -388,7 +410,8 @@ class BridgeRuntime:
                 fetched += 1
                 if (
                     isinstance(got, ForeignPost)
-                    and model.find_marker(got.text) == copy.event_id.hex()[:16]
+                    and (marker := model.parse_marker(got.text)) is not None
+                    and marker.names(copy.event_id)
                 ):
                     await self._observe(got, copy.event_id, model.FOREIGN_PRESENT)
                     self.index.note_crossposter(got.venue, got.author_id)
@@ -398,15 +421,17 @@ class BridgeRuntime:
                     break
         return confirmed
 
-    def _resolve_marker(self, board: str, prefix: str, post: ForeignPost):
+    def _resolve_marker(self, board: str, marker: model.Marker, post: ForeignPost):
         """(local copy, remote copy, any hit) for a marker, matched on foreign_id."""
         bridges = getattr(self._server, "bridges", None)
         if bridges is None:
             return None, None, False
         hits = [
             c
-            for c in bridges.copies_by_event_prefix(prefix)
+            for c in bridges.copies_by_event_prefix(marker.prefix)
             if c.role in (model.ROLE_CROSSPOST, model.ROLE_RELAY_LINK)
+            and marker.names(c.event_id)
+            and (marker.origin is None or c.origin == marker.origin)
         ]
         same = [
             c
@@ -418,6 +443,51 @@ class BridgeRuntime:
         local = next((c for c in same if c.origin == self._origin and c.board == board), None)
         remote = next((c for c in same if c.origin != self._origin), None)
         return local, remote, bool(hits)
+
+    async def _fetch_marked(self, marker: model.Marker, post: ForeignPost):
+        """Another origin's original, fetched from where the marker says it is.
+
+        Returns an object with `origin` and `event_id` when the record that
+        origin serves (over a response signed with its pinned key) is a
+        crosspost or relay link its author signed, stating this very venue
+        post; else None, and the post waits as before.
+        """
+        if (
+            self.remote is None
+            or marker.origin is None
+            or marker.event_id is None
+            or marker.origin == self._origin
+        ):
+            return None
+        key = (marker.origin, marker.event_id)
+        if key in self._rejected_marks:
+            return None
+        rec = await self.remote.get(marker.origin, marker.event_id)
+        if rec is None:
+            return None
+        if not self._states_post(rec, marker, post):
+            log_msg(
+                f"BRIDGE: {post.venue} post {post.foreign_id} names "
+                f"{marker.origin}/{marker.event_id.hex()[:16]}, which doesn't state it"
+            )
+            self._rejected_marks.add(key)
+            return None
+        return rec
+
+    @staticmethod
+    def _states_post(rec, marker: model.Marker, post: ForeignPost) -> bool:
+        if rec.origin != marker.origin or rec.event_id != marker.event_id:
+            return False
+        if rec.kind != KIND_ARTICLE or not verify_intent_signature(
+            rec.actor_pubkey,
+            encode_intent(reconstruct_intent_from_record(rec)),
+            rec.actor_signature,
+        ):
+            return False
+        meta = BridgeMetadata.from_metadata(rec.metadata)
+        return meta.bridge_role in (model.ROLE_CROSSPOST, model.ROLE_RELAY_LINK) and (
+            meta.src == SourceKey(post.venue, post.channel, post.foreign_id)
+        )
 
     async def _mirror(
         self,
@@ -634,7 +704,7 @@ class BridgeRuntime:
             return False
         text = venue.adapter.render_outbound(
             body.decode("utf-8", errors="replace"),
-            model.make_marker(art.event_id),
+            model.make_marker(art.event_id, self._origin),
             self._attribution(art),
         )
         parent = None

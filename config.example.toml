@@ -130,6 +130,15 @@ wire_max = 32
 # linked_grace_seconds = 600
 # marker_timeout_seconds = 3600
 #
+# Venue posts made through Bonnet end in a marker, [bnt:<origin>/<event id>],
+# naming the record they came from. With resolve_markers on, a venue post
+# whose marker names another origin's record that hasn't synced here is
+# checked at that origin (EVENT_GET) and mirrored at once, pointing at it,
+# instead of waiting out marker_timeout_seconds. The origin dialed is named
+# by venue text anyone can write, so this is off by default; dials go
+# through the usual SSRF guard and key pinning, and time out after 5s.
+# resolve_markers = false
+#
 # [[bridges.venue]]
 # type = "flatboard"
 # venue = "flatboard@tools.nyrds.net"

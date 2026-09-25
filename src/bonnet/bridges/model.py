@@ -332,20 +332,55 @@ def is_puppet_of(name: str, venue: str) -> bool:
 # Marker (§4.5)
 # ---------------------------------------------------------------------------
 
-_MARKER_RE = re.compile(r"\[bnt:([0-9a-f]{16})\]")
+# `[bnt:<origin>/<event id, 64 hex>]`, an address anyone can resolve with
+# EVENT_GET; or the older `[bnt:<16 hex>]`, which only a server already
+# holding the record can match. Both parse, forever: venue text is immutable.
+_MARKER_RE = re.compile(
+    r"\[bnt:(?:([a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)/([0-9a-f]{64})|([0-9a-f]{16}))\]"
+)
 
 
-def make_marker(event_id: bytes) -> str:
+@dataclass(frozen=True)
+class Marker:
+    """A parsed marker. `origin` and `event_id` are None for the short form."""
+
+    prefix: str
+    origin: str | None = None
+    event_id: bytes | None = None
+
+    def names(self, event_id: bytes) -> bool:
+        """Whether this marker names `event_id` (all of it, when it can)."""
+        if self.event_id is not None:
+            return self.event_id == event_id
+        return self.prefix == event_id.hex()[:16]
+
+
+def make_marker(event_id: bytes, origin: str | None = None) -> str:
+    """The marker for an article published on `origin` (the short form without one)."""
+    if origin:
+        return f"[bnt:{origin}/{event_id.hex()}]"
     return f"[bnt:{event_id.hex()[:16]}]"
 
 
-def find_marker(text: str) -> str | None:
-    """The 16-hex prefix of the last marker in `text`, or None.
+def parse_marker(text: str) -> Marker | None:
+    """The last marker in `text`, or None.
 
-    A marker is a hint, never proof: anyone at the venue can copy one.
+    A marker is a hint, never proof: anyone at the venue can copy one, or
+    write one naming any origin and event.
     """
     found = _MARKER_RE.findall(text)
-    return found[-1] if found else None
+    if not found:
+        return None
+    origin, full, short = found[-1]
+    if full:
+        return Marker(prefix=full[:16], origin=origin, event_id=bytes.fromhex(full))
+    return Marker(prefix=short)
+
+
+def find_marker(text: str) -> str | None:
+    """The 16-hex event id prefix of the last marker in `text`, or None."""
+    marker = parse_marker(text)
+    return marker.prefix if marker is not None else None
 
 
 # ---------------------------------------------------------------------------

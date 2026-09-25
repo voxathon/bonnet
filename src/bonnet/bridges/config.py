@@ -43,6 +43,7 @@ _RUNTIME_KEYS = {
     "grace_seconds",
     "linked_grace_seconds",
     "marker_timeout_seconds",
+    "resolve_markers",
     "venue",
 }
 _VENUE_KEYS = {
@@ -75,6 +76,9 @@ class BridgeRuntimeConfig:
     grace_seconds: int = 120
     linked_grace_seconds: int = 600
     marker_timeout_seconds: int = 3600
+    # Dial the origin an addressed marker names to fetch its original
+    # (bridges.remote). Venue text names the host, so it's opt-in.
+    resolve_markers: bool = False
     venues: list[VenueConfig] = field(default_factory=list)
 
     @property
@@ -123,6 +127,7 @@ def parse_bridge_runtime(table: dict) -> tuple[BridgeRuntimeConfig, list[str]]:
         grace_seconds=_int(table, "grace_seconds", where, 120),
         linked_grace_seconds=_int(table, "linked_grace_seconds", where, 600),
         marker_timeout_seconds=_int(table, "marker_timeout_seconds", where, 3600),
+        resolve_markers=_bool(table, "resolve_markers", where, False),
     )
 
     venues = table.get("venue", [])

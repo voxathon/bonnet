@@ -213,7 +213,7 @@ async def test_crosspost_posts_to_the_venue_then_publishes_the_original(w):
     assert meta.bridge_role == model.ROLE_CROSSPOST
     assert meta.foreign_id == str(msg["id"]) == result["foreign_id"]
     assert meta.home_origin == HOME and meta.home_url == HOME_URL
-    assert msg["text"] == f"hello from bonnet\n{model.make_marker(art.event_id)}"
+    assert msg["text"] == f"hello from bonnet\n{model.make_marker(art.event_id, B)}"
     assert w.board.request_ids == {art.event_id.hex()[:32]: msg["id"]}
     assert art.actor_pubkey == w.user.public_key and art.actor_username == ""
 
@@ -407,6 +407,113 @@ def _claim(w, foreign_id: str):
         body_hash=compute_body_hash(body),
         body_size=len(body),
     ), body
+
+
+# ---------------------------------------------------------------------------
+# Addressed markers: another bridge resolves them at the origin they name
+# ---------------------------------------------------------------------------
+
+C = "bridge-c.test"
+
+
+async def _other_bridge(w, resolve: bool = True):
+    """A second bridge on the same venue that has never synced B."""
+    from bonnet.app.server import BonnetServer
+    from bonnet.bridges.remote import RemoteEvents
+
+    rt = runtime_config(w.tmp_path / C, [venue_config()], resolve_markers=resolve)
+    server = BonnetServer(make_config(w.tmp_path, C, rt))
+    runtime = BridgeRuntime(server, adapter_factory=w.board.adapter, clock=_Clock())
+    if resolve:
+        runtime.remote = RemoteEvents(
+            asgi_transport_factory({B_URL: w.bridge}, str(w.tmp_path / "c-trust.db"))
+        )
+    await runtime.setup()
+    return server, runtime
+
+
+def _articles(server, origin):
+    return [
+        r for r in server.firehose.get_events_range(origin, 1, 100000) if r.kind == KIND_ARTICLE
+    ]
+
+
+async def test_a_bridge_that_does_not_read_addressed_markers_gets_the_short_one(w, monkeypatch):
+    handler = w.bridge.command_handler
+    real = handler.bridges_manifest
+
+    def older():
+        return [{k: v for k, v in e.items() if k != "addressed_markers"} for e in real()]
+
+    monkeypatch.setattr(handler, "bridges_manifest", older)
+    await w.crosspost()
+    (msg,) = w.venue_posts()
+    (art,) = w.articles()
+    assert msg["text"].endswith(model.make_marker(art.event_id))
+    assert BridgeMetadata.from_metadata(art.metadata).marker == model.make_marker(art.event_id)
+
+
+async def test_another_bridge_resolves_an_addressed_marker_at_its_origin(w):
+    await w.crosspost("hello, federation")
+    (original,) = w.articles()
+    server, runtime = await _other_bridge(w)
+    try:
+        venue = runtime.venues[0]
+        await runtime.ingest_binding(venue, venue.config.bindings[0])
+        (mirror,) = _articles(server, C)
+        meta = BridgeMetadata.from_metadata(mirror.metadata)
+        assert meta.bridge_role == model.ROLE_MIRROR
+        assert (meta.crosspost_of_origin, meta.crosspost_of_event) == (B, original.event_id)
+        assert runtime.index.pending(BOARD) == []  # no hour-long wait
+    finally:
+        await runtime.close()
+        server.close()
+
+
+async def test_without_resolve_markers_the_other_bridge_waits(w):
+    await w.crosspost("hello, federation")
+    server, runtime = await _other_bridge(w, resolve=False)
+    try:
+        venue = runtime.venues[0]
+        await runtime.ingest_binding(venue, venue.config.bindings[0])
+        assert _articles(server, C) == []
+        assert len(runtime.index.pending(BOARD)) == 1
+    finally:
+        await runtime.close()
+        server.close()
+
+
+async def test_an_addressed_marker_copied_onto_another_post_is_not_believed(w):
+    await w.crosspost("the real one")
+    (original,) = w.articles()
+    copied = w.board.post(
+        f"totally mine {model.make_marker(original.event_id, B)}", author="troll", created=0
+    )
+    server, runtime = await _other_bridge(w)
+    asked = []
+    real_get = runtime.remote.get
+
+    async def get(origin, event_id):
+        asked.append(event_id)
+        return await real_get(origin, event_id)
+
+    runtime.remote.get = get
+    try:
+        venue = runtime.venues[0]
+        binding = venue.config.bindings[0]
+        await runtime.ingest_binding(venue, binding)
+        by_post = {
+            BridgeMetadata.from_metadata(a.metadata).foreign_id: a for a in _articles(server, C)
+        }
+        # The real post mirrors pointing at B; the copy names a record that
+        # states another post, so it points nowhere and waits.
+        assert str(copied) not in by_post
+        assert [p.post.foreign_id for p in runtime.index.pending(BOARD)] == [str(copied)]
+        await runtime.ingest_binding(venue, binding)
+        assert asked == [original.event_id, original.event_id]  # one each, never again
+    finally:
+        await runtime.close()
+        server.close()
 
 
 async def test_a_crash_before_the_final_frame_reposts_idempotently(w, monkeypatch):
@@ -657,6 +764,7 @@ async def test_the_manifest_lists_the_bridge(w):
         await client.close()
     assert entry["venue"] == FLATBOARD_VENUE and entry["board"] == BOARD and entry["local"]
     assert entry["status"] == "bound" and entry["admission"] is True
+    assert entry["addressed_markers"] is True
 
 
 async def test_corroborate_finds_the_copies(w):

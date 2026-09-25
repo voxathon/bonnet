@@ -884,6 +884,24 @@ def test_marker_round_trip_and_last_wins():
     assert model.find_marker("no marker") is None
 
 
+def test_addressed_markers_carry_origin_and_full_id():
+    eid = bytes(range(32))
+    m = model.make_marker(eid, "sys.knolastna.me")
+    assert m == f"[bnt:sys.knolastna.me/{eid.hex()}]"
+    parsed = model.parse_marker(f"hello\n{m}")
+    assert parsed == model.Marker("0001020304050607", "sys.knolastna.me", eid)
+    assert parsed.names(eid) and not parsed.names(eid[:8] + bytes(24))
+    # The short form still parses, and matches on the prefix alone.
+    short = model.parse_marker(model.make_marker(eid))
+    assert short == model.Marker("0001020304050607") and short.names(eid[:8] + bytes(24))
+    # The last marker wins, whichever its form.
+    assert model.parse_marker(f"{m} then [bnt:{'b' * 16}]").origin is None
+    assert model.find_marker(m) == "0001020304050607"
+    # Not markers: uppercase hex, a short id with an origin, an origin with a path.
+    for bad in (f"[bnt:x.test/{'A' * 64}]", f"[bnt:x.test/{'a' * 16}]", f"[bnt:a/b/{'a' * 64}]"):
+        assert model.parse_marker(bad) is None, bad
+
+
 def test_normalization_and_digests():
     assert model.normalize_foreign_text("é\r\nx  \n") == "é\nx"
     assert model.foreign_digest("x\r\n") == model.foreign_digest("x")
