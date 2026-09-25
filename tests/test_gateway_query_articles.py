@@ -203,18 +203,32 @@ async def test_root_returns_every_reply_at_any_depth(wired):
     assert {a.subject for a in thread.results} == {"reply", "grandchild"}
 
 
-async def test_query_articles_sorts_oldest_first(wired):
-    """Unlike list_articles/search_articles (created_at DESC), query_articles
-    sorts by article_num ASC — the docstring calls this out explicitly since
-    it is easy to assume the tools agree."""
+async def test_query_articles_pages_from_the_newest(wired):
+    """The first page is the newest articles. It used to be article_num ASC
+    with "reverse client-side" as the advice, which only ever reversed the
+    oldest page: the newest posts sat behind every page before them."""
     await _connect_register_and_create_board("general")
+    for subject in ("first", "second", "third"):
+        await tools.publish_article(subject, "body", board="general")
 
-    await tools.publish_article("first", "body", board="general")
-    await tools.publish_article("second", "body", board="general")
+    page = await tools.query_articles(board="general", origin=ORIGIN, limit=2)
+    assert [a.subject for a in page.results] == ["third", "second"]
+    rest = await tools.query_articles(board="general", origin=ORIGIN, limit=2, offset=2)
+    assert [a.subject for a in rest.results] == ["first"]
 
-    results = await tools.query_articles(board="general", origin=ORIGIN)
 
-    assert [a.subject for a in results.results] == ["first", "second"]
+async def test_query_articles_oldest_is_the_exact_reverse(wired):
+    await _connect_register_and_create_board("general")
+    for subject in ("first", "second", "third"):
+        await tools.publish_article(subject, "body", board="general")
+
+    page = await tools.query_articles(board="general", origin=ORIGIN, order="oldest", limit=2)
+    assert [a.subject for a in page.results] == ["first", "second"]
+
+
+async def test_query_articles_rejects_an_unknown_order(wired):
+    with pytest.raises(ValueError, match='order must be "newest" or "oldest"'):
+        await tools.query_articles(board="general", origin=ORIGIN, order="random")
 
 
 async def test_anonymous_author_is_marked_unchecked_not_just_blank(wired):

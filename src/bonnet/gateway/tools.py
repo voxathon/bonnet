@@ -2324,6 +2324,7 @@ async def query_articles(
     root_article_id: str = "",
     offset: int = 0,
     limit: int = 50,
+    order: str = "newest",
     origin: str = "",
     auth: str | None = None,
 ) -> QueryResponse:
@@ -2376,8 +2377,8 @@ async def query_articles(
         children — one relay round trip per level, no client-side scan.
       - Get every reply in one thread in one call, at any depth:
         root_article_id=<article_id> of the thread's root. Like
-        reply_to_article_id but unbounded depth instead of one level — sorted
-        article_num ASC, so already chronological. Does not include the root's
+        reply_to_article_id but unbounded depth instead of one level; pass
+        order="oldest" to read it top to bottom. Does not include the root's
         own row (a root's root_article_id is the zero sentinel, never its own
         id — fetch the root itself with get_article if you need it too). Prefer
         read_thread over this when you want the tree already assembled, root
@@ -2386,15 +2387,12 @@ async def query_articles(
       - A specific author's activity: author_pubkey_hex=<hex> (see the caveat
         above on username vs author_pubkey_hex).
 
-    Two things this tool does differently from list_articles/search_articles,
-    easy to miss because the signatures look alike:
-
-      - Sort order is article_num ASC (oldest first) here, not created_at
-        DESC (newest first) like the other two. Reverse client-side if you
-        want most-recent-first. With origin="" (every origin holding the
-        board), article numbers from different origins don't compare, so
-        results come grouped by origin, each group in article_num order;
-        each result's `origin` says which one it's from.
+    Order. Results are sorted by created_at before offset/limit apply:
+    order="newest" (the default, like list_articles/search_articles) puts
+    the newest first, so the first page is what's new; order="oldest" is
+    the exact reverse, for reading a thread or a board from the start. With
+    origin="" every origin's matches are merged into that one order; each
+    result's `origin` says which one it's from.
 
     board: board name (defaults to the board open_board last set).
     author_pubkey_hex: hex Ed25519 public key to filter by author.
@@ -2408,6 +2406,7 @@ async def query_articles(
     reply_to_article_id: hex article_id; only show direct replies to that article.
     root_article_id: hex article_id of a thread's root; show every reply in that
         thread, at any depth (not the root's own row — see above).
+    order: "newest" (default) or "oldest"; see Order above.
     origin: origin to query (empty = every origin holding the board, as
         list_articles/search_articles do).
     """
@@ -2418,6 +2417,8 @@ async def query_articles(
         raise ValueError("offset must be non-negative")
     if limit < 1:
         raise ValueError("limit must be at least 1")
+    if order not in ("newest", "oldest"):
+        raise ValueError(f'order must be "newest" or "oldest", got {order!r}')
     filters = []
     if author_pubkey_hex:
         pk = _validate_pubkey(author_pubkey_hex)
@@ -2449,7 +2450,9 @@ async def query_articles(
     client = _make_client()
     try:
         await _connect_with_default(client, auth)
-        return await client.query_articles(origin, board, filters, offset, limit)
+        return await client.query_articles(
+            origin, board, filters, offset, limit, newest_first=(order == "newest")
+        )
     finally:
         await client.close()
 
@@ -2544,7 +2547,8 @@ async def read_thread(
                 )
 
         filters = [(0x0A, 0x01, 0x01, bytes.fromhex(root_view.article_id))]
-        response = await client.query_articles(origin, board, filters, 0, limit)
+        # Oldest first: a truncated thread keeps its opening replies.
+        response = await client.query_articles(origin, board, filters, 0, limit, newest_first=False)
     finally:
         await client.close()
 
