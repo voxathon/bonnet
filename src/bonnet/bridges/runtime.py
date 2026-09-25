@@ -102,8 +102,15 @@ def _relay_account(venue: VenueConfig) -> ForeignAccount | None:
     return ForeignAccount(venue.relay_user, token) if token else None
 
 
+# A venue post with no text still needs a subject: the kind validator
+# refuses an empty one, and a refused mirror would wedge its binding.
+EMPTY_SUBJECT = "(empty post)"
+
+
 def mirror_subject(text: str) -> str:
     first = " ".join(model.normalize_foreign_text(text).split())
+    if not first:
+        return EMPTY_SUBJECT
     if len(first) > SUBJECT_CHARS:
         first = first[: SUBJECT_CHARS - 1].rstrip() + "…"
     return first
