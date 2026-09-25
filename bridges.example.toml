@@ -13,9 +13,10 @@
 # own ACL rule.
 #
 # [runtime]
-# daemon_key = "~/.bonnet/bridges/daemon.key"
-# master_secret = "~/.bonnet/bridges/master.secret"   # puppet keys derive from this: back it up
-# state_dir = "~/.bonnet/bridges/state"               # cache only; `bonnet bridge rebuild-index`
+# Relative paths resolve against this file's directory, the bridge's home.
+# daemon_key = "daemon.key"
+# master_secret = "master.secret"   # puppet keys derive from this: back it up
+# state_dir = "state"               # cache only; `bonnet bridge rebuild-index`
 # grace_seconds = 120
 # marker_timeout_seconds = 3600
 #

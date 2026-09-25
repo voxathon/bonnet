@@ -175,21 +175,47 @@ def parse_options(table: dict, where: str) -> dict:
     return dict(options)
 
 
+# [runtime] path keys and their default names in the bridge's home.
+_RUNTIME_FILES = {
+    "daemon_key": "daemon.key",
+    "master_secret": "master.secret",
+    "state_dir": "state",
+}
+# Where those defaults pointed before bridges had their own home.
+_LEGACY_RUNTIME_DIR = os.path.join("~", ".bonnet", "bridges")
+
+
+def _refuse_legacy_default(key: str, name: str, base_dir: str) -> None:
+    """Refuse a default that would silently replace a file at the legacy path.
+
+    Generating a fresh master secret or daemon key next to bridges.toml while
+    the old one sits in ~/.bonnet/bridges would orphan every puppet.
+    """
+    legacy = os.path.expanduser(os.path.join(_LEGACY_RUNTIME_DIR, name))
+    current = os.path.join(base_dir, name)
+    if os.path.exists(legacy) and not os.path.exists(current):
+        raise ValueError(
+            f"runtime.{key} is unset, and its default is now {current}, but {legacy} "
+            f"exists from an older version: move it to {current}, or set "
+            f'runtime.{key} = "{legacy}"'
+        )
+
+
 def parse_bridge_runtime(table: dict, base_dir: str) -> tuple[BridgeRuntimeConfig, list[str]]:
     """Parse `[runtime]`. Returns the config and any unrecognized keys."""
     if not isinstance(table, dict):
         raise ValueError("[runtime] must be a table")
     unknown = [f"runtime.{k}" for k in table if k not in _RUNTIME_KEYS]
     where = "runtime"
-    home = os.path.join("~", ".bonnet", "bridges")
+    # Unset paths default into base_dir: bridges.toml sits in the bridge's
+    # home, next to bridge.toml, so each bridge keeps its own keys and state.
+    for key, name in _RUNTIME_FILES.items():
+        if key not in table:
+            _refuse_legacy_default(key, name, base_dir)
     cfg = BridgeRuntimeConfig(
-        daemon_key=_path(
-            _str(table, "daemon_key", where, os.path.join(home, "daemon.key")), base_dir
-        ),
-        master_secret=_path(
-            _str(table, "master_secret", where, os.path.join(home, "master.secret")), base_dir
-        ),
-        state_dir=_path(_str(table, "state_dir", where, os.path.join(home, "state")), base_dir),
+        daemon_key=_path(_str(table, "daemon_key", where, "daemon.key"), base_dir),
+        master_secret=_path(_str(table, "master_secret", where, "master.secret"), base_dir),
+        state_dir=_path(_str(table, "state_dir", where, "state"), base_dir),
         daemon_username=_str(table, "daemon_username", where, "bridge"),
         grace_seconds=_int(table, "grace_seconds", where, 120),
         linked_grace_seconds=_int(table, "linked_grace_seconds", where, 600),

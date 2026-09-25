@@ -168,7 +168,8 @@ def test_config_parses_venues_and_bindings(tmp_path):
     cfg, unknown = parse_bridge_runtime(_table(surprise=1), str(tmp_path))
     assert unknown == ["runtime.surprise"]
     assert cfg.state_dir == str(tmp_path / "state")
-    assert cfg.daemon_key.endswith(os.path.join(".bonnet", "bridges", "daemon.key"))
+    assert cfg.daemon_key == str(tmp_path / "daemon.key")
+    assert cfg.master_secret == str(tmp_path / "master.secret")
     (venue,) = cfg.venues
     assert venue.url == "https://flatboard.test"
     assert venue.bindings == [BindingConfig(board="~flatboard", max_body_bytes=1000)]
@@ -199,6 +200,26 @@ def test_config_rejects_bad_tables(tmp_path, mutate, message):
     mutate(table)
     with pytest.raises(ValueError, match=message):
         parse_bridge_runtime(table, str(tmp_path))
+
+
+def test_config_refuses_to_shadow_legacy_key_files(tmp_path, monkeypatch):
+    user_home = tmp_path / "user"
+    legacy = user_home / ".bonnet" / "bridges"
+    legacy.mkdir(parents=True)
+    (legacy / "master.secret").write_bytes(b"x" * 32)
+    monkeypatch.setenv("HOME", str(user_home))
+    bridge_home = tmp_path / "bridge"
+    bridge_home.mkdir()
+    with pytest.raises(ValueError, match="runtime.master_secret is unset"):
+        parse_bridge_runtime(_table(), str(bridge_home))
+    # Pointing at the old file, or having moved it, both load.
+    cfg, _ = parse_bridge_runtime(
+        _table(master_secret=str(legacy / "master.secret")), str(bridge_home)
+    )
+    assert cfg.master_secret == str(legacy / "master.secret")
+    (bridge_home / "master.secret").write_bytes(b"x" * 32)
+    cfg, _ = parse_bridge_runtime(_table(), str(bridge_home))
+    assert cfg.master_secret == str(bridge_home / "master.secret")
 
 
 def test_config_file_loads_bridge_runtime_and_checks_body_cap(tmp_path):
