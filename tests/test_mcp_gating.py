@@ -33,7 +33,7 @@ pytest.importorskip("fastmcp")
 from fastmcp import Client
 
 from bonnet.core.acl import ACLRule, PrincipalMatcher
-from bonnet.gateway import cursor, gating, tenancy, tools
+from bonnet.gateway import cursor, gating, needs, tenancy, tools
 from bonnet.gateway.firehose_client import FirehoseHTTPClient
 from bonnet.gateway.gating import GatingMiddleware
 from tests.test_firehose_http_server import ORIGIN, server_stack  # noqa: F401
@@ -89,6 +89,9 @@ def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
         monkeypatch.delenv(var, raising=False)
 
     tenancy.reset_store_cache()
+    # PERMISSIONS answers are cached per module, keyed on the url: another
+    # test's server at https://bbs.test must not answer for this one's.
+    needs._cache.clear()
     tools.current_origin_url.set(None)
     tools.current_origin_verify.set(None)
     tools.current_origin.set(None)
@@ -138,6 +141,7 @@ def bridge(server_stack, tmp_path, monkeypatch):  # noqa: F811
     yield server_stack
 
     tenancy.reset_store_cache()
+    needs._cache.clear()
     tools.current_origin_url.set(None)
     tools.current_origin_verify.set(None)
     tools.current_origin.set(None)
