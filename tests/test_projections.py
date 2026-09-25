@@ -447,6 +447,18 @@ class TestBoardProjection:
         all_articles = board_proj.list_articles("bbs.a", "general", include_cancelled=True)
         assert len(all_articles) == 3
 
+    def test_list_articles_breaks_created_at_ties_newest_first(self, board_proj):
+        """A bridge backfill mirrors several posts within one second. Ties
+        used to fall back to article_num ASC, so a newest-first listing read
+        in ascending runs inside descending seconds."""
+        for i in range(4):
+            rec = self._make_article_record(seq=i + 1, eid=_rid(i + 1), aid=_rid(i + 11))
+            assert rec.created_at == self._make_article_record().created_at
+            board_proj.apply_article(rec)
+
+        nums = [a.article_num for a in board_proj.list_articles("bbs.a", "general")]
+        assert nums == [4, 3, 2, 1]
+
     def test_pin_and_unpin(self, board_proj):
         rec = self._make_article_record()
         board_proj.apply_article(rec)
