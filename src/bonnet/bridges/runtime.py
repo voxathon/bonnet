@@ -100,11 +100,11 @@ def _relay_account(venue: VenueConfig) -> ForeignAccount | None:
     return ForeignAccount(venue.relay_user, token) if token else None
 
 
-def mirror_subject(venue_type: str, foreign_id: str, text: str) -> str:
+def mirror_subject(text: str) -> str:
     first = " ".join(model.normalize_foreign_text(text).split())
     if len(first) > SUBJECT_CHARS:
         first = first[: SUBJECT_CHARS - 1].rstrip() + "…"
-    return f"[{venue_type} #{foreign_id}] {first}".rstrip()
+    return first
 
 
 class BridgeRuntime:
@@ -425,7 +425,7 @@ class BridgeRuntime:
             crosspost_of_event=crosspost_of[1] if crosspost_of else None,
         )
         fields = [
-            metadata_text(1, mirror_subject(venue_type, post.foreign_id, post.text)),
+            metadata_text(1, mirror_subject(post.text)),
             metadata_text_list(2, model.bridge_tags(venue_type, src)),
             metadata_text(4, "text/plain"),
         ]

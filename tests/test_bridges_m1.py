@@ -501,7 +501,7 @@ async def test_ingest_mirrors_and_observes_a_thread(h):
 
     # Articles: subject, tags, body.
     art = h.article(ra)
-    assert art.subject == f"[flatboard #{a}] root post"
+    assert art.subject == "root post"
     assert f"src:{FLATBOARD_VENUE}##{a}" in art.tags
     assert art.author_check == "registry"
 
@@ -949,9 +949,9 @@ def test_missing_adapters_names_each_venue(monkeypatch):
 
 
 def test_mirror_subject():
-    assert mirror_subject("flatboard", "7", "  hello\n  world  ") == "[flatboard #7] hello world"
-    long = mirror_subject("flatboard", "7", "x" * 200)
-    assert len(long) == len("[flatboard #7] ") + 80 and long.endswith("…")
+    assert mirror_subject("  hello\n  world  ") == "hello world"
+    long = mirror_subject("x" * 200)
+    assert len(long) == 80 and long.endswith("…")
 
 
 # ---------------------------------------------------------------------------
