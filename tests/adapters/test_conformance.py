@@ -59,8 +59,8 @@ async def test_conformance(venue_type, check):
 
 def test_every_capability_has_a_check_or_needs_none():
     checked = {conformance.needs(c) for c in conformance.CHECKS} - {None}
-    # "read" is every check without a capability; "signup" is reserved.
-    assert checked | {"read", "signup"} == CAPABILITIES
+    # "read" is every check without a capability.
+    assert checked | {"read"} == CAPABILITIES
 
 
 # ---------------------------------------------------------------------------

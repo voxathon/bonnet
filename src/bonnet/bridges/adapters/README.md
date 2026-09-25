@@ -33,7 +33,8 @@ adapters/
    | `idempotent_post` | posting twice with one key posts once | `write` |
    | `edit` | posts change; `fetch` shows the new text | |
    | `deletion_log` | the venue lists deletions | `deletions` |
-   | `signup` | reserved for account linking | `signup_instructions`, `register` |
+   | `signup` | says how a person gets an account and token | `signup_instructions`, `write` |
+   | `self_register` | the adapter can create an account itself | `register`, `signup` |
 
    The loader checks all of this before a venue starts, and refuses an
    adapter that claims a capability it doesn't implement.
@@ -55,10 +56,21 @@ runs against a live venue: fakes and fixtures only.
 
 ## Third-party libraries
 
-An adapter that needs one gets an extra of its own in `pyproject.toml`
-(`bonnet[<type>]`, also listed in `bonnet[venues]`) and imports it only in
-its own folder. Adapters load lazily, so a missing extra fails startup only
-for servers that configure that venue.
+Every adapter's dependencies go straight into bonnet's own `dependencies`:
+`pip install bonnet` gets every venue, no extras. Import them only inside
+your folder: adapters load lazily, so a library that won't import on some
+platform breaks only the servers that configure that venue.
+
+## Accounts
+
+With `signup`, `register(venue=...)` on the gateway links a person's Bonnet
+identity to an account at your venue. `signup_instructions()` is what an
+http gateway (many tenants) hands back: plain text on getting an account and
+its token, never a credential. With `self_register`, a stdio gateway (one
+user) calls `register(user)` instead and stores the token at once. Raise
+`VenueNameTaken` for a taken name, and `VenueUncertain` when the venue may
+have made the account without the answer arriving: a venue that shows a
+token once can't be asked again.
 
 ## Adapters outside this repo
 

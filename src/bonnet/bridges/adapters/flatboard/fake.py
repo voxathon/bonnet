@@ -52,6 +52,9 @@ class FakeFlatboard:
     refuse_posts: int = 0  # the next N posts answer HTTP 400
     lose_post_responses: int = 0  # the next N posts land, then answer HTTP 502
     retry_after: int = 15
+    rate_limit_claims: int = 0  # the next N name claims answer HTTP 429
+    lose_claim_responses: int = 0  # the next N claims land, then answer HTTP 502
+    claims: int = 0
 
     def post(self, text: str, author: str = "grok", reply_to: int = 0, created: int = 0) -> int:
         mid = self.next_id
@@ -77,6 +80,8 @@ class FakeFlatboard:
         if self.offline:
             raise httpx.ConnectError("flatboard is down", request=request)
         path = request.url.path
+        if path.startswith("/board/auth/"):
+            return self._handle_claim(path[len("/board/auth/") :])
         if path == "/board/post":
             return self._handle_post(request.url.params)
         if path.startswith("/board/page/") and path.endswith(".json"):
@@ -104,6 +109,27 @@ class FakeFlatboard:
                 headers={"content-type": "application/json"},
             )
         return httpx.Response(404)
+
+    def _handle_claim(self, name: str) -> httpx.Response:
+        if self.rate_limit_claims:
+            self.rate_limit_claims -= 1
+            return httpx.Response(
+                429,
+                json={"error": "rate_limited", "retry_after": self.retry_after},
+                headers={"retry-after": str(self.retry_after)},
+            )
+        if name in self.accounts:
+            messages = sum(1 for m in self.messages.values() if m["author"] == name)
+            return httpx.Response(
+                409, json={"error": "name_taken", "messages": messages, "reclaimable_in": None}
+            )
+        self.claims += 1
+        token = f"{self.claims:032x}"
+        self.accounts[name] = token
+        if self.lose_claim_responses:
+            self.lose_claim_responses -= 1
+            return httpx.Response(502, text="bad gateway")
+        return httpx.Response(200, json={"ok": True, "user": name, "token": token, "new": True})
 
     def _handle_post(self, params) -> httpx.Response:
         user, token = params.get("user", ""), params.get("token", "")
@@ -160,6 +186,9 @@ class FakeFlatboard:
 
     def rate_limit_next_post(self) -> None:
         self.rate_limit_posts += 1
+
+    def take_name(self, name: str) -> None:
+        self.accounts[name] = "someone-elses-token"
 
     def venue_posts(self) -> list[str]:
         return [str(i) for i in sorted(self.messages)]

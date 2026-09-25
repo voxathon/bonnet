@@ -46,6 +46,7 @@ from bonnet.bridges.adapter import (
     VenueAdapter,
     VenueAuthError,
     VenueError,
+    VenueNameTaken,
     VenueRateLimited,
     adapter_problems,
 )
@@ -80,6 +81,8 @@ class VenueFake(Protocol):
     #   def rate_limit_next_post(self) -> None     the next post is refused for rate
     # With "edit":
     #   def edit(self, foreign_id: str, text: str) -> None
+    # With "self_register":
+    #   def take_name(self, name: str) -> None      someone else holds `name`
 
 
 Check = Callable[[VenueFake, VenueAdapter], Awaitable[None]]
@@ -259,6 +262,33 @@ async def deletions_are_logged(fake: VenueFake, adapter: VenueAdapter) -> None:
     assert fid not in [d.foreign_id for d in more], "resuming from the cursor repeated entries"
 
 
+@_needs("signup")
+async def signup_instructions_say_how(fake: VenueFake, adapter: VenueAdapter) -> None:
+    text = adapter.signup_instructions()  # type: ignore[attr-defined]
+    assert isinstance(text, str) and text.strip(), "signup instructions must say something"
+    account = fake.good_account()  # type: ignore[attr-defined]
+    assert account.token not in text, "signup instructions must never carry a credential"
+
+
+@_needs("self_register")
+async def registered_accounts_can_post(fake: VenueFake, adapter: VenueAdapter) -> None:
+    account = await adapter.register("newcomer")  # type: ignore[attr-defined]
+    assert isinstance(account, ForeignAccount) and account.user and account.token
+    text = adapter.render_outbound("first post", model.make_marker(os.urandom(32)), None)
+    posted = await adapter.post(account, CHANNEL, text, None, os.urandom(16).hex())
+    assert posted.foreign_id in fake.venue_posts()
+
+
+@_needs("self_register")
+async def taken_names_raise_name_taken(fake: VenueFake, adapter: VenueAdapter) -> None:
+    fake.take_name("occupied")  # type: ignore[attr-defined]
+    try:
+        await adapter.register("occupied")  # type: ignore[attr-defined]
+    except VenueNameTaken:
+        return
+    raise AssertionError("claiming a taken name must raise VenueNameTaken")
+
+
 CHECKS: list[Check] = [
     interface,
     poll_is_ordered_and_resumable,
@@ -274,6 +304,9 @@ CHECKS: list[Check] = [
     same_key_posts_once,
     edits_show_through_fetch,
     deletions_are_logged,
+    signup_instructions_say_how,
+    registered_accounts_can_post,
+    taken_names_raise_name_taken,
 ]
 
 

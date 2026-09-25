@@ -221,6 +221,11 @@ class JoinedOriginInfo:
     active: bool
 
 
+# How this gateway speaks MCP, set once at startup (bonnet.gateway.server).
+# "stdio" is one user on their own machine; "http"/"sse" may serve many
+# tenants. register(venue=...) creates venue accounts itself only on stdio.
+gateway_transport = "stdio"
+
 mcp = FastMCP("Bonnet BBS", instructions=SERVER_INSTRUCTIONS)
 
 current_username: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -1117,6 +1122,10 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     # identity remembered for it — connect never sets one itself, but it must
     # not erase one register() set on an earlier visit either.
     existing = store.get(origin)
+    if existing and existing["identity"]:
+        bridges = _bridge_tools.annotate_links(
+            bridges, _get_identity_store().linked_venues(origin, existing["identity"])
+        )
     store.remember(
         origin=origin,
         url=resolved_url,
@@ -1396,6 +1405,10 @@ async def register(
     password: str | None = None,
     origin: str | None = None,
     private_key_hex: str | None = None,
+    venue: str | None = None,
+    venue_user: str | None = None,
+    venue_token: str | None = None,
+    unlink: bool = False,
 ) -> dict:
     """Register — or re-select — a local identity for an origin, and use it.
 
@@ -1433,6 +1446,24 @@ async def register(
     Calling register again for a (origin, username) this key already
     registered is safe: it re-selects the identity and returns
     `registered_seq: null` to say no new registration record was published.
+
+    `venue` links this identity to an account at a foreign venue this origin
+    bridges (a `venue` from connect's `bridges`, e.g.
+    `flatboard@tools.nyrds.net`), so publishing on its `~` board also posts
+    there as you. It works on a new identity (registered here first) or an
+    existing one (only linked). How the account is found:
+      - `venue_token` given: stored as your account `venue_user` (default:
+        `username`). In http mode that token passes through your context and
+        whatever your host logs; it is never returned by any tool.
+      - no token, gateway on stdio, and the venue lets accounts be created:
+        the account `venue_user` is created there and linked. Its token is
+        stored at once and never shown. A taken name says so: pick another.
+      - otherwise: `venue.instructions` says how to get an account; call
+        register again with `venue_user` and `venue_token`.
+    `unlink=True` forgets the linked account instead (at `venue`); the account
+    itself stays at the venue. The result's `venue` says what happened; a
+    venue failure never undoes the Bonnet registration. connect's `bridges`
+    shows which venues this identity has linked.
     """
     _reject_lone_surrogates("username", username)
     _check_byte_len("username", username, MAX_TEXT_FIELD)
@@ -1478,6 +1509,10 @@ async def register(
     client = _make_client(origin_entry["url"], origin_entry["verify_tls"])
     try:
         await client.connect(identity, username=username)
+        if venue and not unlink:
+            _bridge_tools.linkable(
+                list(client.discovery.bridges) if client.discovery else [], venue
+            )
 
         registered_seq: int | None = None
         try:
@@ -1540,7 +1575,7 @@ async def register(
     unlocked = await _unlock_origin_tools()
 
     already_registered = registered_seq is None
-    response: dict[str, list[str] | str | int | bool | None] = {
+    response: dict[str, list[str] | str | int | bool | dict | None] = {
         "origin": target_origin,
         "username": username,
         "public_key": identity.public_key.hex(),
@@ -1558,6 +1593,16 @@ async def register(
             f"'{username}' was already registered on this origin under this key - "
             "re-selected the existing identity; no new registration record was published."
         )
+    if venue:
+        from bonnet.bridges.adapter import VenueError
+
+        try:
+            response["venue"] = await _bridge_tools.link_venue(
+                target_origin, username, password, venue,
+                venue_user or "", venue_token or "", unlink,
+            )  # fmt: skip
+        except VenueError as e:
+            response["venue"] = {"venue": venue, "linked": False, "error": str(e)}
     _gw_log(
         "register",
         ok=True,
@@ -1569,7 +1614,7 @@ async def register(
 
 
 @mcp.tool(tags={NEEDS_IDENTITY})
-async def export_identity(auth: str | None = None) -> dict:
+async def export_identity(include_venues: bool = False, auth: str | None = None) -> dict:
     """Export one signing identity's private key for mobility/backup.
 
     Returns `{origin, username, private_key_hex, public_key_hex, wrapped}`
@@ -1583,6 +1628,12 @@ async def export_identity(auth: str | None = None) -> dict:
     (`bonnet gateway tenant remove <id> --yes` or `POST /admin/tenants/{id}/delete`)
     only after every identity is verified re-importable elsewhere.
     `private_key_hex` reinstalls via `register(..., private_key_hex=...)`.
+
+    `include_venues=True` adds `venue_accounts`: every venue account linked
+    to this identity, token included, as `{venue, venue_user, venue_token}`.
+    Off by default: those are credentials at other services, and many can't
+    be rotated. Each reinstalls with `register(..., venue=, venue_user=,
+    venue_token=)`.
 
     Local-only: no origin record is published and nothing on the board
     changes, so this is callable even while banned — leaving must not
@@ -1605,13 +1656,21 @@ async def export_identity(auth: str | None = None) -> dict:
     if pubkey is None:  # pragma: no cover — get_private_key raised first
         raise ValueError(f"No local identity found for '{username}' on '{origin}'")
     _gw_log("export_identity", ok=True, origin=origin, username=username)
-    return {
+    out: dict = {
         "origin": origin,
         "username": username,
         "private_key_hex": private_key.hex(),
         "public_key_hex": pubkey.hex(),
         "wrapped": store.is_wrapped(origin, username),
     }
+    if include_venues:
+        accounts = []
+        for venue in sorted(store.linked_venues(origin, username)):
+            found = store.venue_account(origin, username, venue, password)
+            if found is not None:
+                accounts.append({"venue": venue, "venue_user": found[0], "venue_token": found[1]})
+        out["venue_accounts"] = accounts
+    return out
 
 
 @mcp.tool
@@ -1670,6 +1729,10 @@ async def switch_origin(origin: str) -> dict:
 
     cached = _manifest_cache_get(entry["url"])
     bridges = list(cached.get("bridges", [])) if cached else None
+    if bridges is not None and entry["identity"]:
+        bridges = _bridge_tools.annotate_links(
+            bridges, _get_identity_store().linked_venues(entry["origin"], entry["identity"])
+        )
     return {**entry, "active": True, **({"bridges": bridges} if bridges is not None else {})}
 
 

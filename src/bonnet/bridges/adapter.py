@@ -55,13 +55,14 @@ CAPABILITY_METHODS: dict[str, tuple[str, ...]] = {
     "idempotent_post": (),  # post() with the same key never posts twice
     "edit": (),  # fetch() shows edits; the runtime sweeps for them
     "deletion_log": ("deletions",),
-    "signup": ("signup_instructions", "register"),  # reserved: account linking
+    "signup": ("signup_instructions",),  # accounts: says how a person gets one
+    "self_register": ("register",),  # accounts: the adapter can create one
 }
 CAPABILITIES = frozenset(CAPABILITY_METHODS)
 # Needed by every adapter, whatever it can do.
 BASE_METHODS = ("poll", "fetch", "cursor_after", "cursor_from_ids", "close")
 # Capabilities that only mean something alongside another.
-_CAPABILITY_NEEDS = {"idempotent_post": "write", "signup": "write"}
+_CAPABILITY_NEEDS = {"idempotent_post": "write", "signup": "write", "self_register": "signup"}
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,10 @@ class VenueUncertain(VenueError):
     """A post failed in a way that doesn't say whether the venue took it (the
     connection dropped, the venue answered 5xx). On a venue with
     `idempotent_post`, retrying with the same key settles it either way."""
+
+
+class VenueNameTaken(VenueError):
+    """register(): the venue already has an account by that name."""
 
 
 class VenueRateLimited(VenueError):
@@ -182,9 +187,19 @@ class VenueAdapter(Protocol):
     # Entries after `cursor`, oldest first, and the cursor to resume from.
     # Venues with `edit` are swept with fetch(): a changed text is an edit.
     #
-    # Reserved for `signup` (account linking; nothing calls them yet):
+    # With `signup`, for register(venue=...) (design: accounts are linked to
+    # one Bonnet identity each, in the gateway's identity store):
     #   def signup_instructions(self) -> str
+    # How a person gets an account and its token, for someone who will paste
+    # the token back. Plain text; never contains a credential.
+    #
+    # With `self_register`:
     #   async def register(self, user: str) -> ForeignAccount
+    # Create the account `user` at the venue and return its credentials.
+    # Raises VenueNameTaken if someone holds the name, VenueRateLimited if
+    # the venue refuses for rate, and VenueUncertain if it may have made the
+    # account without the answer arriving: a venue that shows a token once
+    # can't be asked again, and the caller must say so.
 
     async def close(self) -> None: ...
 

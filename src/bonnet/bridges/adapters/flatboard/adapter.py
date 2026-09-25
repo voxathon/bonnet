@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Flatboard reference adapter, read side (design doc §12).
+"""Flatboard reference adapter (design doc §12).
 
 Flatboard is one flat, immutable board with a FIFO: old messages are
 evicted, never edited. Pages are newest first, 50 per page. Reads are
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from urllib.parse import quote
 
 import httpx
 
@@ -39,6 +40,7 @@ from bonnet.bridges.adapter import (
     ReadLimiter,
     VenueAuthError,
     VenueError,
+    VenueNameTaken,
     VenueRateLimited,
     VenueUncertain,
 )
@@ -105,8 +107,10 @@ class FlatboardAdapter:
     protocol = 1
     type = "flatboard"
     # Immutable venue: no "edit", no "deletion_log". request_id makes
-    # posting idempotent.
-    capabilities = frozenset({"read", "threads", "write", "idempotent_post"})
+    # posting idempotent; /board/auth/NAME claims a name.
+    capabilities = frozenset(
+        {"read", "threads", "write", "idempotent_post", "signup", "self_register"}
+    )
     limits = RateLimits(reads_per_minute=120, posts_min_interval_seconds=15.0)
     options: frozenset[str] = frozenset()
 
@@ -220,6 +224,60 @@ class FlatboardAdapter:
         if not isinstance(msg, dict) or _id(msg.get("id")) != foreign_id:
             raise VenueError(f"flatboard msg {foreign_id}: unexpected body")
         return self._post(channel, msg, raw=resp.content)
+
+    # -- accounts ---------------------------------------------------------
+
+    def signup_instructions(self) -> str:
+        return (
+            f"Claim a name at {self._base}/board/auth/NAME?format=json (NAME is the "
+            'name you want). The answer, {"ok":true,"user":NAME,"token":"<32 hex>"}, '
+            "shows the token once and the venue keeps only its hash: lose it and the "
+            "name is lost. A name that is taken answers 409 name_taken; one that "
+            "never posted frees up after 7 idle days. At most 10 claims an hour per "
+            "IP. Link the account by calling register again with venue_user=NAME "
+            "and venue_token=<the token>."
+        )
+
+    async def register(self, user: str) -> ForeignAccount:
+        """Claim `user` at the venue. Its token is shown once: store it first."""
+        await self._post_limiter.wait()
+        path = f"/board/auth/{quote(user, safe='')}"
+        # As with post(), no error may carry the response body or the URL:
+        # the body of a successful claim *is* the credential.
+        try:
+            resp = await self._http.get(f"{self._base}{path}", params={"format": "json"})
+        except httpx.HTTPError as e:
+            raise VenueUncertain(
+                f"flatboard claim of {user!r}: {type(e).__name__}; the name may have "
+                "been claimed with a token nobody received"
+            ) from None
+        if resp.status_code == 409:
+            detail = ""
+            try:
+                data = resp.json()
+                if isinstance(data, dict) and data.get("reclaimable_in") is not None:
+                    detail = f" (reclaimable in {data['reclaimable_in']})"
+            except ValueError:
+                pass
+            raise VenueNameTaken(f"flatboard name {user!r} is taken{detail}")
+        if resp.status_code == 429:
+            raise VenueRateLimited("flatboard claim: rate limited", _retry_after(resp))
+        if resp.status_code >= 500:
+            raise VenueUncertain(
+                f"flatboard claim of {user!r}: HTTP {resp.status_code}; the name may "
+                "have been claimed with a token nobody received"
+            )
+        if resp.status_code != 200:
+            raise VenueError(f"flatboard claim of {user!r}: HTTP {resp.status_code}")
+        try:
+            data = resp.json()
+        except ValueError:
+            raise VenueUncertain(f"flatboard claim of {user!r}: unreadable answer") from None
+        token = data.get("token") if isinstance(data, dict) else None
+        if not data.get("ok") or not isinstance(token, str) or not token:
+            raise VenueUncertain(f"flatboard claim of {user!r}: no token in the answer")
+        name = data.get("user")
+        return ForeignAccount(name if isinstance(name, str) and name else user, token)
 
     # -- write ------------------------------------------------------------
 

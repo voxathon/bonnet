@@ -23,9 +23,11 @@ No tool of its own lives here: `bonnet.gateway.tools` calls into this module.
   corroborate      get_article(corroborate=True): every recognized bridge's
                    copy of a bridged article
 
-Venue accounts live in the tenant's `bridge_accounts.toml` (or the file
-$BONNET_BRIDGE_ACCOUNTS names), managed by the operator, never passed through
-a tool call:
+Venue accounts are linked to one identity each with register(venue=...)
+(`link_venue` here), and kept in the tenant's identity store, wrapped like
+the identity's key. An operator can also give the whole tenant accounts in
+`bridge_accounts.toml` (or the file $BONNET_BRIDGE_ACCOUNTS names); a
+linked account wins over it:
 
     [[account]]
     venue = "flatboard@tools.nyrds.net"
@@ -55,9 +57,11 @@ from bonnet.bridges.adapter import (
     ReadLimiter,
     VenueAuthError,
     VenueError,
+    VenueNameTaken,
     VenueRateLimited,
     VenueUncertain,
     build_adapter,
+    load_adapter_class,
     venue_option_problems,
 )
 from bonnet.bridges.config import VenueConfig, check_venue, parse_options, venue_type_of
@@ -123,6 +127,37 @@ def load_accounts() -> dict[str, VenueAccountSpec]:
         except (KeyError, OSError, TypeError, ValueError) as e:
             raise ValueError(f"{path}: account[{i}] is unusable: {e!r}") from e
     return out
+
+
+def _venue_url(venue: str) -> str:
+    """Where a venue's API lives: the operator's accounts file says, else its host."""
+    spec = load_accounts().get(venue)
+    return spec.url if spec is not None else f"https://{venue.partition('@')[2]}"
+
+
+def _linked_spec(venue: str, auth: str | None) -> VenueAccountSpec | None:
+    """The calling identity's own account at `venue`, if it linked one."""
+    t = _t()
+    try:
+        username, password = t._resolve_auth(auth)
+        origin = t._default_origin() or ""
+        found = t._get_identity_store().venue_account(origin, username, venue, password)
+    except ValueError:
+        return None
+    if found is None:
+        return None
+    user, token = found
+    return VenueAccountSpec(
+        venue=venue,
+        type=venue_type_of(venue),
+        url=_venue_url(venue),
+        account=ForeignAccount(user, token),
+    )
+
+
+def account_spec(venue: str, auth: str | None) -> VenueAccountSpec | None:
+    """The account to post to `venue` as: the caller's linked one, else the tenant's."""
+    return _linked_spec(venue, auth) or load_accounts().get(venue)
 
 
 def _outbox() -> Outbox:
@@ -283,6 +318,97 @@ def _bridge_url(bridge_origin: str, bridge_url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# register(venue=...): linking venue accounts
+# ---------------------------------------------------------------------------
+
+
+def linkable(bridges: list[dict], venue: str) -> None:
+    """Refuse a venue this origin doesn't bridge, or whose adapter isn't here."""
+    known = sorted({b.get("venue", "") for b in bridges if b.get("venue")})
+    if venue not in known:
+        offer = ", ".join(known) if known else "none: this origin bridges no venues"
+        raise ValueError(f"{venue!r} isn't a venue this origin bridges; linkable: {offer}")
+    load_adapter_class(venue_type_of(venue))  # AdapterNotFound is a ValueError
+
+
+async def link_venue(
+    origin: str,
+    username: str,
+    password: str | None,
+    venue: str,
+    venue_user: str = "",
+    venue_token: str = "",
+    unlink: bool = False,
+) -> dict:
+    """Link, or with `unlink` forget, the identity's account at `venue`.
+
+    A token given is stored as it is (paste). With none, a stdio gateway
+    whose adapter can create accounts claims `venue_user` at the venue and
+    stores the token before anything else can fail: venues may show it
+    once. Otherwise the venue's instructions for getting one come back.
+    No token is ever returned.
+    """
+    store = _t()._get_identity_store()
+    if unlink:
+        return {"venue": venue, "linked": False, "unlinked": store.unlink_venue(
+            origin, username, venue
+        )}  # fmt: skip
+    venue_user = venue_user or username
+    # Checked first: a claimed name whose token can't then be stored is lost.
+    if store.is_wrapped(origin, username) and not store.verify_password(
+        origin, username, password or ""
+    ):
+        raise ValueError("Invalid password for this identity")
+    if venue_token:
+        store.link_venue(origin, username, venue, venue_user, venue_token, password)
+        return {"venue": venue, "linked": True, "venue_user": venue_user, "how": "pasted"}
+
+    venue_config = VenueConfig(
+        type=venue_type_of(venue), venue=venue, url=_venue_url(venue)
+    )  # fmt: skip
+    adapter = build_adapter(venue_config)
+    try:
+        caps = adapter.capabilities
+        if _t().gateway_transport == "stdio" and "self_register" in caps:
+            try:
+                account = await adapter.register(venue_user)  # type: ignore[attr-defined]
+            except VenueNameTaken as e:
+                return {
+                    "venue": venue, "linked": False, "error": str(e),
+                    "next": "pick another venue_user and call register again",
+                }  # fmt: skip
+            store.link_venue(origin, username, venue, account.user, account.token, password)
+            return {"venue": venue, "linked": True, "venue_user": account.user,
+                    "how": "registered"}  # fmt: skip
+        if "signup" in caps:
+            return {
+                "venue": venue, "linked": False,
+                "instructions": adapter.signup_instructions(),  # type: ignore[attr-defined]
+                "next": "call register again with venue_user= and venue_token=",
+            }  # fmt: skip
+        return {
+            "venue": venue, "linked": False,
+            "next": f"{venue} says nothing about accounts here: get one there, then "
+            "call register again with venue_user= and venue_token=",
+        }  # fmt: skip
+    finally:
+        await adapter.close()
+
+
+def annotate_links(bridges: list[dict], links: dict[str, str]) -> list[dict]:
+    """The manifest's bridges, each saying whether the active identity linked it."""
+    out = []
+    for b in bridges:
+        entry = dict(b)
+        user = links.get(entry.get("venue", ""))
+        entry["linked"] = user is not None
+        if user is not None:
+            entry["linked_as"] = user
+        out.append(entry)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # crosspost (edge egress)
 # ---------------------------------------------------------------------------
 
@@ -422,7 +548,7 @@ async def publish_bridged(
             )
         venue, channel = entry["venue"], entry.get("channel", "")
         venue_type = venue_type_of(venue)
-        spec = load_accounts().get(venue)
+        spec = account_spec(venue, auth)
 
         event_id, article_id = os.urandom(32), os.urandom(32)
         subject = subject or " ".join(body.split())[:80]
@@ -623,12 +749,16 @@ async def flush_pending(auth: str | None = None) -> list[dict]:
     outbox = _outbox()
     report: list[dict] = []
     try:
-        accounts = load_accounts()
+        accounts: dict[str, VenueAccountSpec | None] = {}
         for entry in outbox.by_state("pending", "ready"):
             # One entry failing (the venue, the bridge) leaves it where it
             # was and moves on: the rest may not need either.
             try:
-                result = await _flush_one(entry, identity, home_origin, home_url, accounts, outbox)
+                if entry.venue not in accounts:
+                    accounts[entry.venue] = account_spec(entry.venue, auth)
+                result = await _flush_one(
+                    entry, identity, home_origin, home_url, accounts[entry.venue], outbox
+                )
             except (VenueError, ProtocolError, FirehoseClientError, OSError) as e:
                 result = {"error": str(e), "state": entry.state}
             report.append({"event_id": entry.event_id.hex(), **result})
@@ -637,13 +767,12 @@ async def flush_pending(auth: str | None = None) -> list[dict]:
     return report
 
 
-async def _flush_one(entry, identity, home_origin, home_url, accounts, outbox) -> dict:
+async def _flush_one(entry, identity, home_origin, home_url, spec, outbox) -> dict:
     bridge_client = _client_for(entry.bridge_url)
     try:
         await bridge_client.connect(identity, username="")
         if entry.state == "ready":
             return await _send(bridge_client, outbox, entry.event_id, entry.frame)
-        spec = accounts.get(entry.venue)
         adapter = _adapter_for(spec) if spec is not None else None
         try:
             if spec is None or adapter is None or "idempotent_post" not in adapter.capabilities:
