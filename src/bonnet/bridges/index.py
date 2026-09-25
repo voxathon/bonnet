@@ -87,6 +87,11 @@ CREATE TABLE IF NOT EXISTS pending (
     reason TEXT NOT NULL,
     PRIMARY KEY (board, venue, channel, foreign_id)
 );
+CREATE TABLE IF NOT EXISTS late_checked (
+    board TEXT NOT NULL,
+    event_id BLOB NOT NULL,
+    PRIMARY KEY (board, event_id)
+);
 """
 
 
@@ -235,6 +240,24 @@ class RuntimeIndex:
             )
             for r in rows
         ]
+
+    # -- late crossposts ---------------------------------------------------
+
+    def late_checked(self, board: str, event_id: bytes) -> bool:
+        with self._lock:
+            return (
+                self._conn.execute(
+                    "SELECT 1 FROM late_checked WHERE board=? AND event_id=?", (board, event_id)
+                ).fetchone()
+                is not None
+            )
+
+    def note_late_checked(self, board: str, event_id: bytes) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO late_checked VALUES (?, ?)", (board, event_id)
+            )
+            self._conn.commit()
 
     # -- linked grace (§11.1 step 1) and deletion logs (§11.4) ---------------
 

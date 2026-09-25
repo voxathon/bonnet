@@ -246,6 +246,9 @@ class BridgeRuntime:
             if binding.ingest:
                 await self.ingest_binding(venue, binding)
         for binding in venue.config.bindings:
+            if binding.ingest:
+                await self.confirm_late_crossposts(venue, binding)
+        for binding in venue.config.bindings:
             if binding.relay_egress:
                 await self.relay_binding(venue, binding)
         caps = venue.adapter.capabilities
@@ -347,6 +350,53 @@ class BridgeRuntime:
         await self._mirror(venue, binding, post, crosspost_of=crosspost_of)
         self.index.drop_pending(board, src)
         return DONE
+
+    LATE_SCAN = 20
+
+    async def confirm_late_crossposts(self, venue: _Venue, binding: BindingConfig) -> int:
+        """Observe crossposts that reached this board after their post was mirrored.
+
+        The poll only observes a crosspost when it reads the venue post back,
+        so one that arrives past the marker timeout finds a mirror in its
+        place and the cursor past it. The facts don't care about order,
+        though: this reads the venue post again and observes the crosspost
+        if its marker names it, after which reads show it instead of the
+        mirror. A post that doesn't (a false claim, or gone) is noted and
+        not fetched again. At most LATE_SCAN fetches per poll. Returns the
+        number observed.
+        """
+        bridges = getattr(self._server, "bridges", None)
+        if bridges is None:
+            return 0
+        board = binding.board
+        confirmed = fetched = offset = 0
+        while fetched < self.LATE_SCAN:
+            page = bridges.late_crossposts(self._origin, board, self.LATE_SCAN, offset)
+            if not page:
+                break
+            offset += len(page)
+            for copy in page:
+                if self.index.late_checked(board, copy.event_id):
+                    continue
+                if copy.src.venue != venue.config.venue or copy.src.channel != binding.channel:
+                    continue
+                try:
+                    got = await venue.adapter.fetch(copy.src.channel, copy.src.foreign_id)
+                except VenueError as e:
+                    log_msg(f"BRIDGE: {venue.config.venue} late crosspost check deferred: {e}")
+                    return confirmed
+                fetched += 1
+                if (
+                    isinstance(got, ForeignPost)
+                    and model.find_marker(got.text) == copy.event_id.hex()[:16]
+                ):
+                    await self._observe(got, copy.event_id, model.FOREIGN_PRESENT)
+                    self.index.note_crossposter(got.venue, got.author_id)
+                    confirmed += 1
+                self.index.note_late_checked(board, copy.event_id)
+                if fetched >= self.LATE_SCAN:
+                    break
+        return confirmed
 
     def _resolve_marker(self, board: str, prefix: str, post: ForeignPost):
         """(local copy, remote copy, any hit) for a marker, matched on foreign_id."""

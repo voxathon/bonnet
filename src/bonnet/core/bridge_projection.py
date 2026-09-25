@@ -522,6 +522,28 @@ class BridgeProjection:
             ).fetchone()
         return row is not None
 
+    def late_crossposts(self, origin: str, board: str, limit: int, offset: int = 0) -> list[Copy]:
+        """`origin`'s unobserved crossposts on `board` whose post it also mirrored.
+
+        A crosspost that reaches its bridge after the marker timeout finds
+        the venue post already mirrored and past the poll cursor, so no poll
+        ever observes it: this is what's left to confirm, oldest first.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {', '.join('c.' + col.strip() for col in _COPY_COLS.split(','))} "
+                "FROM copies c WHERE c.origin=? AND c.board=? AND c.role=? AND c.state=? "
+                "AND EXISTS (SELECT 1 FROM copies m WHERE m.origin=c.origin AND "
+                "m.board=c.board AND m.role=? AND m.venue=c.venue AND m.channel=c.channel "
+                "AND m.foreign_id=c.foreign_id) "
+                "AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.origin=c.origin AND "
+                "o.target_origin=c.origin AND o.target_event_id=c.event_id AND "
+                "o.venue=c.venue AND o.channel=c.channel AND o.foreign_id=c.foreign_id) "
+                "ORDER BY c.created_at, c.event_id LIMIT ? OFFSET ?",
+                (origin, board, ROLE_CROSSPOST, ACTIVE, ROLE_MIRROR, limit, offset),
+            ).fetchall()
+        return [_copy(r) for r in rows]
+
     def copies_of(self, src: SourceKey) -> list[Copy]:
         with self._lock:
             rows = self._conn.execute(
@@ -708,7 +730,9 @@ class BridgeView:
             by_origin.setdefault(c.origin, []).append(c)
         for origin in ranking:
             if origin in by_origin:
-                chosen = min(by_origin[origin], key=lambda c: c.event_id)
+                # The author's own copy over a mirror of it: a crosspost
+                # that arrived late sits beside the mirror made meanwhile.
+                chosen = min(by_origin[origin], key=lambda c: (c.role == ROLE_MIRROR, c.event_id))
                 return {(chosen.origin, chosen.event_id)}
         return None
 

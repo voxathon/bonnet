@@ -38,7 +38,14 @@ from bonnet.bridges.model import BridgeMetadata
 from bonnet.bridges.runtime import BridgeRuntime
 from bonnet.core.crypto import Identity
 from bonnet.core.kinds import KIND_ARTICLE, KIND_USER_REGISTER
-from bonnet.core.record import Intent, MetadataMap, metadata_bytes, metadata_text, metadata_u64
+from bonnet.core.record import (
+    Intent,
+    MetadataMap,
+    compute_body_hash,
+    metadata_bytes,
+    metadata_text,
+    metadata_u64,
+)
 from bonnet.gateway import bridge_tools
 from bonnet.gateway.firehose_client import FirehoseHTTPClient
 from bonnet.gateway.outbox import Outbox
@@ -329,6 +336,77 @@ async def test_an_unreachable_bridge_queues_and_flush_sends_the_same_frame(w):
     (art,) = w.articles()
     assert art.event_id == queued.event_id
     assert len(w.venue_posts()) == 1
+
+
+async def test_a_crosspost_arriving_after_its_mirror_replaces_it(w):
+    # The bridge is down past the marker timeout: the venue post is mirrored
+    # as an ordinary post, and the crosspost lands beside it afterwards.
+    w.fail_send = 1
+    await w.crosspost("late one")
+    venue = w.runtime.venues[0]
+    await w.runtime.ingest_venue(venue)
+    assert w.articles() == []  # the marker names nothing yet: pending
+    w.runtime._clock = lambda: NOW + 3601
+    await w.runtime.ingest_venue(venue)
+    (mirror,) = w.articles()
+    await bridge_tools.flush_pending()
+    crosspost = next(a for a in w.articles() if a.event_id != mirror.event_id)
+
+    await w.runtime.ingest_venue(venue)
+    view = w.bridge.command_handler._bridge_view()
+    assert view.visible_event(B, crosspost.event_id)
+    assert not view.visible_event(B, mirror.event_id)
+    assert w.runtime.index.is_crossposter(FLATBOARD_VENUE, VENUE_USER)
+
+
+async def test_a_late_crosspost_the_venue_post_does_not_name_stays_unconfirmed(w):
+    w.board.post("someone else's words", created=0)
+    venue = w.runtime.venues[0]
+    await w.runtime.ingest_venue(venue)
+    (mirror,) = w.articles()
+    meta = BridgeMetadata.from_metadata(mirror.metadata)
+    # A crosspost claiming that post, with no marker for it at the venue.
+    claim, body = _claim(w, meta.foreign_id)
+    await publish_as(w.bridge, w.user, claim, body)
+    fetched = []
+    real = venue.adapter.fetch
+
+    async def fetch(channel, foreign_id):
+        fetched.append(foreign_id)
+        return await real(channel, foreign_id)
+
+    venue.adapter.fetch = fetch
+    await w.runtime.ingest_venue(venue)
+    await w.runtime.ingest_venue(venue)
+    assert fetched == [meta.foreign_id]  # checked once, then left alone
+    view = w.bridge.command_handler._bridge_view()
+    assert view.visible_event(B, mirror.event_id)
+    assert view.visible_event(B, claim.event_id)
+
+
+def _claim(w, foreign_id: str):
+    body = b"mine, honest"
+    fields = BridgeMetadata(
+        bridge_role=model.ROLE_CROSSPOST,
+        venue=FLATBOARD_VENUE,
+        channel="",
+        foreign_id=foreign_id,
+        home_origin=HOME,
+        home_url=HOME_URL,
+    ).to_fields()
+    base = MetadataMap([metadata_text(1, "claim"), metadata_text(4, "text/plain")])
+    return Intent(
+        event_id=os.urandom(32),
+        kind=KIND_ARTICLE,
+        origin=B,
+        actor_pubkey=w.user.public_key,
+        actor_registrar=B,
+        board=BOARD,
+        article_id=os.urandom(32),
+        metadata=model.merge_metadata(base, fields),
+        body_hash=compute_body_hash(body),
+        body_size=len(body),
+    ), body
 
 
 async def test_a_crash_before_the_final_frame_reposts_idempotently(w, monkeypatch):
