@@ -589,11 +589,7 @@ async def publish_bridged(
 
         adapter = _adapter_for(spec)
         try:
-            # The addressed form only for a bridge that says it reads it: an
-            # older one would miss the marker and mirror the echo as a stranger's.
-            marker = model.make_marker(
-                event_id, bridge_origin if entry.get("addressed_markers") is True else None
-            )
+            marker = model.make_marker(event_id, bridge_origin)
             venue_text = adapter.render_outbound(body, marker, None)
             pending = BridgeMetadata(
                 bridge_role=model.ROLE_CROSSPOST, venue=venue, channel=channel, marker=marker,
@@ -801,7 +797,7 @@ async def _flush_one(entry, identity, home_origin, home_url, spec, outbox) -> di
         frame = _final_frame(
             identity, entry.bridge_origin, entry.board, entry.event_id, old.article_id,
             old.metadata.get_text(1) or "", body, venue_type_of(entry.venue), posted,
-            old_meta.marker or model.make_marker(entry.event_id),
+            old_meta.marker or model.make_marker(entry.event_id, entry.bridge_origin),
             old_meta.home_origin or home_origin, old_meta.home_url or home_url, parent,
             old.metadata.get_text_list(2) or [],
         )  # fmt: skip

@@ -438,21 +438,6 @@ def _articles(server, origin):
     ]
 
 
-async def test_a_bridge_that_does_not_read_addressed_markers_gets_the_short_one(w, monkeypatch):
-    handler = w.bridge.command_handler
-    real = handler.bridges_manifest
-
-    def older():
-        return [{k: v for k, v in e.items() if k != "addressed_markers"} for e in real()]
-
-    monkeypatch.setattr(handler, "bridges_manifest", older)
-    await w.crosspost()
-    (msg,) = w.venue_posts()
-    (art,) = w.articles()
-    assert msg["text"].endswith(model.make_marker(art.event_id))
-    assert BridgeMetadata.from_metadata(art.metadata).marker == model.make_marker(art.event_id)
-
-
 async def test_another_bridge_resolves_an_addressed_marker_at_its_origin(w):
     await w.crosspost("hello, federation")
     (original,) = w.articles()
@@ -764,7 +749,6 @@ async def test_the_manifest_lists_the_bridge(w):
         await client.close()
     assert entry["venue"] == FLATBOARD_VENUE and entry["board"] == BOARD and entry["local"]
     assert entry["status"] == "bound" and entry["admission"] is True
-    assert entry["addressed_markers"] is True
 
 
 async def test_corroborate_finds_the_copies(w):

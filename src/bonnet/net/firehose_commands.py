@@ -855,9 +855,6 @@ class FirehoseCommandHandler:
                 }
                 if self._origin in by_origin:
                     entry["admission"] = self._admission is not None
-                    # It reads [bnt:<origin>/<event id>]: a gateway may write
-                    # them for it. Older bridges only know [bnt:<16 hex>].
-                    entry["addressed_markers"] = True
                 if channel:
                     entry["channel"] = channel
                 out.append(entry)
