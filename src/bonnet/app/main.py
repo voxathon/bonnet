@@ -167,7 +167,7 @@ def _bridges_warnings(config: FirehoseConfig) -> list[str]:
     """[[recognize]] origins that aren't sync peers: their copies never arrive here."""
     peers = {p.origin for p in config.peers}
     return [
-        f"bridges.toml [[recognize]] venue {entry.venue!r} lists origin {origin!r}, which is not a "
+        f"[[recognize]] venue {entry.venue!r} lists origin {origin!r}, which is not a "
         "[[sync.peers]] entry; its copies won't reach this server"
         for entry in getattr(config, "bridges", [])
         for origin in entry.origins

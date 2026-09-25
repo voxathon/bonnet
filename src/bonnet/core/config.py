@@ -147,6 +147,7 @@ _TOP_LEVEL_KEYS = {
     "include",
     "witnesses",
     "logging",
+    "recognize",
 }
 
 _INCLUDE_ALLOWED_TOP_KEYS = {"acl", "sync"}
@@ -441,7 +442,7 @@ class FirehoseConfig:
         # bonnet.bridges.config.BridgeRuntimeConfig when this origin is a
         # bridge origin ([runtime] in bridges.toml), else None.
         self.bridge_runtime = bridge_runtime
-        # bonnet.bridges.config.BridgesEntry list: bridges.toml [[recognize]] (§10.1).
+        # bonnet.bridges.config.BridgesEntry list: [[recognize]] (§10.1).
         self.bridges = list(bridges or [])
         # bonnet.bridges.config.AdmissionConfig, or None: bridges.toml [admission] (§6).
         self.bridge_admission = bridge_admission
@@ -707,11 +708,19 @@ class FirehoseConfig:
         routing = data.get("routing", {})
         if not isinstance(routing, dict):
             raise ValueError("config: [routing] must be a table")
-        # Bridges live in their own file next to this one (bridges.toml).
-        from bonnet.bridges.config import bridges_path, load_bridges_file
+        # A bridge origin's own tables live in bridges.toml next to this
+        # one; [[recognize]] is federation config, next to [[sync.peers]].
+        from bonnet.bridges.config import bridges_path, load_bridges_file, parse_bridges
 
         bridges_file = load_bridges_file(bridges_path(path), _normalize_origin)
         unknown_keys.extend(bridges_file.unknown_keys)
+        recognize: list = []
+        if "recognize" in data:
+            try:
+                recognize, more = parse_bridges(data["recognize"], _normalize_origin)
+            except ValueError as e:
+                raise ValueError(f"config: {e}") from e
+            unknown_keys.extend(more)
 
         # BONNET_SERVER_HOME (or the per-user default, see core.home) only
         # supplies a *default* for storage paths left unset in config.toml —
@@ -821,7 +830,7 @@ class FirehoseConfig:
             ),
             routing=_parse_routing(routing),
             bridge_runtime=bridges_file.runtime,
-            bridges=bridges_file.recognize,
+            bridges=recognize,
             bridge_admission=bridges_file.admission,
         )
 
@@ -968,6 +977,16 @@ interval_seconds = 300
 # import_warnings = true
 # import_temp_bans = true
 # import_permabans = false
+
+# Bridge origins this homeserver recognizes as mirrors of a foreign venue,
+# best first (docs/bonnet-bridges-design.md §10.1). List each origin as a
+# [[sync.peers]] entry too, or its copies never arrive here. A bridge
+# origin's own [runtime] and [admission] live in bridges.toml instead.
+#
+# [[recognize]]
+# type = "flatboard"
+# venue = "flatboard@tools.nyrds.net"
+# origins = ["bridge.example"]
 
 [routing]
 # Transitive peer discovery: origins announce their dial

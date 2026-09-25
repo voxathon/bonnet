@@ -239,3 +239,22 @@ def test_old_discovery_documents_parse_without_bridges():
         capabilities=[],
     )
     assert info.bridges == []
+
+
+def test_unsynced_entries_are_never_adopted():
+    from types import SimpleNamespace
+
+    from bonnet.bridges.adoption import BridgeAdopter
+
+    recognized = []
+    server = SimpleNamespace(
+        sync_manager=SimpleNamespace(routing_policy=("trusted-peers-only", {HOME})),
+        command_handler=SimpleNamespace(
+            recognized_origins=lambda venue: [],
+            recognize_bridge_origin=lambda *a: recognized.append(a),
+        ),
+        config=SimpleNamespace(origin=H2),
+    )
+    entry = {"venue": FLATBOARD_VENUE, "status": "unsynced", "board": None, "origins": [B1]}
+    BridgeAdopter(server)(HOME, [entry])
+    assert recognized == []

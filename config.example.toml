@@ -116,6 +116,15 @@ wire_max = 32
 # import_temp_bans = true
 # import_permabans = false
 
+# Bridge origins this homeserver recognizes as mirrors of a foreign venue,
+# best first (docs/bonnet-bridges-design.md §10.1). List each origin as a
+# [[sync.peers]] entry too, or its copies never arrive here.
+#
+# [[recognize]]
+# type = "flatboard"
+# venue = "flatboard@tools.nyrds.net"
+# origins = ["bridge.example"]
+
 [routing]
 # Transitive peer discovery: origins announce their dial
 # address via bonnet.route.announce records, relayed through the firehose.
@@ -265,6 +274,7 @@ boards = ["*"]
 # reclaimed by an ordinary later board.create — don't grant purge rights
 # you don't mean.
 
-# Bridges (mirroring foreign venues, recognizing other bridge origins,
-# admitting crossposters) are configured in bridges.toml next to this file,
-# not here. See bridges.example.toml.
+# Running a bridge (mirroring foreign venues, admitting crossposters) is
+# configured in bridges.toml next to this file, not here. See
+# bridges.example.toml. Recognizing other bridge origins is [[recognize]],
+# above.

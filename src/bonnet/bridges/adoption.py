@@ -56,6 +56,10 @@ class BridgeAdopter:
         handler = server.command_handler
         own = server.config.origin
         for entry in entries:
+            # Only bindings the peer actually holds: an unsynced entry is
+            # its configuration, not something it has seen.
+            if entry.get("status", "bound") != "bound":
+                continue
             venue = entry.get("venue")
             origins = entry.get("origins")
             if not isinstance(venue, str) or "@" not in venue or not isinstance(origins, list):

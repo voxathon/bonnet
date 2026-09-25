@@ -14,15 +14,19 @@
 
 """`bridges.toml`: bridge configuration, and the runtime's key files.
 
-Bridges have their own file, next to the server's `config.toml` (a bridge
-origin's own server config is `bridge.toml`, in its own home: core.home):
+A bridge origin's tables have their own file, next to the server's config
+(a bridge origin's own server config is `bridge.toml`, in its own home:
+core.home):
 
   [runtime]      makes this origin a bridge origin (design doc §10.2):
                  `bonnet bridge run` starts the runtime next to the server,
                  and the server closes registration to everyone but the
                  runtime and its administrators (§8)
-  [[recognize]]  which bridge origins this homeserver recognizes (§10.1)
   [admission]    admitting crossposters' home keys (§6)
+
+A homeserver's `[[recognize]]` (which bridge origins it recognizes, §10.1)
+is federation config and lives in `config.toml`, beside `[[sync.peers]]`;
+this module parses it for core.config.
 
 A missing file means no bridges. Each `[[runtime.venue]]` may carry an
 `[runtime.venue.options]` table of flags for its adapter alone; the adapter
@@ -40,7 +44,7 @@ from bonnet.core.crypto import Identity
 DEFAULT_MAX_BODY_BYTES = 262144
 
 BRIDGES_FILE = "bridges.toml"
-_FILE_KEYS = {"runtime", "recognize", "admission"}
+_FILE_KEYS = {"runtime", "admission"}
 
 _RUNTIME_KEYS = {
     "daemon_key",
@@ -448,7 +452,6 @@ class BridgesConfigError(ValueError):
 @dataclass
 class BridgesFile:
     runtime: BridgeRuntimeConfig | None = None
-    recognize: list[BridgesEntry] = field(default_factory=list)
     admission: AdmissionConfig | None = None
     unknown_keys: list[str] = field(default_factory=list)
 
@@ -481,9 +484,6 @@ def load_bridges_file(path: str, normalize_origin) -> BridgesFile:
             out.runtime, more = parse_bridge_runtime(
                 data["runtime"], os.path.dirname(os.path.abspath(path))
             )
-            unknown.extend(more)
-        if "recognize" in data:
-            out.recognize, more = parse_bridges(data["recognize"], normalize_origin)
             unknown.extend(more)
         if "admission" in data:
             out.admission, more = parse_bridge_admission(data["admission"])

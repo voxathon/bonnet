@@ -545,6 +545,7 @@ async def test_manifest_lists_synced_bindings_in_preference_order(s):
     assert entry == {
         "type": "flatboard",
         "venue": FLATBOARD_VENUE,
+        "status": "bound",
         "board": BOARD,
         "origins": [B1, B2],
         "local": False,
@@ -561,13 +562,35 @@ async def test_manifest_local_follows_the_live_runtime(s):
     assert handler.bridges_manifest()[0]["local"] is True
 
 
-async def test_manifest_is_empty_without_bindings(tmp_path):
+async def test_manifest_says_what_it_recognizes_before_bindings_arrive(tmp_path):
     home = _home(tmp_path, [B1, B2])
     try:
-        assert home.command_handler.bridges_manifest() == []
+        assert home.command_handler.bridges_manifest() == [
+            {
+                "type": "flatboard",
+                "venue": FLATBOARD_VENUE,
+                "status": "unsynced",
+                "board": None,
+                "origins": [B1, B2],
+                "local": False,
+            }
+        ]
+        # A diagnostic, not a bridge this server can serve.
         assert "bonnet.bridge" not in home.http_server._capabilities()
     finally:
         home.close()
+
+
+async def test_manifest_says_whether_its_own_bindings_admit(s):
+    handler = s.b1.server.command_handler
+    assert handler.bridges_manifest()[0]["admission"] is False
+    handler._admission = object()
+    try:
+        assert handler.bridges_manifest()[0]["admission"] is True
+    finally:
+        handler._admission = None
+    # Another origin's admission policy isn't the home's to know.
+    assert "admission" not in s.home.command_handler.bridges_manifest()[0]
 
 
 async def test_manifest_is_served_in_discovery(s):

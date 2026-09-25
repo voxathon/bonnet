@@ -271,6 +271,31 @@ def test_bridge_tables_in_config_toml_are_just_unknown_keys(tmp_path):
     assert sorted(config.unknown_keys) == ["bridge_admission", "bridge_runtime", "bridges"]
 
 
+def test_recognize_lives_in_config_toml(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f'[server]\norigin = "{ORIGIN}"\n[[recognize]]\ntype = "flatboard"\n'
+        f'venue = "{FLATBOARD_VENUE}"\norigins = ["B.Test"]\n'
+    )
+    config = FirehoseConfig.load(str(path))
+    assert [(e.venue, e.origins) for e in config.bridges] == [(FLATBOARD_VENUE, ["b.test"])]
+    assert not config.unknown_keys
+
+    path.write_text(f'[server]\norigin = "{ORIGIN}"\n[[recognize]]\ntype = "flatboard"\n')
+    with pytest.raises(ValueError, match="config: recognize\\[0\\]"):
+        FirehoseConfig.load(str(path))
+
+
+def test_recognize_in_bridges_toml_is_just_an_unknown_key(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(f'[server]\norigin = "{ORIGIN}"\n')
+    (tmp_path / "bridges.toml").write_text(
+        f'[[recognize]]\ntype = "flatboard"\nvenue = "{FLATBOARD_VENUE}"\norigins = ["b.test"]\n'
+    )
+    config = FirehoseConfig.load(str(path))
+    assert config.bridges == [] and config.unknown_keys == ["bridges.toml:recognize"]
+
+
 def test_bridges_file_reports_its_own_unknown_keys_and_errors(tmp_path):
     from bonnet.bridges.config import BridgesConfigError
 

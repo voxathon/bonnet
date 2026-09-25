@@ -1,7 +1,6 @@
 # Bonnet bridge configuration sample (docs/bonnet-bridges-design.md).
-# Lives next to the server's config file as bridges.toml: config.toml on a
-# homeserver, bridge.toml on a bridge origin. No file, no bridges. Every
-# table is optional.
+# Lives next to a bridge origin's server config (bridge.toml) as
+# bridges.toml. No file, no bridges. Every table is optional.
 
 # [runtime] makes this origin a bridge origin: it mirrors foreign venues
 # onto `~` boards. Run it with `bonnet bridge run` instead of
@@ -34,14 +33,8 @@
 # board = "~flatboard"
 # max_body_bytes = 262144
 
-# [[recognize]]: bridge origins this homeserver treats as mirrors of a
-# venue, best first. Each origin should also be a [[sync.peers]] entry in
-# config.toml, or its copies never arrive here.
-#
-# [[recognize]]
-# type = "flatboard"
-# venue = "flatboard@tools.nyrds.net"
-# origins = ["bridge.example"]
+# A homeserver's [[recognize]] (bridge origins it treats as mirrors of a
+# venue) is not here: it lives in config.toml, beside [[sync.peers]].
 
 # [admission]: admit crossposts signed by users' home keys, checked
 # against their home origins.

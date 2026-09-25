@@ -803,18 +803,41 @@ class FirehoseCommandHandler:
     def bridges_manifest(self) -> list[dict]:
         """The discovery document's `bridges` list (§10.1), computed per request.
 
-        One entry per bound (venue, channel): the recognized origins whose
-        binding records for it are synced and active, in preference order.
+        One entry per recognized venue and bound channel. `status` says
+        whether this server holds the binding records behind it:
+
+          bound     one entry per bound (venue, channel): the recognized
+                    origins whose binding records for it are synced and
+                    active, in preference order, with the board they bind
+          unsynced  recognized, but no binding for the venue has arrived
+                    (the origin isn't a sync peer yet, hasn't synced, or
+                    never bound it): every recognized origin, and no board
+
+        An entry this server binds itself also says whether it admits
+        crossposters (`admission`); a server can't know that of another.
         """
         if self._bridges is None:
             return []
         bindings = self._bridges.active_bindings()
         out = []
         for venue, order in self._recognized_bridges.items():
+            venue_type = self._bridge_venue_types.get(venue, venue.partition("@")[0])
             channels: dict[str, dict[str, dict]] = {}
             for b in bindings:
                 if b["venue"] == venue and b["origin"] in order:
                     channels.setdefault(b["channel"], {})[b["origin"]] = b
+            if not channels:
+                out.append(
+                    {
+                        "type": venue_type,
+                        "venue": venue,
+                        "status": "unsynced",
+                        "board": None,
+                        "origins": list(order),
+                        "local": False,
+                    }
+                )
+                continue
             for channel, by_origin in sorted(channels.items()):
                 origins = [o for o in order if o in by_origin]
                 first = (
@@ -822,13 +845,16 @@ class FirehoseCommandHandler:
                 )
                 cap = first.get("max_body_bytes") or self._max_body_size
                 entry = {
-                    "type": self._bridge_venue_types.get(venue, venue.partition("@")[0]),
+                    "type": venue_type,
                     "venue": venue,
+                    "status": "bound",
                     "board": first["board"],
                     "origins": origins,
                     "local": venue in self.live_bridge_venues and self._origin in by_origin,
                     "max_body_bytes": min(cap, self._max_body_size),
                 }
+                if self._origin in by_origin:
+                    entry["admission"] = self._admission is not None
                 if channel:
                     entry["channel"] = channel
                 out.append(entry)

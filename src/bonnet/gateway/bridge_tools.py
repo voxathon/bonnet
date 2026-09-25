@@ -289,10 +289,15 @@ def _bridge_url(bridge_origin: str, bridge_url: str) -> str:
 async def list_bridges(url: str = "") -> list[dict]:
     """The foreign venues an origin bridges, from its discovery document.
 
-    Each entry names a venue (e.g. `flatboard@tools.nyrds.net`), its bridge
-    board, and the bridge origins this server recognizes for it, best first.
-    `local` means the origin runs that bridge itself. Defaults to the active
-    origin; pass `url` to ask another.
+    Asked of a homeserver: every venue it recognizes. Asked of a bridge
+    origin: the venues it runs. Each entry names a venue (e.g.
+    `flatboard@tools.nyrds.net`), its bridge board, and the bridge origins
+    recognized for it, best first. `status` is "bound" once the server holds
+    the bridge's binding records, "unsynced" while it doesn't (board is then
+    null: the bridge isn't a sync peer yet, or hasn't synced). `local` means
+    the origin runs that bridge itself; its entries also say whether it
+    admits crossposters (`admission`). Defaults to the active origin; pass
+    `url` to ask another.
     """
     client = _client_for(url) if url else _t()._make_client()
     try:
@@ -427,6 +432,12 @@ async def crosspost(
         )
         if entry is None:
             raise ValueError(f"{board!r} is not a live bridge board on {bridge_origin}")
+        if entry.get("admission") is False:
+            # Checked before anything reaches the venue: a post there that
+            # the bridge then refuses would sit at the venue alone.
+            raise ValueError(
+                f"{bridge_origin} mirrors {board!r} read-only: it doesn't admit crossposters"
+            )
         venue, channel = entry["venue"], entry.get("channel", "")
         venue_type = venue_type_of(venue)
         spec = load_accounts().get(venue)

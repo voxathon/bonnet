@@ -513,6 +513,13 @@ async def test_crosspost_refuses_a_board_that_is_not_a_live_bridge(w):
         await bridge_tools.crosspost(B, "~nope", "hi", bridge_url=B_URL)
 
 
+async def test_crosspost_refuses_a_read_only_bridge_before_the_venue(w, monkeypatch):
+    monkeypatch.setattr(w.bridge.command_handler, "_admission", None)
+    with pytest.raises(ValueError, match="read-only"):
+        await w.crosspost()
+    assert w.venue_posts() == [] and w.articles() == []
+
+
 # ---------------------------------------------------------------------------
 # list_bridges and corroborate
 # ---------------------------------------------------------------------------
@@ -521,6 +528,7 @@ async def test_crosspost_refuses_a_board_that_is_not_a_live_bridge(w):
 async def test_list_bridges_reads_the_manifest(w):
     (entry,) = await bridge_tools.list_bridges(url=B_URL)
     assert entry["venue"] == FLATBOARD_VENUE and entry["board"] == BOARD and entry["local"]
+    assert entry["status"] == "bound" and entry["admission"] is True
 
 
 async def test_corroborate_finds_the_copies(w, monkeypatch):
