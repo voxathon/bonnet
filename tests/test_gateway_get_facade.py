@@ -260,8 +260,9 @@ async def test_session_ttl_expiry_starts_fresh(facade_env, monkeypatch):
     assert get_facade._snapshot_get(("alice", minted)) is None
 
 
-def _request_with_headers(tool_name, query, headers):
+def _request_with_headers(tool_name, query, headers, peer=("127.0.0.1", 50000)):
     scope = {
+        "client": peer,
         "type": "http",
         "http_version": "1.1",
         "method": "GET",
@@ -275,17 +276,19 @@ def _request_with_headers(tool_name, query, headers):
     return Request(scope)
 
 
-def test_apply_tenant_exports_forwarded_client_ip(facade_env):
+def test_apply_tenant_exports_forwarded_client_ip(facade_env, monkeypatch):
     """The facade bypasses AuthMiddleware, so it must set forwarded_for_ctx
     itself — otherwise the origin logs/buckets every facade call under the
     gateway's own IP."""
+    from bonnet.net import firehose_transport
     from bonnet.net.firehose_transport import forwarded_for_ctx
 
+    monkeypatch.setattr(firehose_transport, "_gateway_trusted_forwarders", frozenset({"127.0.0.1"}))
     _, _ = facade_env
     assert forwarded_for_ctx.get() == ""
 
     _, reset = get_facade._apply_tenant(
-        _request_with_headers("where_am_i", {}, [(b"x-forwarded-for", b"198.51.100.7, 10.0.0.1")]),
+        _request_with_headers("where_am_i", {}, [(b"x-forwarded-for", b"10.0.0.1, 198.51.100.7")]),
         "",
     )
     try:

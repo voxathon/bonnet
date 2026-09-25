@@ -39,6 +39,7 @@ from bonnet.core.logging import (
     log_msg,
     log_warning,
 )
+from bonnet.net.forwarding import canonical_ip, forwarded_client, parse_trusted
 from bonnet.net.http_auth import (
     UNTP_LABEL,
     UNTP_TAG,
@@ -152,7 +153,7 @@ class FirehoseHTTPServer:
 
         self._max_request_size = getattr(config, "max_request_size", 10 * 1024 * 1024)
         self._cleanup_counter = 0
-        self._trusted_forwarders = set(getattr(config, "trusted_forwarders", []) or [])
+        self._trusted_forwarders = parse_trusted(getattr(config, "trusted_forwarders", []) or [])
 
     @staticmethod
     def _build_signer(identity: Identity, origin: str) -> BonnetSigner:
@@ -528,7 +529,9 @@ class FirehoseHTTPServer:
 
         if is_anonymous:
             rl_addr = (
-                forwarded if forwarded and remote_addr in self._trusted_forwarders else remote_addr
+                forwarded
+                if forwarded and canonical_ip(remote_addr) in self._trusted_forwarders
+                else remote_addr
             )
             rl_key = self._rate_limiter.address_key(rl_addr)
         else:
@@ -720,22 +723,11 @@ class FirehoseHTTPServer:
         """The forwarded client IP a proxy put on the request, or "".
 
         Data, never an authorization: `_handle_command` substitutes it into
-        logging and the anonymous rate-limit bucket only when the socket peer
-        is on config's trusted_forwarders list. Precedence: CF-Connecting-IP
-        (only the edge can mint it), then X-Real-IP, then the leftmost
-        X-Forwarded-For entry.
+        the anonymous rate-limit bucket only when the socket peer is on
+        config's trusted_forwarders list. Precedence and the rightmost
+        X-Forwarded-For rule are `net.forwarding.forwarded_client`'s.
         """
-        headers = self._extract_headers(scope)
-        cf = headers.get("cf-connecting-ip", "").strip()
-        if cf:
-            return cf
-        real = headers.get("x-real-ip", "").strip()
-        if real:
-            return real
-        xff = headers.get("x-forwarded-for", "").strip()
-        if xff:
-            return xff.split(",")[0].strip()
-        return ""
+        return forwarded_client(self._extract_headers(scope))
 
     def _get_authority(self, scope) -> str:
         for k, v in scope.get("headers", []):
@@ -774,10 +766,9 @@ class FirehoseHTTPServer:
 class RequestLogMiddleware:
     """One console-visible log line per HTTP request.
 
-    Wraps the ASGI app served by uvicorn, which installs its own
-    ProxyHeadersMiddleware outside this — so `scope["client"]` here is
-    already the forwarded-rewritten value `_get_remote_addr` reports, and
-    `_forwarded_ips` reads the same header the rewrite came from. The
+    Wraps the ASGI app served by uvicorn, run with `proxy_headers=False`,
+    so `scope["client"]` here is the real socket peer `_get_remote_addr`
+    reports, and `_forwarded_ips` is what forwarded headers claim. The
     logged `HTTP ` line is what the REQ-only stderr mirror
     (core.logging.enable_request_mirror) passes to the operator console;
     `access_log=False` on uvicorn keeps it to one line per request. Status

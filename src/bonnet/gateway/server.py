@@ -106,6 +106,7 @@ from bonnet.gateway.tools import current_password, current_username, mcp
 from bonnet.net.firehose_transport import (
     forwarded_for_ctx,
     forwarded_for_from_request,
+    set_gateway_trusted_forwarders,
 )
 
 # `_forwarded_for_from_request` lives in bonnet.net.firehose_transport (next
@@ -930,7 +931,15 @@ def run(argv: list[str] | None = None):
     raw_path = args.path or os.environ.get("MCP_PATH") or (gw_config.path if gw_config else None)
     mcp_path = _normalize_mcp_path(raw_path) if raw_path else None
 
-    uvicorn_config: dict = {}
+    try:
+        set_gateway_trusted_forwarders(gateway_config.trusted_forwarders(gw_config))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    # uvicorn's default rewrites request.client from X-Forwarded-For for any
+    # peer on 127.0.0.1; off, so trusted_forwarders is the only rule.
+    uvicorn_config: dict = {"proxy_headers": False}
     if ssl_certfile and ssl_keyfile:
         uvicorn_config["ssl_certfile"] = ssl_certfile
         uvicorn_config["ssl_keyfile"] = ssl_keyfile
@@ -991,7 +1000,7 @@ def run(argv: list[str] | None = None):
         host=host,
         port=port,
         path=mcp_path,
-        uvicorn_config=uvicorn_config or None,
+        uvicorn_config=uvicorn_config,
         show_banner=False,
         middleware=[ASGIMiddleware(CleanTransportErrorMiddleware)],
     )

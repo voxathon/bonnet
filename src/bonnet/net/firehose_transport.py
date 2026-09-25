@@ -81,26 +81,40 @@ from bonnet.net.http_auth import (
 forwarded_for_ctx: ContextVar[str] = ContextVar("forwarded_for", default="")
 
 
-def forwarded_for_from_request(request) -> str:
-    """The forwarded client IP a request arrived with, or "".
+#: Socket peers whose forwarded headers the gateway believes: gateway.toml
+#: `trusted_forwarders` or $BONNET_GATEWAY_TRUSTED_FORWARDERS, set once at
+#: startup by `set_gateway_trusted_forwarders`. Empty means no one's.
+_gateway_trusted_forwarders: frozenset[str] = frozenset()
 
-    Passed through as data: the gateway forwards what its own proxy gave it,
-    and the origin decides what to trust (its trusted_forwarders list keyed
-    on the connecting IP, see FirehoseHTTPServer._forwarded_ips). Leftmost
-    X-Forwarded-For entry first, then CF-Connecting-IP.
+
+def set_gateway_trusted_forwarders(trusted: frozenset[str]) -> None:
+    global _gateway_trusted_forwarders
+    _gateway_trusted_forwarders = trusted
+
+
+def forwarded_for_from_request(request) -> str:
+    """The client IP to forward for a gateway request, or "".
+
+    The gateway applies the same rule as the origin (`net.forwarding`):
+    forwarded headers count only from a peer on the gateway's own
+    trusted_forwarders list, otherwise the socket peer is the client. It
+    used to pass the leftmost X-Forwarded-For through from anyone, and the
+    leftmost entry is whatever the caller wrote, so a caller could pick its
+    own rate-limit bucket on any origin that trusts this gateway.
 
     Lives here (not in gateway.server) so both the MCP auth middleware and
     the GET facade — plain Starlette routes the middleware never sees — share
     one extraction rule without an import cycle.
     """
+    from bonnet.net.forwarding import client_ip
+
     try:
-        headers = request.headers
+        client = request.client
+        peer = client.host if client else ""
+        headers = {k.lower(): v for k, v in request.headers.items()}
     except Exception:
         return ""
-    xff = (headers.get("x-forwarded-for") or "").strip()
-    if xff:
-        return xff.split(",")[0].strip()
-    return (headers.get("cf-connecting-ip") or "").strip()
+    return client_ip(peer or "", headers, _gateway_trusted_forwarders)
 
 
 class FirehoseClientError(Exception):
