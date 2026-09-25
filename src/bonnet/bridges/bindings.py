@@ -23,6 +23,7 @@ config gets an unbind. An unchanged binding publishes nothing.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from bonnet.bridges.config import BindingConfig, VenueConfig
@@ -38,20 +39,24 @@ from bonnet.bridges.model import (
 from bonnet.core.crypto import Identity
 from bonnet.core.firehose import FirehoseStore
 from bonnet.core.global_projections import NavProjection, UserProjection
-from bonnet.core.kinds import KIND_BOARD_CREATE, KIND_USER_REGISTER
+from bonnet.core.kinds import KIND_BOARD_CREATE
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
     Intent,
     MetadataMap,
     compute_body_hash,
     metadata_bytes,
-    metadata_text,
-    metadata_u64,
 )
 
 
 class BindingError(Exception):
     """A binding could not be put in place."""
+
+
+def signer_name(users: UserProjection, origin: str, identity: Identity) -> str:
+    """The name `origin` issued to `identity`'s key, or "" (always accepted)."""
+    user = users.get_user_by_pubkey(origin, identity.public_key)
+    return user["username"] if user is not None else ""
 
 
 @dataclass(frozen=True)
@@ -118,58 +123,35 @@ class Bindings:
         nav: NavProjection,
         users: UserProjection,
         origin: str,
-        daemon: Identity,
-        daemon_username: str,
+        signer: Callable[[], Identity],
     ):
         self._publisher = publisher
         self._firehose = firehose
         self._nav = nav
         self._users = users
         self._origin = origin
-        self._daemon = daemon
-        self._daemon_username = daemon_username
+        # The server's own key, read per use: it can rotate while running.
+        self._signer = signer
+
+    @property
+    def _daemon(self) -> Identity:
+        return self._signer()
 
     def _intent(self, kind: str, **fields) -> Intent:
         return Intent(
             kind=kind,
             origin=self._origin,
             actor_pubkey=self._daemon.public_key,
-            actor_username=self._daemon_username,
+            actor_username=signer_name(self._users, self._origin, self._daemon),
             actor_registrar=self._origin,
             **fields,
         )
 
-    async def ensure_daemon(self) -> None:
-        user = self._users.get_user_by_pubkey(self._origin, self._daemon.public_key)
-        if user is not None and not user.get("revoked") and user.get("superseded_by") is None:
-            if user["username"] != self._daemon_username:
-                raise BindingError(
-                    f"daemon key is registered as {user['username']!r}, "
-                    f"config says {self._daemon_username!r}"
-                )
-            return
-        intent = Intent(
-            event_id=os.urandom(32),
-            kind=KIND_USER_REGISTER,
-            origin=self._origin,
-            actor_pubkey=self._daemon.public_key,
-            actor_registrar=self._origin,
-            metadata=MetadataMap(
-                [
-                    metadata_text(1, self._daemon_username),
-                    metadata_bytes(2, self._daemon.public_key),
-                    metadata_u64(3, 0),
-                ]
-            ),
-        )
-        await self._publisher.publish(self._daemon, intent)
-        log_msg(f"BRIDGE: registered daemon as '{self._daemon_username}'")
-
     async def ensure_board(self, board: str) -> None:
-        existing = self._nav.get_board(self._origin, board)
-        if existing is not None:
-            if existing["owner_pubkey"] != self._daemon.public_key:
-                raise BindingError(f"board {board!r} exists but is not owned by the bridge daemon")
+        # `~` boards are created by this origin's bridges alone (the
+        # reservation in firehose_commands), so an existing one is ours,
+        # whichever of the server's keys created it.
+        if self._nav.get_board(self._origin, board) is not None:
             return
         await self._publisher.publish(
             self._daemon,

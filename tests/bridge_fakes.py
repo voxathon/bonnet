@@ -28,12 +28,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from bonnet.bridges.adapters.flatboard import PAGE_SIZE, FlatboardAdapter
-from bonnet.bridges.config import (
-    BindingConfig,
-    BridgeRuntimeConfig,
-    VenueConfig,
-    load_daemon_identity,
-)
+from bonnet.bridges.config import BindingConfig, BridgeRuntimeConfig, VenueConfig
 from bonnet.core.acl import ACLEvaluator, ACLRule
 from bonnet.core.config import FirehoseConfig
 
@@ -186,14 +181,8 @@ def venue_config(board: str = "~flatboard", **binding) -> VenueConfig:
 
 
 def runtime_config(tmp_path, venues: list[VenueConfig], **kw) -> BridgeRuntimeConfig:
-    keys = tmp_path / "bridge-keys"
-    return BridgeRuntimeConfig(
-        daemon_key=str(keys / "daemon.key"),
-        master_secret=str(keys / "master.secret"),
-        state_dir=str(tmp_path / "bridge-state"),
-        venues=venues,
-        **kw,
-    )
+    """`tmp_path` is unused: the index and puppet secret live in the server's data_dir."""
+    return BridgeRuntimeConfig(venues=venues, **kw)
 
 
 def shipped_rules() -> list[dict]:
@@ -209,15 +198,14 @@ def shipped_rules() -> list[dict]:
     ]  # fmt: skip
 
 
-def bridge_rules(daemon_pubkey: bytes) -> list[dict]:
-    """§10.2: shipped reads and registration, articles on `~*`, the daemon rule."""
+def bridge_rules() -> list[dict]:
+    """§10.2: shipped reads and registration, and articles on `~*`.
+
+    The server's own key, which signs bridge facts, is always its own admin.
+    """
     return shipped_rules() + [
         {"effect": "allow", "match": {"registered": True}, "actions": ["write"],
          "commands": ["PUBLISH_RECORD"], "kinds": ["bonnet.article"], "boards": ["~*"]},
-        {"effect": "allow", "match": {"pubkey": "hex:" + daemon_pubkey.hex()},
-         "actions": ["write"], "commands": ["PUBLISH_RECORD"],
-         "kinds": ["bonnet.bridge.*", "bonnet.board.create", "bonnet.article"],
-         "boards": ["~*", ""]},
     ]  # fmt: skip
 
 
@@ -231,7 +219,7 @@ def make_config(
     root = tmp_path / origin
     if rules is None:
         if bridge_runtime is not None:
-            rules = bridge_rules(load_daemon_identity(bridge_runtime).public_key)
+            rules = bridge_rules()
         else:
             rules = shipped_rules() + [
                 {"effect": "allow", "match": {"registered": True}, "actions": ["write"],

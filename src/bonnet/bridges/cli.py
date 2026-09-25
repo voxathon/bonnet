@@ -12,17 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""`bonnet bridge`: run a bridge origin and inspect its runtime state.
+"""`bonnet bridge`: inspect and repair a server's bridge state.
 
-  run            the server plus the bridge runtime (takes `bonnet server`'s flags)
-  rebuild-index  rebuild the runtime index from the origin's log
+  rebuild-index  rebuild the bridge index from the origin's log
   status         bindings, cursors, mirror and pending counts
 
-A bridge origin has its own home ($BONNET_BRIDGE_HOME, or `--dir` for one
-run) and its server config is `bridge.toml`, never a homeserver's
-`config.toml`. Bridges are configured in `bridges.toml` next to it. Bindings
-come from its `[runtime]`: `run` reconciles them at startup, binding new or
-changed boards and unbinding boards removed from config.
+Bridges run inside `bonnet server`, from the `[bridges]` table of its
+`config.toml`; these commands inspect or repair a server's bridge state. Run
+them against the same home (`--dir`, $BONNET_SERVER_HOME) or `--config`.
+Bindings come from `[[bridges.venue]]`: the server reconciles them at
+startup, binding new or changed boards and unbinding removed ones.
 """
 
 from __future__ import annotations
@@ -34,40 +33,33 @@ import os
 import sys
 
 _USAGE = """\
-usage: bonnet bridge {run,rebuild-index,status} ...
+usage: bonnet bridge {rebuild-index,status} ...
 
 commands:
-  run            run the bridge origin (server + runtime); same flags as `bonnet server`
-  rebuild-index  rebuild the runtime index from the log (stop the bridge first)
+  rebuild-index  rebuild the bridge index from the log (stop the server first)
   status         show bindings, cursors, and mirror/pending counts
 """
 
 
 def _load_config(argv: list[str], prog: str):
     from bonnet.app.main import _load_and_validate_config
-    from bonnet.core.home import BRIDGE, home_conflict, resolve_home
+    from bonnet.core.home import SERVER, resolve_home
 
     parser = argparse.ArgumentParser(prog=prog)
-    parser.add_argument("--dir", default=None, help="Bridge home directory, for this run only")
-    parser.add_argument("--config", default=None, help="Path to config file (bridge.toml)")
+    parser.add_argument("--dir", default=None, help="Server home directory, for this run only")
+    parser.add_argument("--config", default=None, help="Path to config file (config.toml)")
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     args = parser.parse_args(argv)
     if args.dir:
-        os.environ[BRIDGE.env_var] = os.path.expanduser(args.dir)
-    home = resolve_home(BRIDGE.component, BRIDGE.env_var)
+        os.environ[SERVER.env_var] = os.path.expanduser(args.dir)
+    home = resolve_home(SERVER.component, SERVER.env_var)
     if args.config is None:
-        args.config = os.path.join(home, BRIDGE.config_name)
-    conflict = home_conflict(BRIDGE, args.config, home if os.environ.get(BRIDGE.env_var) else None)
-    if conflict:
-        print(f"error: {conflict}", file=sys.stderr)
-        raise SystemExit(1)
+        args.config = os.path.join(home, SERVER.config_name)
     args.host = None
     args.port = None
     config = _load_and_validate_config(args)
     if config.bridge_runtime is None:
-        from bonnet.bridges.config import bridges_path
-
-        print(f"error: {bridges_path(args.config)} has no [runtime] table", file=sys.stderr)
+        print(f"error: {args.config} bridges no venues ([[bridges.venue]])", file=sys.stderr)
         raise SystemExit(1)
     return config, args
 
@@ -85,7 +77,7 @@ def _rebuild(argv: list[str]) -> int:
             print(f"error: {error}", file=sys.stderr)
         return 1
     firehose = FirehoseStore(config.events_db_path)
-    index = RuntimeIndex(rt.state_dir)
+    index = RuntimeIndex(config.bridges_state_dir)
     adapters = [build_adapter(v) for v in rt.venues]
     try:
         cursor_fns = {
@@ -110,7 +102,7 @@ def _status(argv: list[str]) -> int:
 
     config, args = _load_config(argv, "bonnet bridge status")
     rt = config.bridge_runtime
-    index = RuntimeIndex(rt.state_dir)
+    index = RuntimeIndex(config.bridges_state_dir)
     try:
         rows = [
             {
@@ -130,7 +122,7 @@ def _status(argv: list[str]) -> int:
     if args.json:
         print(json.dumps({"origin": config.origin, "bindings": rows}, indent=2))
         return 0
-    print(f"bridge origin: {config.origin}")
+    print(f"origin: {config.origin}")
     for r in rows:
         print(
             f"  {r['board']:<24} {r['venue']}#{r['channel']}  "
@@ -146,10 +138,6 @@ def main(argv: list[str] | None = None) -> int:
         print(_USAGE, file=sys.stderr if not argv else sys.stdout)
         return 2 if not argv else 0
     command, rest = argv[0], argv[1:]
-    if command == "run":
-        from bonnet.app.main import main as server_main
-
-        return server_main(rest, bridge=True) or 0
     if command == "rebuild-index":
         return _rebuild(rest)
     if command == "status":

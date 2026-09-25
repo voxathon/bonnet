@@ -23,7 +23,6 @@ record take the batch down with it.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 
 import pytest
@@ -305,7 +304,5 @@ async def test_config_parses_sweep_settings(tmp_path):
                 }
             ]
         },
-        str(tmp_path),
     )
     assert (cfg.venues[0].sweep_interval_seconds, cfg.venues[0].sweep_window) == (30, 5)
-    assert os.path.isabs(cfg.state_dir)

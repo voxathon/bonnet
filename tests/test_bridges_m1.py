@@ -150,7 +150,6 @@ async def h(tmp_path):
 
 def _table(**over):
     t = {
-        "state_dir": "state",
         "venue": [
             {
                 "type": "flatboard",
@@ -164,12 +163,9 @@ def _table(**over):
     return t
 
 
-def test_config_parses_venues_and_bindings(tmp_path):
-    cfg, unknown = parse_bridge_runtime(_table(surprise=1), str(tmp_path))
-    assert unknown == ["runtime.surprise"]
-    assert cfg.state_dir == str(tmp_path / "state")
-    assert cfg.daemon_key == str(tmp_path / "daemon.key")
-    assert cfg.master_secret == str(tmp_path / "master.secret")
+def test_config_parses_venues_and_bindings():
+    cfg, unknown = parse_bridge_runtime(_table(surprise=1))
+    assert unknown == ["bridges.surprise"]
     (venue,) = cfg.venues
     assert venue.url == "https://flatboard.test"
     assert venue.bindings == [BindingConfig(board="~flatboard", max_body_bytes=1000)]
@@ -191,38 +187,17 @@ def test_config_parses_venues_and_bindings(tmp_path):
             lambda t: t["venue"][0]["binding"].append({"board": "~flatboard"}),
             "bound twice",
         ),
-        (lambda t: t.update(daemon_username="a~b"), "daemon_username"),
         (lambda t: t.update(grace_seconds=-1), "grace_seconds"),
     ],
 )
-def test_config_rejects_bad_tables(tmp_path, mutate, message):
+def test_config_rejects_bad_tables(mutate, message):
     table = _table()
     mutate(table)
     with pytest.raises(ValueError, match=message):
-        parse_bridge_runtime(table, str(tmp_path))
+        parse_bridge_runtime(table)
 
 
-def test_config_refuses_to_shadow_legacy_key_files(tmp_path, monkeypatch):
-    user_home = tmp_path / "user"
-    legacy = user_home / ".bonnet" / "bridges"
-    legacy.mkdir(parents=True)
-    (legacy / "master.secret").write_bytes(b"x" * 32)
-    monkeypatch.setenv("HOME", str(user_home))
-    bridge_home = tmp_path / "bridge"
-    bridge_home.mkdir()
-    with pytest.raises(ValueError, match="runtime.master_secret is unset"):
-        parse_bridge_runtime(_table(), str(bridge_home))
-    # Pointing at the old file, or having moved it, both load.
-    cfg, _ = parse_bridge_runtime(
-        _table(master_secret=str(legacy / "master.secret")), str(bridge_home)
-    )
-    assert cfg.master_secret == str(legacy / "master.secret")
-    (bridge_home / "master.secret").write_bytes(b"x" * 32)
-    cfg, _ = parse_bridge_runtime(_table(), str(bridge_home))
-    assert cfg.master_secret == str(bridge_home / "master.secret")
-
-
-def test_config_file_loads_bridge_runtime_and_checks_body_cap(tmp_path):
+def test_config_file_loads_bridges_and_checks_body_cap(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text(
         textwrap.dedent(
@@ -231,44 +206,61 @@ def test_config_file_loads_bridge_runtime_and_checks_body_cap(tmp_path):
             origin = "{ORIGIN}"
             [limits]
             max_article_body_size = 500
-            """
-        )
-    )
-    (tmp_path / "bridges.toml").write_text(
-        textwrap.dedent(
-            f"""
-            [runtime]
-            state_dir = "state"
-            [[runtime.venue]]
+            [bridges]
+            grace_seconds = 30
+            [[bridges.venue]]
             type = "flatboard"
             venue = "{FLATBOARD_VENUE}"
             url = "https://flatboard.test"
-            [runtime.venue.options]
+            [bridges.venue.options]
             flavor = "plain"
-            [[runtime.venue.binding]]
+            [[bridges.venue.binding]]
             board = "~flatboard"
             max_body_bytes = 1000
+            [admission]
+            enabled = true
             """
         )
     )
     config = FirehoseConfig.load(str(path))
     assert config.bridge_runtime is not None and not config.unknown_keys
-    assert config.bridge_runtime.state_dir == str(tmp_path / "state")
+    assert config.bridge_runtime.grace_seconds == 30
     assert config.bridge_runtime.venues[0].options == {"flavor": "plain"}
+    assert config.bridge_admission is not None and config.bridge_admission.enabled
+    assert config.bridges_state_dir == os.path.join(config.data_dir, "bridges")
+    assert config.puppet_secret_path == os.path.join(config.data_dir, "puppet_secret")
     with pytest.raises(ValueError, match="exceeds limits.max_article_body_size"):
         config.validate()
 
 
-def test_bridge_tables_in_config_toml_are_just_unknown_keys(tmp_path):
+def test_bridges_without_venues_bridge_nothing(tmp_path):
     path = tmp_path / "config.toml"
+    path.write_text(f'[server]\norigin = "{ORIGIN}"\n[bridges]\ngrace_seconds = 30\n')
+    assert FirehoseConfig.load(str(path)).bridge_runtime is None
+
+
+def test_bridge_config_errors_name_the_table(tmp_path):
+    path = tmp_path / "config.toml"
+    base = f'[server]\norigin = "{ORIGIN}"\n'
+    path.write_text(base + "[admission]\nodd = 2\n")
+    assert FirehoseConfig.load(str(path)).unknown_keys == ["admission.odd"]
+    path.write_text(base + "[admission]\nmax_chain_hops = 0\n")
+    with pytest.raises(ValueError, match="config: admission.max_chain_hops"):
+        FirehoseConfig.load(str(path))
     path.write_text(
-        f'[server]\norigin = "{ORIGIN}"\n[bridge_runtime]\nstate_dir = "s"\n'
-        '[[bridges]]\ntype = "flatboard"\n[bridge_admission]\nenabled = true\n'
+        base + f'[[bridges.venue]]\ntype = "flatboard"\nvenue = "{FLATBOARD_VENUE}"\n'
+        'url = "u"\noptions = 3\n'
     )
+    with pytest.raises(ValueError, match="options must be a table"):
+        FirehoseConfig.load(str(path))
+
+
+def test_old_bridge_files_are_not_read(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(f'[server]\norigin = "{ORIGIN}"\n')
+    (tmp_path / "bridges.toml").write_text("[admission]\nenabled = true\n")
     config = FirehoseConfig.load(str(path))
-    assert config.bridge_runtime is None and config.bridges == []
-    assert config.bridge_admission is None
-    assert sorted(config.unknown_keys) == ["bridge_admission", "bridge_runtime", "bridges"]
+    assert config.bridge_admission is None and not config.unknown_keys
 
 
 def test_recognize_lives_in_config_toml(tmp_path):
@@ -283,40 +275,6 @@ def test_recognize_lives_in_config_toml(tmp_path):
 
     path.write_text(f'[server]\norigin = "{ORIGIN}"\n[[recognize]]\ntype = "flatboard"\n')
     with pytest.raises(ValueError, match="config: recognize\\[0\\]"):
-        FirehoseConfig.load(str(path))
-
-
-def test_recognize_in_bridges_toml_is_just_an_unknown_key(tmp_path):
-    path = tmp_path / "config.toml"
-    path.write_text(f'[server]\norigin = "{ORIGIN}"\n')
-    (tmp_path / "bridges.toml").write_text(
-        f'[[recognize]]\ntype = "flatboard"\nvenue = "{FLATBOARD_VENUE}"\norigins = ["b.test"]\n'
-    )
-    config = FirehoseConfig.load(str(path))
-    assert config.bridges == [] and config.unknown_keys == ["bridges.toml:recognize"]
-
-
-def test_bridges_file_reports_its_own_unknown_keys_and_errors(tmp_path):
-    from bonnet.bridges.config import BridgesConfigError
-
-    path = tmp_path / "config.toml"
-    path.write_text(f'[server]\norigin = "{ORIGIN}"\n')
-    bridges = tmp_path / "bridges.toml"
-    bridges.write_text("surprise = 1\n[admission]\nodd = 2\n")
-    config = FirehoseConfig.load(str(path))
-    assert config.unknown_keys == ["bridges.toml:surprise", "bridges.toml:admission.odd"]
-
-    bridges.write_text("[admission]\nmax_chain_hops = 0\n")
-    with pytest.raises(BridgesConfigError, match="bridges.toml: admission.max_chain_hops"):
-        FirehoseConfig.load(str(path))
-    bridges.write_text("[runtime\n")
-    with pytest.raises(BridgesConfigError, match="could not parse"):
-        FirehoseConfig.load(str(path))
-    bridges.write_text(
-        f'[[runtime.venue]]\ntype = "flatboard"\nvenue = "{FLATBOARD_VENUE}"\n'
-        'url = "u"\noptions = 3\n'
-    )
-    with pytest.raises(BridgesConfigError, match="options must be a table"):
         FirehoseConfig.load(str(path))
 
 
@@ -416,13 +374,30 @@ async def test_homeserver_refuses_local_tilde_boards(tmp_path):
         server.close()
 
 
-async def test_bridge_origin_closes_registration(h):
+async def test_tilde_names_are_reserved_on_servers_without_bridges(tmp_path):
+    from bonnet.app.server import BonnetServer
+
+    server = BonnetServer(make_config(tmp_path, ORIGIN))
+    try:
+        user = Identity.generate()
+        with pytest.raises(ProtocolError) as e:
+            await _http_publish(server, user, _register_intent(user, "grok~flatboard"))
+        assert "reserved for bridge puppets" in str(e.value)
+    finally:
+        server.close()
+
+
+async def test_tilde_names_are_reserved_for_puppets(h):
     server = h.server
-    stranger = Identity.generate()
-    for name in ("moxxie", "x~flatboard", "moxxie~sys.knolastna.me"):
+    for name in ("x~flatboard", "moxxie~sys.knolastna.me"):
+        stranger = Identity.generate()
         with pytest.raises(ProtocolError) as e:
             await _http_publish(server, stranger, _register_intent(stranger, name))
-        assert "closed" in str(e.value)
+        assert "reserved for bridge puppets" in str(e.value)
+    # Running bridges doesn't close registration to everyone else.
+    user = Identity.generate()
+    await _http_publish(server, user, _register_intent(user, "moxxie"))
+    assert server.users.username_holder(ORIGIN, "moxxie") == user.public_key
 
     # The runtime may register puppets for a type it runs, and nothing else.
     pub = h.runtime.publisher
@@ -433,11 +408,13 @@ async def test_bridge_origin_closes_registration(h):
         with pytest.raises(ProtocolError):
             await pub.publish(other, _register_intent(other, bad))
 
-    # Administrators can still provision accounts by hand.
+    # Not even administrators may squat on a puppet's name.
     root = server.server_identity
-    operator = Identity.generate()
-    await _http_publish(server, root, _register_intent(root, "operator", operator.public_key))
-    assert server.users.username_holder(ORIGIN, "operator") == operator.public_key
+    squatter = Identity.generate()
+    with pytest.raises(ProtocolError):
+        await _http_publish(
+            server, root, _register_intent(root, "moxxie~flatboard", squatter.public_key)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -445,10 +422,12 @@ async def test_bridge_origin_closes_registration(h):
 # ---------------------------------------------------------------------------
 
 
-async def test_setup_registers_daemon_board_and_binding(h):
-    daemon = h.runtime.daemon.public_key
-    assert h.server.users.username_holder(ORIGIN, "bridge") == daemon
-    assert h.server.nav.get_board(ORIGIN, BOARD)["owner_pubkey"] == daemon
+async def test_setup_creates_board_and_binding_as_the_server(h):
+    server_key = h.server.server_identity.public_key
+    assert h.runtime.daemon.public_key == server_key
+    assert h.server.nav.get_board(ORIGIN, BOARD)["owner_pubkey"] == server_key
+    (binding,) = h.records(KIND_BRIDGE_BINDING)
+    assert binding.actor_pubkey == server_key
     active = read_bindings(h.firehose, ORIGIN)
     meta = active[BOARD].meta
     assert meta.venue == FLATBOARD_VENUE and meta.binding_ingest is True
@@ -632,11 +611,9 @@ async def test_long_posts_are_truncated_with_full_bytes_observed(tmp_path):
 
 
 async def test_puppet_name_collision_gets_a_suffix(h):
-    root = h.server.server_identity
-    squatter = Identity.generate()
-    await _http_publish(
-        h.server, root, _register_intent(root, "grok~flatboard", squatter.public_key)
-    )
+    # Another author with the same handle got the plain name first.
+    other = Identity.generate()
+    await h.runtime.publisher.publish(other, _register_intent(other, "grok~flatboard"))
     mid = h.board.post("hi", created=NOW - 600)
     await h.poll()
     rec = h.mirrors()[str(mid)]
@@ -680,7 +657,7 @@ async def test_lost_index_is_rebuilt_from_the_log(h):
     reply = h.board.post("reply", reply_to=ids[0], created=NOW - 600)
     await h.poll()
     before = h.highest()
-    state_dir = h.runtime._config.state_dir
+    state_dir = h.server.config.bridges_state_dir
     await h.stop()
     shutil.rmtree(state_dir)
     await h.start()
@@ -792,7 +769,7 @@ async def test_serve_bridge_never_starts_runtime_if_server_cannot_bind():
     server, runtime = _FakeServer(binds=False), _FakeRuntime()
     assert await serve_bridge(server, runtime) is False
     assert not runtime.ran
-    assert server.run_kwargs == {"console": False}
+    assert server.run_kwargs == {}
 
 
 async def test_serve_bridge_runtime_failure_stops_server():
@@ -985,7 +962,7 @@ def test_mirror_subject():
 
 
 def _write_bridge_config(tmp_path) -> str:
-    path = tmp_path / "bridge.toml"
+    path = tmp_path / "config.toml"
     path.write_text(
         textwrap.dedent(
             f"""
@@ -994,21 +971,11 @@ def _write_bridge_config(tmp_path) -> str:
             data_dir = "data"
             boards_dir = "boards"
             events_bodies_dir = "event_bodies"
-            """
-        )
-    )
-    (tmp_path / "bridges.toml").write_text(
-        textwrap.dedent(
-            f"""
-            [runtime]
-            daemon_key = "keys/daemon.key"
-            master_secret = "keys/master.secret"
-            state_dir = "state"
-            [[runtime.venue]]
+            [[bridges.venue]]
             type = "flatboard"
             venue = "{FLATBOARD_VENUE}"
             url = "https://flatboard.test"
-            [[runtime.venue.binding]]
+            [[bridges.venue.binding]]
             board = "~flatboard"
             """
         )
@@ -1032,29 +999,29 @@ def test_cli_status_and_rebuild(tmp_path, capsys):
     assert "rebuilt index from 0" in capsys.readouterr().out
 
 
-def test_cli_run_requires_bridge_runtime(tmp_path, capsys):
+def test_cli_status_needs_venues(tmp_path, capsys):
     from bonnet.cli import main
 
-    path = tmp_path / "bridge.toml"
+    path = tmp_path / "config.toml"
     path.write_text(f'[server]\norigin = "{ORIGIN}"\n')
     with pytest.raises(SystemExit) as e:
-        main(["bridge", "run", "--config", str(path)])
+        main(["bridge", "status", "--config", str(path)])
     assert e.value.code == 1
-    assert "bridges.toml has no [runtime]" in capsys.readouterr().err
+    assert "bridges no venues" in capsys.readouterr().err
 
 
-def test_cli_refuses_a_venue_type_with_no_adapter(tmp_path, capsys, monkeypatch):
+def test_server_refuses_a_venue_type_with_no_adapter(tmp_path, capsys, monkeypatch):
     from bonnet.cli import main
 
     _installed(monkeypatch)
     path = _write_bridge_config(tmp_path)
-    with open(tmp_path / "bridges.toml", "a") as f:
+    with open(path, "a") as f:
         f.write(
-            '[[runtime.venue]]\ntype = "nostr"\nvenue = "nostr@relay.test"\n'
-            'url = "wss://relay.test"\n[[runtime.venue.binding]]\nboard = "~nostr"\n'
+            '[[bridges.venue]]\ntype = "nostr"\nvenue = "nostr@relay.test"\n'
+            'url = "wss://relay.test"\n[[bridges.venue.binding]]\nboard = "~nostr"\n'
         )
     with pytest.raises(SystemExit) as e:
-        main(["bridge", "run", "--config", path])
+        main(["server", "--config", path])
     assert e.value.code == 1
     err = capsys.readouterr().err
     assert "error: nostr@relay.test: no bridge adapter for venue type 'nostr'" in err
@@ -1062,22 +1029,12 @@ def test_cli_refuses_a_venue_type_with_no_adapter(tmp_path, capsys, monkeypatch)
     assert "no bridge adapter" in capsys.readouterr().err
 
 
-def test_cli_status_refuses_a_homeserver_home(tmp_path, capsys, monkeypatch):
-    from bonnet.cli import main
-
-    monkeypatch.setenv("BONNET_BRIDGE_HOME", str(tmp_path / "unused"))  # restored after --dir
-    (tmp_path / "config.toml").write_text(f'[server]\norigin = "{ORIGIN}"\n')
-    with pytest.raises(SystemExit) as e:
-        main(["bridge", "status", "--dir", str(tmp_path)])
-    assert e.value.code == 1
-    assert "holds config.toml, so it is a server's home" in capsys.readouterr().err
-
-
 def test_cli_bridge_usage(capsys):
     from bonnet.cli import main
 
     assert main(["bridge"]) == 2
     assert main(["bridge", "bogus"]) == 2
+    assert main(["bridge", "run"]) == 2  # bridges run inside `bonnet server`
 
 
 async def test_local_publisher_from_bridge_server_marks_runtime(h):
@@ -1085,8 +1042,8 @@ async def test_local_publisher_from_bridge_server_marks_runtime(h):
     assert pub.context_for(h.runtime.daemon.public_key).via_bridge_runtime
 
 
-async def test_daemon_rule_is_synthesized_on_bridge_origins(tmp_path):
-    """No operator-written daemon rule: the server grants it, since the key is born at first start."""
+async def test_bridges_run_on_an_acl_that_never_names_them(tmp_path):
+    """No operator rule for the bridge: its facts are signed with the server's own key."""
     from bonnet.app.server import BonnetServer
     from tests.bridge_fakes import shipped_rules
 
@@ -1103,20 +1060,14 @@ async def test_daemon_rule_is_synthesized_on_bridge_origins(tmp_path):
         await runtime.setup()
         venue = runtime.venues[0]
         assert await runtime.ingest_binding(venue, venue.config.bindings[0]) == 1
-        # The grant is exactly the runtime's kinds: no routes, rules or controls.
-        from bonnet.core.acl import AuthContext
+        # The server key may do anything, so the runtime's own guard is
+        # what keeps it to bridge kinds: no routes, rules or controls.
+        from bonnet.bridges.local_publish import KindRefused
 
-        ctx = AuthContext(pubkey=runtime.daemon.public_key, is_registered=True, origin=ORIGIN)
-        acl = server.acl
-        assert acl.check(
-            ctx, "write", command="PUBLISH_RECORD", kind="bonnet.bridge.binding", board=""
-        )
-        assert not acl.check(
-            ctx, "write", command="PUBLISH_RECORD", kind="bonnet.route.announce", board=""
-        )
-        assert not acl.check(
-            ctx, "write", command="PUBLISH_RECORD", kind="bonnet.article", board="general"
-        )
+        route = _register_intent(runtime.daemon, "x")
+        route.kind = "bonnet.route.announce"
+        with pytest.raises(KindRefused):
+            runtime.publisher.build_frame(runtime.daemon, route)
     finally:
         await runtime.close()
         server.close()

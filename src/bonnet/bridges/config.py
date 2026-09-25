@@ -12,45 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""`bridges.toml`: bridge configuration, and the runtime's key files.
+"""Bridge configuration, as `config.toml` carries it, and the puppet secret.
 
-A bridge origin's tables have their own file, next to the server's config
-(a bridge origin's own server config is `bridge.toml`, in its own home:
-core.home):
+  [bridges]      this origin's own bridges (design doc §10.2): tunables,
+                 and a `[[bridges.venue]]` per foreign venue. Any origin may
+                 carry one; the server runs its venues in-process
+  [admission]    admitting other origins' users as crossposters (§6)
+  [[recognize]]  other origins recognized as bridges for a venue (§10.1)
 
-  [runtime]      makes this origin a bridge origin (design doc §10.2):
-                 `bonnet bridge run` starts the runtime next to the server,
-                 and the server closes registration to everyone but the
-                 runtime and its administrators (§8)
-  [admission]    admitting crossposters' home keys (§6)
-
-A homeserver's `[[recognize]]` (which bridge origins it recognizes, §10.1)
-is federation config and lives in `config.toml`, beside `[[sync.peers]]`;
-this module parses it for core.config.
-
-A missing file means no bridges. Each `[[runtime.venue]]` may carry an
-`[runtime.venue.options]` table of flags for its adapter alone; the adapter
-declares and checks them (`adapter.venue_option_problems`).
+Each `[[bridges.venue]]` may carry a `[bridges.venue.options]` table of
+flags for its adapter alone; the adapter declares and checks them
+(`adapter.venue_option_problems`). Bridge facts are signed with the server's
+own key; puppet keys derive from `puppet_secret` in the data directory.
 """
 
 from __future__ import annotations
 
 import os
-import tomllib
 from dataclasses import dataclass, field
-
-from bonnet.core.crypto import Identity
 
 DEFAULT_MAX_BODY_BYTES = 262144
 
-BRIDGES_FILE = "bridges.toml"
-_FILE_KEYS = {"runtime", "admission"}
-
 _RUNTIME_KEYS = {
-    "daemon_key",
-    "daemon_username",
-    "master_secret",
-    "state_dir",
     "grace_seconds",
     "linked_grace_seconds",
     "marker_timeout_seconds",
@@ -103,17 +86,15 @@ class VenueConfig:
     sweep_window: int = 50
     relay_user: str = ""
     relay_token_file: str = ""
-    # Adapter-specific flags, as TOML gave them ([runtime.venue.options]).
+    # Adapter-specific flags, as TOML gave them ([bridges.venue.options]).
     options: dict = field(default_factory=dict)
     bindings: list[BindingConfig] = field(default_factory=list)
 
 
 @dataclass
 class BridgeRuntimeConfig:
-    daemon_key: str
-    master_secret: str
-    state_dir: str
-    daemon_username: str = "bridge"
+    """`[bridges]`: the venues this origin bridges itself."""
+
     grace_seconds: int = 120
     linked_grace_seconds: int = 600
     marker_timeout_seconds: int = 3600
@@ -122,11 +103,6 @@ class BridgeRuntimeConfig:
     @property
     def venue_types(self) -> frozenset[str]:
         return frozenset(v.type for v in self.venues)
-
-
-def _path(value: str, base_dir: str) -> str:
-    value = os.path.expanduser(value)
-    return value if os.path.isabs(value) else os.path.join(base_dir, value)
 
 
 def _int(table: dict, key: str, where: str, default: int, minimum: int = 0) -> int:
@@ -179,61 +155,24 @@ def parse_options(table: dict, where: str) -> dict:
     return dict(options)
 
 
-# [runtime] path keys and their default names in the bridge's home.
-_RUNTIME_FILES = {
-    "daemon_key": "daemon.key",
-    "master_secret": "master.secret",
-    "state_dir": "state",
-}
-# Where those defaults pointed before bridges had their own home.
-_LEGACY_RUNTIME_DIR = os.path.join("~", ".bonnet", "bridges")
-
-
-def _refuse_legacy_default(key: str, name: str, base_dir: str) -> None:
-    """Refuse a default that would silently replace a file at the legacy path.
-
-    Generating a fresh master secret or daemon key next to bridges.toml while
-    the old one sits in ~/.bonnet/bridges would orphan every puppet.
-    """
-    legacy = os.path.expanduser(os.path.join(_LEGACY_RUNTIME_DIR, name))
-    current = os.path.join(base_dir, name)
-    if os.path.exists(legacy) and not os.path.exists(current):
-        raise ValueError(
-            f"runtime.{key} is unset, and its default is now {current}, but {legacy} "
-            f"exists from an older version: move it to {current}, or set "
-            f'runtime.{key} = "{legacy}"'
-        )
-
-
-def parse_bridge_runtime(table: dict, base_dir: str) -> tuple[BridgeRuntimeConfig, list[str]]:
-    """Parse `[runtime]`. Returns the config and any unrecognized keys."""
+def parse_bridge_runtime(table: dict) -> tuple[BridgeRuntimeConfig, list[str]]:
+    """Parse `[bridges]`. Returns the config and any unrecognized keys."""
     if not isinstance(table, dict):
-        raise ValueError("[runtime] must be a table")
-    unknown = [f"runtime.{k}" for k in table if k not in _RUNTIME_KEYS]
-    where = "runtime"
-    # Unset paths default into base_dir: bridges.toml sits in the bridge's
-    # home, next to bridge.toml, so each bridge keeps its own keys and state.
-    for key, name in _RUNTIME_FILES.items():
-        if key not in table:
-            _refuse_legacy_default(key, name, base_dir)
+        raise ValueError("[bridges] must be a table")
+    unknown = [f"bridges.{k}" for k in table if k not in _RUNTIME_KEYS]
+    where = "bridges"
     cfg = BridgeRuntimeConfig(
-        daemon_key=_path(_str(table, "daemon_key", where, "daemon.key"), base_dir),
-        master_secret=_path(_str(table, "master_secret", where, "master.secret"), base_dir),
-        state_dir=_path(_str(table, "state_dir", where, "state"), base_dir),
-        daemon_username=_str(table, "daemon_username", where, "bridge"),
         grace_seconds=_int(table, "grace_seconds", where, 120),
         linked_grace_seconds=_int(table, "linked_grace_seconds", where, 600),
         marker_timeout_seconds=_int(table, "marker_timeout_seconds", where, 3600),
     )
-    if "~" in cfg.daemon_username or not cfg.daemon_username.strip():
-        raise ValueError("runtime.daemon_username must be non-empty and have no '~'")
 
     venues = table.get("venue", [])
     if not isinstance(venues, list):
-        raise ValueError("[[runtime.venue]] must be an array of tables")
+        raise ValueError("[[bridges.venue]] must be an array of tables")
     boards: set[str] = set()
     for i, v in enumerate(venues):
-        vw = f"runtime.venue[{i}]"
+        vw = f"bridges.venue[{i}]"
         if not isinstance(v, dict):
             raise ValueError(f"{vw} must be a table")
         unknown.extend(f"{vw}.{k}" for k in v if k not in _VENUE_KEYS)
@@ -279,42 +218,6 @@ def parse_bridge_runtime(table: dict, base_dir: str) -> tuple[BridgeRuntimeConfi
             venue.bindings.append(binding)
         cfg.venues.append(venue)
     return cfg, unknown
-
-
-# ---------------------------------------------------------------------------
-# Key files
-# ---------------------------------------------------------------------------
-
-
-def _read_or_create(path: str, make) -> bytes:
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            data = f.read()
-        if len(data) != 32:
-            raise ValueError(f"{path}: expected 32 bytes, found {len(data)}")
-        return data
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    data = make()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-    return data
-
-
-def load_daemon_identity(cfg: BridgeRuntimeConfig) -> Identity:
-    """The daemon's signing key, generated on first use."""
-    return Identity.from_private_key(
-        _read_or_create(cfg.daemon_key, lambda: Identity.generate().private_key)
-    )
-
-
-def load_master_secret(cfg: BridgeRuntimeConfig) -> bytes:
-    """The secret puppet keys derive from, generated on first use.
-
-    Losing it orphans every puppet: new keys would be derived, and the old
-    puppets' names stay held by keys nobody can sign with any more.
-    """
-    return _read_or_create(cfg.master_secret, lambda: os.urandom(32))
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +295,33 @@ def venue_types(config) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# The puppet secret
+# ---------------------------------------------------------------------------
+
+
+def load_puppet_secret(path: str) -> bytes:
+    """The secret puppet keys derive from, generated on first use.
+
+    Server state, not config: it lives in the data directory next to the
+    server's identity, and unlike that identity it never rotates. Losing it
+    orphans every puppet: new keys would be derived, and the old puppets'
+    names stay held by keys nobody can sign with any more. Back it up.
+    """
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            data = f.read()
+        if len(data) != 32:
+            raise ValueError(f"{path}: expected 32 bytes, found {len(data)}")
+        return data
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    data = os.urandom(32)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return data
+
+
+# ---------------------------------------------------------------------------
 # [admission]: admitting crossposters' home keys (§6)
 # ---------------------------------------------------------------------------
 
@@ -434,61 +364,3 @@ def parse_bridge_admission(table) -> tuple[AdmissionConfig, list[str]]:
         verify_tls=_bool(table, "verify_tls", where, True),
     )
     return cfg, [f"{where}.{k}" for k in table if k not in _ADMISSION_KEYS]
-
-
-# ---------------------------------------------------------------------------
-# The file
-# ---------------------------------------------------------------------------
-
-
-class BridgesConfigError(ValueError):
-    """`bridges.toml` is unreadable or invalid. Carries the file's path."""
-
-    def __init__(self, path: str, message: str):
-        super().__init__(f"{path}: {message}")
-        self.path = path
-
-
-@dataclass
-class BridgesFile:
-    runtime: BridgeRuntimeConfig | None = None
-    admission: AdmissionConfig | None = None
-    unknown_keys: list[str] = field(default_factory=list)
-
-
-def bridges_path(config_path: str) -> str:
-    """The `bridges.toml` that goes with the server config at `config_path`
-    (a homeserver's `config.toml` or a bridge origin's `bridge.toml`)."""
-    return os.path.join(os.path.dirname(os.path.abspath(config_path)), BRIDGES_FILE)
-
-
-def load_bridges_file(path: str, normalize_origin) -> BridgesFile:
-    """Parse the bridges file at `path`; a missing file is no bridges.
-
-    Unknown keys come back prefixed with the file name, the way the
-    server's includes report theirs.
-    """
-    if not os.path.exists(path):
-        return BridgesFile()
-    try:
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-    except tomllib.TOMLDecodeError as e:
-        raise BridgesConfigError(path, f"could not parse: {e}") from e
-    except OSError as e:
-        raise BridgesConfigError(path, f"could not read: {e}") from e
-    out = BridgesFile()
-    unknown = [k for k in data if k not in _FILE_KEYS]
-    try:
-        if "runtime" in data:
-            out.runtime, more = parse_bridge_runtime(
-                data["runtime"], os.path.dirname(os.path.abspath(path))
-            )
-            unknown.extend(more)
-        if "admission" in data:
-            out.admission, more = parse_bridge_admission(data["admission"])
-            unknown.extend(more)
-    except ValueError as e:
-        raise BridgesConfigError(path, str(e)) from e
-    out.unknown_keys = [f"{BRIDGES_FILE}:{k}" for k in unknown]
-    return out

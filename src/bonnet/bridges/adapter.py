@@ -20,7 +20,7 @@ has one, otherwise None, and the runtime fills it from its own index.
 
 Adapters register under the entry point group `bonnet.bridges.adapters`,
 keyed by venue type. Built-ins are listed in `BUILTIN_ADAPTERS` and always
-win over entry points: an adapter runs next to the master secret and the
+win over entry points: an adapter runs next to the puppet secret and the
 relay tokens, so installing a package must never swap out one the operator
 already runs. A type no built-in covers must be claimed by exactly one
 installed package.

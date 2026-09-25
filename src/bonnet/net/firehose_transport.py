@@ -429,6 +429,7 @@ class FirehoseTransport:
             "command_endpoint": info.command_endpoint,
             "capabilities": list(info.capabilities or []),
             "known_origins": list(info.known_origins or []),
+            "bridges": [dict(b) for b in info.bridges or []],
             "signature_lifetime_seconds": int(info.signature_lifetime_seconds),
             "clock_skew_seconds": int(info.clock_skew_seconds),
             "peer_max_lifetime": int(self._peer_max_lifetime)
@@ -467,6 +468,7 @@ class FirehoseTransport:
                 clock_skew_seconds=_coerce_window(
                     cached.get("clock_skew_seconds", 300), default=300, minimum=0
                 ),
+                bridges=[b for b in cached.get("bridges", []) if isinstance(b, dict)],
             )
             server_pubkey = bytes.fromhex(info.public_key)
             anonymous_key = bytes.fromhex(info.anonymous_key)

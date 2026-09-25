@@ -403,7 +403,7 @@ class FirehoseCommandHandler:
         self._recognized_bridges = dict(recognized_bridges or {})
         self._bridge_venue_types = dict(bridge_venue_types or {})
         # bonnet.bridges.admission.Admission on a bridge origin with
-        # bridges.toml [admission] enabled, else None (set by BonnetServer).
+        # [admission] enabled, else None (set by BonnetServer).
         self._admission: Any = None
         # Venues whose runtime is running in this process right now; the
         # bridge runtime adds and removes itself (manifest `local`).
@@ -867,24 +867,23 @@ class FirehoseCommandHandler:
     def _bridge_reservation_denial(self, intent: Intent, ctx: FirehoseContext) -> bytes | None:
         """Refuse local publishes that would squat on bridge namespaces.
 
-        Every origin reserves boards starting with `~` for its own bridge
-        runtime, and bridge records and roles for the runtime alone. A bridge origin also closes registration: only the runtime
-        (its daemon, and puppets named `<handle>~<type>` for a type it runs)
-        and administrators may register. Crossposters are admitted by
-        appending straight to the firehose, so they never reach this check,
-        and neither do federated records.
+        Every origin reserves boards starting with `~` for its own bridges,
+        bridge records and roles for its bridges alone, and usernames with a
+        `~` for bridge puppets: only this origin's bridges may register one,
+        as `<handle>~<type>` for a type they run. Crossposters from other
+        origins are admitted by appending straight to the firehose, so they
+        never reach this check, and neither do federated records.
         """
         if (
             intent.kind == KIND_BOARD_CREATE
             and intent.board.startswith("~")
             and not ctx.via_bridge_runtime
         ):
-            return _error(0x0004, "Boards starting with '~' are reserved for this origin's bridge")
+            return _error(0x0004, "Boards starting with '~' are reserved for this origin's bridges")
         if not ctx.via_bridge_runtime:
             # Bridge facts (bindings, links, observations, mirrors) are the
-            # runtime's to state; readers dedup and thread on them. The ACL
-            # grants these kinds to the daemon alone, but an operator's broad
-            # allow rule mustn't be able to widen that. A crosspost is the one
+            # runtime's to state; readers dedup and thread on them. An
+            # operator's broad allow rule mustn't be able to widen that. A crosspost is the one
             # role a user may claim, and it counts for nothing until the
             # bridge observes it at the venue.
             from bonnet.bridges.model import ROLE_CROSSPOST, BridgeMetadata
@@ -897,21 +896,18 @@ class FirehoseCommandHandler:
                     return _error(
                         0x0004, "Only the bridge runtime may publish mirrors of foreign posts"
                     )
-        policy = self._bridge_policy
-        if policy is None or intent.kind != KIND_USER_REGISTER or ctx.role == "administrator":
+        if intent.kind != KIND_USER_REGISTER:
             return None
+        name = intent.metadata.get_text(1) or ""
+        policy = self._bridge_policy
+        is_puppet = policy is not None and policy.is_puppet_name(name)
         if ctx.via_bridge_runtime:
-            name = intent.metadata.get_text(1) or ""
-            if intent.actor_pubkey == policy.daemon_pubkey and "~" not in name:
-                return None
-            if policy.is_puppet_name(name):
+            if is_puppet:
                 return None
             return _error(0x0004, "The bridge runtime may only register puppets as <handle>~<type>")
-        return _error(
-            0x0004,
-            "Registration on this bridge origin is closed; crossposters are admitted "
-            "through their home origin",
-        )
+        if "~" in name:
+            return _error(0x0004, "Usernames containing '~' are reserved for bridge puppets")
+        return None
 
     # ------------------------------------------------------------------
     # PUBLISH_RECORD

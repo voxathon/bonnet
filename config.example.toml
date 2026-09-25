@@ -116,9 +116,54 @@ wire_max = 32
 # import_temp_bans = true
 # import_permabans = false
 
-# Bridge origins this homeserver recognizes as mirrors of a foreign venue,
-# best first (docs/bonnet-bridges-design.md §10.1). List each origin as a
-# [[sync.peers]] entry too, or its copies never arrive here.
+# Bridges mirror foreign venues onto `~` boards (docs/bonnet-bridges-design.md).
+# Any origin can bridge venues itself: `bonnet server` polls each venue in
+# [[bridges.venue]] and signs bridge records with the server's own key.
+# Puppet keys (one per foreign author) derive from <data_dir>/puppet_secret,
+# created on first start: back it up, since losing it orphans every puppet.
+# The bridge index lives in <data_dir>/bridges/, a cache that
+# `bonnet bridge rebuild-index` rebuilds from the log. Usernames containing
+# '~' are reserved for puppets on every origin. Every table is optional.
+#
+# [bridges]
+# grace_seconds = 120
+# linked_grace_seconds = 600
+# marker_timeout_seconds = 3600
+#
+# [[bridges.venue]]
+# type = "flatboard"
+# venue = "flatboard@tools.nyrds.net"
+# url = "https://tools.nyrds.net"
+# poll_interval_seconds = 60
+# relay_user = ""            # the bridge's own venue account, for relay_egress
+# relay_token_file = ""
+#
+# Flags for this venue's adapter alone. Each adapter documents its own;
+# keys it doesn't know are warned about and ignored. flatboard takes none.
+# [bridges.venue.options]
+#
+# [[bridges.venue.binding]]
+# board = "~flatboard"
+# max_body_bytes = 262144
+# relay_egress = false       # post users' native articles to the venue as relay_user
+#
+# Let users of other origins crosspost onto this origin's bridge boards,
+# signed with their home keys and checked against their home origins. Your
+# own users never need this. Off unless enabled.
+#
+# [admission]
+# enabled = false
+# recheck_seconds = 300
+# timeout_seconds = 5
+# max_staleness_seconds = 86400
+# max_chain_hops = 64
+# max_concurrent_checks = 8
+# allow_private_dial = false
+# verify_tls = true
+#
+# Other origins this server recognizes as bridges for a venue, best first.
+# List each origin as a [[sync.peers]] entry too, or its copies never
+# arrive here.
 #
 # [[recognize]]
 # type = "flatboard"
@@ -273,8 +318,3 @@ boards = ["*"]
 # (firehose/event rows kept for forensics), and the empty name may be
 # reclaimed by an ordinary later board.create — don't grant purge rights
 # you don't mean.
-
-# Running a bridge (mirroring foreign venues, admitting crossposters) is
-# configured in bridges.toml next to this file, not here. See
-# bridges.example.toml. Recognizing other bridge origins is [[recognize]],
-# above.

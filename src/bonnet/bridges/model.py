@@ -537,12 +537,12 @@ def merge_metadata(base: MetadataMap, extra: list[MetadataField]) -> MetadataMap
 
 @dataclass(frozen=True)
 class BridgePolicy:
-    """What a bridge origin's server needs to know to enforce §8.
+    """What a server needs to know to enforce §8's puppet names.
 
-    Held by the command handler only on origins with a bridges.toml `[runtime]`.
+    Every server holds one; `venue_types` is empty on a server that bridges
+    no venues itself, so it may register no puppets.
     """
 
-    daemon_pubkey: bytes
     venue_types: frozenset[str]
 
     def is_puppet_name(self, name: str) -> bool:

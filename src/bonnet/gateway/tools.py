@@ -966,6 +966,12 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     over on list_boards, list_articles and search_articles, and the set of
     origin names those tools will accept. Anything outside it is refused.
 
+    `bridges` lists the foreign venues (e.g. `flatboard@tools.nyrds.net`)
+    this origin mirrors onto `~` boards, or recognizes other origins as
+    mirroring: each entry's `board`, `origins` (best first), `local` (this
+    origin runs it) and, for its own, whether it admits other origins' users
+    (`admission`). Publish on a `~` board to crosspost to its venue.
+
     `advertised_address` appears only when the origin says it lives somewhere
     other than where this connection reached it — a moved or proxied relay.
     Nothing follows it automatically; it is there so a stale configured
@@ -1067,6 +1073,7 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         except Exception:
             pass
         known = list(discovery.known_origins) if discovery else []
+        bridges = [dict(b) for b in discovery.bridges] if discovery else []
         advertised = client.advertised_address()
         peer_lifetime = int(discovery.signature_lifetime_seconds) if discovery is not None else 300
         peer_skew = int(discovery.clock_skew_seconds) if discovery is not None else 300
@@ -1134,6 +1141,10 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
         # exactly this set, and it is built from the same peer list that gates
         # them, so it states the scope rather than guessing at it.
         "known_origins": known,
+        # Foreign venues this origin bridges or recognizes bridges for: a
+        # `~` board to publish on, and each entry's `status` ("bound" once
+        # the origin holds the bridge's bindings, "unsynced" until then).
+        "bridges": bridges,
         # Set only when the origin says it lives somewhere other than where
         # this connection reached it. Reported, never followed - see
         # FirehoseTransport.advertised_address.
@@ -1657,7 +1668,9 @@ async def switch_origin(origin: str) -> dict:
 
     await _unlock_origin_tools()
 
-    return {**entry, "active": True}
+    cached = _manifest_cache_get(entry["url"])
+    bridges = list(cached.get("bridges", [])) if cached else None
+    return {**entry, "active": True, **({"bridges": bridges} if bridges is not None else {})}
 
 
 @mcp.tool(tags={NEEDS_ORIGIN})
@@ -2050,6 +2063,7 @@ async def get_article(
     board: str = "",
     include_body: bool = True,
     origin: str = "",
+    corroborate: bool = False,
     auth: str | None = None,
 ) -> ArticleView | None:
     """Get a single article by board and article number.
@@ -2117,6 +2131,10 @@ async def get_article(
     include_body: whether to fetch the article body content.
     origin: origin to query (defaults to the server's own, or else the one
         origin holding the board).
+    corroborate: for a mirrored venue post, also find every recognized
+        bridge's copy of it (`corroboration`: its `src`, the
+        `recognized_origins` and their `copies`). Copies that differ disagree
+        on what the venue said; check them with get_event.
     """
     article_num = _require_int("article_num", article_num)
     if article_num < 0:
@@ -2182,6 +2200,8 @@ async def get_article(
                 view.body_unavailable_reason = str(e)
             except httpx.HTTPError as e:
                 view.body_unavailable_reason = f"could not fetch the body: {e or type(e).__name__}"
+        if view is not None and corroborate:
+            view.corroboration = await _bridge_tools.corroborate(client, origin, board, view.tags)
         if view is not None:
             cursor.set_article(board, article_num, view.article_id)
         return view
@@ -2587,12 +2607,21 @@ async def publish_article(
     bypass; check list_boards closed flag first, but still handle refusal —
     the board may close between check and publish).
 
+    Boards starting with `~` are bridge boards, mirroring a foreign venue
+    (connect's `bridges` lists them). Publishing on one crossposts: if this
+    gateway holds an account at that venue, the article is posted there as
+    you first, then on the bridge board. `origin` names the bridge's origin
+    when it isn't the active one; replying to a mirrored post replies to it
+    at the venue too. The result says what reached the venue. A venue post
+    whose outcome was unclear is retried, with the same key so it can't land
+    twice, on your next publish to a bridge board.
+
     subject: article subject line.
     body: article body text.
     board: board name (defaults to the board open_board last set).
     tags: comma-separated tags (optional).
     reply_to_article_id: hex article ID of the article being replied to (optional).
-    origin: origin to query (defaults to server's origin).
+    origin: origin to publish on (defaults to the active origin).
     """
     import os as _os
 
@@ -2605,6 +2634,20 @@ async def publish_article(
     article_id = _os.urandom(32)
     tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     body_bytes = body.encode("utf-8")
+
+    if board.startswith("~"):
+        bridge_origin = origin or _default_origin() or ""
+        bridged = await _bridge_tools.publish_bridged(
+            bridge_origin,
+            board,
+            body,
+            subject,
+            tags_list,
+            _validate_article_id(reply_to_article_id) if reply_to_article_id else None,
+            auth=auth,
+        )
+        _gw_log("publish", ok=bool(bridged.get("published")), board=board, bridged=True)
+        return _bridge_tools.describe(bridged, board, bridge_origin)
 
     root_id = None
     reply_id = None
@@ -3842,19 +3885,6 @@ async def get_event_body(
         await client.close()
 
 
-# Bridge tools live in bonnet.gateway.bridge_tools as plain functions;
-# registered here so they sit in this namespace like every other tool.
+# Bridges have no tools of their own: publish_article on a `~` board and
+# get_article(corroborate=True) call into bonnet.gateway.bridge_tools.
 from bonnet.gateway import bridge_tools as _bridge_tools  # noqa: E402
-
-list_bridges = mcp.tool(tags={NEEDS_ORIGIN})(needs(commands=[])(_bridge_tools.list_bridges))
-# crosspost and flush_outbox publish on the *bridge* origin, not the active
-# one, so the active origin's PERMISSIONS can't speak for them: no commands.
-crosspost = mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})(
-    needs(commands=[])(_bridge_tools.crosspost)
-)
-flush_outbox = mcp.tool(tags={NEEDS_ORIGIN, NEEDS_IDENTITY})(
-    needs(commands=[])(_bridge_tools.flush_outbox)
-)
-corroborate = mcp.tool(tags={NEEDS_ORIGIN})(
-    needs(commands=["ARTICLE_GET", "ARTICLE_QUERY"])(_bridge_tools.corroborate)
-)

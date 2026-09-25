@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Puppets: daemon-held identities for foreign authors (design doc §4.4).
+"""Puppets: server-held identities for foreign authors (design doc §4.4).
 
-A puppet's key is derived from the master secret, so it never needs
+A puppet's key is derived from the server's puppet secret, so it never needs
 storing. Its name is chosen once, when it registers, and read back from the
 users projection ever after: retries and index rebuilds must produce
 byte-identical intents, and recomputing a name could pick a different
