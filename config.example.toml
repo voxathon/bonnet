@@ -71,7 +71,6 @@ result_limit = 100
 enabled = false
 # cert_path = "./certs/bonnet.crt"
 # key_path = "./certs/bonnet.key"
-# ca_bundle = true
 
 [sync]
 interval_seconds = 300

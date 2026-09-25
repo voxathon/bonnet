@@ -182,7 +182,6 @@ _SECTION_KEYS = {
         "enabled",
         "cert_path",
         "key_path",
-        "ca_bundle",
     },
     "sync": {
         "interval_seconds",
@@ -377,7 +376,6 @@ class FirehoseConfig:
         tls_enabled: bool = False,
         tls_cert_path: str = "",
         tls_key_path: str = "",
-        tls_ca_bundle: bool | str = True,
         max_request_size: int = 10 * 1024 * 1024,
         max_article_body_size: int = 1024 * 1024,
         rate_limit_requests: int = 100,
@@ -415,7 +413,6 @@ class FirehoseConfig:
         self.tls_enabled = tls_enabled
         self.tls_cert_path = tls_cert_path
         self.tls_key_path = tls_key_path
-        self.tls_ca_bundle = tls_ca_bundle
         self.max_request_size = max_request_size
         self.max_article_body_size = max_article_body_size
         self.rate_limit_requests = rate_limit_requests
@@ -775,7 +772,6 @@ class FirehoseConfig:
             tls_enabled=_as_bool(tls, "enabled", "tls", False),
             tls_cert_path=tls.get("cert_path", ""),
             tls_key_path=tls.get("key_path", ""),
-            tls_ca_bundle=tls.get("ca_bundle", True),
             max_request_size=limits.get("max_request_size", 10 * 1024 * 1024),
             max_article_body_size=limits.get("max_article_body_size", 1024 * 1024),
             rate_limit_requests=limits.get("rate_limit_requests", 100),
@@ -863,14 +859,12 @@ class FirehoseConfig:
             tls_section = f"""[tls]
 enabled = true
 cert_path = "{cert_path}"
-key_path = "{key_path}"
-# ca_bundle = true"""
+key_path = "{key_path}\""""
         else:
             tls_section = """[tls]
 enabled = false
 # cert_path = "./certs/bonnet.crt"
-# key_path = "./certs/bonnet.key"
-# ca_bundle = true"""
+# key_path = "./certs/bonnet.key\""""
 
         default_content = f"""# Bonnet server configuration sample.
 # Split a growing [[acl]] or [[sync.peers]] list into separate files with
