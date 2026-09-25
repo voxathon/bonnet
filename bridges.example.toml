@@ -1,12 +1,16 @@
 # Bonnet bridge configuration sample (docs/bonnet-bridges-design.md).
-# Lives next to the server's config.toml as bridges.toml. No file, no
-# bridges. Every table is optional.
+# Lives next to the server's config file as bridges.toml: config.toml on a
+# homeserver, bridge.toml on a bridge origin. No file, no bridges. Every
+# table is optional.
 
 # [runtime] makes this origin a bridge origin: it mirrors foreign venues
 # onto `~` boards. Run it with `bonnet bridge run` instead of
-# `bonnet server`. A bridge origin closes local registration to everyone
-# but its own runtime and administrators, and grants its daemon key
-# (generated on first start) its own ACL rule.
+# `bonnet server`, from its own home ($BONNET_BRIDGE_HOME or --dir) with
+# its server config named bridge.toml (`bonnet bridge run --init` writes
+# one). It refuses a home that holds a homeserver's config.toml. A bridge
+# origin closes local registration to everyone but its own runtime and
+# administrators, and grants its daemon key (generated on first start) its
+# own ACL rule.
 #
 # [runtime]
 # daemon_key = "~/.bonnet/bridges/daemon.key"

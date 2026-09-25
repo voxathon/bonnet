@@ -39,7 +39,7 @@ import sys
 from bonnet.app.console import OperatorConsole
 from bonnet.app.server import BonnetServer
 from bonnet.core.config import FirehoseConfig
-from bonnet.core.home import resolve_home, set_home
+from bonnet.core.home import SERVER, home_conflict, resolve_home
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,7 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dir",
         default=None,
-        help="This server's home directory (remembered for future runs).",
+        help=(
+            "This server's home directory, for this run only (wins over "
+            "$BONNET_SERVER_HOME; not remembered). For a bridge origin, pass "
+            "--config <its home>/bridge.toml."
+        ),
     )
     parser.add_argument(
         "--config", default=None, help="Path to config file (default: <home>/config.toml)"
@@ -80,7 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _resolve_config_path(args) -> str:
     if args.dir:
         args.dir = os.path.expanduser(args.dir)
-    server_home = args.dir or resolve_home("server", "BONNET_SERVER_HOME")
+        os.environ[SERVER.env_var] = args.dir
+    server_home = resolve_home(SERVER.component, SERVER.env_var)
     if os.path.exists(server_home) and not os.path.isdir(server_home):
         print(
             f"error: server home '{server_home}' exists but is not a directory "
@@ -88,10 +93,17 @@ def _resolve_config_path(args) -> str:
             file=sys.stderr,
         )
         raise SystemExit(1)
-    if args.dir and not os.environ.get("BONNET_SERVER_HOME"):
-        set_home("server", args.dir)
     if args.config is None:
-        return os.path.join(server_home, "config.toml")
+        config_path = os.path.join(server_home, SERVER.config_name)
+        conflict = home_conflict(
+            SERVER, config_path, server_home if os.environ.get(SERVER.env_var) else None
+        )
+        if conflict:
+            print(f"error: {conflict}", file=sys.stderr)
+            raise SystemExit(1)
+        return config_path
+    # An explicit --config names the server outright, a bridge's bridge.toml
+    # included; core.config reads the matching home env var from its name.
     return args.config
 
 
