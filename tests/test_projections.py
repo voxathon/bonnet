@@ -867,6 +867,22 @@ class TestQueryArticlesVisibilityFilter:
         )
         return active, other
 
+    def test_order_is_created_at_then_article_num_either_way(self, board_proj):
+        """Sorted before offset/limit, by created_at, article_num breaking
+        ties; newest first is exactly oldest first reversed. #2 is backdated,
+        so article_num order alone would put it second."""
+        for seq, created in ((1, 200), (2, 100), (3, 300), (4, 300)):
+            rec = self._make_article_record(seq=seq, aid=_rid(20 + seq))
+            rec.created_at = created
+            board_proj.apply_article(rec)
+
+        oldest = board_proj.query_articles("bbs.a", "general", [])
+        newest = board_proj.query_articles("bbs.a", "general", [], newest_first=True)
+        assert [r.article_num for r in oldest] == [2, 1, 3, 4]
+        assert [r.article_num for r in newest] == [4, 3, 1, 2]
+        first_page = board_proj.query_articles("bbs.a", "general", [], limit=2, newest_first=True)
+        assert [r.article_num for r in first_page] == [4, 3]
+
     def test_unsupported_operator_still_defaults_to_active_only(self, board_proj):
         """The originally-filed scenario: an unsupported operator (GT) on
         the visibility field must not disable the safe default."""

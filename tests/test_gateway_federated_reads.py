@@ -92,8 +92,9 @@ class FakeClient:
             raise self._body_error
         return BODY
 
-    async def query_articles(self, origin, board, filters, offset=0, limit=100):
+    async def query_articles(self, origin, board, filters, offset=0, limit=100, newest_first=False):
         self.calls.append(("query_articles", origin))
+        self.newest_first = newest_first
         return SimpleNamespace(results=[])
 
     async def close(self):
@@ -120,6 +121,7 @@ async def test_query_articles_asks_every_origin_holding_the_board(install):
     client = install(FakeClient([("~flatboard", BRIDGE)]))
     await tools.query_articles(board="~flatboard")
     assert client.calls == [("query_articles", "")]
+    assert client.newest_first is True
 
 
 async def test_get_article_falls_over_to_the_one_origin_holding_the_board(install):
@@ -171,6 +173,8 @@ async def test_read_thread_falls_over_like_get_article(install):
     result = await tools.read_thread(7, board="~flatboard")
     assert result.count == 1
     assert ("query_articles", BRIDGE) in client.calls
+    # A thread reads top-down: a truncated one keeps its opening replies.
+    assert client.newest_first is False
 
 
 # --- why a body is missing ------------------------------------------------

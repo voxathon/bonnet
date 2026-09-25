@@ -102,6 +102,7 @@ from bonnet.net.firehose_wire import (
     OP_REPORT_LIST,
     OP_USER_GET,
     OP_USER_LIST,
+    QUERY_NEWEST_FIRST,
     _enc_text16,
     _read_bytes,
     _read_id32,
@@ -2194,7 +2195,9 @@ class FirehoseCommandHandler:
         list_offset, offset = _read_u32(data, offset)
         limit, offset = _read_u16(data, offset)
         limit = max(1, min(limit, 65535))
+        flags, offset = _read_u8(data, offset)
         _require_request_end(data, offset, "article query request")
+        newest_first = bool(flags & QUERY_NEWEST_FIRST)
 
         def filters_for(orig: str) -> list | bytes:
             out = list(filters)
@@ -2210,7 +2213,9 @@ class FirehoseCommandHandler:
             if isinstance(resolved, bytes):
                 return resolved
             bp = self._get_board_projection(origin, board)
-            articles = bp.query_articles(origin, board, resolved, offset=list_offset, limit=limit)
+            articles = bp.query_articles(
+                origin, board, resolved, offset=list_offset, limit=limit, newest_first=newest_first
+            )
             out = struct.pack(">H", len(articles))
             for art in articles:
                 out += self._encode_article_view(art, include_body=False)
@@ -2230,7 +2235,7 @@ class FirehoseCommandHandler:
             if isinstance(resolved, bytes):
                 return resolved
             per_origin[orig] = resolved
-        page = self._aggregate_query_page(board, per_origin, list_offset, limit)
+        page = self._aggregate_query_page(board, per_origin, list_offset, limit, newest_first)
         out = struct.pack(">H", len(page))
         for art, orig in page:
             out += _enc_text16(orig)
@@ -2238,37 +2243,54 @@ class FirehoseCommandHandler:
         return _success(out)
 
     def _aggregate_query_page(
-        self, board: str, per_origin: dict[str, list], list_offset: int, limit: int
+        self,
+        board: str,
+        per_origin: dict[str, list],
+        list_offset: int,
+        limit: int,
+        newest_first: bool,
     ) -> list:
         """One page of ARTICLE_QUERY across origins: (article, origin) pairs.
 
-        Each origin's matches come in article_num order, and article numbers
-        from different origins aren't comparable, so the aggregate order is
-        origin (sorted) then article_num: every origin's matches in turn.
-        On a `~` board, non-canonical copies are skipped as they stream past,
-        as the aggregate list does.
+        A lazy k-way merge, as `_canonical_article_page` does for lists, on
+        (created_at, origin, article_num): each origin's rows already arrive
+        in that order (origin being constant), ascending or, newest first,
+        descending, so one merge in the same direction gives one order across
+        origins, and newest first is exactly oldest first reversed. On a `~`
+        board, non-canonical copies are skipped as they stream past.
         """
         view = self._bridge_view() if self._dedups(board) else None
         batch = max(limit, 50)
-        page: list = []
-        skipped = 0
-        for orig, orig_filters in per_origin.items():
+
+        def stream(orig: str, orig_filters: list):
             bp = self._get_board_projection(orig, board)
             pos = 0
             while True:
-                rows = bp.query_articles(orig, board, orig_filters, offset=pos, limit=batch)
+                rows = bp.query_articles(
+                    orig, board, orig_filters, offset=pos, limit=batch, newest_first=newest_first
+                )
                 for art in rows:
-                    if view is not None and not view.visible_event(orig, art.event_id):
-                        continue
-                    if skipped < list_offset:
-                        skipped += 1
-                        continue
-                    page.append((art, orig))
-                    if len(page) >= limit:
-                        return page
+                    yield (art.created_at, orig, art.article_num), art, orig
                 if len(rows) < batch:
-                    break
+                    return
                 pos += batch
+
+        merged = heapq.merge(
+            *(stream(o, f) for o, f in per_origin.items()),
+            key=lambda t: t[0],
+            reverse=newest_first,
+        )
+        page: list = []
+        skipped = 0
+        for _, art, orig in merged:
+            if view is not None and not view.visible_event(orig, art.event_id):
+                continue
+            if skipped < list_offset:
+                skipped += 1
+                continue
+            page.append((art, orig))
+            if len(page) >= limit:
+                break
         return page
 
     # ------------------------------------------------------------------

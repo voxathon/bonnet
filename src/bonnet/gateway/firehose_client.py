@@ -1093,13 +1093,20 @@ class FirehoseHTTPClient(FirehoseTransport):
         return result
 
     async def query_articles(
-        self, origin: str, board: str, filters: list, offset: int = 0, limit: int = 100
+        self,
+        origin: str,
+        board: str,
+        filters: list,
+        offset: int = 0,
+        limit: int = 100,
+        newest_first: bool = False,
     ) -> QueryResponse:
         """Query articles with structured filters.
 
         filters: list of (field_id, operator, value_type, value_bytes) tuples.
+        newest_first: created_at descending; otherwise ascending.
         """
-        cmd = build_article_query(origin, board, filters, offset, limit)
+        cmd = build_article_query(origin, board, filters, offset, limit, newest_first)
         resp = await self._send_command(cmd)
         result = parse_article_query_response(resp, aggregate=(origin == ""))
         self._label_rows(result.results, origin)

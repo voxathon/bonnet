@@ -915,17 +915,23 @@ def parse_article_search_response(resp: bytes, aggregate: bool = False) -> Searc
 # ---------------------------------------------------------------------------
 
 
+#: ARTICLE_QUERY flags byte: newest first (created_at DESC); clear is oldest first.
+QUERY_NEWEST_FIRST = 0x01
+
+
 def build_article_query(
     origin: str,
     board: str,
     filters: list,
     offset: int = 0,
     limit: int = 100,
+    newest_first: bool = False,
 ) -> bytes:
     """Build an ARTICLE_QUERY request.
 
     filters: list of (field_id, operator, value_type, value_bytes) tuples.
         value_type: 0x01=BYTES, 0x02=TEXT, 0x03=I64, 0x04=BOOL
+    newest_first: order by created_at descending, before offset/limit.
     """
     out = struct.pack(">B", OP_ARTICLE_QUERY)
     out += _enc_text16(origin)
@@ -950,6 +956,7 @@ def build_article_query(
     limit = max(1, min(limit, 65535))
     out += _enc_u32(offset, "offset")
     out += _enc_u16(limit, "limit")
+    out += struct.pack(">B", QUERY_NEWEST_FIRST if newest_first else 0)
     return out
 
 

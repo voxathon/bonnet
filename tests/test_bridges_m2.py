@@ -494,8 +494,25 @@ async def test_aggregate_query_shows_each_post_once_with_its_origin(s):
     rows = await _query_all(s, [])
     assert _shown(s, rows) == {str(i): B1 for i in (s.p1, s.p2, s.p3, s.p4, s.p5)}
     assert all(r.origin == B1 for r in rows)
-    # Grouped by origin, each group in article_num order.
-    assert [r.article_num for r in rows] == sorted(r.article_num for r in rows)
+
+
+async def test_aggregate_query_merges_origins_into_one_order(tmp_path):
+    """Both bridges preferred for different threads (see the test above), so
+    the canonical copies come from two origins; they interleave by created_at
+    rather than one origin's matches following the other's."""
+    sc = Scenario(tmp_path)
+    await sc.build(order=(B2, B1))
+    try:
+        for newest_first in (True, False):
+            resp = await read(
+                sc.home, build_article_query("", BOARD, [], 0, 100, newest_first=newest_first)
+            )
+            rows = parse_article_query_response(resp, aggregate=True).results
+            assert {r.origin for r in rows} == {B1, B2}
+            keys = [(r.created_at, r.origin, r.article_num) for r in rows]
+            assert keys == sorted(keys, reverse=newest_first)
+    finally:
+        await sc.close()
 
 
 async def test_aggregate_query_pages_completely(s):

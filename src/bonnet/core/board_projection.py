@@ -1191,8 +1191,14 @@ class BoardProjection:
         filters: list,
         offset: int = 0,
         limit: int = 100,
+        newest_first: bool = False,
     ) -> list[ArticleProjection]:
         """Query articles with structured field filters.
+
+        Ordered by created_at, article_num breaking ties: oldest first, or
+        with `newest_first` the exact reverse. The order is applied before
+        offset/limit, so the first page of a newest-first query is the
+        newest articles, not a page of the oldest to reverse.
 
         filters: list of (field_id, operator, value) tuples.
             field_id: 0x01=author_pubkey, 0x02=author_username,
@@ -1321,6 +1327,11 @@ class BoardProjection:
             where_parts.append("body_state != 'purged'")
 
         where_clause = " AND ".join(where_parts)
+        order = (
+            "created_at DESC, article_num DESC"
+            if newest_first
+            else "created_at ASC, article_num ASC"
+        )
 
         with self._lock:
             rows = self._conn.execute(
@@ -1332,7 +1343,7 @@ class BoardProjection:
                 f"root_article_id, reply_to_article_id, replacement_article_id, "
                 f"latest_control_seq, author_check "
                 f"FROM articles WHERE {where_clause} "
-                f"ORDER BY article_num ASC LIMIT ? OFFSET ?",
+                f"ORDER BY {order} LIMIT ? OFFSET ?",
                 params + [limit, offset],
             ).fetchall()
             return [
