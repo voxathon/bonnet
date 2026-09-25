@@ -26,7 +26,7 @@ import tomllib
 from bonnet.app.server import BonnetServer
 from bonnet.core.acl import ACLError
 from bonnet.core.config import FirehoseConfig
-from bonnet.core.home import BRIDGE, SERVER, home_conflict, resolve_home, set_home
+from bonnet.core.home import SERVER, resolve_home, set_home
 from bonnet.core.logging import enable_request_mirror, init_logging
 from bonnet.core.tlsutil import OpenSSLNotFoundError, generate_self_signed_cert
 
@@ -45,20 +45,12 @@ def _make_self_signed_cert(config_path: str, force: bool = False) -> tuple[str, 
     return (cert_path.replace(os.sep, "/"), key_path.replace(os.sep, "/"))
 
 
-def _print_next_steps(
-    config_path: str, tls_enabled: bool, port: int = 2272, bridge: bool = False
-) -> None:
+def _print_next_steps(config_path: str, tls_enabled: bool, port: int = 2272) -> None:
     scheme = "https" if tls_enabled else "http"
     print()
     print("Next steps:")
-    if bridge:
-        print("  0. Write bridges.toml next to it, with a [runtime] table (see")
-        print("     bridges.example.toml), and give the bridge its own origin and port.")
-        print("  1. Start the bridge:")
-        print(f"       uv run bonnet bridge run --config {config_path}")
-    else:
-        print("  1. Start the server:")
-        print(f"       uv run bonnet server --config {config_path}")
+    print("  1. Start the server:")
+    print(f"       uv run bonnet server --config {config_path}")
     print(f"     It will listen on {scheme}://127.0.0.1:{port} and print its own public key.")
     print("  2. The server's REPL (the 'bonnet>' prompt after startup) is already an")
     print("     administrator - no key setup needed for local use.")
@@ -84,24 +76,15 @@ def _load_and_validate_config(args) -> FirehoseConfig:
     --check-config alike - never let a config problem escape as a raw
     traceback.
     """
-    from bonnet.bridges.config import BridgesConfigError
-
     try:
         config = FirehoseConfig.load(args.config)
-    except BridgesConfigError as exc:
-        print(f"error: invalid bridge configuration in {exc}", file=sys.stderr)
-        raise SystemExit(1)
     except FileNotFoundError:
         print(f"error: config file not found: {args.config}", file=sys.stderr)
         # README's "Running a board" walkthrough only ever mentions --init
         # (which also generates TLS certs and prints next steps); a first-run
         # user following it literally used to be told about --create-config
         # instead, which writes a config with no certs and no guidance.
-        cmd = (
-            "bonnet bridge run"
-            if os.path.basename(args.config) == BRIDGE.config_name
-            else "bonnet server"
-        )
+        cmd = "bonnet server"
         print(f"run '{cmd} --init' to generate a config and get started", file=sys.stderr)
         print(
             f"(or '{cmd} --create-config' for just a sample config, no TLS setup)",
@@ -167,7 +150,7 @@ def _bridges_warnings(config: FirehoseConfig) -> list[str]:
     """[[recognize]] origins that aren't sync peers: their copies never arrive here."""
     peers = {p.origin for p in config.peers}
     return [
-        f"bridges.toml [[recognize]] venue {entry.venue!r} lists origin {origin!r}, which is not a "
+        f"[[recognize]] venue {entry.venue!r} lists origin {origin!r}, which is not a "
         "[[sync.peers]] entry; its copies won't reach this server"
         for entry in getattr(config, "bridges", [])
         for origin in entry.origins
@@ -209,24 +192,14 @@ def _acl_rule_warnings(config: FirehoseConfig) -> list[str]:
     return warnings
 
 
-def main(argv: list[str] | None = None, bridge: bool = False):
-    """`bonnet server`, or with `bridge=True`, `bonnet bridge run`.
+def main(argv: list[str] | None = None):
+    """`bonnet server`.
 
-    Bridge mode is the same server plus the bridge runtime in one process
-    (docs/bonnet-bridges-design.md §5.2): it needs a bridges.toml with a
-    [runtime] table next to its bridge.toml, and skips the operator REPL
-    unless --console is given. A bridge has its own home (BONNET_BRIDGE_HOME)
-    and never runs out of a server's (core.home).
+    A config with `[[bridges.venue]]`s also runs this origin's bridges in the
+    same process (docs/bonnet-bridges-design.md §5.2), once the port is bound.
     """
-    kind = BRIDGE if bridge else SERVER
-    parser = argparse.ArgumentParser(
-        prog="bonnet bridge run" if bridge else "bonnet server",
-        description="Bonnet bridge origin (server + bridge runtime)" if bridge else "Bonnet server",
-    )
-    if bridge:
-        parser.add_argument(
-            "--console", action="store_true", help="Run the operator REPL alongside the bridge"
-        )
+    kind = SERVER
+    parser = argparse.ArgumentParser(prog="bonnet server", description="Bonnet server")
     parser.add_argument(
         "--dir",
         default=None,
@@ -314,14 +287,6 @@ def main(argv: list[str] | None = None, bridge: bool = False):
         raise SystemExit(1)
     if args.config is None:
         args.config = os.path.join(server_home, kind.config_name)
-    # The home in play is the one storage defaults use: the env var's if set,
-    # else the config file's own directory (core.config); both are checked.
-    conflict = home_conflict(
-        kind, args.config, server_home if os.environ.get(kind.env_var) else None
-    )
-    if conflict:
-        print(f"error: {conflict}", file=sys.stderr)
-        raise SystemExit(1)
 
     if args.init:
         init_port = args.port if args.port is not None else 2272
@@ -355,9 +320,7 @@ def main(argv: list[str] | None = None, bridge: bool = False):
         print(f"Wrote sample config to {args.config}")
         if tls_paths:
             print(f"Generated self-signed TLS certificate at {tls_paths[0]} (CN=localhost)")
-        _print_next_steps(
-            args.config, tls_enabled=tls_paths is not None, port=init_port, bridge=bridge
-        )
+        _print_next_steps(args.config, tls_enabled=tls_paths is not None, port=init_port)
         return
 
     if args.create_config:
@@ -422,16 +385,7 @@ def main(argv: list[str] | None = None, bridge: bool = False):
         return
 
     config = _load_and_validate_config(args)
-    if bridge and config.bridge_runtime is None:
-        from bonnet.bridges.config import bridges_path
-
-        print(
-            f"error: {bridges_path(args.config)} has no [runtime] table; "
-            "'bonnet bridge run' needs one (see docs/bonnet-bridges-design.md §10.2)",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-    if bridge:
+    if config.bridge_runtime is not None:
         # Before binding a port: a venue type with no adapter, or options
         # it can't take, would otherwise surface as a traceback from
         # BridgeRuntime.
@@ -504,7 +458,7 @@ def main(argv: list[str] | None = None, bridge: bool = False):
 
     server = BonnetServer(config, config_path=args.config)
     runtime = None
-    if bridge:
+    if config.bridge_runtime is not None:
         from bonnet.bridges.runtime import BridgeRuntime
 
         runtime = BridgeRuntime(server)
@@ -557,7 +511,6 @@ async def _serve_until_signal(server: BonnetServer, args, runtime=None) -> bool:
                 port=args.port,
                 ssl_certfile=args.cert,
                 ssl_keyfile=args.key,
-                console=args.console,
             )
         )
     else:

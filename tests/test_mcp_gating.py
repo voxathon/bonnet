@@ -75,9 +75,6 @@ READ_ONLY = {
     "list_routes",
     "my_permissions",
     "open_board",
-    # Bridges (bonnet.gateway.bridge_tools): discovery and per-origin queries.
-    "list_bridges",
-    "corroborate",
 }
 
 

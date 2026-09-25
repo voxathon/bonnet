@@ -29,7 +29,7 @@ import tomllib
 from dataclasses import dataclass, field
 
 from bonnet.core.acl import ACLEvaluator
-from bonnet.core.home import kind_for_config
+from bonnet.core.home import SERVER
 from bonnet.core.hostname import normalize_hostname
 from bonnet.core.record import normalize_origin
 
@@ -147,6 +147,9 @@ _TOP_LEVEL_KEYS = {
     "include",
     "witnesses",
     "logging",
+    "recognize",
+    "bridges",
+    "admission",
 }
 
 _INCLUDE_ALLOWED_TOP_KEYS = {"acl", "sync"}
@@ -438,12 +441,12 @@ class FirehoseConfig:
         self.unknown_keys = list(unknown_keys or [])
         self.witness = witness or WitnessConfig()
         self.trusted_forwarders = list(trusted_forwarders or [])
-        # bonnet.bridges.config.BridgeRuntimeConfig when this origin is a
-        # bridge origin ([runtime] in bridges.toml), else None.
+        # bonnet.bridges.config.BridgeRuntimeConfig when this origin bridges
+        # venues itself ([bridges] with at least one venue), else None.
         self.bridge_runtime = bridge_runtime
-        # bonnet.bridges.config.BridgesEntry list: bridges.toml [[recognize]] (§10.1).
+        # bonnet.bridges.config.BridgesEntry list: [[recognize]] (§10.1).
         self.bridges = list(bridges or [])
-        # bonnet.bridges.config.AdmissionConfig, or None: bridges.toml [admission] (§6).
+        # bonnet.bridges.config.AdmissionConfig, or None: [admission] (§6).
         self.bridge_admission = bridge_admission
 
     def validate(self) -> None:
@@ -479,7 +482,7 @@ class FirehoseConfig:
                 for binding in venue.bindings:
                     if binding.max_body_bytes > self.max_article_body_size:
                         raise ValueError(
-                            f"config: bridges.toml binding {binding.board!r} max_body_bytes "
+                            f"config: bridges binding {binding.board!r} max_body_bytes "
                             f"({binding.max_body_bytes}) exceeds limits.max_article_body_size "
                             f"({self.max_article_body_size})"
                         )
@@ -672,6 +675,16 @@ class FirehoseConfig:
         return os.path.join(self.data_dir, "replay.db")
 
     @property
+    def bridges_state_dir(self) -> str:
+        """The bridge subsystem's index: a cache, rebuilt from the log on demand."""
+        return os.path.join(self.data_dir, "bridges")
+
+    @property
+    def puppet_secret_path(self) -> str:
+        """The secret bridge puppet keys derive from (bonnet.bridges.config)."""
+        return os.path.join(self.data_dir, "puppet_secret")
+
+    @property
     def http_host(self) -> str:
         return self.host
 
@@ -707,11 +720,31 @@ class FirehoseConfig:
         routing = data.get("routing", {})
         if not isinstance(routing, dict):
             raise ValueError("config: [routing] must be a table")
-        # Bridges live in their own file next to this one (bridges.toml).
-        from bonnet.bridges.config import bridges_path, load_bridges_file
+        # Bridges (docs/bonnet-bridges-design.md): this origin's own venues,
+        # admission of other origins' users, and other origins it recognizes.
+        from bonnet.bridges.config import (
+            parse_bridge_admission,
+            parse_bridge_runtime,
+            parse_bridges,
+        )
 
-        bridges_file = load_bridges_file(bridges_path(path), _normalize_origin)
-        unknown_keys.extend(bridges_file.unknown_keys)
+        bridge_runtime = None
+        bridge_admission = None
+        recognize: list = []
+        try:
+            if "bridges" in data:
+                bridge_runtime, more = parse_bridge_runtime(data["bridges"])
+                unknown_keys.extend(more)
+                if not bridge_runtime.venues:
+                    bridge_runtime = None
+            if "admission" in data:
+                bridge_admission, more = parse_bridge_admission(data["admission"])
+                unknown_keys.extend(more)
+            if "recognize" in data:
+                recognize, more = parse_bridges(data["recognize"], _normalize_origin)
+                unknown_keys.extend(more)
+        except ValueError as e:
+            raise ValueError(f"config: {e}") from e
 
         # BONNET_SERVER_HOME (or the per-user default, see core.home) only
         # supplies a *default* for storage paths left unset in config.toml —
@@ -730,10 +763,7 @@ class FirehoseConfig:
         # comment above; `--dir`/`--init` continue to work unchanged, since
         # they set `args.config` to `<dir>/config.toml`, making `base_dir`
         # equal to the directory they named.
-        # A bridge origin's bridge.toml reads BONNET_BRIDGE_HOME instead, so
-        # a BONNET_SERVER_HOME in the same environment never points a bridge's
-        # storage into the homeserver's (see core.home).
-        env_server_home = os.environ.get(kind_for_config(path).env_var)
+        env_server_home = os.environ.get(SERVER.env_var)
         server_home = os.path.expanduser(env_server_home) if env_server_home else base_dir
 
         def _storage_default(subdir: str) -> str:
@@ -820,9 +850,9 @@ class FirehoseConfig:
                 wire_max=witnesses.get("wire_max", 32),
             ),
             routing=_parse_routing(routing),
-            bridge_runtime=bridges_file.runtime,
-            bridges=bridges_file.recognize,
-            bridge_admission=bridges_file.admission,
+            bridge_runtime=bridge_runtime,
+            bridges=recognize,
+            bridge_admission=bridge_admission,
         )
 
     @staticmethod
@@ -968,6 +998,42 @@ interval_seconds = 300
 # import_warnings = true
 # import_temp_bans = true
 # import_permabans = false
+
+# Bridges mirror foreign venues onto `~` boards (docs/bonnet-bridges-design.md).
+# Any origin can bridge venues itself: the server polls each one and signs
+# bridge records with its own key. Puppet keys (one per foreign author)
+# derive from <data_dir>/puppet_secret, created on first start: back it up,
+# since losing it orphans every puppet. Usernames containing '~' are
+# reserved for puppets on every origin.
+#
+# [bridges]
+# grace_seconds = 120
+# marker_timeout_seconds = 3600
+#
+# [[bridges.venue]]
+# type = "flatboard"
+# venue = "flatboard@tools.nyrds.net"
+# url = "https://tools.nyrds.net"
+# poll_interval_seconds = 60
+#
+# [[bridges.venue.binding]]
+# board = "~flatboard"
+#
+# Let users of other origins crosspost onto this origin's bridge boards,
+# signed with their home keys and checked against their home origins.
+# Your own users never need this.
+#
+# [admission]
+# enabled = false
+#
+# Other origins this server recognizes as bridges for a venue, best first.
+# List each origin as a [[sync.peers]] entry too, or its copies never
+# arrive here.
+#
+# [[recognize]]
+# type = "flatboard"
+# venue = "flatboard@tools.nyrds.net"
+# origins = ["bridge.example"]
 
 [routing]
 # Transitive peer discovery: origins announce their dial

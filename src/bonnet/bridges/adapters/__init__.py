@@ -12,4 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Built-in venue adapters."""
+"""Every built-in venue adapter, one folder per venue type.
+
+Each `<type>/` holds the adapter (`adapter.py`, its class exported from the
+package), a fake of the venue for tests (`fake.py`), and a README on the
+venue's quirks. `README.md` here says how to add one.
+
+Import-light on purpose: `bonnet.bridges.adapter` reads these tables to
+load a venue's adapter only when a config names that venue.
+"""
+
+# Venue type -> "module:Class" of its adapter.
+BUILTIN_ADAPTERS = {
+    "flatboard": "bonnet.bridges.adapters.flatboard:FlatboardAdapter",
+}
+
+# Venue type -> "module:Class" of its fake venue (bonnet.bridges.conformance).
+# Every built-in adapter has one: it's how the conformance suite reaches it.
+BUILTIN_FAKES = {
+    "flatboard": "bonnet.bridges.adapters.flatboard.fake:FakeFlatboard",
+}

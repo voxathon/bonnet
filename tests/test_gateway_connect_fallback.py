@@ -87,6 +87,7 @@ class FakeClient:
         self.server_origin = "test-origin"
         self.discovery = SimpleNamespace(
             known_origins=[],
+            bridges=[],
             signature_lifetime_seconds=300,
             clock_skew_seconds=300,
         )

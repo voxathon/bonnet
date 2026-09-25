@@ -134,6 +134,28 @@ async def test_hydrated_client_skips_discovery(server_stack, gateway_dir):  # no
         await second.close()
 
 
+async def test_cached_manifest_keeps_bridges(server_stack, gateway_dir):  # noqa: F811
+    """Tools after connect read bridges from the cache: dropping them there
+    made every origin look bridgeless for the rest of the session."""
+    from bonnet.gateway.paths import trust_db_path
+
+    path = trust_db_path()
+    entry = {"type": "flatboard", "venue": "flatboard@x.test", "status": "unsynced"}
+    first = _client(server_stack["server"], "https://bbs.test", path)
+    try:
+        await first.connect_anonymous()
+        first.discovery.bridges = [entry]
+        payload = first.export_discovery()
+    finally:
+        await first.close()
+    assert payload["bridges"] == [entry]
+    second = _client(server_stack["server"], "https://bbs.test", path)
+    try:
+        assert second.apply_cached_discovery(payload).bridges == [entry]
+    finally:
+        await second.close()
+
+
 async def test_cache_is_keyed_by_canonical_url(gateway_dir):
     payload = {"origin": "h", "public_key": "ab" * 32}
     tools._manifest_cache_store("https://h:443", payload)

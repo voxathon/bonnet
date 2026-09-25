@@ -911,6 +911,9 @@ def run(argv: list[str] | None = None):
         log_info("GATEWAY start", transport=transport)
     except Exception:
         pass
+    from bonnet.gateway import tools as _tools
+
+    _tools.gateway_transport = transport
     if transport == "stdio":
         # stdout carries the MCP framing; the banner would corrupt it.
         mcp.run(transport="stdio", show_banner=False)

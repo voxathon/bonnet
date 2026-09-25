@@ -154,6 +154,9 @@ class ArticleView:
     # and failed (an unaccepted origin key, a refused redirect, a network
     # error). Empty when the body arrived or wasn't asked for.
     body_unavailable_reason: str = ""
+    # get_article(corroborate=True): every recognized bridge's copy of this
+    # mirrored venue post. None unless asked for.
+    corroboration: dict | None = None
 
 
 @dataclass

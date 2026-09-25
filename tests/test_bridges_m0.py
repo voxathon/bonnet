@@ -41,6 +41,7 @@ import httpx
 import pytest
 
 from bonnet.bridges import model
+from bonnet.bridges.config import BridgeRuntimeConfig, VenueConfig
 from bonnet.bridges.local_publish import KindRefused, LocalPublisher
 from bonnet.bridges.model import (
     KIND_BRIDGE_OBSERVATION,
@@ -130,6 +131,11 @@ def _make_server(tmp_path, origin: str, daemon: Identity, peers: list[PeerConfig
         tls_enabled=False,
         peers=list(peers),
         acl=ACLEvaluator([ACLRule.from_dict(r) for r in _rules(daemon.public_key)]),
+        # Declares the venue so puppet names for it may register (§8); the
+        # runtime itself never starts here.
+        bridge_runtime=BridgeRuntimeConfig(
+            venues=[VenueConfig(type=VENUE_TYPE, venue=VENUE, url="https://tools.nyrds.net")]
+        ),
     )
     for d in (config.data_dir, config.boards_dir, config.events_bodies_dir):
         os.makedirs(d, exist_ok=True)
@@ -163,7 +169,28 @@ class Bridge:
                 ]
             ),
         )
-        return await self.pub.publish(identity, intent)
+        if "~" in username:
+            return await self.pub.publish(identity, intent)
+        # Only puppets register through the runtime; anyone else registers
+        # the way a client would.
+        return await self.publish_as_client(identity, intent)
+
+    async def publish_as_client(self, identity: Identity, intent: Intent):
+        import asyncio
+
+        from bonnet.net.firehose_wire import parse_publish_response
+
+        frame = self.pub.build_frame(identity, intent)
+        ctx = derive_context(
+            self.server.users,
+            self.origin,
+            identity.public_key,
+            "test",
+            self.server.anonymous_identity.public_key,
+        )
+        return parse_publish_response(
+            await asyncio.to_thread(self.server.command_handler.handle, frame, ctx)
+        )
 
     async def create_board(self, board: str = BOARD):
         intent = Intent(
@@ -440,7 +467,7 @@ async def test_e_runtime_context_matches_http_context(tmp_path, bridge):
     stranger = Identity.generate()
     # Root registers `operator` with the administrator flag.
     root = server.server_identity
-    await bridge.pub.publish(
+    await bridge.publish_as_client(
         root,
         Intent(
             event_id=os.urandom(32),

@@ -279,7 +279,11 @@ class FirehoseHTTPServer:
         capabilities = []
         if resolve_rg():
             capabilities.append("bonnet.per-board-body-search")
-        if bridges if bridges is not None else self._bridges():
+        if bridges is None:
+            bridges = self._bridges()
+        # Recognized-but-unsynced venues are a diagnostic, not a bridge
+        # this server can serve reads of.
+        if any(b.get("status", "bound") == "bound" for b in bridges):
             capabilities.append("bonnet.bridge")
         admission = getattr(self._config, "bridge_admission", None)
         if admission is not None and admission.enabled:

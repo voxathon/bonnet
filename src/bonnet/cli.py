@@ -39,7 +39,7 @@ usage: bonnet [--version] [-h] {server,gateway,admin,bridge} ...
 
 commands:
   server   run a Bonnet board server (see `bonnet server -h`)
-  bridge   run or inspect a bridge origin (see `bonnet bridge -h`)
+  bridge   inspect or repair a server's bridges (see `bonnet bridge -h`)
   gateway  run the MCP gateway to a board server (see `bonnet gateway -h`)
   admin    run one operator-console command headlessly (see `bonnet admin -h`)
 """

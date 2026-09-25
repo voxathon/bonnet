@@ -12,18 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Gateway tools for bridges (design doc §9.5, §11.2).
+"""Bridges, as the gateway's existing tools use them (design doc §9.5, §11.2).
 
-  list_bridges  the bridges an origin advertises in its discovery document
-  crosspost     post on a bridge board on a bridge origin, signed with your
-                home key; with a venue account configured, the gateway posts
-                to the venue as you first (edge egress)
-  flush_outbox  retry crossposts that reached the venue but not the bridge
-  corroborate   find every recognized bridge's copy of a bridged article
+No tool of its own lives here: `bonnet.gateway.tools` calls into this module.
 
-Venue accounts live in the tenant's `bridge_accounts.toml` (or the file
-$BONNET_BRIDGE_ACCOUNTS names), managed by the operator, never passed through
-a tool call:
+  publish_bridged  publish_article on a `~` board: signed with your home key,
+                   and, with a venue account configured, posted to the venue
+                   as you first (edge egress). Runs flush_pending first.
+  flush_pending    retry crossposts that reached the venue but not the bridge
+  corroborate      get_article(corroborate=True): every recognized bridge's
+                   copy of a bridged article
+
+Venue accounts are linked to one identity each with register(venue=...)
+(`link_venue` here), and kept in the tenant's identity store, wrapped like
+the identity's key. An operator can also give the whole tenant accounts in
+`bridge_accounts.toml` (or the file $BONNET_BRIDGE_ACCOUNTS names); a
+linked account wins over it:
 
     [[account]]
     venue = "flatboard@tools.nyrds.net"
@@ -31,11 +35,10 @@ a tool call:
     url = "https://tools.nyrds.net"
     user = "lanternfly"
     token_file = "~/.bonnet/flatboard.token"
-    # [account.options]  flags for this venue's adapter, as in bridges.toml
+    # [account.options]  flags for this venue's adapter, as in [[bridges.venue]]
 
-Plain functions: `bonnet.gateway.tools` registers them as MCP tools (and
-declares their Needs) at its end, so this module never touches `mcp` and
-there is no import cycle to type through.
+Plain functions, imported late by `bonnet.gateway.tools`, so this module
+never touches `mcp` and there is no import cycle to type through.
 """
 
 from __future__ import annotations
@@ -54,9 +57,11 @@ from bonnet.bridges.adapter import (
     ReadLimiter,
     VenueAuthError,
     VenueError,
+    VenueNameTaken,
     VenueRateLimited,
     VenueUncertain,
     build_adapter,
+    load_adapter_class,
     venue_option_problems,
 )
 from bonnet.bridges.config import VenueConfig, check_venue, parse_options, venue_type_of
@@ -122,6 +127,37 @@ def load_accounts() -> dict[str, VenueAccountSpec]:
         except (KeyError, OSError, TypeError, ValueError) as e:
             raise ValueError(f"{path}: account[{i}] is unusable: {e!r}") from e
     return out
+
+
+def _venue_url(venue: str) -> str:
+    """Where a venue's API lives: the operator's accounts file says, else its host."""
+    spec = load_accounts().get(venue)
+    return spec.url if spec is not None else f"https://{venue.partition('@')[2]}"
+
+
+def _linked_spec(venue: str, auth: str | None) -> VenueAccountSpec | None:
+    """The calling identity's own account at `venue`, if it linked one."""
+    t = _t()
+    try:
+        username, password = t._resolve_auth(auth)
+        origin = t._default_origin() or ""
+        found = t._get_identity_store().venue_account(origin, username, venue, password)
+    except ValueError:
+        return None
+    if found is None:
+        return None
+    user, token = found
+    return VenueAccountSpec(
+        venue=venue,
+        type=venue_type_of(venue),
+        url=_venue_url(venue),
+        account=ForeignAccount(user, token),
+    )
+
+
+def account_spec(venue: str, auth: str | None) -> VenueAccountSpec | None:
+    """The account to post to `venue` as: the caller's linked one, else the tenant's."""
+    return _linked_spec(venue, auth) or load_accounts().get(venue)
 
 
 def _outbox() -> Outbox:
@@ -282,25 +318,94 @@ def _bridge_url(bridge_origin: str, bridge_url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# list_bridges
+# register(venue=...): linking venue accounts
 # ---------------------------------------------------------------------------
 
 
-async def list_bridges(url: str = "") -> list[dict]:
-    """The foreign venues an origin bridges, from its discovery document.
+def linkable(bridges: list[dict], venue: str) -> None:
+    """Refuse a venue this origin doesn't bridge, or whose adapter isn't here."""
+    known = sorted({b.get("venue", "") for b in bridges if b.get("venue")})
+    if venue not in known:
+        offer = ", ".join(known) if known else "none: this origin bridges no venues"
+        raise ValueError(f"{venue!r} isn't a venue this origin bridges; linkable: {offer}")
+    load_adapter_class(venue_type_of(venue))  # AdapterNotFound is a ValueError
 
-    Each entry names a venue (e.g. `flatboard@tools.nyrds.net`), its bridge
-    board, and the bridge origins this server recognizes for it, best first.
-    `local` means the origin runs that bridge itself. Defaults to the active
-    origin; pass `url` to ask another.
+
+async def link_venue(
+    origin: str,
+    username: str,
+    password: str | None,
+    venue: str,
+    venue_user: str = "",
+    venue_token: str = "",
+    unlink: bool = False,
+) -> dict:
+    """Link, or with `unlink` forget, the identity's account at `venue`.
+
+    A token given is stored as it is (paste). With none, a stdio gateway
+    whose adapter can create accounts claims `venue_user` at the venue and
+    stores the token before anything else can fail: venues may show it
+    once. Otherwise the venue's instructions for getting one come back.
+    No token is ever returned.
     """
-    client = _client_for(url) if url else _t()._make_client()
+    store = _t()._get_identity_store()
+    if unlink:
+        return {"venue": venue, "linked": False, "unlinked": store.unlink_venue(
+            origin, username, venue
+        )}  # fmt: skip
+    venue_user = venue_user or username
+    # Checked first: a claimed name whose token can't then be stored is lost.
+    if store.is_wrapped(origin, username) and not store.verify_password(
+        origin, username, password or ""
+    ):
+        raise ValueError("Invalid password for this identity")
+    if venue_token:
+        store.link_venue(origin, username, venue, venue_user, venue_token, password)
+        return {"venue": venue, "linked": True, "venue_user": venue_user, "how": "pasted"}
+
+    venue_config = VenueConfig(
+        type=venue_type_of(venue), venue=venue, url=_venue_url(venue)
+    )  # fmt: skip
+    adapter = build_adapter(venue_config)
     try:
-        await client.connect_anonymous()
-        info = client.discovery
-        return list(info.bridges) if info is not None else []
+        caps = adapter.capabilities
+        if _t().gateway_transport == "stdio" and "self_register" in caps:
+            try:
+                account = await adapter.register(venue_user)  # type: ignore[attr-defined]
+            except VenueNameTaken as e:
+                return {
+                    "venue": venue, "linked": False, "error": str(e),
+                    "next": "pick another venue_user and call register again",
+                }  # fmt: skip
+            store.link_venue(origin, username, venue, account.user, account.token, password)
+            return {"venue": venue, "linked": True, "venue_user": account.user,
+                    "how": "registered"}  # fmt: skip
+        if "signup" in caps:
+            return {
+                "venue": venue, "linked": False,
+                "instructions": adapter.signup_instructions(),  # type: ignore[attr-defined]
+                "next": "call register again with venue_user= and venue_token=",
+            }  # fmt: skip
+        return {
+            "venue": venue, "linked": False,
+            "next": f"{venue} says nothing about accounts here: get one there, then "
+            "call register again with venue_user= and venue_token=",
+        }  # fmt: skip
     finally:
-        await client.close()
+        await adapter.close()
+
+
+def annotate_links(bridges: list[dict], links: dict[str, str]) -> list[dict]:
+    """The manifest's bridges, each saying whether the active identity linked it."""
+    out = []
+    for b in bridges:
+        entry = dict(b)
+        user = links.get(entry.get("venue", ""))
+        entry["linked"] = user is not None
+        if user is not None:
+            entry["linked_as"] = user
+        out.append(entry)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -358,56 +463,59 @@ async def _send(bridge_client, outbox: Outbox, event_id: bytes, frame: bytes) ->
     return {"published": True, "article_num": result.article_num, "seq": result.origin_seq}
 
 
-async def _parent_on_bridge(bridge_url, bridge_origin, board, venue, channel, foreign_id):
-    """(root_article_id, article_id) of the copy of a venue post on B, if there is one.
+async def _reply_target(bridge_url, bridge_origin, board, venue, channel, article_id):
+    """(parent, venue post id) for a reply to `article_id` on the bridge board.
 
-    Asked anonymously: the caller's key may not be admitted on B yet. Best
-    effort: if B doesn't let anonymous callers query, the reply still threads
-    at the venue, just not on B.
+    `parent` is (root_article_id, article_id) on the bridge; the venue post
+    id is the one its `src:` tag names, if it is a copy of (or crosspost to)
+    this venue, else None: the reply then threads on the bridge alone.
+
+    Asked anonymously: the caller's key may not be admitted on the bridge yet.
     """
-    value = model.src_tag(SourceKey(venue, channel, foreign_id))[len("src:") :]
     reader = _client_for(bridge_url)
     try:
         await reader.connect_anonymous()
-        resp = await reader.query_articles(bridge_origin, board, [(0x0B, 0x01, 0x02, value)])
-    except (ProtocolError, FirehoseClientError):
-        return None
+        art = await reader.get_article_by_id(bridge_origin, board, article_id, include_body=False)
     finally:
         await reader.close()
-    if not resp.results:
-        return None
-    hit = resp.results[0]
-    root = bytes.fromhex(hit.root_article_id) if hit.root_article_id else b""
-    art = bytes.fromhex(hit.article_id)
-    return (root if root and root != bytes(32) else art), art
+    if art is None:
+        raise ValueError(f"article {article_id.hex()} not found in /{board} on {bridge_origin}")
+    root = bytes.fromhex(art.root_article_id) if art.root_article_id else b""
+    parent = ((root if root and root != bytes(32) else article_id), article_id)
+    src = _src_of(art.tags)
+    foreign_id = src.foreign_id if src and (src.venue, src.channel) == (venue, channel) else None
+    return parent, foreign_id
 
 
-async def crosspost(
+def _src_of(tags: str) -> SourceKey | None:
+    return next((k for k in (model.parse_src_tag(t.strip()) for t in tags.split(",")) if k), None)
+
+
+async def publish_bridged(
     bridge_origin: str,
     board: str,
     body: str,
     subject: str = "",
-    reply_to_foreign_id: str = "",
+    tags: list[str] | None = None,
+    reply_to_article_id: bytes | None = None,
     bridge_url: str = "",
     auth: str | None = None,
 ) -> dict:
-    """Post on a bridge board, signed with your home key, and to the venue as you.
+    """Publish on a bridge board, signed with your home key, and to the venue as you.
 
-    The bridge origin admits your key by asking your home origin (the one
-    you're connected to) about it; your name there is your home username.
-    If this gateway has an account for the board's venue, it posts to the
-    venue first, as you, with a marker linking the two; otherwise the post
-    stays on the bridge board, where the bridge's relay may carry it.
-
-    bridge_origin: the bridge origin (see list_bridges).
-    board: its bridge board, e.g. "~flatboard".
-    reply_to_foreign_id: the venue post id you're replying to, if any.
-    bridge_url: where to reach the bridge origin, if not a joined origin.
+    On your home origin's own bridge you publish as yourself. On another
+    origin's, it admits your key by asking your home origin about it (if
+    its [admission] is on). If this gateway has an account for the board's
+    venue, it posts to the venue first, as you, with a marker linking the
+    two; otherwise the post stays on the bridge board, where the bridge's
+    relay may carry it. A reply to a copy of a venue post replies to that
+    post at the venue too.
     """
     t = _t()
     t._require_text_fields(body=body, subject=subject)
     t._require_non_blank("body", body)
     bridge_origin = normalize_origin(bridge_origin)
+    flushed = await flush_pending(auth)
     identity, home_origin, home_url = _home(auth)
     bridge_client = _client_for(_bridge_url(bridge_origin, bridge_url))
     outbox = _outbox()
@@ -426,25 +534,37 @@ async def crosspost(
             None,
         )
         if entry is None:
-            raise ValueError(f"{board!r} is not a live bridge board on {bridge_origin}")
+            raise ValueError(
+                f"{board!r} is not a live bridge board on {bridge_origin}: "
+                "boards starting with '~' are bridge boards"
+            )
+        if entry.get("admission") is False and bridge_origin != home_origin:
+            # Checked before anything reaches the venue: a post there that
+            # the bridge then refuses would sit at the venue alone. Its own
+            # users need no admission.
+            raise ValueError(
+                f"{bridge_origin} mirrors {board!r} read-only for other origins' users: "
+                "it doesn't admit crossposters"
+            )
         venue, channel = entry["venue"], entry.get("channel", "")
         venue_type = venue_type_of(venue)
-        spec = load_accounts().get(venue)
+        spec = account_spec(venue, auth)
 
         event_id, article_id = os.urandom(32), os.urandom(32)
         subject = subject or " ".join(body.split())[:80]
         body_bytes = body.encode("utf-8")
         home_meta = BridgeMetadata(home_origin=home_origin, home_url=home_url, bridge_version=None)
-        parent = None
-        if reply_to_foreign_id:
-            parent = await _parent_on_bridge(
-                bridge_client.base_url, bridge_origin, board, venue, channel, reply_to_foreign_id
+        user_tags = list(tags or [])
+        parent, reply_to_foreign_id = None, None
+        if reply_to_article_id:
+            parent, reply_to_foreign_id = await _reply_target(
+                bridge_client.base_url, bridge_origin, board, venue, channel, reply_to_article_id
             )
 
         def native() -> bytes:
             intent = _article_intent(
                 identity, bridge_origin, board, event_id, article_id, subject,
-                body_bytes, home_meta, [], parent,
+                body_bytes, home_meta, user_tags, parent,
             )  # fmt: skip
             return _frame(identity, intent, body_bytes)
 
@@ -465,11 +585,7 @@ async def crosspost(
                 )
             )
             result = await _send(bridge_client, outbox, event_id, frame)
-            return {
-                "egress": "none",
-                "note": "no venue account; the bridge's relay may carry it",
-                **result,
-            }
+            return {"egress": "none", "venue": venue, "flushed": flushed, **result}
 
         adapter = _adapter_for(spec)
         try:
@@ -490,7 +606,7 @@ async def crosspost(
                     subject,
                     body_bytes,
                     pending,
-                    [],
+                    user_tags,
                     parent,
                 ),  # fmt: skip
                 body_bytes,
@@ -508,13 +624,14 @@ async def crosspost(
                 if isinstance(e, VenueUncertain) and "idempotent_post" in adapter.capabilities:
                     # The venue may hold the post, and a native copy on B
                     # would then sit beside it. Keep the frame pending:
-                    # flush_outbox finishes it with the same key.
+                    # flush_pending finishes it with the same key.
                     return {
                         "egress": "uncertain",
+                        "venue": venue,
                         "venue_error": str(e),
                         "published": False,
                         "queued": True,
-                        "note": "run flush_outbox to finish: it re-posts with the same key",
+                        "flushed": flushed,
                     }
                 # §11.2 step 4: the venue refused; keep the post on B, natively.
                 frame = native()
@@ -533,17 +650,23 @@ async def crosspost(
                     )
                 )
                 result = await _send(bridge_client, outbox, event_id, frame)
-                return {"egress": "failed", "venue_error": str(e), **result}
+                return {
+                    "egress": "failed", "venue": venue, "venue_error": str(e),
+                    "flushed": flushed, **result,
+                }  # fmt: skip
             frame = _final_frame(
                 identity, bridge_origin, board, event_id, article_id, subject, body_bytes,
-                venue_type, posted, marker, home_origin, home_url, parent,
+                venue_type, posted, marker, home_origin, home_url, parent, user_tags,
             )  # fmt: skip
             outbox.put(
                 _entry(event_id, bridge_origin, bridge_client, board, venue, channel,
                        venue_text, reply_to_foreign_id or None, frame, "ready")
             )  # fmt: skip
             result = await _send(bridge_client, outbox, event_id, frame)
-            return {"egress": "posted", "venue": venue, "foreign_id": posted.foreign_id, **result}
+            return {
+                "egress": "posted", "venue": venue, "foreign_id": posted.foreign_id,
+                "flushed": flushed, **result,
+            }  # fmt: skip
         finally:
             await adapter.close()
     finally:
@@ -571,7 +694,7 @@ def _entry(
 
 def _final_frame(
     identity, bridge_origin, board, event_id, article_id, subject, body_bytes,
-    venue_type, posted, marker, home_origin, home_url, parent,
+    venue_type, posted, marker, home_origin, home_url, parent, extra_tags,
 ) -> bytes:  # fmt: skip
     """The role-2 original with the venue's foreign_id: signed once, sent as stored (§11.2 step 5)."""
     src = SourceKey(posted.venue, posted.channel, posted.foreign_id)
@@ -591,6 +714,7 @@ def _final_frame(
         home_url=home_url,
     )
     tags = model.bridge_tags(venue_type, src) if venue_type else ["bridged", model.src_tag(src)]
+    tags += [t for t in extra_tags if t not in tags]
     intent = _article_intent(
         identity,
         bridge_origin,
@@ -611,40 +735,44 @@ def _final_frame(
 # ---------------------------------------------------------------------------
 
 
-async def flush_outbox(auth: str | None = None) -> dict:
+async def flush_pending(auth: str | None = None) -> list[dict]:
     """Retry crossposts that reached the venue but not the bridge origin.
 
-    Frames already signed with the venue's post id are re-sent as stored. A
-    crosspost interrupted between the venue post and storing that id is
-    re-posted to the venue with the same idempotency key when the venue
-    supports it (and so lands on the same venue post), else given up and
-    reported: re-posting could duplicate it there.
+    Runs at the start of every publish to a bridge board. Frames already
+    signed with the venue's post id are re-sent as stored. A crosspost
+    interrupted between the venue post and storing that id is re-posted to
+    the venue with the same idempotency key when the venue supports it (and
+    so lands on the same venue post), else given up and reported:
+    re-posting could duplicate it there. Returns one report per entry tried.
     """
     identity, home_origin, home_url = _home(auth)
     outbox = _outbox()
     report: list[dict] = []
     try:
-        accounts = load_accounts()
+        accounts: dict[str, VenueAccountSpec | None] = {}
         for entry in outbox.by_state("pending", "ready"):
             # One entry failing (the venue, the bridge) leaves it where it
             # was and moves on: the rest may not need either.
             try:
-                result = await _flush_one(entry, identity, home_origin, home_url, accounts, outbox)
+                if entry.venue not in accounts:
+                    accounts[entry.venue] = account_spec(entry.venue, auth)
+                result = await _flush_one(
+                    entry, identity, home_origin, home_url, accounts[entry.venue], outbox
+                )
             except (VenueError, ProtocolError, FirehoseClientError, OSError) as e:
                 result = {"error": str(e), "state": entry.state}
             report.append({"event_id": entry.event_id.hex(), **result})
     finally:
         outbox.close()
-    return {"entries": report}
+    return report
 
 
-async def _flush_one(entry, identity, home_origin, home_url, accounts, outbox) -> dict:
+async def _flush_one(entry, identity, home_origin, home_url, spec, outbox) -> dict:
     bridge_client = _client_for(entry.bridge_url)
     try:
         await bridge_client.connect(identity, username="")
         if entry.state == "ready":
             return await _send(bridge_client, outbox, entry.event_id, entry.frame)
-        spec = accounts.get(entry.venue)
         adapter = _adapter_for(spec) if spec is not None else None
         try:
             if spec is None or adapter is None or "idempotent_post" not in adapter.capabilities:
@@ -671,6 +799,7 @@ async def _flush_one(entry, identity, home_origin, home_url, accounts, outbox) -
             old.metadata.get_text(1) or "", body, venue_type_of(entry.venue), posted,
             old_meta.marker or model.make_marker(entry.event_id),
             old_meta.home_origin or home_origin, old_meta.home_url or home_url, parent,
+            old.metadata.get_text_list(2) or [],
         )  # fmt: skip
         outbox.put(OutboxEntry(**{**entry.__dict__, "frame": frame, "state": "ready"}))
         result = await _send(bridge_client, outbox, entry.event_id, frame)
@@ -684,49 +813,75 @@ async def _flush_one(entry, identity, home_origin, home_url, accounts, outbox) -
 # ---------------------------------------------------------------------------
 
 
-async def corroborate(
-    article_id: str, board: str = "", origin: str = "", auth: str | None = None
-) -> dict:
-    """Find every recognized bridge's copy of a bridged article.
+async def corroborate(client, src_origin: str, board: str, tags: str) -> dict:
+    """Every recognized bridge's copy of a bridged article: get_article(corroborate=True).
 
-    Reads the article's `src:` tag, the bridge origins the active origin
+    Reads the article's `src:` tag, the bridge origins the connected origin
     recognizes for that venue, and asks each for its copy of the same venue
     post. Copies whose `foreign_digest` differ disagree on what the venue
     said; check them with get_event.
     """
-    t = _t()
-    board = t.cursor.resolve_board(board)
-    aid = t._validate_article_id(article_id)
-    client = t._make_client()
-    try:
-        await t._connect_with_default(client, auth)
-        src_origin = origin or client._server_origin or ""
-        art = await client.get_article_by_id(src_origin, board, aid, include_body=False)
-        if art is None:
-            raise ValueError(f"article {article_id} not found in /{board}")
-        src = next(
-            (s for s in (model.parse_src_tag(x.strip()) for x in art.tags.split(",")) if s), None
+    src = _src_of(tags)
+    if src is None:
+        return {"bridged": False, "copies": []}
+    bridges = client.discovery.bridges if client.discovery else []
+    origins: list[str] = next(
+        (b.get("origins", []) for b in bridges if b.get("venue") == src.venue), []
+    )
+    value = model.src_tag(src)[len("src:") :]
+    copies: list[dict] = []
+    for o in origins or [src_origin]:
+        resp = await client.query_articles(o, board, [(0x0B, 0x01, 0x02, value)])
+        copies.extend(
+            {"origin": o, "article_num": r.article_num, "article_id": r.article_id,
+             "event_id": r.event_id, "subject": r.subject}
+            for r in resp.results
+        )  # fmt: skip
+    return {
+        "bridged": True,
+        "src": {"venue": src.venue, "channel": src.channel, "foreign_id": src.foreign_id},
+        "recognized_origins": origins,
+        "copies": copies,
+    }
+
+
+def describe(result: dict, board: str, bridge_origin: str) -> str:
+    """publish_article's one-line report of a publish on a bridge board."""
+    venue = result.get("venue", "the venue")
+    retried = len(result.get("flushed") or [])
+    tail = f"; retried {retried} earlier crosspost(s) first" if retried else ""
+    if result.get("egress") == "uncertain":
+        return (
+            f"Not published yet: {venue} may or may not have taken it "
+            f"({result.get('venue_error')}). It is retried with the same key on your "
+            f"next publish to a bridge board, so it can't land twice{tail}"
         )
-        if src is None:
-            return {"bridged": False, "copies": []}
-        bridges = client.discovery.bridges if client.discovery else []
-        origins: list[str] = next(
-            (b.get("origins", []) for b in bridges if b.get("venue") == src.venue), []
+    if not result.get("published"):
+        if result.get("queued"):
+            return (
+                f"Not published yet: {bridge_origin} couldn't be reached "
+                f"({result.get('error')}). It is retried on your next publish to a "
+                f"bridge board{tail}"
+            )
+        posted = (
+            f"; it was posted to {venue} as #{result['foreign_id']}"
+            if result.get("foreign_id")
+            else ""
         )
-        value = model.src_tag(src)[len("src:") :]
-        copies: list[dict] = []
-        for o in origins or [src_origin]:
-            resp = await client.query_articles(o, board, [(0x0B, 0x01, 0x02, value)])
-            copies.extend(
-                {"origin": o, "article_num": r.article_num, "article_id": r.article_id,
-                 "event_id": r.event_id, "subject": r.subject}
-                for r in resp.results
-            )  # fmt: skip
-        return {
-            "bridged": True,
-            "src": {"venue": src.venue, "channel": src.channel, "foreign_id": src.foreign_id},
-            "recognized_origins": origins,
-            "copies": copies,
-        }
-    finally:
-        await client.close()
+        raise ValueError(f"{bridge_origin} refused the article: {result.get('refused')}{posted}")
+    head = (
+        f"Article #{result['article_num']} published on {board} ({bridge_origin}) "
+        f"— event seq {result['seq']}"
+    )
+    egress = result.get("egress")
+    if egress == "posted":
+        return f"{head}; posted to {venue} as #{result['foreign_id']}{tail}"
+    if egress == "failed":
+        return (
+            f"{head}; {venue} refused it ({result.get('venue_error')}), so it is on "
+            f"the bridge board only{tail}"
+        )
+    return (
+        f"{head}; not posted to {venue}: this gateway has no account there, so it is "
+        f"on the bridge board only, where the bridge's relay may carry it{tail}"
+    )

@@ -21,7 +21,8 @@ actor signature, the validator, the ACL or the chain rules.
 
 The kind guard is an allowlist. A bridge never cancels, restores or purges,
 and never touches routes, rules or punishments; those are refused here before
-anything is signed, as well as by the daemon's ACL grant.
+anything is signed. That guard matters: bridge facts are signed with the
+server's own key, which the ACL lets do anything.
 """
 
 from __future__ import annotations

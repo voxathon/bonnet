@@ -41,9 +41,6 @@ def _isolated_server_home(tmp_path, monkeypatch):
     specifically exercise home resolution override these with their own
     monkeypatch calls."""
     monkeypatch.setenv("BONNET_SERVER_HOME", str(tmp_path / "srvhome"))
-    # Set (not just absent) so monkeypatch restores it after a --dir run
-    # writes it into os.environ.
-    monkeypatch.setenv("BONNET_BRIDGE_HOME", str(tmp_path / "bridgehome-env"))
     monkeypatch.setattr("platformdirs.user_config_dir", lambda *a, **k: str(tmp_path / "cfg"))
     monkeypatch.setattr("platformdirs.user_data_dir", lambda *a, **k: str(tmp_path / "data"))
 
@@ -281,91 +278,6 @@ def test_set_default_dir_is_remembered(tmp_path, capsys, monkeypatch):
 
     out = capsys.readouterr().out
     assert f"OK: {home_dir / 'config.toml'} is valid." in out
-
-
-# ---------------------------------------------------------------------------
-# Bridge homes: their own env var, pointer and bridge.toml
-# ---------------------------------------------------------------------------
-
-
-def test_bridge_home_is_separate_from_the_server_home(tmp_path, capsys, monkeypatch):
-    """`bonnet bridge run` resolves its own home, never the server's, even
-    with BONNET_SERVER_HOME set in the same environment."""
-    monkeypatch.delenv("BONNET_BRIDGE_HOME", raising=False)
-
-    main(["--create-config"], bridge=True)
-
-    assert (tmp_path / "data" / "bridge" / "bridge.toml").exists()
-    assert not (tmp_path / "srvhome").exists()
-
-
-def test_bridge_dir_is_process_local(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("BONNET_BRIDGE_HOME", raising=False)
-    home_dir = tmp_path / "bridgehome"
-
-    main(["--dir", str(home_dir), "--create-config"], bridge=True)
-
-    assert (home_dir / "bridge.toml").exists()
-    assert os.environ["BONNET_BRIDGE_HOME"] == str(home_dir)
-    assert "BONNET_SERVER_HOME" in os.environ and os.environ["BONNET_SERVER_HOME"] != str(home_dir)
-    assert not (tmp_path / "cfg" / "bridge.dir").exists()
-
-
-def test_bridge_refuses_a_homeserver_home(tmp_path, capsys, monkeypatch):
-    home_dir = tmp_path / "shared"
-    home_dir.mkdir()
-    (home_dir / "config.toml").write_text('[server]\norigin = "home.test"\n')
-
-    with pytest.raises(SystemExit) as exc:
-        main(["--dir", str(home_dir), "--init"], bridge=True)
-
-    assert exc.value.code == 1
-    assert "holds config.toml, so it is a server's home" in capsys.readouterr().err
-    assert not (home_dir / "bridge.toml").exists()
-
-
-def test_server_refuses_a_bridge_home(tmp_path, capsys, monkeypatch):
-    home_dir = tmp_path / "shared"
-    home_dir.mkdir()
-    (home_dir / "bridge.toml").write_text('[server]\norigin = "bridge.test"\n')
-
-    with pytest.raises(SystemExit) as exc:
-        main(["--dir", str(home_dir), "--create-config"])
-
-    assert exc.value.code == 1
-    assert "holds bridge.toml, so it is a bridge's home" in capsys.readouterr().err
-    assert not (home_dir / "config.toml").exists()
-
-
-def test_server_refuses_a_bridge_home_via_explicit_config(tmp_path, capsys, monkeypatch):
-    """The config file's own directory is checked too, not just --dir."""
-    monkeypatch.delenv("BONNET_SERVER_HOME", raising=False)
-    home_dir = tmp_path / "shared"
-    home_dir.mkdir()
-    (home_dir / "bridge.toml").write_text('[server]\norigin = "bridge.test"\n')
-    (home_dir / "config.toml").write_text('[server]\norigin = "home.test"\n')
-
-    with pytest.raises(SystemExit) as exc:
-        main(["--config", str(home_dir / "config.toml"), "--check-config"])
-
-    assert exc.value.code == 1
-    assert "holds bridge.toml" in capsys.readouterr().err
-
-
-def test_config_file_name_must_match_the_kind(tmp_path, capsys):
-    cfg = tmp_path / "config.toml"
-    cfg.write_text('[server]\norigin = "x.test"\n')
-    with pytest.raises(SystemExit):
-        main(["--config", str(cfg), "--check-config"], bridge=True)
-    assert "a bridge's is named bridge.toml" in capsys.readouterr().err
-
-    other = tmp_path / "elsewhere"
-    other.mkdir()
-    bcfg = other / "bridge.toml"
-    bcfg.write_text('[server]\norigin = "x.test"\n')
-    with pytest.raises(SystemExit):
-        main(["--config", str(bcfg), "--check-config"])
-    assert "can't be a server's config" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

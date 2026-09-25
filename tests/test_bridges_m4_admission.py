@@ -121,7 +121,6 @@ class World:
 
         self.bridge.loop = asyncio.get_running_loop()
         rt = BridgeRuntime(self.bridge)
-        await rt.bindings.ensure_daemon()
         await rt.bindings.ensure_board(BOARD)
         await rt.close()
 

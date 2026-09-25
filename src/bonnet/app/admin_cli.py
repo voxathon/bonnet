@@ -39,7 +39,7 @@ import sys
 from bonnet.app.console import OperatorConsole
 from bonnet.app.server import BonnetServer
 from bonnet.core.config import FirehoseConfig
-from bonnet.core.home import SERVER, home_conflict, resolve_home
+from bonnet.core.home import SERVER, resolve_home
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,8 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "This server's home directory, for this run only (wins over "
-            "$BONNET_SERVER_HOME; not remembered). For a bridge origin, pass "
-            "--config <its home>/bridge.toml."
+            "$BONNET_SERVER_HOME; not remembered)."
         ),
     )
     parser.add_argument(
@@ -94,16 +93,7 @@ def _resolve_config_path(args) -> str:
         )
         raise SystemExit(1)
     if args.config is None:
-        config_path = os.path.join(server_home, SERVER.config_name)
-        conflict = home_conflict(
-            SERVER, config_path, server_home if os.environ.get(SERVER.env_var) else None
-        )
-        if conflict:
-            print(f"error: {conflict}", file=sys.stderr)
-            raise SystemExit(1)
-        return config_path
-    # An explicit --config names the server outright, a bridge's bridge.toml
-    # included; core.config reads the matching home env var from its name.
+        return os.path.join(server_home, SERVER.config_name)
     return args.config
 
 

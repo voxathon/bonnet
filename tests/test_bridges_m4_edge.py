@@ -161,7 +161,7 @@ class World:
         )
 
     async def crosspost(self, body="hello from bonnet", **kw):
-        return await bridge_tools.crosspost(B, BOARD, body, bridge_url=B_URL, **kw)
+        return await bridge_tools.publish_bridged(B, BOARD, body, bridge_url=B_URL, **kw)
 
     def articles(self):
         return [
@@ -235,7 +235,7 @@ async def test_replies_thread_on_the_venue_and_the_bridge(w):
     venue = w.runtime.venues[0]
     await w.runtime.ingest_binding(venue, venue.config.bindings[0])
     (mirror,) = w.articles()
-    await w.crosspost("my reply", reply_to_foreign_id=str(parent))
+    await w.crosspost("my reply", reply_to_article_id=mirror.article_id)
     (msg,) = w.venue_posts()
     assert msg["reply_to"] == parent
     reply = next(a for a in w.articles() if a.event_id != mirror.event_id)
@@ -284,8 +284,8 @@ async def test_an_uncertain_post_stays_pending_instead_of_going_native(w):
     assert len(w.venue_posts()) == 1 and w.articles() == []
     (pending,) = _outbox().by_state("pending")
 
-    flushed = await bridge_tools.flush_outbox()
-    assert flushed["entries"][0]["reposted"] is True
+    flushed = await bridge_tools.flush_pending()
+    assert flushed[0]["reposted"] is True
     assert len(w.venue_posts()) == 1  # the same key: the same venue post
     (art,) = w.articles()
     assert art.event_id == pending.event_id
@@ -324,8 +324,8 @@ async def test_an_unreachable_bridge_queues_and_flush_sends_the_same_frame(w):
     result = await w.crosspost()
     assert result["published"] is False and result["queued"] is True
     (queued,) = _outbox().by_state("ready")
-    flushed = await bridge_tools.flush_outbox()
-    assert flushed["entries"][0]["published"] is True
+    flushed = await bridge_tools.flush_pending()
+    assert flushed[0]["published"] is True
     (art,) = w.articles()
     assert art.event_id == queued.event_id
     assert len(w.venue_posts()) == 1
@@ -344,8 +344,8 @@ async def test_a_crash_before_the_final_frame_reposts_idempotently(w, monkeypatc
     assert len(_outbox().by_state("pending")) == 1
 
     monkeypatch.setattr(bridge_tools, "_final_frame", real_final)
-    flushed = await bridge_tools.flush_outbox()
-    assert flushed["entries"][0]["reposted"] is True
+    flushed = await bridge_tools.flush_pending()
+    assert flushed[0]["reposted"] is True
     assert len(w.venue_posts()) == 1  # same request_id: the same venue post
     (art,) = w.articles()
     assert BridgeMetadata.from_metadata(art.metadata).foreign_id == str(w.venue_posts()[0]["id"])
@@ -364,8 +364,8 @@ async def test_a_pending_frame_on_a_non_idempotent_venue_is_dropped(w, monkeypat
         return adapter
 
     monkeypatch.setattr(bridge_tools, "_adapter_for", plain_adapter)
-    flushed = await bridge_tools.flush_outbox()
-    assert flushed["entries"] == [{"event_id": flushed["entries"][0]["event_id"], "dropped": True}]
+    flushed = await bridge_tools.flush_pending()
+    assert flushed == [{"event_id": flushed[0]["event_id"], "dropped": True}]
     assert len(w.venue_posts()) == 1
 
 
@@ -414,6 +414,13 @@ async def test_rejected_credentials_are_never_sent_again(w):
 
 
 async def test_flush_carries_on_past_an_entry_the_venue_refuses(w, monkeypatch):
+    # Set up both entries without the flush every publish runs first.
+    real_flush = bridge_tools.flush_pending
+
+    async def no_flush(auth=None):
+        return []
+
+    monkeypatch.setattr(bridge_tools, "flush_pending", no_flush)
     # Entry 1: pending (the gateway died after the venue post).
     real_final = bridge_tools._final_frame
     monkeypatch.setattr(
@@ -428,13 +435,22 @@ async def test_flush_carries_on_past_an_entry_the_venue_refuses(w, monkeypatch):
 
     w.board.rate_limit_posts = 1
     w.board.retry_after = 3600
-    flushed = await bridge_tools.flush_outbox()
-    by_state = {e.get("state", "sent"): e for e in flushed["entries"]}
+    flushed = await real_flush()
+    by_state = {e.get("state", "sent"): e for e in flushed}
     assert "rate limited" in by_state["pending"]["error"]
     assert by_state["sent"]["published"] is True
     (pending,) = _outbox().by_state("pending")
     assert _outbox().by_state("ready") == []
     assert pending.venue_text.startswith("pending one")
+
+
+async def test_publishing_flushes_earlier_crossposts_first(w):
+    w.fail_send = 1
+    first = await w.crosspost("first")
+    assert first["queued"] is True
+    second = await w.crosspost("second")
+    assert [e["published"] for e in second["flushed"]] == [True]
+    assert second["published"] is True and len(w.articles()) == 2
 
 
 async def _impostor(w, tmp_path):
@@ -510,31 +526,119 @@ async def test_a_home_whose_own_name_does_not_answer_is_refused(w, monkeypatch):
 
 async def test_crosspost_refuses_a_board_that_is_not_a_live_bridge(w):
     with pytest.raises(ValueError, match="not a live bridge board"):
-        await bridge_tools.crosspost(B, "~nope", "hi", bridge_url=B_URL)
+        await bridge_tools.publish_bridged(B, "~nope", "hi", bridge_url=B_URL)
+
+
+async def test_crosspost_refuses_a_read_only_bridge_before_the_venue(w, monkeypatch):
+    monkeypatch.setattr(w.bridge.command_handler, "_admission", None)
+    with pytest.raises(ValueError, match="read-only"):
+        await w.crosspost()
+    assert w.venue_posts() == [] and w.articles() == []
+
+
+async def test_a_bridge_s_own_users_crosspost_without_admission(w, monkeypatch):
+    monkeypatch.setattr(w.bridge.command_handler, "_admission", None)
+    local = Identity.generate()
+    await publish_as(
+        w.bridge,
+        local,
+        Intent(
+            event_id=os.urandom(32),
+            kind=KIND_USER_REGISTER,
+            origin=B,
+            actor_pubkey=local.public_key,
+            actor_registrar=B,
+            metadata=MetadataMap(
+                [
+                    metadata_text(1, "local"),
+                    metadata_bytes(2, local.public_key),
+                    metadata_u64(3, 0),
+                ]
+            ),
+        ),
+    )
+    monkeypatch.setattr(bridge_tools, "_home", lambda auth: (local, B, B_URL))
+    result = await w.crosspost("from home")
+    assert result["egress"] == "posted" and result["published"] is True
+    (art,) = w.articles()
+    assert art.actor_pubkey == local.public_key
+    assert w.bridge.users.get_user_by_pubkey(B, local.public_key)["username"] == "local"
 
 
 # ---------------------------------------------------------------------------
-# list_bridges and corroborate
+# The manifest, corroboration, and publish_article's report
 # ---------------------------------------------------------------------------
 
 
-async def test_list_bridges_reads_the_manifest(w):
-    (entry,) = await bridge_tools.list_bridges(url=B_URL)
+async def test_the_manifest_lists_the_bridge(w):
+    client = w._client(B_URL)
+    try:
+        await client.connect_anonymous()
+        (entry,) = client.discovery.bridges
+    finally:
+        await client.close()
     assert entry["venue"] == FLATBOARD_VENUE and entry["board"] == BOARD and entry["local"]
+    assert entry["status"] == "bound" and entry["admission"] is True
 
 
-async def test_corroborate_finds_the_copies(w, monkeypatch):
-    from bonnet.gateway import tools
-
+async def test_corroborate_finds_the_copies(w):
     w.board.post("corroborate me", created=0)
     venue = w.runtime.venues[0]
     await w.runtime.ingest_binding(venue, venue.config.bindings[0])
     (mirror,) = w.articles()
-    monkeypatch.setattr(tools, "_make_client", lambda url=None, verify=None: w._client(B_URL))
-    result = await bridge_tools.corroborate(mirror.article_id.hex(), board=BOARD, origin=B)
+    tags = ",".join(mirror.metadata.get_text_list(2) or [])
+    client = w._client(B_URL)
+    try:
+        await client.connect_anonymous()
+        result = await bridge_tools.corroborate(client, B, BOARD, tags)
+        assert await bridge_tools.corroborate(client, B, BOARD, "plain") == {
+            "bridged": False,
+            "copies": [],
+        }
+    finally:
+        await client.close()
     assert result["bridged"] is True
     assert result["recognized_origins"] == [B]
     assert [c["event_id"] for c in result["copies"]] == [mirror.event_id.hex()]
+
+
+def test_describe_reports_what_reached_the_venue():
+    ok = {"published": True, "article_num": 3, "seq": 9, "venue": FLATBOARD_VENUE}
+    posted = bridge_tools.describe({**ok, "egress": "posted", "foreign_id": "42"}, BOARD, B)
+    assert posted.startswith(f"Article #3 published on {BOARD} ({B})") and "#42" in posted
+    assert "no account" in bridge_tools.describe({**ok, "egress": "none"}, BOARD, B)
+    failed = bridge_tools.describe({**ok, "egress": "failed", "venue_error": "nope"}, BOARD, B)
+    assert "refused it (nope)" in failed
+    retried = bridge_tools.describe({**ok, "egress": "none", "flushed": [{}, {}]}, BOARD, B)
+    assert retried.endswith("retried 2 earlier crosspost(s) first")
+    unsure = {"egress": "uncertain", "published": False, "queued": True, "venue_error": "?"}
+    assert "can't land twice" in bridge_tools.describe(unsure, BOARD, B)
+    down = {"egress": "none", "published": False, "queued": True, "error": "down"}
+    assert "couldn't be reached" in bridge_tools.describe(down, BOARD, B)
+    refused = {"egress": "posted", "published": False, "refused": "no", "foreign_id": "7"}
+    with pytest.raises(ValueError, match="refused the article: no; it was posted"):
+        bridge_tools.describe(refused, BOARD, B)
+
+
+async def test_publish_article_on_a_tilde_board_crossposts(monkeypatch):
+    from bonnet.gateway import tools
+
+    calls = []
+
+    async def fake(bridge_origin, board, body, subject, tags, reply_to, auth=None):
+        calls.append((bridge_origin, board, body, subject, tags, reply_to))
+        return {"egress": "none", "published": True, "article_num": 1, "seq": 2}
+
+    monkeypatch.setattr(bridge_tools, "publish_bridged", fake)
+    monkeypatch.setattr(tools, "_default_origin", lambda: HOME)
+    parent = "ab" * 32
+    out = await tools.publish_article(
+        "hi", "hello", board=BOARD, tags="a, b", reply_to_article_id=parent
+    )
+    assert out.startswith(f"Article #1 published on {BOARD} ({HOME})")
+    assert calls == [(HOME, BOARD, "hello", "hi", ["a", "b"], bytes.fromhex(parent))]
+    await tools.publish_article("hi", "hello", board=BOARD, origin=B)
+    assert calls[-1][0] == B
 
 
 def test_accounts_file_is_validated(tmp_path, monkeypatch):

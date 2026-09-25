@@ -106,31 +106,6 @@ def _bridge_venue_types(config):
     return venue_types(config)
 
 
-def _with_bridge_daemon_rule(rules, bridge_policy):
-    """Append the bridge daemon's grant on a bridge origin (docs/bonnet-bridges-design.md §7).
-
-    Synthesized like the server's own admin rule because the daemon key is
-    generated on first start, so an operator can't name it in config ahead
-    of time. It grants exactly what the runtime publishes: bridge records,
-    boards and articles on `~` boards (and board-less bridge records).
-    Operator deny rules still win over it.
-    """
-    if bridge_policy is None:
-        return rules
-    from bonnet.core.acl import ACLRule, PrincipalMatcher
-
-    return list(rules) + [
-        ACLRule(
-            effect="allow",
-            matcher=PrincipalMatcher(pubkey=bridge_policy.daemon_pubkey),
-            actions=["write"],
-            commands=["PUBLISH_RECORD"],
-            kinds=["bonnet.bridge.*", "bonnet.board.create", "bonnet.article"],
-            boards=["~*", ""],
-        )
-    ]
-
-
 class BonnetServer:
     """Complete Bonnet server: all components wired and runnable."""
 
@@ -254,22 +229,17 @@ class BonnetServer:
         self.bridges.set_article_lookup(self._lookup_article)
         log_msg("INIT: Dispatcher initialized")
 
-        # A bridge origin ([runtime] in bridges.toml) closes registration to
-        # all but its runtime and administrators; the daemon key is loaded
-        # (or generated) here so the server knows which key that is.
-        self.bridge_policy = None
-        if config.bridge_runtime is not None:
-            from bonnet.bridges.config import load_daemon_identity
-            from bonnet.bridges.model import BridgePolicy
+        # Usernames with a '~' are reserved for bridge puppets on every
+        # origin; the policy says which `<handle>~<type>` names this
+        # server's own bridges may register (§8).
+        from bonnet.bridges.model import BridgePolicy
 
-            self.bridge_policy = BridgePolicy(
-                daemon_pubkey=load_daemon_identity(config.bridge_runtime).public_key,
-                venue_types=config.bridge_runtime.venue_types,
-            )
-            log_msg(
-                f"INIT: bridge origin, daemon={self.bridge_policy.daemon_pubkey.hex()[:16]} "
-                f"venues={sorted(self.bridge_policy.venue_types)}"
-            )
+        runtime_cfg = config.bridge_runtime
+        self.bridge_policy = BridgePolicy(
+            venue_types=runtime_cfg.venue_types if runtime_cfg is not None else frozenset()
+        )
+        if runtime_cfg is not None:
+            log_msg(f"INIT: bridging venues={sorted(v.venue for v in runtime_cfg.venues)}")
 
         # Tracks the one ACL rule (if any) that grants admin by the server's
         # own key because nothing else in config did — as opposed to a rule
@@ -288,7 +258,7 @@ class BonnetServer:
         final_rules, self._acl_admin_rule = _synthesize_acl(
             acl._rules, config.admin_pubkey_hex, self.server_identity.public_key
         )
-        acl._rules = _with_bridge_daemon_rule(final_rules, self.bridge_policy)
+        acl._rules = final_rules
         if not had_rules:
             log_msg("INIT: no ACL rules configured, defaulting to server identity as admin")
         elif not had_server_admin and self._acl_admin_rule is not None:
@@ -637,7 +607,6 @@ class BonnetServer:
             new_rules, new_admin_rule = _synthesize_acl(
                 fresh.acl._rules, fresh.admin_pubkey_hex, self.server_identity.public_key
             )
-            new_rules = _with_bridge_daemon_rule(new_rules, self.bridge_policy)
         except Exception as exc:
             log_msg(f"ACL_RELOAD: reason={reason} synthesis failed ({exc}), keeping {old_n} rules")
             return f"Error: ACL reload failed, keeping {old_n} rules: {exc}"

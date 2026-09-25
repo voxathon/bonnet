@@ -110,6 +110,20 @@ class IdentityStore:
                 PRIMARY KEY (origin, username)
             )
         """)
+        # Accounts at foreign venues, linked to one identity (register's
+        # `venue`). The token is wrapped exactly when the identity is.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS venue_accounts (
+                origin TEXT NOT NULL,
+                username TEXT NOT NULL,
+                venue TEXT NOT NULL,
+                venue_user TEXT NOT NULL,
+                token_salt BLOB NOT NULL,
+                token BLOB NOT NULL,
+                wrapped INTEGER NOT NULL,
+                PRIMARY KEY (origin, username, venue)
+            )
+        """)
         conn.commit()
 
     def _derive_aes_key(self, password: str, key_salt: bytes, key_len: int = 32) -> bytes:
@@ -350,6 +364,88 @@ class IdentityStore:
         encrypted = bytes(row["encrypted_private_key"])
 
         return self._decrypt_private_key(password, key_salt, encrypted)
+
+    # -- venue accounts ----------------------------------------------------
+
+    def _unlocked(self, origin: str, username: str, password: str | None) -> bool:
+        """Whether the identity is wrapped, having checked `password` if it is."""
+        wrapped = self.is_wrapped(origin, username)
+        if wrapped:
+            if not password:
+                raise ValueError(
+                    f"Identity '{username}' is password-protected; supply its password "
+                    f"(auth='{username}:<password>')"
+                )
+            if not self.verify_password(origin, username, password):
+                raise ValueError("Invalid password")
+        return wrapped
+
+    def link_venue(
+        self,
+        origin: str,
+        username: str,
+        venue: str,
+        venue_user: str,
+        token: str,
+        password: str | None = None,
+    ) -> None:
+        """Store (or replace) the identity's account at `venue`, wrapped like its key."""
+        wrapped = self._unlocked(origin, username, password)
+        salt = b""
+        blob = token.encode("utf-8")
+        if wrapped:
+            assert password is not None
+            salt = os.urandom(16)
+            nonce = os.urandom(12)
+            aes = AESGCM(self._derive_aes_key(password, salt))
+            blob = nonce + aes.encrypt(nonce, blob, venue.encode("utf-8"))
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT OR REPLACE INTO venue_accounts
+               (origin, username, venue, venue_user, token_salt, token, wrapped)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (origin, username, venue, venue_user, salt, blob, int(wrapped)),
+        )
+        conn.commit()
+
+    def venue_account(
+        self, origin: str, username: str, venue: str, password: str | None = None
+    ) -> tuple[str, str] | None:
+        """(venue user, token) for the identity's account at `venue`, if linked."""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT venue_user, token_salt, token, wrapped FROM venue_accounts "
+            "WHERE origin = ? AND username = ? AND venue = ?",
+            (origin, username, venue),
+        ).fetchone()
+        if row is None:
+            return None
+        blob = bytes(row["token"])
+        if row["wrapped"]:
+            self._unlocked(origin, username, password)
+            assert password is not None
+            aes = AESGCM(self._derive_aes_key(password, bytes(row["token_salt"])))
+            blob = aes.decrypt(blob[:12], blob[12:], venue.encode("utf-8"))
+        return row["venue_user"], blob.decode("utf-8")
+
+    def linked_venues(self, origin: str, username: str) -> dict[str, str]:
+        """Venue -> venue user, for every account linked to the identity. No secrets."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT venue, venue_user FROM venue_accounts WHERE origin = ? AND username = ?",
+            (origin, username),
+        ).fetchall()
+        return {r["venue"]: r["venue_user"] for r in rows}
+
+    def unlink_venue(self, origin: str, username: str, venue: str) -> bool:
+        """Forget the identity's account at `venue`. True if there was one."""
+        conn = self._get_conn()
+        cur = conn.execute(
+            "DELETE FROM venue_accounts WHERE origin = ? AND username = ? AND venue = ?",
+            (origin, username, venue),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
     def get_pubkey(self, origin: str, username: str) -> bytes | None:
         conn = self._get_conn()

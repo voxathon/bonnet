@@ -14,9 +14,11 @@
 
 """The bridge runtime: ingest from venues onto bridge boards (design doc §5, §11.1).
 
-One `BridgeRuntime` runs next to a `BonnetServer` in the same process and
-publishes through it in-process. Each venue polls in its own task with its
-own backoff, so one venue going offline leaves the others alone.
+One `BridgeRuntime` runs inside a `BonnetServer` whose config has
+`[[bridges.venue]]`s, and publishes through it in-process. Bridge facts are
+signed with the server's own key; puppets' keys derive from its puppet
+secret. Each venue polls in its own task with its own backoff, so one venue
+going offline leaves the others alone.
 
 M1 is read-only: it mirrors, observes, and never posts to a venue. It never
 cancels or purges either; the only lifecycle action a bridge ever takes is a
@@ -43,18 +45,18 @@ from bonnet.bridges.adapter import (
     VenueUncertain,
     build_adapter,
 )
-from bonnet.bridges.bindings import Bindings
+from bonnet.bridges.bindings import Bindings, signer_name
 from bonnet.bridges.config import (
     BindingConfig,
     BridgeRuntimeConfig,
     VenueConfig,
-    load_daemon_identity,
-    load_master_secret,
+    load_puppet_secret,
 )
 from bonnet.bridges.index import MirrorEntry, RuntimeIndex
 from bonnet.bridges.local_publish import LocalPublisher
 from bonnet.bridges.model import BridgeMetadata, SourceKey
 from bonnet.bridges.puppets import PuppetError, Puppets
+from bonnet.core.crypto import Identity
 from bonnet.core.kinds import KIND_ARTICLE
 from bonnet.core.logging import log_msg
 from bonnet.core.record import (
@@ -118,15 +120,17 @@ class BridgeRuntime:
         self._server = server
         self._config = config or server.config.bridge_runtime
         if self._config is None:
-            raise ValueError("bridges.toml has no [runtime] table: this is not a bridge origin")
+            raise ValueError("this server bridges no venues ([[bridges.venue]])")
         self._origin = server.config.origin
         self._clock = clock
         self._max_raw = server.config.max_article_body_size
-        self.daemon = load_daemon_identity(self._config)
         self.publisher = LocalPublisher.for_server(server)
-        self.index = RuntimeIndex(self._config.state_dir)
+        self.index = RuntimeIndex(server.config.bridges_state_dir)
         self.puppets = Puppets(
-            self.publisher, server.users, self._origin, load_master_secret(self._config)
+            self.publisher,
+            server.users,
+            self._origin,
+            load_puppet_secret(server.config.puppet_secret_path),
         )
         self.bindings = Bindings(
             self.publisher,
@@ -134,14 +138,21 @@ class BridgeRuntime:
             server.nav,
             server.users,
             self._origin,
-            self.daemon,
-            self._config.daemon_username,
+            lambda: self.daemon,
         )
         self.venues = [_Venue(v, adapter_factory(v)) for v in self._config.venues]
         self._relay_accounts = {v.venue: _relay_account(v) for v in self._config.venues}
         # Bindings whose relay credentials the venue rejected: relaying stops
         # there until restart, since venues lock out IPs over bad tokens.
         self._relay_stopped: set[str] = set()
+
+    @property
+    def daemon(self) -> Identity:
+        """The key bridge facts are signed with: the server's own, as it is now."""
+        return self._server.server_identity
+
+    def _daemon_name(self) -> str:
+        return signer_name(self._server.users, self._origin, self.daemon)
 
     async def close(self) -> None:
         for v in self.venues:
@@ -156,8 +167,7 @@ class BridgeRuntime:
     # ------------------------------------------------------------------
 
     async def setup(self) -> None:
-        """Register the daemon, create bridge boards, reconcile bindings."""
-        await self.bindings.ensure_daemon()
+        """Create bridge boards and reconcile bindings."""
         await self.bindings.reconcile(
             self._config.venues, {v.config.type: v.adapter.capabilities for v in self.venues}
         )
@@ -631,7 +641,7 @@ class BridgeRuntime:
                 kind=model.KIND_BRIDGE_LINK,
                 origin=self._origin,
                 actor_pubkey=self.daemon.public_key,
-                actor_username=self._config.daemon_username,
+                actor_username=self._daemon_name(),
                 actor_registrar=self._origin,
                 target_origin=self._origin,
                 target_board=board,
@@ -681,7 +691,7 @@ class BridgeRuntime:
             kind=model.KIND_BRIDGE_OBSERVATION,
             origin=self._origin,
             actor_pubkey=self.daemon.public_key,
-            actor_username=self._config.daemon_username,
+            actor_username=self._daemon_name(),
             actor_registrar=self._origin,
             target_origin=self._origin,
             target_event_id=target_event_id,
@@ -751,7 +761,6 @@ async def serve_bridge(server, runtime: BridgeRuntime, **run_kwargs) -> bool:
     starts in that case. A runtime failure stops the server and re-raises,
     so the process exits non-zero.
     """
-    run_kwargs.setdefault("console", False)
     server_task = asyncio.create_task(server.run(**run_kwargs))
     started = asyncio.create_task(server.started.wait())
     await asyncio.wait({server_task, started}, return_when=asyncio.FIRST_COMPLETED)
