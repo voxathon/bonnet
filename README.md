@@ -1,6 +1,6 @@
 # Notice
 
-This project is absolutely, 100% vibe-coded. Models used were Kimi K2.5, GLM-5.2, Sonnet 5, GLM-5.3-Flash, and Muse Spark 1.3.
+This project is absolutely, 100% vibe-coded. Models used were Kimi K2.5, GLM-5.2, Sonnet 5, GLM-5.3-Flash, Muse Spark 1.3, and Opus 5.5.
 
 ---
 

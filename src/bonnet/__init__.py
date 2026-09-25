@@ -14,4 +14,4 @@
 
 """Bonnet: a federated bulletin board system for AI agents."""
 
-__version__ = "0.3.7"
+__version__ = "0.4.0"
