@@ -58,7 +58,7 @@ from bonnet.net.firehose_models import (
     SearchResponse,
     UserInfo,
 )
-from bonnet.net.firehose_sync import is_safe_dial_target
+from bonnet.net.firehose_sync import dial_target_problem
 from bonnet.net.firehose_transport import (
     FirehoseClientError,  # noqa: F401 — re-export
     FirehoseTransport,
@@ -1045,19 +1045,26 @@ class FirehoseHTTPClient(FirehoseTransport):
         )
         resp = await self._send_command(cmd)
         result = parse_article_list_response(resp, aggregate=(origin == ""))
-        if origin and origin != self._server_origin:
-            for item in result.results:
-                if item.body_state == "unavailable":
-                    item.body_state = "remote"
-        elif origin == "":
-            for item in result.results:
-                if (
-                    item.body_state == "unavailable"
-                    and item.origin
-                    and item.origin != self._server_origin
-                ):
-                    item.body_state = "remote"
+        self._label_rows(result.results, origin)
         return result
+
+    def _label_rows(self, rows, origin: str) -> None:
+        """Give each row its origin, and mark another origin's bodies 'remote'.
+
+        A single-origin response leaves the per-row origin off the wire (it
+        would repeat the request), so it's filled back in here, as list_boards
+        does. A body this relay doesn't hold but another origin does is
+        'remote', not 'unavailable': fetching it redirects there.
+        """
+        for item in rows:
+            if origin and not item.origin:
+                item.origin = origin
+            if (
+                getattr(item, "body_state", None) == "unavailable"
+                and item.origin
+                and item.origin != self._server_origin
+            ):
+                item.body_state = "remote"
 
     async def search_articles(
         self,
@@ -1081,7 +1088,9 @@ class FirehoseHTTPClient(FirehoseTransport):
             include_superseded,
         )
         resp = await self._send_command(cmd)
-        return parse_article_search_response(resp, aggregate=(origin == ""))
+        result = parse_article_search_response(resp, aggregate=(origin == ""))
+        self._label_rows(result.results, origin)
+        return result
 
     async def query_articles(
         self, origin: str, board: str, filters: list, offset: int = 0, limit: int = 100
@@ -1092,7 +1101,9 @@ class FirehoseHTTPClient(FirehoseTransport):
         """
         cmd = build_article_query(origin, board, filters, offset, limit)
         resp = await self._send_command(cmd)
-        return parse_article_query_response(resp)
+        result = parse_article_query_response(resp, aggregate=(origin == ""))
+        self._label_rows(result.results, origin)
+        return result
 
     async def get_article_body(self, origin: str, board: str, article_num: int) -> bytes:
         try:
@@ -1113,13 +1124,16 @@ class FirehoseHTTPClient(FirehoseTransport):
             # between loopback ports, and a public relay has no business
             # sending anyone there. Same reasoning, and same seam, as
             # is_loopback's other two callers.
-            if not is_safe_dial_target(
+            problem = dial_target_problem(
                 redirect.hostname,
                 redirect.port,
                 allow_private=is_loopback(self._base_url),
-            ):
+            )
+            if problem:
                 raise FirehoseClientError(
-                    f"refusing redirect to unsafe target {redirect.hostname}:{redirect.port}"
+                    f"{self._server_origin or 'the relay'} redirected this body to "
+                    f"{redirect.hostname}:{redirect.port} (where {origin} is reached), "
+                    f"which this client won't dial: {problem}"
                 ) from None
             scheme = urlparse(self._base_url).scheme
             origin_client = FirehoseHTTPClient(

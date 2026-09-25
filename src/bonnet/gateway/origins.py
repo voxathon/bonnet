@@ -159,6 +159,16 @@ class OriginStore:
         )
         self._conn.commit()
 
+    def update_url(self, origin: str, url: str) -> None:
+        """Re-point a joined origin at `url`, keeping everything else.
+
+        For the gateway's port fallback: an origin that answered on the
+        other default port is remembered there, so the next process start
+        dials the address that works instead of failing over again.
+        """
+        self._conn.execute("UPDATE origins SET url = ? WHERE origin = ?", (url, origin))
+        self._conn.commit()
+
     def forget(self, origin: str) -> bool:
         """Drop an origin. Its pinned key is left alone — forgetting an
         origin is not a reason to stop recognising the key it presented."""

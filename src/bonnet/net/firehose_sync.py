@@ -79,30 +79,50 @@ def is_safe_dial_target(hostname: str | None, port: int, allow_private: bool = F
     pushed onto every caller as a pre-check.
 
     The hostname is canonicalized (lower, trailing dot, IDNA) before any
-    check, so the address validated is the address dialed.
+    check, so the address validated is the address dialed. See
+    `dial_target_problem` for why a target is refused.
+    """
+    return dial_target_problem(hostname, port, allow_private) is None
+
+
+def _address_problem(addr, allow_private: bool) -> str | None:
+    if allow_private:
+        return None
+    if addr.is_loopback:
+        return f"it is a loopback address ({addr})"
+    if addr.is_private or addr.is_link_local:
+        return f"it is a private address ({addr})"
+    if addr.is_multicast or addr.is_reserved or addr.is_unspecified:
+        return f"it is not a unicast address ({addr})"
+    return None
+
+
+def dial_target_problem(hostname: str | None, port: int, allow_private: bool = False) -> str | None:
+    """Why `is_safe_dial_target` refuses this target, or None if it doesn't.
+
+    The reason is for an operator reading an error: "does not resolve" and
+    "resolves to a loopback address" are fixed in different places (DNS, or
+    a hosts file), and a bare "unsafe" leaves them to guess which.
     """
     if not hostname:
-        return False
+        return "no hostname"
     if port < 1 or port > 65535:
-        return False
+        return f"port {port} is out of range"
     hostname = normalize_hostname(hostname)
     if not hostname:
-        return False
+        return "the hostname is not valid"
 
     try:
-        addr = ipaddress.ip_address(hostname)
-        if not allow_private:
-            if addr.is_loopback or addr.is_private or addr.is_link_local:
-                return False
-            if addr.is_multicast or addr.is_reserved or addr.is_unspecified:
-                return False
+        problem = _address_problem(ipaddress.ip_address(hostname), allow_private)
+        if problem:
+            return problem
     except ValueError:
         pass
 
     try:
         infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
-    except socket.gaierror:
-        return False
+    except socket.gaierror as e:
+        return f"it does not resolve ({e.strerror or e})"
 
     for family, _, _, _, sockaddr in infos:
         ip_str = sockaddr[0]
@@ -110,13 +130,11 @@ def is_safe_dial_target(hostname: str | None, port: int, allow_private: bool = F
             addr = ipaddress.ip_address(ip_str)
         except ValueError:
             continue
-        if not allow_private:
-            if addr.is_loopback or addr.is_private or addr.is_link_local:
-                return False
-            if addr.is_multicast or addr.is_reserved or addr.is_unspecified:
-                return False
+        problem = _address_problem(addr, allow_private)
+        if problem:
+            return problem.replace("it is", "it resolves to", 1)
 
-    return True
+    return None
 
 
 # ---------------------------------------------------------------------------

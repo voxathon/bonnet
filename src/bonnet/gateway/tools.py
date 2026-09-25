@@ -630,20 +630,87 @@ async def _connect_authenticated(client: FirehoseHTTPClient, auth: str | None) -
     anonymous principal when `auth` is omitted.
     """
     if tenancy.is_anonymous():
-        await client.connect_anonymous()
+        await _with_port_fallback(client, client.connect_anonymous)
     else:
         username, password = _resolve_auth(auth)
         store = _get_identity_store()
         private_key = store.get_private_key(_default_origin() or "", username, password)
         identity = Identity.from_private_key(private_key)
-        await client.connect(identity, username=username)
+        await _with_port_fallback(client, lambda: client.connect(identity, username=username))
     _store_manifest_after_first_use(client)
 
 
 async def _connect_anonymous(client: FirehoseHTTPClient) -> None:
     """Connect using the server's anonymous key."""
-    await client.connect_anonymous()
+    await _with_port_fallback(client, client.connect_anonymous)
     _store_manifest_after_first_use(client)
+
+
+def _alternate_port_url(url: str) -> str | None:
+    """The same https host on Bonnet's other usual port, or None.
+
+    443 (bare or explicit: a reverse proxy or tunnel) and 2272 (Bonnet's own
+    listen port) are how an origin is typically reached, and a remembered
+    or configured address on one of them going quiet usually means the
+    origin is on the other.
+    """
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or parsed.port not in (None, 443, 2272):
+        return None
+    host = parsed.hostname or ""
+    if not host:
+        return None
+    # urlsplit strips IPv6 brackets from `.hostname`; put them back so the
+    # target stays a valid URL for literal IPv6 hosts.
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port == 2272:
+        return canonicalize_url(f"https://{host}")
+    return canonicalize_url(f"https://{host}:2272")
+
+
+async def _with_port_fallback(client: FirehoseHTTPClient, attempt) -> None:
+    """Run `attempt` (a connect), retrying once on the other usual port.
+
+    Only when nothing answered at all (DNS, refused, timeout) and discovery
+    never completed: a real HTTP response, even an error, means something
+    is there, and a client that got as far as discovery has already
+    committed to this address. Every way a tool call reaches an origin —
+    `connect`, the first call after `switch_origin`, a remembered origin
+    on a fresh start — goes through here, so they all fail over alike.
+
+    When the other port answers, the session and the origin's remembered
+    URL move to it, so the next call and the next process start dial the
+    address that works.
+    """
+    try:
+        await attempt()
+        return
+    except PinConfirmationRequired:
+        raise
+    except FirehoseClientError as e:
+        dead = client.base_url
+        alternate = _alternate_port_url(dead)
+        if alternate is None or client.discovery is not None or "could not reach" not in str(e):
+            raise
+        client._base_url = alternate
+        try:
+            await attempt()
+        except PinConfirmationRequired:
+            raise
+        except FirehoseClientError as e2:
+            client._base_url = dead
+            raise FirehoseClientError(f"{e}; also tried {alternate}: {e2}") from None
+    log_info("GATEWAY port fallback", dead=dead, url=alternate)
+    current = current_origin_url.get()
+    if current and canonicalize_url(current) == canonicalize_url(dead):
+        current_origin_url.set(alternate)
+    origin = client.server_origin
+    if origin:
+        store = _get_origin_store()
+        entry = store.get(origin)
+        if entry is not None and canonicalize_url(entry["url"]) == canonicalize_url(dead):
+            store.update_url(origin, alternate)
 
 
 async def _connect_with_default(client: FirehoseHTTPClient, auth: str | None) -> None:
@@ -667,6 +734,32 @@ async def _connect_with_default(client: FirehoseHTTPClient, auth: str | None) ->
         await _connect_authenticated(client, None)
         return
     await _connect_anonymous(client)
+
+
+async def _board_elsewhere(client: FirehoseHTTPClient, board: str) -> str | None:
+    """The one other origin holding `board`, when the server's own doesn't.
+
+    A single-origin read that named no origin tries the connected server's
+    own first; only when that misses is this asked, so a local board costs
+    no extra round trip. None when the server's own origin holds the board
+    (the miss was real) or no origin does. A board on several other origins
+    is ambiguous, and raised as such rather than picked.
+    """
+    own = client._server_origin or ""
+    try:
+        boards = await client.list_boards(origin="")
+    except ProtocolError:
+        # BOARD_LIST refused: the lookup is a courtesy, so the original
+        # miss stands rather than becoming this error.
+        return None
+    holders = sorted({b.origin for b in boards if b.name == board})
+    if not holders or own in holders:
+        return None
+    if len(holders) > 1:
+        raise ValueError(
+            f"/{board} is on several origins ({', '.join(holders)}); pass origin= to pick one"
+        )
+    return holders[0]
 
 
 def _store_manifest_after_first_use(client: FirehoseHTTPClient) -> None:
@@ -933,14 +1026,10 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     # origin silently redirects every subsequent tool call to an address that
     # does not answer.
     #
-    # Fallback: https on 443 (bare or explicit — fine behind a reverse
-    # proxy or tunnel) and Bonnet's own default port 2272 are retried as
-    # each other, once, same host, and only on a connect-level failure
-    # (DNS, refused, timeout) - a real response (even an error one)
-    # means something is there and answering, so it is left alone.
-    # `https://h:443` and `https://h` are the same socket either way.
-    port_fallback_eligible = parsed.scheme == "https" and parsed.port in (None, 443, 2272)
-    fell_back_to_2272 = False
+    # Port fallback (443 <-> 2272, once, connect-level failures only) is
+    # `_with_port_fallback`, under `_connect_anonymous`: the same rule every
+    # other way of reaching an origin goes through.
+    #
     # Establishing a connection always re-fetches the manifest: stash the
     # session entry aside and clear it so `_make_client` below cannot
     # hydrate from it. The verified result is stored on success; the stash
@@ -951,28 +1040,13 @@ async def connect(url: str, verify_tls: bool | None = None) -> dict:
     client = None
     try:
         client = _make_client()
-        try:
-            await _connect_anonymous(client)
-        except FirehoseClientError as e:
-            if not port_fallback_eligible or "could not reach" not in str(e):
-                raise
-            await client.close()
-            # urlsplit strips IPv6 brackets from `.hostname`; put them back
-            # so the retry target stays a valid URL for literal IPv6 hosts.
-            fallback_host = parsed.hostname or ""
-            if ":" in fallback_host and not fallback_host.startswith("["):
-                fallback_host = f"[{fallback_host}]"
-            if parsed.port == 2272:
-                fallback_target = f"{parsed.scheme}://{fallback_host}"
-            else:
-                fallback_target = f"{parsed.scheme}://{fallback_host}:2272"
-            resolved_url = canonicalize_url(fallback_target)
+        await _connect_anonymous(client)
+        fell_back_to_2272 = client.base_url != resolved_url
+        if fell_back_to_2272:
+            resolved_url = client.base_url
             resolved_verify = default_verify_tls(resolved_url) if verify_tls is None else verify_tls
             current_origin_url.set(resolved_url)
             current_origin_verify.set(resolved_verify)
-            fell_back_to_2272 = True
-            client = _make_client()
-            await _connect_anonymous(client)
         origin = client.server_origin or ""
         # First successful contact is when to learn this origin's key history,
         # while it is answering. Cached, verification of its older records
@@ -2041,7 +2115,8 @@ async def get_article(
     article_num: article number (starts at 1).
     board: board name (defaults to the board open_board last set).
     include_body: whether to fetch the article body content.
-    origin: origin to query (defaults to server's origin).
+    origin: origin to query (defaults to the server's own, or else the one
+        origin holding the board).
     """
     article_num = _require_int("article_num", article_num)
     if article_num < 0:
@@ -2051,13 +2126,23 @@ async def get_article(
     client = _make_client()
     try:
         await _connect_with_default(client, auth)
+        named = bool(origin)
         origin = origin or client._server_origin or ""
         try:
             view = await client.get_article(origin, board, article_num, include_body)
         except ProtocolError as e:
-            if e.code == 0x0003:
+            if e.code != 0x0003:
+                raise
+            elsewhere = None if named else await _board_elsewhere(client, board)
+            if elsewhere is None:
                 return None
-            raise
+            origin = elsewhere
+            try:
+                view = await client.get_article(origin, board, article_num, include_body)
+            except ProtocolError as e2:
+                if e2.code == 0x0003:
+                    return None
+                raise
         if view and include_body and view.body is None and view.body_size > 0:
             try:
                 body = await client.get_article_body(origin, board, article_num)
@@ -2068,14 +2153,22 @@ async def get_article(
                     actual_hash = compute_body_hash(body).hex()
                     ok = len(body) == view.body_size and actual_hash == view.body_hash
                     view.body_check = "matched" if ok else "mismatched"
-            except PinConfirmationRequired:
+            except PinConfirmationRequired as e:
                 # A remote body redirects to its own origin, whose key this
                 # client has not accepted. The candidate is recorded (see
-                # where_am_i), and the body is simply unavailable — which the
-                # view already models. Failing the whole read would be worse:
-                # the article and its metadata are fine, and it is only the
-                # bytes from an unaccepted third party that are withheld.
-                pass
+                # where_am_i), and the body is withheld. Failing the whole
+                # read would be worse: the article and its metadata are fine,
+                # and it is only the bytes from an unaccepted third party that
+                # are withheld. Saying so is what makes that recoverable.
+                view.body_unavailable_reason = (
+                    f"the body is held by {e.origin}, whose {e.kind} key this client "
+                    f"has not accepted (fingerprint {e.fingerprint}); confirm it out "
+                    "of band, accept it with trust_origin_key, and read again"
+                )
+            except FirehoseClientError as e:
+                # A redirect this client refused to follow, or an origin that
+                # would not answer: the relay's metadata still stands.
+                view.body_unavailable_reason = str(e)
             except ProtocolError as e:
                 if e.code == 0x0007:
                     # The relay holds a body for this article but it failed
@@ -2084,10 +2177,11 @@ async def get_article(
                     # rather than leaving the caller unable to tell the two
                     # apart.
                     view.body_check = "mismatched"
-                # else: body unavailable/purged or unreachable — leave it
-                # unset; signature verification failures still propagate
-            except httpx.HTTPError:
-                pass
+                # body unavailable/purged or unreachable: say which;
+                # signature verification failures still propagate
+                view.body_unavailable_reason = str(e)
+            except httpx.HTTPError as e:
+                view.body_unavailable_reason = f"could not fetch the body: {e or type(e).__name__}"
         if view is not None:
             cursor.set_article(board, article_num, view.article_id)
         return view
@@ -2297,10 +2391,10 @@ async def query_articles(
 
       - Sort order is article_num ASC (oldest first) here, not created_at
         DESC (newest first) like the other two. Reverse client-side if you
-        want most-recent-first.
-      - origin="" means "nothing" here, not "aggregate every known origin"
-        like list_articles/search_articles — pass a specific origin, or
-        leave it unset to use the connected server's own.
+        want most-recent-first. With origin="" (every origin holding the
+        board), article numbers from different origins don't compare, so
+        results come grouped by origin, each group in article_num order;
+        each result's `origin` says which one it's from.
 
     board: board name (defaults to the board open_board last set).
     author_pubkey_hex: hex Ed25519 public key to filter by author.
@@ -2314,8 +2408,8 @@ async def query_articles(
     reply_to_article_id: hex article_id; only show direct replies to that article.
     root_article_id: hex article_id of a thread's root; show every reply in that
         thread, at any depth (not the root's own row — see above).
-    origin: origin to query (defaults to server's origin; "" is not aggregate
-        here, unlike list_articles/search_articles).
+    origin: origin to query (empty = every origin holding the board, as
+        list_articles/search_articles do).
     """
     board = cursor.resolve_board(board)
     offset = _require_int("offset", offset)
@@ -2355,7 +2449,6 @@ async def query_articles(
     client = _make_client()
     try:
         await _connect_with_default(client, auth)
-        origin = origin or client._server_origin or ""
         return await client.query_articles(origin, board, filters, offset, limit)
     finally:
         await client.close()
@@ -2380,8 +2473,7 @@ async def read_thread(
     article in the thread, not necessarily the root — a reply resolves to
     the same tree as its root would.
 
-    Scope matches query_articles: one origin only, no cross-origin merge.
-    That is not just consistency for its own sake — a reply is stored under
+    One origin only, no cross-origin merge. That is not just consistency for its own sake — a reply is stored under
     its own author's origin, in that origin's own board projection, so a
     thread spanning origins is structurally two separate single-origin views
     here regardless; there is no aggregate view this tool could return even
@@ -2407,7 +2499,8 @@ async def read_thread(
     article_num: any article in the thread (root or reply).
     board: board name (defaults to the board open_board last set).
     limit: max articles to fetch for the thread (see `truncated`).
-    origin: origin to query (defaults to server's origin).
+    origin: origin to query (defaults to the server's own, or else the one
+        origin holding the board).
     """
     board = cursor.resolve_board(board)
     limit = _require_int("limit", limit)
@@ -2417,8 +2510,23 @@ async def read_thread(
     client = _make_client()
     try:
         await _connect_with_default(client, auth)
+        named = bool(origin)
         origin = origin or client._server_origin or ""
-        view = await client.get_article(origin, board, article_num, include_body=False)
+        try:
+            view = await client.get_article(origin, board, article_num, include_body=False)
+        except ProtocolError as e:
+            if e.code != 0x0003:
+                raise
+            view = None
+        if view is None and not named:
+            elsewhere = await _board_elsewhere(client, board)
+            if elsewhere is not None:
+                origin = elsewhere
+                try:
+                    view = await client.get_article(origin, board, article_num, include_body=False)
+                except ProtocolError as e:
+                    if e.code != 0x0003:
+                        raise
         if view is None:
             raise ValueError(f"article #{article_num} not found in /{board}")
 

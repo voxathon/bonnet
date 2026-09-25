@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Gateway connect() 443 <-> 2272 port fallback.
+"""Gateway 443 <-> 2272 port fallback.
 
 Bare/` :443` https URLs retry once on `:2272` when nothing answers, and
 `:2272` URLs retry once on 443 — same host, connect-level failures only.
+The rule lives under every connection a tool call makes, so `connect`,
+the first call after `switch_origin`, and a remembered origin on a fresh
+start all fail over alike, and a fallback that works is remembered.
 """
 
 from types import SimpleNamespace
@@ -56,17 +59,37 @@ def isolated(tmp_path, monkeypatch):
 
 
 class FakeClient:
-    """Minimal stand-in for the post-discovery client connect() drives."""
+    """Stand-in for the client tool calls drive: connects per a shared script.
 
-    def __init__(self, url):
-        self._url = url
+    `script` has one entry per connection attempt, across every client:
+    None succeeds, anything else is raised. Each attempt records the URL
+    it dialed, which is what a fallback changes.
+    """
+
+    def __init__(self, url, script, attempts):
+        self._base_url = url
+        self._script = script
+        self._attempts = attempts
+        self.server_origin = None
+        self.discovery = None
+        self.closed = False
+
+    @property
+    def base_url(self):
+        return self._base_url
+
+    async def connect_anonymous(self):
+        idx = len(self._attempts)
+        self._attempts.append(self._base_url)
+        action = self._script[idx] if idx < len(self._script) else None
+        if action is not None:
+            raise action
         self.server_origin = "test-origin"
         self.discovery = SimpleNamespace(
             known_origins=[],
             signature_lifetime_seconds=300,
             clock_skew_seconds=300,
         )
-        self.closed = False
 
     async def close(self):
         self.closed = True
@@ -90,38 +113,35 @@ class FakeClient:
 
 
 def _install(monkeypatch, script):
-    """Route _make_client at fakes; _connect_anonymous follows `script`.
+    """Route _make_client at fakes that follow `script`.
 
-    `script` is a list with one entry per connect attempt: None means
-    success, otherwise the exception to raise. Returns the list of
-    observed client URLs (via tools._current_url at build time) and
-    the created FakeClients.
+    Returns the URLs each connection attempt dialed, the created
+    FakeClients, and a counter of attempts.
     """
-    seen_urls = []
+    attempts: list[str] = []
     created = []
-    calls = {"n": 0}
 
     def make_client(url=None, verify=None):
         target = url if url is not None else tools._current_url()
-        seen_urls.append(target)
-        client = FakeClient(target)
+        client = FakeClient(target, script, attempts)
         created.append(client)
         return client
-
-    async def connect_anonymous(client):
-        idx = calls["n"]
-        calls["n"] += 1
-        action = script[idx] if idx < len(script) else None
-        if action is not None:
-            raise action
 
     async def unlock():
         return []
 
     monkeypatch.setattr(tools, "_make_client", make_client)
-    monkeypatch.setattr(tools, "_connect_anonymous", connect_anonymous)
     monkeypatch.setattr(tools, "_unlock_origin_tools", unlock)
-    return seen_urls, created, calls
+    return attempts, created, _Count(attempts)
+
+
+class _Count(dict):
+    def __init__(self, attempts):
+        super().__init__()
+        self._attempts = attempts
+
+    def __getitem__(self, key):
+        return len(self._attempts)
 
 
 async def test_bare_host_falls_back_to_2272(isolated, monkeypatch):
@@ -202,3 +222,68 @@ async def test_ipv6_fallback_target_stays_bracketed(isolated, monkeypatch):
     assert result["url"] == canonicalize_url("https://[2001:db8::1]:2272")
     assert result["port_fallback"] is True
     assert seen[1] == canonicalize_url("https://[2001:db8::1]:2272")
+
+
+async def test_switch_origin_falls_back_and_remembers(isolated, monkeypatch):
+    """switch_origin takes the remembered URL as-is; the first call after it
+    used to fail flat when that address had gone quiet. Now it fails over
+    like connect, and the working address replaces the dead one in the
+    store so the next process start doesn't repeat the detour."""
+    seen, _, _ = _install(
+        monkeypatch,
+        [FirehoseClientError("could not reach https://bbs.example: refused"), None],
+    )
+    store = tools._get_origin_store()
+    store.remember("test-origin", "https://bbs.example", True, "")
+    await tools.switch_origin("test-origin")
+
+    client = tools._make_client()
+    await tools._connect_with_default(client, None)
+
+    assert seen == ["https://bbs.example", "https://bbs.example:2272"]
+    assert tools.current_origin_url.get() == "https://bbs.example:2272"
+    assert store.get("test-origin")["url"] == "https://bbs.example:2272"
+
+
+async def test_remembered_origin_on_a_fresh_start_falls_back(isolated, monkeypatch):
+    """A fresh process adopts the remembered origin without any network
+    call; its first real connection is where the fallback happens."""
+    tools._get_origin_store().remember("test-origin", "https://bbs.example:2272", True, "")
+    seen, _, _ = _install(
+        monkeypatch,
+        [FirehoseClientError("could not reach https://bbs.example:2272: refused"), None],
+    )
+    client = tools._make_client()
+    await tools._connect_with_default(client, None)
+
+    assert seen == ["https://bbs.example:2272", "https://bbs.example"]
+    assert tools._get_origin_store().get("test-origin")["url"] == "https://bbs.example"
+
+
+async def test_no_fallback_once_discovery_succeeded(isolated, monkeypatch):
+    """A client that got as far as discovery has committed to its address;
+    a failure after that is that address's, not a reason to go elsewhere."""
+    seen, _, _ = _install(monkeypatch, [None])
+    client = tools._make_client("https://bbs.example")
+    await client.connect_anonymous()
+
+    async def fails_after_discovery():
+        raise FirehoseClientError("could not reach https://bbs.example: reset")
+
+    with pytest.raises(FirehoseClientError, match="reset"):
+        await tools._with_port_fallback(client, fails_after_discovery)
+    assert client.base_url == "https://bbs.example"
+
+
+async def test_double_failure_names_both_addresses(isolated, monkeypatch):
+    _install(
+        monkeypatch,
+        [
+            FirehoseClientError("could not reach https://bbs.example: refused"),
+            FirehoseClientError("could not reach https://bbs.example:2272: refused"),
+        ],
+    )
+    client = tools._make_client("https://bbs.example")
+    with pytest.raises(FirehoseClientError, match="also tried https://bbs.example:2272"):
+        await tools._connect_with_default(client, None)
+    assert client.base_url == "https://bbs.example"
