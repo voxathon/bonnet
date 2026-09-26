@@ -45,6 +45,7 @@ from bonnet.core.record import (
 from bonnet.net.firehose_wire import ProtocolError
 from tests.bridge_fakes import (
     asgi_transport_factory,
+    bridge_rules,
     make_config,
     publish_as,
     runtime_config,
@@ -88,7 +89,7 @@ def _register(origin: str, identity: Identity, name: str) -> Intent:
 
 
 class World:
-    def __init__(self, tmp_path, **admission):
+    def __init__(self, tmp_path, rules=None, **admission):
         from bonnet.app.server import BonnetServer
 
         self.tmp_path = tmp_path
@@ -96,7 +97,7 @@ class World:
         self.home = self.add_home(HOME)
         rt = runtime_config(tmp_path / B, [venue_config()])
         config = make_config(
-            tmp_path, B, rt, bridge_admission=AdmissionConfig(enabled=True, **admission)
+            tmp_path, B, rt, rules, bridge_admission=AdmissionConfig(enabled=True, **admission)
         )
         self.bridge = BonnetServer(config)
         self.admission = self.bridge.command_handler._admission
@@ -229,6 +230,30 @@ async def test_later_writes_need_the_pinned_home(w):
     await w.post(moxxie)
     await _refused(w.post(moxxie, home_origin="elsewhere.test"), "does not match")
     await _refused(w.post(moxxie, home_url="https://other.url"), "does not match")
+
+
+async def test_admitted_keys_stay_on_bridge_boards(tmp_path):
+    # An ACL that lets every registered principal publish anywhere, as the
+    # shipped config does: admitted keys are registered principals to it.
+    w = World(tmp_path, rules=bridge_rules() + HOME_RULES[-1:])
+    await w.start()
+    try:
+        from bonnet.bridges.runtime import BridgeRuntime
+
+        rt = BridgeRuntime(w.bridge)
+        await rt.bindings.ensure_board("general")
+        await rt.close()
+        moxxie = await w.user("moxxie")
+        await w.post(moxxie)
+        for meta in (None, MetadataMap([metadata_text(1, "x"), metadata_text(4, "text/plain")])):
+            intent, body = w.crosspost(moxxie)
+            intent.board = "general"
+            if meta is not None:
+                intent.metadata = meta
+            await _refused(publish_as(w.bridge, moxxie, intent, body), "bridge boards only")
+        await w.post(moxxie)
+    finally:
+        w.close()
 
 
 async def test_unknown_at_home_is_refused(w):

@@ -193,7 +193,7 @@ async def test_relay_posts_with_attribution_and_marker_then_links(w):
     assert await w.b1.relay() == 1
 
     (msg,) = w.relay_posts()
-    assert msg["text"] == f"operator@{B1}: hello venue\n{model.make_marker(art.event_id)}"
+    assert msg["text"] == f"operator@{B1}: hello venue\n{model.make_marker(art.event_id, B1)}"
     assert w.board.request_ids == {art.event_id.hex()[:32]: msg["id"]}
 
     (link,) = _records(w.b1.server, B1, model.KIND_BRIDGE_LINK)
@@ -405,7 +405,7 @@ async def test_consumers_show_the_relayed_original_even_preferring_the_other_bri
 async def test_a_copied_marker_is_mirrored_as_an_ordinary_post(w):
     art = await w.native("hello")
     await w.b1.relay()
-    copied = w.board.post(f"look: {model.make_marker(art.event_id)}", author="troll", created=0)
+    copied = w.board.post(f"look: {model.make_marker(art.event_id, B1)}", author="troll", created=0)
     await w.b1.ingest()
     mirrors = {
         BridgeMetadata.from_metadata(r.metadata).foreign_id: BridgeMetadata.from_metadata(
@@ -436,7 +436,7 @@ async def test_bridges_db_groups_the_link_with_the_venue_post(w):
 async def test_render_outbound_keeps_the_marker_within_the_cap():
     board = FakeFlatboard()
     adapter = board.adapter(venue_config())
-    marker = model.make_marker(os.urandom(32))
+    marker = model.make_marker(os.urandom(32), B1)
     try:
         text = adapter.render_outbound("x" * 5000, marker, "someone@b.test")
         assert len(text.encode()) <= 2048 and text.endswith(marker)

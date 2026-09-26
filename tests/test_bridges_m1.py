@@ -561,7 +561,9 @@ async def test_grace_window_holds_young_posts_in_order(h):
 
 
 async def test_marked_post_waits_for_the_marker_timeout(h):
-    marked = h.board.post(f"copied {model.make_marker(os.urandom(32))}", created=NOW - 600)
+    marked = h.board.post(
+        f"copied {model.make_marker(os.urandom(32), 'elsewhere.test')}", created=NOW - 600
+    )
     plain = h.board.post("plain", created=NOW - 500)
     await h.poll()
     assert set(h.mirrors()) == {str(plain)}
@@ -596,7 +598,9 @@ async def test_a_slightly_fast_venue_clock_still_gets_the_grace_window(h):
 
 
 async def test_a_reply_waits_for_its_pending_parent_and_threads_under_it(h):
-    parent = h.board.post(f"quoting {model.make_marker(os.urandom(32))}", created=NOW - 600)
+    parent = h.board.post(
+        f"quoting {model.make_marker(os.urandom(32), 'elsewhere.test')}", created=NOW - 600
+    )
     reply = h.board.post("a reply", author="lanternfly", reply_to=parent, created=NOW - 500)
     await h.poll()
     assert h.mirrors() == {}

@@ -221,6 +221,11 @@ class Admission:
         if pin is None or not pin["active"] or not ctx.is_registered:
             return None
         if intent.kind == KIND_ARTICLE:
+            if not intent.board.startswith("~"):
+                # Admission vouches for crossposting, nothing more: an admitted
+                # key is a registered principal to the ACL, which can't tell
+                # it from a native user, so its reach stops here.
+                raise AdmissionRefused("admitted crossposters publish on bridge boards only")
             meta = BridgeMetadata.from_metadata(intent.metadata)
             if meta.home_origin != pin["home_origin"] or meta.home_url != pin["home_url"]:
                 raise AdmissionRefused("home_origin does not match this key's admission")

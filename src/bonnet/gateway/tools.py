@@ -2341,6 +2341,15 @@ async def list_articles(
         await client.close()
 
 
+# Rust regex metacharacters: relays hand body queries to ripgrep as patterns.
+_RG_META = frozenset("\\.+*?()|[]{}^$#&-~")
+
+
+def _rg_literal(text: str) -> str:
+    """`text` as a ripgrep pattern matching exactly that text."""
+    return "".join("\\" + c if c in _RG_META else c for c in text)
+
+
 @mcp.tool(tags={NEEDS_ORIGIN})
 @needs(commands=["ARTICLE_SEARCH"])
 async def search_articles(
@@ -2348,6 +2357,7 @@ async def search_articles(
     *,
     board: str = "",
     body_query: str = "",
+    regex: bool = False,
     offset: int = 0,
     limit: int = 50,
     origin: str = "",
@@ -2365,6 +2375,8 @@ async def search_articles(
         relay. Empty means body content is not searched. Requires the relay
         to advertise `bonnet.per-board-body-search` (see get_head); if it
         does not, this is silently not searched.
+    regex: treat body_query as a ripgrep (Rust) regex instead of literal
+        text. Off: `[bnt:` finds the text `[bnt:`.
     board: board name (defaults to the board open_board last set).
     origin: origin to query (empty = aggregate across all known origins).
     """
@@ -2381,6 +2393,8 @@ async def search_articles(
     # ("LIKE or GLOB pattern too complex") that never reaches the caller
     # cleanly. Rejecting here keeps this an actionable ValueError instead.
     _check_byte_len("query", query, MAX_TEXT_FIELD)
+    if body_query and not regex:
+        body_query = _rg_literal(body_query)
     _check_byte_len("body_query", body_query, MAX_TEXT_FIELD)
     client = _make_client()
     try:

@@ -332,20 +332,41 @@ def is_puppet_of(name: str, venue: str) -> bool:
 # Marker (§4.5)
 # ---------------------------------------------------------------------------
 
-_MARKER_RE = re.compile(r"\[bnt:([0-9a-f]{16})\]")
+# `[bnt:<origin>/<event id, 64 hex>]`: an address anyone can resolve with EVENT_GET.
+_MARKER_RE = re.compile(r"\[bnt:([a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)/([0-9a-f]{64})\]")
 
 
-def make_marker(event_id: bytes) -> str:
-    return f"[bnt:{event_id.hex()[:16]}]"
+@dataclass(frozen=True)
+class Marker:
+    """A parsed marker: the origin and event id it names."""
+
+    origin: str
+    event_id: bytes
+
+    @property
+    def prefix(self) -> str:
+        return self.event_id.hex()[:16]
+
+    def names(self, event_id: bytes) -> bool:
+        return self.event_id == event_id
 
 
-def find_marker(text: str) -> str | None:
-    """The 16-hex prefix of the last marker in `text`, or None.
+def make_marker(event_id: bytes, origin: str) -> str:
+    """The marker for an article published on `origin`."""
+    return f"[bnt:{origin}/{event_id.hex()}]"
 
-    A marker is a hint, never proof: anyone at the venue can copy one.
+
+def parse_marker(text: str) -> Marker | None:
+    """The last marker in `text`, or None.
+
+    A marker is a hint, never proof: anyone at the venue can copy one, or
+    write one naming any origin and event.
     """
     found = _MARKER_RE.findall(text)
-    return found[-1] if found else None
+    if not found:
+        return None
+    origin, event_id = found[-1]
+    return Marker(origin=origin, event_id=bytes.fromhex(event_id))
 
 
 # ---------------------------------------------------------------------------
