@@ -484,6 +484,42 @@ class BridgeRuntime:
             meta.src == SourceKey(post.venue, post.channel, post.foreign_id)
         )
 
+    def _parent(self, board: str, src: SourceKey) -> MirrorEntry | None:
+        """What a reply to venue post `src` threads under on `board`, if anything.
+
+        Usually a mirror. But a post that started here (a crosspost original,
+        or an article the relay carried out) is never mirrored: its echo is
+        only observed. Its copy is known to the bridge projection instead,
+        and a reply to it threads under that article.
+        """
+        found = self.index.mirror(board, src)
+        if found is not None:
+            return found
+        bridges = getattr(self._server, "bridges", None)
+        if bridges is None:
+            return None
+        local = [
+            c
+            for c in bridges.copies_of(src)
+            if c.origin == self._origin
+            and c.board == board
+            and c.role in (model.ROLE_CROSSPOST, model.ROLE_RELAY_LINK)
+        ]
+        if not local:
+            return None
+        copy = min(local, key=lambda c: (c.state != "active", c.created_at))
+        bp = self._server.dispatcher._get_board_projection(self._origin, board)
+        art = bp.get_article_by_id(self._origin, board, copy.article_id)
+        root = art.root_article_id if art is not None else b""
+        return MirrorEntry(
+            event_id=copy.event_id,
+            article_id=copy.article_id,
+            root_article_id=root if root and root != bytes(32) else copy.article_id,
+            root_foreign_id=bridges.thread_root(src)[0],
+            digest=copy.digest or b"",
+            revision=copy.revision,
+        )
+
     async def _mirror(
         self,
         venue: _Venue,
@@ -507,7 +543,7 @@ class BridgeRuntime:
         revision = current.revision + 1 if current is not None else 0
 
         parent = (
-            self.index.mirror(board, SourceKey(post.venue, post.channel, post.reply_to))
+            self._parent(board, SourceKey(post.venue, post.channel, post.reply_to))
             if post.reply_to
             else None
         )
