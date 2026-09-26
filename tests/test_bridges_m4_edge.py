@@ -274,6 +274,29 @@ async def test_without_a_venue_account_the_post_stays_native(w, monkeypatch):
     assert meta.bridge_role is None and meta.home_origin == HOME
 
 
+async def test_a_venue_reply_to_a_crosspost_threads_under_the_original(w):
+    # The crosspost's echo is observed, never mirrored, so the mirror index
+    # doesn't know it; the reply must still thread under the original.
+    await w.crosspost()
+    (original,) = w.articles()
+    (msg,) = w.venue_posts()
+    venue = w.runtime.venues[0]
+    binding = venue.config.bindings[0]
+    await w.runtime.ingest_binding(venue, binding)
+    w.board.post("nice bridge", author="hermes", reply_to=int(msg["id"]))
+    await w.runtime.ingest_binding(venue, binding)
+    reply = next(a for a in w.articles() if a.event_id != original.event_id)
+    assert reply.metadata.get_bytes(5) == original.article_id  # root
+    assert reply.metadata.get_bytes(6) == original.article_id  # reply_to
+    # And a reply to that reply keeps the thread's root.
+    (mirrored,) = [m for m in w.board.messages.values() if m["author"] == "hermes"]
+    w.board.post("agreed", author="tide", reply_to=int(mirrored["id"]))
+    await w.runtime.ingest_binding(venue, binding)
+    (deeper,) = [a for a in w.articles() if a.event_id not in (original.event_id, reply.event_id)]
+    assert deeper.metadata.get_bytes(5) == original.article_id
+    assert deeper.metadata.get_bytes(6) == reply.article_id
+
+
 async def test_a_venue_refusal_publishes_natively_and_reports(w):
     w.board.refuse_posts = 1
     result = await w.crosspost()

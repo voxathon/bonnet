@@ -245,6 +245,22 @@ async def test_reply_to_a_mirror_goes_out_as_a_venue_reply(w):
     assert BridgeMetadata.from_metadata(link.metadata).foreign_root_id == str(parent_id)
 
 
+async def test_a_venue_reply_to_a_relayed_article_threads_under_it(w):
+    art = await w.native("hello venue")
+    await w.b1.relay()
+    (msg,) = w.relay_posts()
+    await w.b1.ingest()  # the echo: observed, not mirrored
+    w.board.post("welcome", author="hermes", reply_to=int(msg["id"]), created=0)
+    await w.b1.ingest()
+    reply = next(
+        r
+        for r in _records(w.b1.server, B1, KIND_ARTICLE)
+        if BridgeMetadata.from_metadata(r.metadata).foreign_author == "hermes"
+    )
+    assert reply.metadata.get_bytes(5) == art.article_id  # root
+    assert reply.metadata.get_bytes(6) == art.article_id  # reply_to
+
+
 async def test_crash_after_posting_reposts_idempotently(w, monkeypatch):
     art = await w.native("hello")
     real_publish = w.b1.runtime.publisher.publish
