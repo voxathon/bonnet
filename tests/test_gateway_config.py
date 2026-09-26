@@ -191,6 +191,17 @@ def test_the_gateway_runs_uvicorn_without_proxy_headers(gw, trusted):
     assert calls[-1]["uvicorn_config"]["proxy_headers"] is False
 
 
+def test_the_gateway_logs_requests_itself_not_through_uvicorn(gw, trusted):
+    """uvicorn's access log can only name the socket peer (127.0.0.1 behind
+    cloudflared); the gateway's own request-log middleware replaces it."""
+    from bonnet.gateway.server import GatewayRequestLogMiddleware
+
+    home, calls = gw
+    gateway_run(["--http"])
+    assert calls[-1]["uvicorn_config"]["access_log"] is False
+    assert calls[-1]["middleware"][0].cls is GatewayRequestLogMiddleware
+
+
 def test_trusted_forwarders_default_to_no_one(gw, trusted):
     gateway_run(["--http"])
     assert trusted() == frozenset()

@@ -107,7 +107,8 @@ _SAMPLE = """\
 # # X-Forwarded-For) this gateway believes: a reverse proxy or tunnel in front
 # # of it, e.g. cloudflared on this machine. Exact IPs only. Requests from
 # # anyone else are forwarded upstream as coming from their own socket
-# # address. $BONNET_GATEWAY_TRUSTED_FORWARDERS (comma-separated) wins.
+# # address. The same rule picks the client= IP on the gateway's per-request
+# # HTTP log lines. $BONNET_GATEWAY_TRUSTED_FORWARDERS (comma-separated) wins.
 # # trusted_forwarders = ["127.0.0.1"]
 """
 
