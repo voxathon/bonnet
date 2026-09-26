@@ -43,9 +43,6 @@ _BANNER_BOARD = "b" * 32
 #: need their prose restructured, not just their parameter docs moved; drop
 #: an entry once its tool fits.
 KNOWN_OVER_BUDGET = {
-    "query_articles": 3788,
-    "get_article": 3410,
-    "connect": 3004,
     "get_event": 1888,
 }
 
