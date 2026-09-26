@@ -424,6 +424,7 @@ def _article_intent(
     meta: BridgeMetadata,
     tags: list[str],
     parent: tuple[bytes, bytes] | None,
+    username: str = "",
 ) -> Intent:
     fields = [metadata_text(1, subject)]
     if tags:
@@ -436,7 +437,9 @@ def _article_intent(
         kind=KIND_ARTICLE,
         origin=bridge_origin,
         actor_pubkey=identity.public_key,
-        actor_username="",  # B issues the name; empty is always accepted (§6.2)
+        # B issues the name, and refuses any other (§6.2). Empty is always
+        # accepted, but readers then have nothing to show but the key.
+        actor_username=username,
         actor_registrar=bridge_origin,
         board=board,
         article_id=article_id,
@@ -444,6 +447,23 @@ def _article_intent(
         body_hash=compute_body_hash(body),
         body_size=len(body),
     )
+
+
+async def _issued_name(bridge_client, bridge_origin: str, pubkey: bytes) -> str:
+    """The name `bridge_origin` issued to `pubkey`, or "" if none (yet).
+
+    On your home origin's own bridge that's your registered name; on another
+    origin's, the one its admission picked, once it has admitted you. A key
+    it doesn't know yet (a first crosspost there) signs with no name: the
+    admission that names it happens on that very publish.
+    """
+    try:
+        user = await bridge_client.get_user(bridge_origin, pubkey)
+    except (ProtocolError, FirehoseClientError, OSError, ValueError):
+        return ""
+    if user is None or user.revoked or user.superseded_by:
+        return ""
+    return user.username
 
 
 def _frame(identity: Identity, intent: Intent, body: bytes) -> bytes:
@@ -549,6 +569,7 @@ async def publish_bridged(
         venue, channel = entry["venue"], entry.get("channel", "")
         venue_type = venue_type_of(venue)
         spec = account_spec(venue, auth)
+        name = await _issued_name(bridge_client, bridge_origin, identity.public_key)
 
         event_id, article_id = os.urandom(32), os.urandom(32)
         subject = subject or " ".join(body.split())[:80]
@@ -564,7 +585,7 @@ async def publish_bridged(
         def native() -> bytes:
             intent = _article_intent(
                 identity, bridge_origin, board, event_id, article_id, subject,
-                body_bytes, home_meta, user_tags, parent,
+                body_bytes, home_meta, user_tags, parent, name,
             )  # fmt: skip
             return _frame(identity, intent, body_bytes)
 
@@ -608,6 +629,7 @@ async def publish_bridged(
                     pending,
                     user_tags,
                     parent,
+                    name,
                 ),  # fmt: skip
                 body_bytes,
             )
@@ -656,7 +678,7 @@ async def publish_bridged(
                 }  # fmt: skip
             frame = _final_frame(
                 identity, bridge_origin, board, event_id, article_id, subject, body_bytes,
-                venue_type, posted, marker, home_origin, home_url, parent, user_tags,
+                venue_type, posted, marker, home_origin, home_url, parent, user_tags, name,
             )  # fmt: skip
             outbox.put(
                 _entry(event_id, bridge_origin, bridge_client, board, venue, channel,
@@ -694,7 +716,7 @@ def _entry(
 
 def _final_frame(
     identity, bridge_origin, board, event_id, article_id, subject, body_bytes,
-    venue_type, posted, marker, home_origin, home_url, parent, extra_tags,
+    venue_type, posted, marker, home_origin, home_url, parent, extra_tags, username="",
 ) -> bytes:  # fmt: skip
     """The role-2 original with the venue's foreign_id: signed once, sent as stored (§11.2 step 5)."""
     src = SourceKey(posted.venue, posted.channel, posted.foreign_id)
@@ -726,6 +748,7 @@ def _final_frame(
         meta,
         tags,
         parent,
+        username,
     )
     return _frame(identity, intent, body_bytes)
 
@@ -799,7 +822,7 @@ async def _flush_one(entry, identity, home_origin, home_url, spec, outbox) -> di
             old.metadata.get_text(1) or "", body, venue_type_of(entry.venue), posted,
             old_meta.marker or model.make_marker(entry.event_id, entry.bridge_origin),
             old_meta.home_origin or home_origin, old_meta.home_url or home_url, parent,
-            old.metadata.get_text_list(2) or [],
+            old.metadata.get_text_list(2) or [], old.actor_username,
         )  # fmt: skip
         outbox.put(OutboxEntry(**{**entry.__dict__, "frame": frame, "state": "ready"}))
         result = await _send(bridge_client, outbox, entry.event_id, frame)
