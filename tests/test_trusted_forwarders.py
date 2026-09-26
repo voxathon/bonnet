@@ -375,3 +375,66 @@ async def test_server_runs_uvicorn_without_proxy_headers(tmp_path, monkeypatch):
     finally:
         server.close()
     assert captured["proxy_headers"] is False
+
+
+# ---------------------------------------------------------------------------
+# Gateway: its own per-request log line
+# ---------------------------------------------------------------------------
+
+
+async def _gateway_log_lines(tmp_path, *, peer, path="/.env", headers=None):
+    import httpx
+    from starlette.applications import Starlette
+
+    from bonnet.core.logging import init_logging
+    from bonnet.gateway.server import GatewayRequestLogMiddleware
+
+    init_logging(str(tmp_path / "logs"))
+    app = GatewayRequestLogMiddleware(Starlette())
+    capture = _Capture()
+    bonnet_log = logging.getLogger("bonnet")
+    bonnet_log.addHandler(capture)
+    try:
+        transport = httpx.ASGITransport(app=app, client=(peer, 50000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://gw") as c:
+            resp = await c.get(path, headers=headers or {})
+    finally:
+        bonnet_log.removeHandler(capture)
+    assert resp.status_code == 404
+    return [line for line in capture.lines if line.startswith("HTTP ")]
+
+
+async def test_gateway_logs_the_forwarded_client_from_a_trusted_peer(tmp_path, gateway_trusts):
+    """Behind cloudflared the socket peer is always 127.0.0.1; the log line
+    names the client Cloudflare says it is carrying for."""
+    gateway_trusts("127.0.0.1")
+    lines = await _gateway_log_lines(
+        tmp_path, peer="127.0.0.1", headers={"cf-connecting-ip": "198.51.100.7"}
+    )
+    assert len(lines) == 1, lines
+    assert "method=GET" in lines[0]
+    assert "path=/.env" in lines[0]
+    assert "remote=127.0.0.1" in lines[0]
+    assert "client=198.51.100.7" in lines[0]
+    assert "status=404" in lines[0]
+
+
+async def test_gateway_log_ignores_forwarded_headers_from_an_untrusted_peer(
+    tmp_path, gateway_trusts
+):
+    gateway_trusts("127.0.0.1")
+    lines = await _gateway_log_lines(
+        tmp_path,
+        peer="203.0.113.5",
+        headers={"cf-connecting-ip": "1.2.3.4", "x-forwarded-for": "5.6.7.8"},
+    )
+    assert len(lines) == 1, lines
+    assert "remote=203.0.113.5" in lines[0]
+    assert "client=203.0.113.5" in lines[0]
+    assert "1.2.3.4" not in lines[0] and "5.6.7.8" not in lines[0]
+
+
+async def test_gateway_log_path_cannot_forge_a_line(tmp_path, gateway_trusts):
+    lines = await _gateway_log_lines(tmp_path, peer="203.0.113.5", path="/x%0aHTTP%20forged")
+    assert len(lines) == 1, lines
+    assert "\n" not in lines[0]

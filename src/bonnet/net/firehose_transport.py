@@ -106,15 +106,24 @@ def forwarded_for_from_request(request) -> str:
     the GET facade — plain Starlette routes the middleware never sees — share
     one extraction rule without an import cycle.
     """
-    from bonnet.net.forwarding import client_ip
-
     try:
         client = request.client
         peer = client.host if client else ""
         headers = {k.lower(): v for k, v in request.headers.items()}
     except Exception:
         return ""
-    return client_ip(peer or "", headers, _gateway_trusted_forwarders)
+    return gateway_client_ip(peer or "", headers)
+
+
+def gateway_client_ip(peer: str, headers) -> str:
+    """The client `peer` is carrying for, under the gateway's trust list.
+
+    `headers` has lower-case keys. The forwarded client only if `peer` is on
+    trusted_forwarders, else `peer` itself; "" when there is no peer.
+    """
+    from bonnet.net.forwarding import client_ip
+
+    return client_ip(peer, headers, _gateway_trusted_forwarders)
 
 
 class FirehoseClientError(Exception):

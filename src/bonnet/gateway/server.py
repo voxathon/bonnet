@@ -80,6 +80,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Literal, cast
 
 from fastmcp.server.dependencies import get_http_request
@@ -106,6 +107,7 @@ from bonnet.gateway.tools import current_password, current_username, mcp
 from bonnet.net.firehose_transport import (
     forwarded_for_ctx,
     forwarded_for_from_request,
+    gateway_client_ip,
     set_gateway_trusted_forwarders,
 )
 
@@ -425,6 +427,67 @@ class CleanTransportErrorMiddleware(BaseHTTPMiddleware):
         return Response(
             content=body, status_code=response.status_code, media_type="application/json"
         )
+
+
+class GatewayRequestLogMiddleware:
+    """One `HTTP` log line per request: method, path, peer, client, status.
+
+    The gateway's counterpart of the origin's `RequestLogMiddleware`, and
+    the reason uvicorn's own access log is off: uvicorn runs with
+    `proxy_headers=False`, so its access log could only ever name the socket
+    peer — behind cloudflared on this box, 127.0.0.1 for every request.
+    `remote=` is that peer; `client=` is who it is carrying for, under the
+    same trusted_forwarders rule the upstream export uses, so a caller not
+    on that list can't write someone else's IP into the log. It sits
+    outside routing, so /mcp, the GET facade, and a scanner's 404 for
+    /.env all get a line. The log call never raises into the request.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        client = scope.get("client")
+        peer = str(client[0]) if client else ""
+        status = 0
+        start = time.time()
+
+        async def _send(message):
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        finally:
+            try:
+                from bonnet.core.logging import log_info
+
+                headers = {
+                    k.decode("latin-1").lower(): v.decode("latin-1")
+                    for k, v in scope.get("headers", [])
+                }
+                # The raw request target, still percent-encoded, escaped
+                # anyway: a decoded %0a in a scanner's path must not start a
+                # forged log line.
+                raw_path = scope.get("raw_path")
+                path = raw_path.decode("latin-1") if raw_path else scope.get("path", "")
+                log_info(
+                    "HTTP",
+                    method=scope.get("method", ""),
+                    path=path.encode("unicode_escape").decode("ascii"),
+                    remote=peer or "unknown",
+                    client=gateway_client_ip(peer, headers) or "unknown",
+                    status=status if status else "-",
+                    ms=int((time.time() - start) * 1000),
+                )
+            except Exception:
+                pass
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -941,8 +1004,17 @@ def run(argv: list[str] | None = None):
         raise SystemExit(1)
 
     # uvicorn's default rewrites request.client from X-Forwarded-For for any
-    # peer on 127.0.0.1; off, so trusted_forwarders is the only rule.
-    uvicorn_config: dict = {"proxy_headers": False}
+    # peer on 127.0.0.1; off, so trusted_forwarders is the only rule. Its
+    # access log is off too: it could only name the socket peer, so
+    # GatewayRequestLogMiddleware writes the per-request line instead, and
+    # the request mirror puts that line on the console where uvicorn's was.
+    uvicorn_config: dict = {"proxy_headers": False, "access_log": False}
+    try:
+        from bonnet.core.logging import enable_request_mirror
+
+        enable_request_mirror()
+    except Exception:
+        pass
     if ssl_certfile and ssl_keyfile:
         uvicorn_config["ssl_certfile"] = ssl_certfile
         uvicorn_config["ssl_keyfile"] = ssl_keyfile
@@ -1005,7 +1077,10 @@ def run(argv: list[str] | None = None):
         path=mcp_path,
         uvicorn_config=uvicorn_config,
         show_banner=False,
-        middleware=[ASGIMiddleware(CleanTransportErrorMiddleware)],
+        middleware=[
+            ASGIMiddleware(GatewayRequestLogMiddleware),
+            ASGIMiddleware(CleanTransportErrorMiddleware),
+        ],
     )
 
 
