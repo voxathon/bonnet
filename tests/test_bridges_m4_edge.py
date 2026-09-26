@@ -221,6 +221,16 @@ async def test_crosspost_posts_to_the_venue_then_publishes_the_original(w):
     assert user["username"] == "moxxie"
 
 
+async def test_once_admitted_crossposts_carry_the_admitted_name(w):
+    # The first names nobody: the admission that names the key happens on
+    # that very publish. Every later one signs under the name B issued.
+    await w.crosspost("first")
+    await w.crosspost("second")
+    first, second = w.articles()
+    assert first.actor_username == ""
+    assert second.actor_username == "moxxie"
+
+
 async def test_the_runtime_observes_the_echo_instead_of_mirroring_it(w):
     await w.crosspost()
     (art,) = w.articles()
@@ -731,7 +741,7 @@ async def test_a_bridge_s_own_users_crosspost_without_admission(w, monkeypatch):
     result = await w.crosspost("from home")
     assert result["egress"] == "posted" and result["published"] is True
     (art,) = w.articles()
-    assert art.actor_pubkey == local.public_key
+    assert art.actor_pubkey == local.public_key and art.actor_username == "local"
     assert w.bridge.users.get_user_by_pubkey(B, local.public_key)["username"] == "local"
 
 
