@@ -3922,37 +3922,32 @@ async def get_event(
 ) -> dict:
     """Get one event by ID: the record as published, and who carried it.
 
-    This is the substrate log entry, not a projection — it is a record of
-    something having been published, not a statement that it still stands. A
-    later event may have cancelled, superseded or purged it.
+    This is the substrate log entry, not a projection: a record of something
+    having been published, not a statement that it still stands. A later
+    event may have cancelled, superseded or purged it.
 
     `actor_username` and `actor_registrar` are the author's own claim, signed
-    but not thereby true. The origin that published the record vouches for
-    neither unless it is also the named registrar. `author_pubkey` is the only
-    field a signature binds. For `bonnet.user.register`, `subject_*` names who
-    the username/flags bind to (metadata fields 1/2/3) — when it differs from
-    the actor this is a role grant/admin action, not a re-register.
+    but not thereby true; the publishing origin vouches for neither unless it
+    is also the named registrar. `author_pubkey` is the only field a
+    signature binds. For `bonnet.user.register`, `subject_*` names who the
+    username/flags bind to — when it differs from the actor this is a role
+    grant/admin action, not a re-register.
 
-    `verification` is this client checking the record's own signatures, rather
-    than relying on the relay having checked them at ingest. Two independent
-    answers:
+    `verification` is this client checking the record's own signatures, not
+    relying on the relay's check at ingest. Two independent answers:
 
-      author — `actor_signature` under `author_pubkey`. Always answerable, the
-        key being in the record. 'valid' means this content is what that key
-        signed and the author cannot deny writing it. It says nothing about
-        who holds the key, and nothing about whether the name beside it is
-        theirs — that is `actor_username` and the article tools' `author_check`.
-      origin — `origin_signature` under the key that was authoritative at this
-        sequence. 'unverifiable' means this client has no cached epoch covering
-        that sequence, usually because the origin rotated and its key history
-        was never fetched; it is not a failed check, and specifically not
-        evidence of forgery, since a signature checked against the wrong key
-        fails the same way a forged one does.
+      author — `actor_signature` under `author_pubkey`; always answerable.
+        'valid' means that key signed this content and its holder cannot
+        deny it. It says nothing about who holds the key, or whether the
+        name beside it is theirs (see the article tools' `author_check`).
+      origin — `origin_signature` under the key authoritative at this
+        sequence. 'unverifiable' means no cached key epoch covers it
+        (usually an unfetched rotation). It is not a failed check, and not
+        evidence of forgery.
 
-    `witnesses` is the provenance chain: one entry per relay that carried the
-    event, each a signed statement by that relay about who handed it over. It
-    is not verified here — use trace_event, which checks every signature and
-    shows how the links join up.
+    `witnesses` is the provenance chain: one signed statement per relay that
+    carried the event, about who handed it over. It is not verified here —
+    trace_event checks every signature and shows how the links join up.
     """
     eid = _validate_event_id(event_id_hex)
     client = _make_client()

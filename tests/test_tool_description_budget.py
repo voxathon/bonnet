@@ -39,13 +39,6 @@ CLIENT_DESCRIPTION_CAP = 2048
 #: the board-scoped tools almost nothing.
 _BANNER_BOARD = "b" * 32
 
-#: Tools still over budget, each with the length it may not grow past. They
-#: need their prose restructured, not just their parameter docs moved; drop
-#: an entry once its tool fits.
-KNOWN_OVER_BUDGET = {
-    "get_event": 1888,
-}
-
 
 def _worst_cursor_banner() -> str:
     def render() -> str | None:
@@ -75,21 +68,9 @@ async def test_tool_descriptions_fit_the_client_cap():
     over = {
         name: (len(desc), _budget(name))
         for name, desc in (await _descriptions()).items()
-        if name not in KNOWN_OVER_BUDGET and len(desc) > _budget(name)
+        if len(desc) > _budget(name)
     }
     assert not over, (
         f"tool descriptions over budget (length, budget): {over}. Move parameter "
         f"docs into Field(description=...) and implementation notes into comments."
-    )
-
-
-@pytest.mark.parametrize("name", sorted(KNOWN_OVER_BUDGET))
-async def test_known_over_budget_tools_only_shrink(name):
-    desc = (await _descriptions())[name]
-    assert len(desc) <= KNOWN_OVER_BUDGET[name], (
-        f"{name} grew to {len(desc)} characters; it is already past the cap"
-    )
-    assert len(desc) > _budget(name), (
-        f"{name} now fits its budget ({len(desc)} <= {_budget(name)}): "
-        f"remove it from KNOWN_OVER_BUDGET"
     )
