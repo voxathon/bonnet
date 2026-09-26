@@ -202,6 +202,7 @@ dependencies = [
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "platformdirs" },
+    { name = "pydantic" },
     { name = "pyjwt" },
     { name = "pynacl" },
     { name = "ripgrep" },
@@ -225,6 +226,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3.0.0,<4.0.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "platformdirs", specifier = ">=4.0.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "pynacl", specifier = ">=1.5.0" },
     { name = "ripgrep", specifier = ">=14.1.0" },
@@ -602,7 +604,7 @@ name = "importlib-metadata"
 version = "8.7.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp" },
+    { name = "zipp", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f3/49/3b30cad09e7771a4982d9975a8cbf64f00d4a1ececb53297f1d9a7be1b10/importlib_metadata-8.7.1.tar.gz", hash = "sha256:49fef1ae6440c182052f407c8d34a68f72efc36db9ca90dc0113398f2fdde8bb", size = 57107, upload-time = "2025-12-21T10:00:19.278Z" }
 wheels = [
