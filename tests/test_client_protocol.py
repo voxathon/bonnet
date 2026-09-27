@@ -572,6 +572,9 @@ class TestArticleSearch:
         out += struct.pack(">B", 32) + aid
         out += _enc_text16("Test")
         out += struct.pack(">B", 32) + ap
+        out += _enc_text16("alice")  # author_username
+        out += _enc_text16("bbs.test")  # author_registrar
+        out += _enc_text16("registry")  # author_check
         out += struct.pack(">q", 1700000000)
         out += struct.pack(">B", 1)  # body available
         out += _enc_text16("excerpt text")
@@ -582,6 +585,10 @@ class TestArticleSearch:
         assert result.results[0].article_num == 1
         assert result.results[0].subject == "Test"
         assert result.results[0].excerpt == "excerpt text"
+        assert result.results[0].author_pubkey == ap.hex()
+        assert result.results[0].author_username == "alice"
+        assert result.results[0].author_registrar == "bbs.test"
+        assert result.results[0].author_check == "registry"
         assert result.total == 1
         assert not result.truncated
 
@@ -596,6 +603,9 @@ class TestArticleSearch:
         out += struct.pack(">B", 32) + aid
         out += _enc_text16(long_subject)
         out += struct.pack(">B", 32) + ACTOR_PUB
+        out += _enc_text16("")
+        out += _enc_text16("")
+        out += _enc_text16("unchecked")
         out += struct.pack(">q", 1700000000)
         out += struct.pack(">B", 1)
         out += _enc_text16("excerpt")

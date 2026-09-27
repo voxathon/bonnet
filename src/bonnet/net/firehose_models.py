@@ -194,7 +194,13 @@ class ArticleListItem:
 
 @dataclass
 class SearchResult:
-    """A single search match."""
+    """A single search match.
+
+    author_username, author_registrar and author_check mean what they do on
+    ArticleView: the name is the author's own claim, author_check says
+    whether the naming origin backs it, and author_pubkey stays the only
+    durable identity.
+    """
 
     article_num: int
     article_id: str
@@ -204,6 +210,9 @@ class SearchResult:
     body_available: bool
     excerpt: str | None = None
     origin: str = ""
+    author_username: str = ""
+    author_registrar: str = ""
+    author_check: str = "unchecked"  # unchecked, unregistered, registry, retired, foreign
 
 
 @dataclass

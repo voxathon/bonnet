@@ -48,6 +48,9 @@ class SearchResult:
     body_available: bool
     excerpt: str | None = ""
     truncated: bool = False
+    author_username: str = ""
+    author_registrar: str = ""
+    author_check: str = "unchecked"
 
 
 @dataclass
@@ -132,6 +135,9 @@ class SearchService:
                     board=art.board,
                     subject=art.subject,
                     author_pubkey=art.author_pubkey,
+                    author_username=art.author_username,
+                    author_registrar=art.author_registrar,
+                    author_check=art.author_check,
                     created_at=art.created_at,
                     visibility=art.visibility,
                     body_state=art.body_state,
@@ -193,6 +199,9 @@ class SearchService:
                     board=art.board,
                     subject=art.subject,
                     author_pubkey=art.author_pubkey,
+                    author_username=art.author_username,
+                    author_registrar=art.author_registrar,
+                    author_check=art.author_check,
                     created_at=art.created_at,
                     visibility=art.visibility,
                     body_state=art.body_state,

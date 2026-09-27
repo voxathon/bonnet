@@ -554,3 +554,20 @@ def test_restart_discards_orphaned_staged_body(config):
         assert not any(e == event_id for _, _, e, _ in staged)
     finally:
         s2.close()
+
+
+def test_search_articles_shows_subject_and_author(server, monkeypatch):
+    """The console read the subject with a one-byte length (the wire has
+    two), so every row after the length byte was misparsed."""
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    console = OperatorConsole(server)
+    console._do_create_board(["testboard"])
+
+    responses = iter(["Needle in a haystack", "", "hello", ""])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(responses))
+    console._do_publish_article(["testboard"])
+    server.dispatcher.dispatch_origin("bbs.test")
+
+    result = console._cmd_search_articles(["search-articles", "testboard", "Needle"])
+    assert "Needle in a haystack" in result
+    assert "| root |" in result

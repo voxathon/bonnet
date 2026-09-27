@@ -698,3 +698,59 @@ def test_adding_the_registrar_narrows_to_one_identity(wired):
     assert len(hits) == 1
     assert hits[0].author_registrar == "respectable.test"
     assert hits[0].author_check == AUTHOR_FOREIGN
+
+
+# ---------------------------------------------------------------------------
+# search results name their authors
+# ---------------------------------------------------------------------------
+
+
+def _search(handler, ctx, origin, meta_query="", body_query=""):
+    from bonnet.net.firehose_wire import build_article_search, parse_article_search_response
+
+    req = build_article_search(origin, "general", meta_query, body_query, 0, 10)
+    resp = handler.handle(req, ctx)
+    return parse_article_search_response(resp, aggregate=(origin == "")).results
+
+
+@pytest.mark.parametrize("origin", [ORIGIN, ""])
+@pytest.mark.parametrize("by_body", [False, True])
+def test_search_results_carry_the_author_name_and_its_check(wired, origin, by_body):
+    """A bare key in a search hit can't be told apart from any other key;
+    the name and its check ride alongside, as they do on ARTICLE_LIST."""
+    from bonnet.core.binutil import resolve_rg
+
+    if by_body and not resolve_rg():
+        pytest.skip("ripgrep not available")
+    alice = Identity.generate()
+    nobody = Identity.generate()
+    _register(wired, alice, "alice")
+    for identity, extra in (
+        (alice, dict(actor_username="alice", actor_registrar=ORIGIN)),
+        (nobody, {}),
+    ):
+        resp = _publish(
+            wired["handler"],
+            identity,
+            _registered_ctx(identity),
+            body=b"needle in a haystack",
+            **_article_fields(subject="Needle", **extra),
+        )
+        assert resp[0] == 0, resp[:120]
+    wired["dispatcher"].dispatch_origin(ORIGIN)
+
+    if by_body:
+        hits = _search(wired["handler"], _registered_ctx(alice), origin, body_query="needle")
+    else:
+        hits = _search(wired["handler"], _registered_ctx(alice), origin, meta_query="Needle")
+    by_key = {h.author_pubkey: h for h in hits}
+    assert set(by_key) == {alice.public_key.hex(), nobody.public_key.hex()}
+
+    named = by_key[alice.public_key.hex()]
+    assert (named.author_username, named.author_registrar, named.author_check) == (
+        "alice",
+        ORIGIN,
+        AUTHOR_REGISTRY,
+    )
+    unnamed = by_key[nobody.public_key.hex()]
+    assert (unnamed.author_username, unnamed.author_check) == ("", AUTHOR_UNCHECKED)
