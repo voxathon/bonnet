@@ -1397,12 +1397,13 @@ class OperatorConsole:
             offset += 8
             aid_len = resp[offset]
             offset += 1 + aid_len
-            subj_len = resp[offset]
-            offset += 1
-            subject = resp[offset : offset + subj_len].decode("utf-8")
-            offset += subj_len
+            subject, offset = _read_text16(resp, offset)
             ap_len = resp[offset]
+            author_pubkey = resp[offset + 1 : offset + 1 + ap_len]
             offset += 1 + ap_len
+            author_username, offset = _read_text16(resp, offset)
+            _author_registrar, offset = _read_text16(resp, offset)
+            _author_check, offset = _read_text16(resp, offset)
             created_at = struct.unpack(">q", resp[offset : offset + 8])[0]
             offset += 8
             _body_avail = resp[offset]
@@ -1413,10 +1414,11 @@ class OperatorConsole:
 
             ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
             subject = _truncate_display(_sanitize_for_terminal(subject))
+            author = _sanitize_for_terminal(author_username) or author_pubkey.hex()[:16]
             if aggregate:
-                lines.append(f"{result_origin} #{article_num:4} | {subject} | {ts}")
+                lines.append(f"{result_origin} #{article_num:4} | {subject} | {author} | {ts}")
             else:
-                lines.append(f"#{article_num:4} | {subject} | {ts}")
+                lines.append(f"#{article_num:4} | {subject} | {author} | {ts}")
 
         if not lines:
             return "No matches."

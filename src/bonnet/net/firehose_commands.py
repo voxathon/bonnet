@@ -208,6 +208,26 @@ def _success(payload: bytes = b"") -> bytes:
     return b"\x00" + payload
 
 
+def _encode_search_row(r) -> bytes:
+    """One ARTICLE_SEARCH result row, less the aggregate origin prefix.
+
+    The author's claimed name, registrar and `author_check` ride next to the
+    key, as on ARTICLE_LIST: a bare key can't be told from any other.
+    """
+    out = struct.pack(">Q", r.article_num)
+    out += struct.pack(">B", len(r.article_id)) + r.article_id
+    out += _enc_text16(r.subject)
+    out += struct.pack(">B", len(r.author_pubkey)) + r.author_pubkey
+    out += _enc_text16(r.author_username or "")
+    out += _enc_text16(r.author_registrar or "")
+    out += _enc_text16(r.author_check or "unchecked")
+    out += struct.pack(">q", r.created_at)
+    out += struct.pack(">B", 1 if r.body_available else 0)
+    excerpt = r.excerpt.encode("utf-8") if r.excerpt else b""
+    out += struct.pack(">H", len(excerpt)) + excerpt
+    return out
+
+
 def _error(code: int, message: str) -> bytes:
     msg_bytes = message.encode("utf-8")
     return b"\x01" + struct.pack(">H", code) + struct.pack(">H", len(msg_bytes)) + msg_bytes
@@ -2107,14 +2127,7 @@ class FirehoseCommandHandler:
             out += struct.pack(">B", 1 if truncated else 0)
             for r, orig in page:
                 out += _enc_text16(orig)
-                out += struct.pack(">Q", r.article_num)
-                out += struct.pack(">B", len(r.article_id)) + r.article_id
-                out += _enc_text16(r.subject)
-                out += struct.pack(">B", len(r.author_pubkey)) + r.author_pubkey
-                out += struct.pack(">q", r.created_at)
-                out += struct.pack(">B", 1 if r.body_available else 0)
-                excerpt = r.excerpt.encode("utf-8") if r.excerpt else b""
-                out += struct.pack(">H", len(excerpt)) + excerpt
+                out += _encode_search_row(r)
             return _success(out)
 
         self._maybe_queue_remote_sync(origin)
@@ -2150,14 +2163,7 @@ class FirehoseCommandHandler:
         out += struct.pack(">I", results.total)
         out += struct.pack(">B", 1 if results.truncated else 0)
         for r in results.results:
-            out += struct.pack(">Q", r.article_num)
-            out += struct.pack(">B", len(r.article_id)) + r.article_id
-            out += _enc_text16(r.subject)
-            out += struct.pack(">B", len(r.author_pubkey)) + r.author_pubkey
-            out += struct.pack(">q", r.created_at)
-            out += struct.pack(">B", 1 if r.body_available else 0)
-            excerpt = r.excerpt.encode("utf-8") if r.excerpt else b""
-            out += struct.pack(">H", len(excerpt)) + excerpt
+            out += _encode_search_row(r)
         return _success(out)
 
     # ------------------------------------------------------------------
