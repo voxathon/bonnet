@@ -51,6 +51,8 @@ PROTOCOL = 1
 CAPABILITY_METHODS: dict[str, tuple[str, ...]] = {
     "read": (),  # required of every adapter
     "threads": (),  # posts carry reply_to
+    # Without "signup", posting takes no account: the gateway posts under the
+    # person's own name with an empty token, and there's nothing to link.
     "write": ("post", "render_outbound", "max_text_bytes"),
     "idempotent_post": (),  # post() with the same key never posts twice
     "edit": (),  # fetch() shows edits; the runtime sweeps for them
@@ -79,6 +81,9 @@ class ForeignPost:
     raw: bytes
     raw_content_type: str
     url: str | None
+    # The venue's own subject for the post (a thread's title, say), where it
+    # has one. Mirrors use it; without one, the text's start.
+    subject: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,9 +176,11 @@ class VenueAdapter(Protocol):
         text: str,
         reply_to: str | None,
         idempotency_key: str,
+        subject: str | None = None,
     ) -> ForeignPost:
         """Post as `account`. Retrying with the same key must not post twice
-        on venues with `idempotent_post`. Raises VenueAuthError on bad credentials."""
+        on venues with `idempotent_post`. Raises VenueAuthError on bad credentials.
+        `subject` is the article's; a venue with titles uses it, others ignore it."""
         ...
 
     def render_outbound(self, text: str, marker: str, attribution: str | None) -> str:

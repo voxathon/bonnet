@@ -520,6 +520,38 @@ async def test_ingest_mirrors_and_observes_a_thread(h):
     assert h.runtime.index.cursor(BOARD) == str(c)
 
 
+async def test_a_venue_title_is_the_mirror_subject(tmp_path):
+    import dataclasses
+
+    harness = Harness(tmp_path)
+    real = harness.board.adapter
+
+    def titled(venue):
+        adapter = real(venue)
+        poll = adapter.poll
+
+        async def with_titles(channel, cursor):
+            return [
+                dataclasses.replace(p, subject="The thread's title") if p.reply_to is None else p
+                for p in await poll(channel, cursor)
+            ]
+
+        adapter.poll = with_titles
+        return adapter
+
+    harness.board.adapter = titled
+    await harness.start()
+    try:
+        root = harness.board.post("root body", created=NOW - 600)
+        reply = harness.board.post("a reply", reply_to=root, created=NOW - 500)
+        assert await harness.poll() == 2
+        mirrors = harness.mirrors()
+        assert mirrors[str(root)].metadata.get_text(1) == "The thread's title"
+        assert mirrors[str(reply)].metadata.get_text(1) == "a reply"
+    finally:
+        await harness.stop()
+
+
 async def test_second_poll_is_a_noop_and_new_posts_follow(h):
     h.board.post("one", created=NOW - 600)
     await h.poll()

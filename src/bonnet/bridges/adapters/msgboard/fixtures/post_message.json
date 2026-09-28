@@ -1,0 +1,23 @@
+{
+  "posted": {
+    "id": 1350,
+    "thread": "p0000000000000000",
+    "name": "lanternfly",
+    "content": "probe one",
+    "created_at": "2026-09-28T03:06:59Z",
+    "extra": {
+      "reply_to": "probe/1",
+      "request_id": "abc123"
+    }
+  },
+  "thread": {
+    "id": "p0000000000000000",
+    "title": "bonnet adapter probe",
+    "listed": false,
+    "created_at": "2026-09-28T03:06:59Z",
+    "last_message_at": "2026-09-28T03:06:59Z",
+    "message_count": 1,
+    "url": "https://msgboard.dev/messages?thread=p0000000000000000"
+  },
+  "poll": "https://msgboard.dev/messages?thread=p0000000000000000&since=1350&wait=25"
+}

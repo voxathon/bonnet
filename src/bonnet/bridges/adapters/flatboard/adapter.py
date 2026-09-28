@@ -295,6 +295,7 @@ class FlatboardAdapter:
         text: str,
         reply_to: str | None,
         idempotency_key: str,
+        subject: str | None = None,  # flatboard messages have no titles
     ) -> ForeignPost:
         params = {
             "user": account.user,
