@@ -28,9 +28,15 @@ from pathlib import Path
 import httpx
 import pytest
 
-from bonnet.bridges.adapter import Gone, VenueError
+from bonnet.bridges.adapter import (
+    ForeignAccount,
+    Gone,
+    VenueError,
+    VenueRateLimited,
+    VenueUncertain,
+)
 from bonnet.bridges.adapters import msgboard
-from bonnet.bridges.adapters.msgboard import PAGE_SIZE, MsgboardAdapter
+from bonnet.bridges.adapters.msgboard import MAX_TEXT_BYTES, PAGE_SIZE, MsgboardAdapter
 from bonnet.bridges.adapters.msgboard.adapter import _parse_created, split_foreign_id
 from bonnet.bridges.adapters.msgboard.fake import FakeMsgboard, _NoLimit
 
@@ -187,3 +193,52 @@ async def test_the_fake_serves_the_shape_the_venue_does():
     assert set(served["thread.json"]["messages"][0]) == set(fixture("thread.json")["messages"][1])
     assert set(served["threads.json"]["threads"][0]) == set(fixture("threads.json")["threads"][0])
     assert set(served["thread.json"]["thread"]) == set(fixture("thread.json")["thread"])
+
+
+async def test_msgboard_posts_open_threads_and_reply_into_them():
+    board = FakeMsgboard()
+    adapter = board.adapter(board.venue_config())
+    try:
+        me = ForeignAccount("lanternfly", "")
+        top = await adapter.post(me, "", "a new topic\nmore\n--marker", None, "k1")
+        thread = top.foreign_id.split("/")[0]
+        assert board.threads[thread]["title"] == "a new topic"
+        assert top.root_id == top.foreign_id and top.author_handle == "lanternfly"
+        reply = await adapter.post(me, "", "a reply", top.foreign_id, "k2")
+        assert reply.foreign_id.startswith(f"{thread}/") and reply.reply_to == top.foreign_id
+        # On a thread channel, a top-level post goes into that thread.
+        board.open_thread("lobby")
+        lobby = await adapter.post(ForeignAccount("", ""), "lobby", "hi", None, "k3")
+        assert lobby.foreign_id.startswith("lobby/") and lobby.author_handle == ""
+        assert len(board.threads) == 2
+    finally:
+        await adapter.close()
+
+
+async def test_msgboard_post_failures():
+    board = FakeMsgboard()
+    board.open_thread("lobby")
+    adapter = board.adapter(board.venue_config())
+    me = ForeignAccount("lanternfly", "")
+    try:
+        board.lose_post_responses = 1
+        with pytest.raises(VenueUncertain):
+            await adapter.post(me, "lobby", "maybe", None, "k")
+        assert len(board.messages) == 1  # it landed; only the answer was lost
+        board.fail_posts = 1
+        with pytest.raises(VenueError):
+            await adapter.post(me, "", "no thread opened", None, "k")
+        assert len(board.threads) == 1
+        board.rate_limit_posts = 1
+        with pytest.raises(VenueRateLimited) as e:
+            await adapter.post(me, "lobby", "slow", None, "k")
+        assert e.value.retry_after == 5
+    finally:
+        await adapter.close()
+
+
+def test_msgboard_outbound_text_fits():
+    adapter = MsgboardAdapter(FakeMsgboard().venue_config(), http=httpx.AsyncClient())
+    out = adapter.render_outbound("é" * 9000, "--marker", "someone")
+    assert out.startswith("someone: ") and out.endswith("\n--marker")
+    assert len(out.encode("utf-8")) <= MAX_TEXT_BYTES

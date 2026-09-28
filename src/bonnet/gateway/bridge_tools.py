@@ -17,8 +17,9 @@
 No tool of its own lives here: `bonnet.gateway.tools` calls into this module.
 
   publish_bridged  publish_article on a `~` board: signed with your home key,
-                   and, with a venue account configured, posted to the venue
-                   as you first (edge egress). Runs flush_pending first.
+                   and, with a venue account configured (or on a venue that
+                   needs none), posted to the venue as you first (edge
+                   egress). Runs flush_pending first.
   flush_pending    retry crossposts that reached the venue but not the bridge
   corroborate      get_article(corroborate=True): every recognized bridge's
                    copy of a bridged article
@@ -158,6 +159,35 @@ def _linked_spec(venue: str, auth: str | None) -> VenueAccountSpec | None:
 def account_spec(venue: str, auth: str | None) -> VenueAccountSpec | None:
     """The account to post to `venue` as: the caller's linked one, else the tenant's."""
     return _linked_spec(venue, auth) or load_accounts().get(venue)
+
+
+def _needs_no_account(venue: str) -> bool:
+    """Whether anyone can post to `venue`: `write` with no `signup`."""
+    try:
+        caps: frozenset[str] = getattr(
+            load_adapter_class(venue_type_of(venue)), "capabilities", frozenset()
+        )
+    except (ValueError, ImportError, AttributeError):
+        return False
+    return "write" in caps and "signup" not in caps
+
+
+def _open_spec(venue: str, name: str, auth: str | None) -> VenueAccountSpec | None:
+    """Posting as yourself on a venue that takes no account: `name`, else
+    the identity's own username, with no token."""
+    if not _needs_no_account(venue):
+        return None
+    if not name:
+        try:
+            name = _t()._resolve_auth(auth)[0]
+        except ValueError:
+            name = ""
+    return VenueAccountSpec(
+        venue=venue,
+        type=venue_type_of(venue),
+        url=_venue_url(venue),
+        account=ForeignAccount(name, ""),
+    )
 
 
 def _outbox() -> Outbox:
@@ -348,6 +378,12 @@ async def link_venue(
     once. Otherwise the venue's instructions for getting one come back.
     No token is ever returned.
     """
+    if _needs_no_account(venue) and not unlink:
+        return {
+            "venue": venue, "linked": False,
+            "next": f"{venue} takes posts without an account: crossposts go out "
+            "under your name, with nothing to link",
+        }  # fmt: skip
     store = _t()._get_identity_store()
     if unlink:
         return {"venue": venue, "linked": False, "unlinked": store.unlink_venue(
@@ -568,8 +604,8 @@ async def publish_bridged(
             )
         venue, channel = entry["venue"], entry.get("channel", "")
         venue_type = venue_type_of(venue)
-        spec = account_spec(venue, auth)
         name = await _issued_name(bridge_client, bridge_origin, identity.public_key)
+        spec = account_spec(venue, auth) or _open_spec(venue, name, auth)
 
         event_id, article_id = os.urandom(32), os.urandom(32)
         subject = subject or " ".join(body.split())[:80]

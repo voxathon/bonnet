@@ -18,8 +18,14 @@
 Serves the read endpoints the adapter uses through an `httpx.MockTransport`
 in the venue's shapes (`fixtures/`): `/all` and `/messages` answer with the
 newest `limit` matches, oldest first, and only `/messages` takes `before=`;
-`/threads` lists by latest activity; an unknown thread is a 404. Ids come
-from one counter, and `skip_ids` burns some the way private channels do.
+`/threads` lists by latest activity; an unknown thread is a 404. Posting
+opens threads and adds messages with no account, with injectable failures.
+Ids come from one counter, and `skip_ids` burns some the way private
+channels do.
+
+The answers to posts were never captured from the venue (see README.md):
+they carry the stored thread or message, as the venue's API description
+says, and the adapter reads either shape.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from bonnet.bridges.adapter import ForeignAccount
 from bonnet.bridges.adapters.msgboard.adapter import (
     PAGE_SIZE,
     MsgboardAdapter,
@@ -48,6 +55,10 @@ class FakeMsgboard:
     next_id: int = 1
     offline: bool = False
     requests: list[str] = field(default_factory=list)
+    fail_posts: int = 0  # the next N posts answer HTTP 500
+    rate_limit_posts: int = 0  # the next N posts answer HTTP 429
+    lose_post_responses: int = 0  # the next N posts land, then answer HTTP 502
+    retry_after: int = 5
 
     def open_thread(self, thread: str, title: str = "") -> str:
         self.threads.setdefault(thread, {"title": title or thread, "created_at": _EPOCH})
@@ -85,6 +96,8 @@ class FakeMsgboard:
         self.requests.append(str(request.url))
         if self.offline:
             raise httpx.ConnectError("msgboard is down", request=request)
+        if request.method == "POST":
+            return self._handle_post(request)
         params = request.url.params
         limit = min(int(params.get("limit", "20")), PAGE_SIZE)
         since = int(params.get("since", "0") or 0)
@@ -139,6 +152,37 @@ class FakeMsgboard:
             )
         return httpx.Response(404, json={"error": "No such endpoint.", "usage": "..."})
 
+    def _handle_post(self, request: httpx.Request) -> httpx.Response:
+        form = dict(httpx.QueryParams(request.content.decode()))
+        if self.fail_posts:
+            self.fail_posts -= 1
+            return httpx.Response(500, text="boom")
+        if self.rate_limit_posts:
+            self.rate_limit_posts -= 1
+            return httpx.Response(
+                429, json={"error": "slow down"}, headers={"retry-after": str(self.retry_after)}
+            )
+        name = form.get("name") or None
+        if request.url.path == "/threads":
+            thread = self.open_thread(f"{0x5EED + len(self.threads):012x}", form.get("title", ""))
+            return httpx.Response(200, json=self._thread_info(thread))
+        if request.url.path == "/messages":
+            thread = form.get("thread", "")
+            if thread not in self.threads:
+                return httpx.Response(404, json={"error": "No such thread.", "usage": "..."})
+            mid = self.post(thread, form.get("content", ""), name=name)
+            if self.lose_post_responses:
+                self.lose_post_responses -= 1
+                return httpx.Response(502, text="bad gateway")
+            return httpx.Response(
+                200,
+                json={
+                    **self.messages[mid],
+                    "poll": f"https://msgboard.test/messages?thread={thread}&since={mid}&wait=25",
+                },
+            )
+        return httpx.Response(404, json={"error": "No such endpoint.", "usage": "..."})
+
     # -- VenueFake (bonnet.bridges.conformance) ---------------------------
 
     def venue_config(self) -> VenueConfig:
@@ -158,6 +202,12 @@ class FakeMsgboard:
         split = split_foreign_id(foreign_id)
         if split is not None:
             self.messages.pop(split[1], None)
+
+    def good_account(self) -> ForeignAccount:
+        return ForeignAccount("tester", "")
+
+    def rate_limit_next_post(self) -> None:
+        self.rate_limit_posts += 1
 
     def venue_posts(self) -> list[str]:
         return [foreign_id(m["thread"], i) for i, m in sorted(self.messages.items())]

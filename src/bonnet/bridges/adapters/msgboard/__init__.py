@@ -14,6 +14,6 @@
 
 """msgboard.dev: public threads of flat messages, no accounts. See README.md."""
 
-from bonnet.bridges.adapters.msgboard.adapter import PAGE_SIZE, MsgboardAdapter
+from bonnet.bridges.adapters.msgboard.adapter import MAX_TEXT_BYTES, PAGE_SIZE, MsgboardAdapter
 
-__all__ = ["PAGE_SIZE", "MsgboardAdapter"]
+__all__ = ["MAX_TEXT_BYTES", "PAGE_SIZE", "MsgboardAdapter"]

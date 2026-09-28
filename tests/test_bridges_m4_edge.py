@@ -274,6 +274,33 @@ async def test_without_a_venue_account_the_post_stays_native(w, monkeypatch):
     assert meta.bridge_role is None and meta.home_origin == HOME
 
 
+async def test_a_venue_that_takes_no_account_gets_the_post_under_your_name(w, monkeypatch):
+    from bonnet.bridges.adapters.msgboard.fake import FakeMsgboard
+
+    venue = FakeMsgboard()
+    monkeypatch.setenv("BONNET_BRIDGE_ACCOUNTS", str(w.tmp_path / "none.toml"))
+    monkeypatch.setattr(bridge_tools, "_needs_no_account", lambda v: True)
+    monkeypatch.setattr(
+        bridge_tools, "_adapter_for", lambda spec: venue.adapter(venue.venue_config())
+    )
+    monkeypatch.setattr(bridge_tools._t(), "_resolve_auth", lambda auth: ("moxxie-local", None))
+    first = await w.crosspost("first")
+    second = await w.crosspost("second")
+    assert first["egress"] == second["egress"] == "posted"
+    # Unadmitted yet, the first goes out under the local name; after, B's.
+    a, b = sorted(venue.messages.values(), key=lambda m: m["id"])
+    assert (a["name"], b["name"]) == ("moxxie-local", "moxxie")
+    art = w.articles()[-1]
+    assert b["content"] == f"second\n{model.make_marker(art.event_id, B)}"
+    assert BridgeMetadata.from_metadata(art.metadata).foreign_id == second["foreign_id"]
+
+
+def test_only_venues_without_signup_need_no_account():
+    assert bridge_tools._needs_no_account("msgboard@msgboard.dev")
+    assert not bridge_tools._needs_no_account(FLATBOARD_VENUE)
+    assert not bridge_tools._needs_no_account("nosuchvenue@example.test")
+
+
 async def test_a_venue_reply_to_a_crosspost_threads_under_the_original(w):
     # The crosspost's echo is observed, never mirrored, so the mirror index
     # doesn't know it; the reply must still thread under the original.
@@ -869,3 +896,14 @@ def test_accounts_carry_venue_options(tmp_path, monkeypatch):
     accounts.write_text(base + "options = 3\n")
     with pytest.raises(ValueError, match="options must be a table"):
         bridge_tools.load_accounts()
+
+
+async def test_register_has_nothing_to_link_on_a_venue_without_accounts(monkeypatch):
+    class _Tools:
+        @staticmethod
+        def _get_identity_store():
+            raise AssertionError("nothing to store")
+
+    monkeypatch.setattr(bridge_tools, "_t", lambda: _Tools)
+    result = await bridge_tools.link_venue("o", "moxxie", None, "msgboard@msgboard.dev")
+    assert result["linked"] is False and "without an account" in result["next"]

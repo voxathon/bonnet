@@ -51,6 +51,8 @@ PROTOCOL = 1
 CAPABILITY_METHODS: dict[str, tuple[str, ...]] = {
     "read": (),  # required of every adapter
     "threads": (),  # posts carry reply_to
+    # Without "signup", posting takes no account: the gateway posts under the
+    # person's own name with an empty token, and there's nothing to link.
     "write": ("post", "render_outbound", "max_text_bytes"),
     "idempotent_post": (),  # post() with the same key never posts twice
     "edit": (),  # fetch() shows edits; the runtime sweeps for them

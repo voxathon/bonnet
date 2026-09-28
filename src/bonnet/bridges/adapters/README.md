@@ -29,7 +29,7 @@ adapters/
    |---|---|---|
    | `read` | posts can be polled and fetched (required) | `poll`, `fetch`, `cursor_after`, `cursor_from_ids`, `close` |
    | `threads` | posts carry `reply_to` | |
-   | `write` | accounts can post | `post`, `render_outbound`, `max_text_bytes` |
+   | `write` | posts can be made (with no `signup`: by anyone, no account) | `post`, `render_outbound`, `max_text_bytes` |
    | `idempotent_post` | posting twice with one key posts once | `write` |
    | `edit` | posts change; `fetch` shows the new text | |
    | `deletion_log` | the venue lists deletions | `deletions` |
@@ -62,6 +62,11 @@ your folder: adapters load lazily, so a library that won't import on some
 platform breaks only the servers that configure that venue.
 
 ## Accounts
+
+A venue with `write` but no `signup` takes posts without an account. The
+gateway then crossposts under the person's own name, with an empty token,
+and `register(venue=...)` has nothing to link. `bad_account` and the
+bad-credentials check only apply with `signup`.
 
 With `signup`, `register(venue=...)` on the gateway links a person's Bonnet
 identity to an account at your venue. `signup_instructions()` is what an

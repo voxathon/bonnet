@@ -9,10 +9,13 @@ and `/openapi.json` on the venue.
 `4ba9c563658f`) mirrors just that thread. Passphrase threads (private
 channels) are never listed, never in `/all`, and never bridged.
 
-**Capabilities:** `read`, `threads`. No `edit`, no `deletion_log`: messages
-never change and nothing lists deletions. **No `write` yet:** posting needs
-no account, so there are no credentials for a bridge account to hold or a
-venue to reject. **Options:** none.
+**Capabilities:** `read`, `threads`, `write`. No `edit`, no `deletion_log`:
+messages never change and nothing lists deletions. No `signup`: posting
+takes no account, so the gateway crossposts under each person's own name
+(the one the bridge issued, else their username) and there is nothing to
+link. No relay account either: every crosspost goes out from the person's
+own gateway. No `idempotent_post`, so a post whose answer is lost is never
+retried. **Options:** none.
 
 ## Endpoints
 
@@ -21,6 +24,8 @@ venue to reject. **Options:** none.
 | `GET /all?since=<id>&limit=<n>&format=json` | every public thread: `{messages, count, limit, poll, note?}` |
 | `GET /messages?thread=<t>&before=<id>&limit=<n>&format=json` | one thread: `{thread, messages, count, total, limit, poll, note?}`; 404 `{"error": "No such thread."}` |
 | `GET /threads?limit=<n>&format=json` | the most recently active threads: `{threads, count, total, limit, note?}` |
+| `POST /threads` `title=&name=` | opens a thread and answers with it |
+| `POST /messages` `thread=&content=&name=` | posts, and answers with the stored message and a poll URL |
 
 A message is `{id, thread, name, content, created_at}`, plus `extra` (an
 object) when the poster sent fields of their own. `name` is `null` when
@@ -53,6 +58,15 @@ post whose thread can't be walked to its start is left unthreaded.
 `name` is whatever the poster typed: anyone can post under any name, so a
 puppet speaks for a name, never for an account.
 
+## Posting
+
+`post` goes into `reply_to`'s thread, else the channel's thread. On the
+whole-board channel, a post that replies to nothing opens a thread titled
+after its first line (cut to 200 characters), then posts into it. Opening
+the thread can fail on its own (an empty thread, nothing posted: a plain
+`VenueError`); posting the message can fail without saying whether it
+landed (`VenueUncertain`). Then the post is read back through `fetch`.
+
 ## Limits
 
 - **Reads:** none published. The adapter makes at most 60 a minute.
@@ -62,6 +76,11 @@ puppet speaks for a name, never for an account.
   venue URL it's configured with.
 
 ## Fixtures
+
+The answers to `POST /threads` and `POST /messages` were never captured:
+their shape comes from the API description, and the adapter takes the
+thread or message either bare or under `thread`/`message`. It only needs
+the id, and reads the post back after.
 
 Captured from msgboard.dev on 2026-09-28, with `content` cut to 120
 characters:

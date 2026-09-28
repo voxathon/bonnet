@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""msgboard.dev adapter: public threads of flat messages, read-only.
+"""msgboard.dev adapter: public threads of flat messages, no accounts.
 
 Everything on msgboard is a thread; message ids are one counter across the
 whole board, so they order posts everywhere. Every listing answers with the
@@ -27,6 +27,10 @@ sent fields of their own.
 There is no endpoint for one message, so a foreign id carries its thread:
 `<thread>/<id>`. A thread's first message is its root, and every later one
 replies to it.
+
+Posting takes no account: a name is whatever the poster sends, so the
+adapter posts under the account's `user` and ignores its token. A post with
+no `reply_to` on the whole-board channel opens a thread of its own.
 """
 
 from __future__ import annotations
@@ -37,7 +41,17 @@ from urllib.parse import urlencode
 
 import httpx
 
-from bonnet.bridges.adapter import ForeignPost, Gone, RateLimits, ReadLimiter, VenueError
+from bonnet.bridges.adapter import (
+    ForeignAccount,
+    ForeignPost,
+    Gone,
+    RateLimits,
+    ReadLimiter,
+    VenueError,
+    VenueRateLimited,
+    VenueUncertain,
+)
+from bonnet.bridges.model import normalize_foreign_text, truncate_utf8
 from bonnet.bridges.venue import VenueConfig
 
 # The venue's ceiling on `limit=`, everywhere.
@@ -46,6 +60,10 @@ PAGE_SIZE = 100
 MAX_CATCHUP_PAGES = 20
 # Pages walked back to find a thread's first message before giving up on it.
 MAX_ROOT_PAGES = 20
+# `content` is capped at 8192 characters; bytes keep the cut exact.
+MAX_TEXT_BYTES = 8192
+MAX_TITLE_CHARS = 200
+MAX_NAME_CHARS = 64
 
 
 def _parse_created(value) -> int | None:
@@ -98,12 +116,11 @@ class _NoSuchThread(Exception):
 class MsgboardAdapter:
     protocol = 1
     type = "msgboard"
-    # Messages never change and nothing lists deletions. Posting needs no
-    # account at all, so there is nothing for "write" to authenticate:
-    # read-only until the bridge has a model for anonymous venues.
-    capabilities = frozenset({"read", "threads"})
-    # The venue publishes no read limit; this stays well clear of trouble.
-    limits = RateLimits(reads_per_minute=60)
+    # Messages never change and nothing lists deletions. "write" without
+    # "signup": posting takes no account, so there is none to get or link.
+    capabilities = frozenset({"read", "threads", "write"})
+    # The venue publishes no limits; these stay well clear of trouble.
+    limits = RateLimits(reads_per_minute=60, posts_min_interval_seconds=5.0)
     options: frozenset[str] = frozenset()
 
     def __init__(
@@ -283,3 +300,90 @@ class MsgboardAdapter:
         if msg is None:
             return Gone(foreign_id, "unknown")
         return self._post(channel, msg, await self._root(thread))
+
+    # -- write ------------------------------------------------------------
+
+    def max_text_bytes(self) -> int:
+        return MAX_TEXT_BYTES
+
+    def render_outbound(self, text: str, marker: str, attribution: str | None) -> str:
+        head = f"{attribution}: " if attribution else ""
+        tail = f"\n{marker}"
+        budget = MAX_TEXT_BYTES - len((head + tail).encode("utf-8"))
+        body = truncate_utf8(normalize_foreign_text(text), max(budget, 0)).rstrip()
+        return f"{head}{body}{tail}"
+
+    async def _send(self, path: str, form: dict, uncertain: bool) -> dict:
+        """POST `form`. With `uncertain`, a failure that doesn't say whether
+        the venue took it raises VenueUncertain; else VenueError."""
+        await self._limiter.wait()
+        fail = VenueUncertain if uncertain else VenueError
+        try:
+            resp = await self._http.post(f"{self._base}{path}", data={**form, "format": "json"})
+        except httpx.HTTPError as e:
+            raise fail(f"msgboard {path}: {type(e).__name__}") from None
+        if resp.status_code == 429:
+            try:
+                retry_after: float | None = float(resp.headers.get("retry-after", ""))
+            except ValueError:
+                retry_after = None
+            raise VenueRateLimited(f"msgboard {path}: rate limited", retry_after)
+        if resp.status_code >= 500:
+            raise fail(f"msgboard {path}: HTTP {resp.status_code}")
+        if resp.status_code != 200:
+            raise VenueError(f"msgboard {path}: HTTP {resp.status_code}")
+        try:
+            data = resp.json()
+        except ValueError:
+            raise fail(f"msgboard {path}: bad JSON") from None
+        if not isinstance(data, dict):
+            raise fail(f"msgboard {path}: unexpected body")
+        return data
+
+    async def _open_thread(self, title: str, name: str) -> str:
+        form = {"title": title[:MAX_TITLE_CHARS] or "untitled"}
+        if name:
+            form["name"] = name
+        data = await self._send("/threads", form, uncertain=False)
+        # The thread comes back on its own or under "thread".
+        thread = data.get("thread") if isinstance(data.get("thread"), dict) else data
+        tid = thread.get("id") if isinstance(thread, dict) else None
+        if not isinstance(tid, str) or not tid:
+            raise VenueError("msgboard /threads: no thread id in the answer")
+        return tid
+
+    async def post(
+        self,
+        account: ForeignAccount,
+        channel: str,
+        text: str,
+        reply_to: str | None,
+        idempotency_key: str,
+    ) -> ForeignPost:
+        """Post under `account.user` (its token means nothing here): into
+        `reply_to`'s thread, else the channel's, else a new thread named after
+        the text's first line."""
+        name = account.user[:MAX_NAME_CHARS]
+        split = split_foreign_id(reply_to) if reply_to else None
+        thread = split[0] if split is not None else channel
+        if not thread:
+            thread = await self._open_thread(text.split("\n", 1)[0].strip(), name)
+        form = {"thread": thread, "content": text}
+        if name:
+            form["name"] = name
+        data = await self._send("/messages", form, uncertain=True)
+        # The stored message comes back on its own or under "message".
+        msg = data.get("message") if isinstance(data.get("message"), dict) else data
+        n = _id(msg.get("id")) if isinstance(msg, dict) else None
+        if n is None:
+            raise VenueUncertain("msgboard /messages: no message id in the answer")
+        # The post is made: reading it back is a nicety, and must never turn
+        # a post the venue took into an error.
+        try:
+            fetched = await self.fetch(channel, foreign_id(thread, n))
+        except VenueError:
+            fetched = None
+        if isinstance(fetched, ForeignPost):
+            return fetched
+        stored = {"id": n, "thread": thread, "name": name or None, "content": text}
+        return self._post(channel, stored, self._roots.get(thread))

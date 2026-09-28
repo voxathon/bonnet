@@ -77,8 +77,9 @@ class VenueFake(Protocol):
 
     # With "write":
     #   def good_account(self) -> ForeignAccount   an account the venue accepts
-    #   def bad_account(self) -> ForeignAccount    one whose credentials it rejects
     #   def rate_limit_next_post(self) -> None     the next post is refused for rate
+    # With "signup" (the venue has accounts):
+    #   def bad_account(self) -> ForeignAccount    one whose credentials it rejects
     # With "edit":
     #   def edit(self, foreign_id: str, text: str) -> None
     # With "self_register":
@@ -210,7 +211,7 @@ async def posts_land_and_read_back(fake: VenueFake, adapter: VenueAdapter) -> No
     assert polled[posted.foreign_id].text == posted.text
 
 
-@_needs("write")
+@_needs("signup")  # a venue without accounts has no credentials to reject
 async def bad_credentials_raise_auth_error(fake: VenueFake, adapter: VenueAdapter) -> None:
     bad: ForeignAccount = fake.bad_account()  # type: ignore[attr-defined]
     before = fake.venue_posts()
