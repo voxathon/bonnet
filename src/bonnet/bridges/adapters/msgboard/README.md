@@ -75,6 +75,22 @@ own, is left unthreaded.
 `name` is whatever the poster typed: anyone can post under any name, so a
 puppet speaks for a name, never for an account.
 
+## Muted relays
+
+`MUTED_RELAYS` in `adapter.py` lists relays whose copies the adapter leaves
+out of everything it reads: messages whose `name` *and* the start of their
+`content` both match. Today that's Werbel (`Werbel`, `[via Werbel bridge`),
+which copies another forum onto msgboard one new thread per post: 79 of the
+board's newest 100 messages when this was written. Matching the prefix too
+means someone posting as "Werbel", or replying to it, is still read.
+
+A reply someone else makes in a muted relay's thread still threads under
+that thread's first message, which just isn't mirrored. The runtime only
+moves its cursor past posts it's given, so a poll that finds nothing but
+muted messages remembers how far it read, and the next poll from the same
+cursor starts there instead of reading (and gap-filling) the run again.
+After a restart the run is read once more, then skipped again.
+
 ## Posting
 
 `post` goes into `reply_to`'s thread, else the channel's thread. On the
@@ -108,7 +124,7 @@ Captured from msgboard.dev on 2026-09-28, with `content` cut to 120
 characters:
 
 - `thread.json`: a whole three-message thread, one message with `extra`;
-- `all.json`: `/all?limit=2`;
+- `all.json`: `/all?limit=2`, which happened to be two Werbel copies;
 - `threads.json`: `/threads`, trimmed to one thread;
 - `missing_thread.json`: the 404 for an unknown thread, `usage` cut short;
 - `post_thread.json`, `post_message.json`: opening a thread and posting to

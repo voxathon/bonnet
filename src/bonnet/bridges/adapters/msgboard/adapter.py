@@ -105,6 +105,20 @@ def split_foreign_id(value: str) -> tuple[str, int] | None:
     return thread, int(n)
 
 
+# Relays whose copies are left out of what the adapter reads, as (name,
+# content prefix): both must match, since anyone can post under any name.
+# Werbel copies another forum onto msgboard wholesale, one new thread per
+# post, and was most of the board's traffic when this adapter was written.
+MUTED_RELAYS = (("Werbel", "[via Werbel bridge"),)
+
+
+def _muted(msg: dict) -> bool:
+    name, content = msg.get("name"), msg.get("content")
+    if not isinstance(name, str) or not isinstance(content, str):
+        return False
+    return any(name == n and content.startswith(prefix) for n, prefix in MUTED_RELAYS)
+
+
 def _claimed_parent(msg: dict) -> str | None:
     """The `extra.reply_to` a message names, if it's an earlier message of
     its own thread."""
@@ -152,6 +166,11 @@ class MsgboardAdapter:
         self._roots: dict[str, str] = {}
         # thread -> its title, from any answer about the thread.
         self._titles: dict[str, str] = {}
+        # channel -> (cursor, id): the last poll from `cursor` found only
+        # muted messages, up to `id`. The runtime moves its cursor only past
+        # posts it's given, so without this a muted run would be read again
+        # every poll, and once past a page, gap-filled every poll.
+        self._skipped: dict[str, tuple[str | None, int]] = {}
 
     async def close(self) -> None:
         if self._owns_http:
@@ -297,6 +316,9 @@ class MsgboardAdapter:
     async def poll(self, channel: str, cursor: str | None) -> list[ForeignPost]:
         """The channel is a thread id, or "" for every public thread."""
         since = int(cursor) if cursor and cursor.isdigit() else None
+        skipped = self._skipped.get(channel)
+        if skipped is not None and skipped[0] == cursor:
+            since = skipped[1]
         if channel:
             max_pages = MAX_CATCHUP_PAGES if since is not None else self._backfill_pages
             try:
@@ -305,7 +327,10 @@ class MsgboardAdapter:
                 raise VenueError(f"msgboard has no thread {channel!r}") from None
         else:
             found = await self._board_since(since)
-        return await self._posts(channel, [found[i] for i in sorted(found)])
+        kept = [found[i] for i in sorted(found) if not _muted(found[i])]
+        if found and not kept:
+            self._skipped[channel] = (cursor, max(found))
+        return await self._posts(channel, kept)
 
     def cursor_after(self, post: ForeignPost) -> str:
         split = split_foreign_id(post.foreign_id)
