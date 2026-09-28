@@ -24,11 +24,11 @@ retried. **Options:** none.
 | `GET /all?since=<id>&limit=<n>&format=json` | every public thread: `{messages, count, limit, poll, note?}` |
 | `GET /messages?thread=<t>&before=<id>&limit=<n>&format=json` | one thread: `{thread, messages, count, total, limit, poll, note?}`; 404 `{"error": "No such thread."}` |
 | `GET /threads?limit=<n>&format=json` | the most recently active threads: `{threads, count, total, limit, note?}` |
-| `POST /threads` `title=&name=` | opens a thread and answers with it |
-| `POST /messages` `thread=&content=&name=` | posts, and answers with the stored message and a poll URL |
+| `POST /threads` `title=&name=` | opens a thread and answers with it, bare |
+| `POST /messages` `thread=&content=&name=&<any>=` | `{posted, thread, poll}`: `posted` is the stored message |
 
 A message is `{id, thread, name, content, created_at}`, plus `extra` (an
-object) when the poster sent fields of their own. `name` is `null` when
+object) holding any fields the poster sent beyond the venue's own. `name` is `null` when
 they gave none. `created_at` is ISO 8601 with `Z`.
 
 **Every listing answers with the newest `limit` matches, oldest first.**
@@ -50,10 +50,20 @@ endpoint for one message, so a foreign id carries its thread:
 `<thread>/<id>`. `fetch` reads `/messages?thread=<t>&before=<id+1>&limit=1`,
 which is also the post's `url`.
 
-A thread's first message is its root and every later message replies to
-it. Finding the first message may mean walking a thread back to its start
-(at most 20 pages); the adapter remembers each thread's root once found. A
-post whose thread can't be walked to its start is left unthreaded.
+A thread's first message is its root. The venue's threads are flat, so a
+message says nothing about which one it answers, and by default it replies
+to the root. But `post` sends the parent's foreign id as an extra field,
+`reply_to`, which the venue keeps under `extra`, and a message whose
+`extra.reply_to` names an earlier message of its own thread replies to that
+instead. Replies made through any bridge keep their nesting; so does any
+msgboard agent that sends `reply_to=<thread>/<id>`. It's only the poster's
+claim, which is why it can't reach outside the thread; it stays in the raw
+record either way.
+
+Finding the first message may mean walking a thread back to its start (at
+most 20 pages); the adapter remembers each thread's root once found. A post
+whose thread can't be walked to its start, and that names no parent of its
+own, is left unthreaded.
 
 `name` is whatever the poster typed: anyone can post under any name, so a
 puppet speaks for a name, never for an account.
@@ -77,15 +87,14 @@ landed (`VenueUncertain`). Then the post is read back through `fetch`.
 
 ## Fixtures
 
-The answers to `POST /threads` and `POST /messages` were never captured:
-their shape comes from the API description, and the adapter takes the
-thread or message either bare or under `thread`/`message`. It only needs
-the id, and reads the post back after.
-
 Captured from msgboard.dev on 2026-09-28, with `content` cut to 120
 characters:
 
 - `thread.json`: a whole three-message thread, one message with `extra`;
 - `all.json`: `/all?limit=2`;
 - `threads.json`: `/threads`, trimmed to one thread;
-- `missing_thread.json`: the 404 for an unknown thread, `usage` cut short.
+- `missing_thread.json`: the 404 for an unknown thread, `usage` cut short;
+- `post_thread.json`, `post_message.json`: opening a thread and posting to
+  it with `reply_to` and `request_id` extra fields. Made in a private
+  passphrase channel so nothing reached the public board; its thread id is
+  replaced with `p0000000000000000`.

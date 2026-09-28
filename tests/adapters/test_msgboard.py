@@ -242,3 +242,81 @@ def test_msgboard_outbound_text_fits():
     out = adapter.render_outbound("é" * 9000, "--marker", "someone")
     assert out.startswith("someone: ") and out.endswith("\n--marker")
     assert len(out.encode("utf-8")) <= MAX_TEXT_BYTES
+
+
+async def test_msgboard_reads_the_real_post_answers():
+    seen: list[str] = []
+    routes = {"/threads": (200, "post_thread.json"), "/messages": (200, "post_message.json")}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        if request.method == "GET":  # the read-back: a thread we can't see
+            return httpx.Response(404, json=fixture("missing_thread.json"))
+        status, name = routes[request.url.path]
+        return httpx.Response(status, json=fixture(name))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    adapter = MsgboardAdapter(FakeMsgboard().venue_config(), http=http, limiter=_NoLimit())
+    try:
+        posted = await adapter.post(ForeignAccount("lanternfly", ""), "", "probe", None, "k")
+    finally:
+        await http.aclose()
+    assert seen[:2] == ["POST /threads", "POST /messages"]
+    assert posted.foreign_id == "p0000000000000000/1350"
+
+
+async def test_msgboard_replies_keep_their_parent_through_the_venue():
+    board = FakeMsgboard()
+    adapter = board.adapter(board.venue_config())
+    me = ForeignAccount("lanternfly", "")
+    try:
+        top = await adapter.post(me, "", "topic", None, "k1")
+        first = await adapter.post(me, "", "first reply", top.foreign_id, "k2")
+        nested = await adapter.post(me, "", "reply to the reply", first.foreign_id, "k3")
+        assert nested.reply_to == first.foreign_id and nested.root_id == top.foreign_id
+        # A native reply names no parent, so it hangs off the thread's start.
+        thread = top.foreign_id.split("/")[0]
+        board.post(thread, "native", name="grok")
+        polled = {p.text: p for p in await adapter.poll("", None)}
+        assert polled["reply to the reply"].reply_to == first.foreign_id
+        assert polled["native"].reply_to == top.foreign_id
+    finally:
+        await adapter.close()
+
+
+async def test_msgboard_claimed_parents_stay_inside_their_thread():
+    board = FakeMsgboard()
+    a = board.post("a", "root")
+    b = board.post("b", "elsewhere")
+    board.post("a", "outside", reply_to=f"b/{b}")
+    board.post("a", "later", reply_to=f"a/{a + 99}")
+    board.post("a", "junk", reply_to="nonsense")
+    adapter = board.adapter(board.venue_config())
+    try:
+        posts = [p for p in await adapter.poll("", None) if p.text != "elsewhere"]
+        assert {p.text: p.reply_to for p in posts} == {
+            "root": None, "outside": f"a/{a}", "later": f"a/{a}", "junk": f"a/{a}",
+        }  # fmt: skip
+        # The claim stays in the raw record either way.
+        assert b'"reply_to":"b/2"' in next(p for p in posts if p.text == "outside").raw
+    finally:
+        await adapter.close()
+
+
+async def test_the_fake_answers_posts_the_way_the_venue_does():
+    board = FakeMsgboard()
+    async with board.client() as http:
+        base = "https://msgboard.test"
+        thread = (await http.post(f"{base}/threads", data={"title": "t"})).json()
+        posted = (
+            await http.post(
+                f"{base}/messages",
+                data={"thread": thread["id"], "content": "c", "name": "n", "reply_to": "x/1"},
+            )  # fmt: skip
+        ).json()
+    assert set(thread) == set(fixture("post_thread.json"))
+    real = fixture("post_message.json")
+    assert set(posted) == set(real)
+    assert set(posted["posted"]) == set(real["posted"])
+    assert posted["posted"]["extra"] == {"reply_to": "x/1"}
+    assert set(posted["thread"]) == set(real["thread"])

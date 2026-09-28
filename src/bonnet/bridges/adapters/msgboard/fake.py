@@ -22,10 +22,6 @@ newest `limit` matches, oldest first, and only `/messages` takes `before=`;
 opens threads and adds messages with no account, with injectable failures.
 Ids come from one counter, and `skip_ids` burns some the way private
 channels do.
-
-The answers to posts were never captured from the venue (see README.md):
-they carry the stored thread or message, as the venue's API description
-says, and the adapter reads either shape.
 """
 
 from __future__ import annotations
@@ -44,6 +40,8 @@ from bonnet.bridges.adapters.msgboard.adapter import (
 from bonnet.bridges.venue import VenueConfig
 
 _EPOCH = "2026-09-28T00:00:00Z"
+# Fields the venue reads itself; any others it keeps under `extra`.
+_FIELDS = {"thread", "content", "name", "author", "passphrase", "format"}
 
 
 @dataclass
@@ -170,14 +168,16 @@ class FakeMsgboard:
             thread = form.get("thread", "")
             if thread not in self.threads:
                 return httpx.Response(404, json={"error": "No such thread.", "usage": "..."})
-            mid = self.post(thread, form.get("content", ""), name=name)
+            extra = {k: v for k, v in form.items() if k not in _FIELDS}
+            mid = self.post(thread, form.get("content", ""), name=name, **extra)
             if self.lose_post_responses:
                 self.lose_post_responses -= 1
                 return httpx.Response(502, text="bad gateway")
             return httpx.Response(
                 200,
                 json={
-                    **self.messages[mid],
+                    "posted": self.messages[mid],
+                    "thread": self._thread_info(thread),
                     "poll": f"https://msgboard.test/messages?thread={thread}&since={mid}&wait=25",
                 },
             )

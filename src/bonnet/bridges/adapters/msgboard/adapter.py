@@ -29,7 +29,9 @@ There is no endpoint for one message, so a foreign id carries its thread:
 replies to it.
 
 Posting takes no account: a name is whatever the poster sends, so the
-adapter posts under the account's `user` and ignores its token. A post with
+adapter posts under the account's `user` and ignores its token. Fields a
+poster adds are kept under `extra`: a reply carries its parent's foreign id
+as `reply_to`, which reads back as the post's parent. A post with
 no `reply_to` on the whole-board channel opens a thread of its own.
 """
 
@@ -101,6 +103,17 @@ def split_foreign_id(value: str) -> tuple[str, int] | None:
     if not sep or not thread or not n.isdigit() or int(n) <= 0:
         return None
     return thread, int(n)
+
+
+def _claimed_parent(msg: dict) -> str | None:
+    """The `extra.reply_to` a message names, if it's an earlier message of
+    its own thread."""
+    extra = msg.get("extra")
+    value = extra.get("reply_to") if isinstance(extra, dict) else None
+    split = split_foreign_id(value) if isinstance(value, str) else None
+    if split is None or split[0] != msg["thread"] or split[1] >= msg["id"]:
+        return None
+    return foreign_id(*split)
 
 
 def _canonical(msg: dict) -> bytes:
@@ -243,9 +256,16 @@ class MsgboardAdapter:
         name = msg.get("name")
         name = name if isinstance(name, str) else ""
         text = msg.get("content")
-        # A thread's later messages reply to its first. With the first out of
-        # reach, the post stands alone rather than guess.
-        reply_to = root if root is not None and root != fid else None
+        # A thread's later messages reply to its first, unless they name an
+        # earlier message of the same thread as their parent. Bridges post
+        # with `reply_to`, which the venue keeps under `extra`; it's only
+        # the poster's claim, so it can't reach outside the thread. With the
+        # first message out of reach, the post stands alone rather than guess.
+        claimed = _claimed_parent(msg)
+        if claimed is not None:
+            reply_to: str | None = claimed
+        else:
+            reply_to = root if root is not None and root != fid else None
         return ForeignPost(
             venue=self.venue,
             channel=channel,
@@ -345,9 +365,8 @@ class MsgboardAdapter:
         if name:
             form["name"] = name
         data = await self._send("/threads", form, uncertain=False)
-        # The thread comes back on its own or under "thread".
-        thread = data.get("thread") if isinstance(data.get("thread"), dict) else data
-        tid = thread.get("id") if isinstance(thread, dict) else None
+        # The new thread, bare.
+        tid = data.get("id")
         if not isinstance(tid, str) or not tid:
             raise VenueError("msgboard /threads: no thread id in the answer")
         return tid
@@ -371,9 +390,13 @@ class MsgboardAdapter:
         form = {"thread": thread, "content": text}
         if name:
             form["name"] = name
+        if split is not None:
+            # Kept under `extra` and read back as the parent: nesting survives
+            # the venue's flat threads for anyone reading through a bridge.
+            form["reply_to"] = foreign_id(*split)
         data = await self._send("/messages", form, uncertain=True)
-        # The stored message comes back on its own or under "message".
-        msg = data.get("message") if isinstance(data.get("message"), dict) else data
+        # {"posted": <message>, "thread": <thread>, "poll": <url>}
+        msg = data.get("posted")
         n = _id(msg.get("id")) if isinstance(msg, dict) else None
         if n is None:
             raise VenueUncertain("msgboard /messages: no message id in the answer")
@@ -386,4 +409,6 @@ class MsgboardAdapter:
         if isinstance(fetched, ForeignPost):
             return fetched
         stored = {"id": n, "thread": thread, "name": name or None, "content": text}
+        if split is not None:
+            stored["extra"] = {"reply_to": foreign_id(*split)}
         return self._post(channel, stored, self._roots.get(thread))
