@@ -81,13 +81,30 @@ async def test_msgboard_reads_the_real_firehose_envelope():
     seen: list[str] = []
     adapter = _serving({"/all": (200, "all.json"), "/messages": (404, "missing_thread.json")}, seen)
     try:
-        posts = await adapter.poll("", None)
+        # Both captured messages are Werbel's relay copies, left out as is.
+        assert await adapter.poll("", None) == []
     finally:
         await adapter._http.aclose()
+
+    body = fixture("all.json")
+    for m in body["messages"]:
+        m["name"] = "someone"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/all":
+            return httpx.Response(200, json=body)
+        return httpx.Response(404, json=fixture("missing_thread.json"))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    adapter = MsgboardAdapter(FakeMsgboard().venue_config(), http=http, limiter=_NoLimit())
+    try:
+        posts = await adapter.poll("", None)
+    finally:
+        await http.aclose()
     assert [p.foreign_id for p in posts] == ["35da4acc2cfb/1345", "95ef5dc3b1c5/1346"]
     # Threads whose start can't be read leave their posts unthreaded.
     assert all(p.reply_to is None and p.root_id is None for p in posts)
-    assert posts[0].author_handle == "Werbel"
+    assert posts[0].author_handle == "someone"
 
 
 async def test_msgboard_missing_threads():
@@ -349,5 +366,47 @@ async def test_msgboard_thread_titles_travel_both_ways():
             assert (await fresh.fetch("", top.foreign_id)).subject == "A subject"
         finally:
             await fresh.close()
+    finally:
+        await adapter.close()
+
+
+async def test_msgboard_leaves_out_werbel_copies():
+    board = FakeMsgboard()
+    board.post("lobby", "hello", name="grok")
+    relay = board.post("relayed", "[via Werbel bridge · from thecolony] Re: x", name="Werbel")
+    board.post("relayed", "a real reply in a relayed thread", name="Ekurhive")
+    board.post("lobby", "[via Werbel bridge] but not Werbel", name="impostor")
+    board.post("lobby", "Werbel, your relay is noisy", name="Werbel")
+    adapter = board.adapter(board.venue_config())
+    try:
+        posts = await adapter.poll("", None)
+        assert [p.author_handle for p in posts] == ["grok", "Ekurhive", "impostor", "Werbel"]
+        # The reply still names its thread's (unmirrored) first message.
+        assert posts[1].reply_to == f"relayed/{relay}"
+    finally:
+        await adapter.close()
+
+
+async def test_msgboard_muted_runs_move_the_poll_along():
+    board = FakeMsgboard()
+    board.post("lobby", "hello")
+    adapter = board.adapter(board.venue_config())
+    try:
+        (hello,) = await adapter.poll("", None)
+        cursor = adapter.cursor_after(hello)
+        for i in range(150):  # more than a page: a gap to fill
+            board.post(f"relay{i}", f"[via Werbel bridge] {i}", name="Werbel")
+        assert await adapter.poll("", cursor) == []
+        # The runtime's cursor hasn't moved, but the next poll starts past
+        # the muted run: one /all request, no gap fill.
+        board.requests.clear()
+        assert await adapter.poll("", cursor) == []
+        assert len(board.requests) == 1 and f"since={board.next_id - 1}" in board.requests[0]
+        board.post("lobby", "back to normal")
+        (normal,) = await adapter.poll("", cursor)
+        assert normal.text == "back to normal"
+        # A cursor the skip wasn't recorded for reads from that cursor.
+        again = await adapter.poll("", "0")
+        assert [p.text for p in again] == ["hello", "back to normal"]
     finally:
         await adapter.close()
