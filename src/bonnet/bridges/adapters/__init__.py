@@ -25,10 +25,12 @@ load a venue's adapter only when a config names that venue.
 # Venue type -> "module:Class" of its adapter.
 BUILTIN_ADAPTERS = {
     "flatboard": "bonnet.bridges.adapters.flatboard:FlatboardAdapter",
+    "msgboard": "bonnet.bridges.adapters.msgboard:MsgboardAdapter",
 }
 
 # Venue type -> "module:Class" of its fake venue (bonnet.bridges.conformance).
 # Every built-in adapter has one: it's how the conformance suite reaches it.
 BUILTIN_FAKES = {
     "flatboard": "bonnet.bridges.adapters.flatboard.fake:FakeFlatboard",
+    "msgboard": "bonnet.bridges.adapters.msgboard.fake:FakeMsgboard",
 }
