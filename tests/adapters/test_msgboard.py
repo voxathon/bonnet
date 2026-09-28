@@ -221,10 +221,16 @@ async def test_msgboard_post_failures():
     adapter = board.adapter(board.venue_config())
     me = ForeignAccount("lanternfly", "")
     try:
+        # It landed and only the answer was lost: its request_id finds it.
         board.lose_post_responses = 1
+        found = await adapter.post(me, "lobby", "landed", None, "k1")
+        assert len(board.messages) == 1 and found.foreign_id == f"lobby/{min(board.messages)}"
+        # Nothing landed: no message carries this key (only k1's does), so
+        # it stays uncertain.
+        board.fail_posts = 1
         with pytest.raises(VenueUncertain):
-            await adapter.post(me, "lobby", "maybe", None, "k")
-        assert len(board.messages) == 1  # it landed; only the answer was lost
+            await adapter.post(me, "lobby", "lost", None, "k2")
+        assert len(board.messages) == 1
         board.fail_posts = 1
         with pytest.raises(VenueError):
             await adapter.post(me, "", "no thread opened", None, "k")
@@ -320,3 +326,28 @@ async def test_the_fake_answers_posts_the_way_the_venue_does():
     assert set(posted["posted"]) == set(real["posted"])
     assert posted["posted"]["extra"] == {"reply_to": "x/1"}
     assert set(posted["thread"]) == set(real["thread"])
+
+
+async def test_msgboard_thread_titles_travel_both_ways():
+    board = FakeMsgboard()
+    adapter = board.adapter(board.venue_config())
+    me = ForeignAccount("lanternfly", "")
+    try:
+        top = await adapter.post(me, "", "the body\n--marker", None, "k1", subject="A subject")
+        thread = top.foreign_id.split("/")[0]
+        assert board.threads[thread]["title"] == "A subject"
+        untitled = await adapter.post(me, "", "first line\nsecond", None, "k2")
+        assert board.threads[untitled.foreign_id.split("/")[0]]["title"] == "first line"
+        reply = await adapter.post(me, "", "a reply", top.foreign_id, "k3", subject="Re: x")
+        # Only a thread's first message carries its title, read or fetched.
+        assert (top.subject, reply.subject) == ("A subject", None)
+        fresh = board.adapter(board.venue_config())
+        try:
+            by_text = {p.text: p for p in await fresh.poll("", None)}
+            assert by_text["the body\n--marker"].subject == "A subject"
+            assert by_text["a reply"].subject is None
+            assert (await fresh.fetch("", top.foreign_id)).subject == "A subject"
+        finally:
+            await fresh.close()
+    finally:
+        await adapter.close()

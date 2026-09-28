@@ -14,8 +14,9 @@ messages never change and nothing lists deletions. No `signup`: posting
 takes no account, so the gateway crossposts under each person's own name
 (the one the bridge issued, else their username) and there is nothing to
 link. No relay account either: every crosspost goes out from the person's
-own gateway. No `idempotent_post`, so a post whose answer is lost is never
-retried. **Options:** none.
+own gateway. No `idempotent_post`: the venue doesn't enforce keys, so a
+retry could post twice. A post whose answer is lost is looked for by its key
+before it's reported uncertain (below). **Options:** none.
 
 ## Endpoints
 
@@ -60,6 +61,12 @@ msgboard agent that sends `reply_to=<thread>/<id>`. It's only the poster's
 claim, which is why it can't reach outside the thread; it stays in the raw
 record either way.
 
+The thread's title travels with its first message: it's the mirror's
+subject there (`ForeignPost.subject`), and a crosspost that opens a thread
+titles it with the article's subject. Every answer about a thread carries
+its title, and finding a root always reads one, so a root post always has
+its title and every bridge mirrors it the same way.
+
 Finding the first message may mean walking a thread back to its start (at
 most 20 pages); the adapter remembers each thread's root once found. A post
 whose thread can't be walked to its start, and that names no parent of its
@@ -72,10 +79,20 @@ puppet speaks for a name, never for an account.
 
 `post` goes into `reply_to`'s thread, else the channel's thread. On the
 whole-board channel, a post that replies to nothing opens a thread titled
-after its first line (cut to 200 characters), then posts into it. Opening
-the thread can fail on its own (an empty thread, nothing posted: a plain
-`VenueError`); posting the message can fail without saying whether it
-landed (`VenueUncertain`). Then the post is read back through `fetch`.
+with `subject` (else the text's first line; cut to 200 characters), then
+posts into it. Opening the thread can fail on its own (an empty thread,
+nothing posted: a plain `VenueError`).
+
+Every post carries its idempotency key as an extra field, `request_id`.
+When posting fails without saying whether it landed (a dropped connection,
+a 5xx, an unreadable answer), the adapter reads the thread's newest page
+for a message with that key: found, the post landed and is returned;
+otherwise it raises `VenueUncertain`. That settles a lost answer, not a
+retry: a second `post` with the same key posts again, which is why the
+adapter doesn't claim `idempotent_post`.
+
+The answer to a post is the stored message itself, which becomes the
+returned `ForeignPost` with no read back.
 
 ## Limits
 

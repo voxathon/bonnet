@@ -297,7 +297,7 @@ def _note_auth(spec: VenueAccountSpec, failed: bool) -> None:
     _write_auth_failures(data)
 
 
-async def _venue_post(spec: VenueAccountSpec, adapter, channel, text, reply_to, key):
+async def _venue_post(spec: VenueAccountSpec, adapter, channel, text, reply_to, key, subject=None):
     """Post as `spec`: spaced per account, never with rejected credentials.
 
     Retried once, with the same key, when that's safe: after a short rate
@@ -311,7 +311,7 @@ async def _venue_post(spec: VenueAccountSpec, adapter, channel, text, reply_to, 
     for attempt in range(2):
         await gate.wait()
         try:
-            posted = await adapter.post(spec.account, channel, text, reply_to, key)
+            posted = await adapter.post(spec.account, channel, text, reply_to, key, subject=subject)
         except VenueAuthError:
             _note_auth(spec, failed=True)
             raise
@@ -676,7 +676,7 @@ async def publish_bridged(
             try:
                 posted = await _venue_post(
                     spec, adapter, channel, venue_text, reply_to_foreign_id or None,
-                    event_id.hex()[:32],
+                    event_id.hex()[:32], subject,
                 )  # fmt: skip
             except VenueError as e:
                 if isinstance(e, VenueUncertain) and "idempotent_post" in adapter.capabilities:

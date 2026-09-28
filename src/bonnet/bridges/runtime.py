@@ -593,7 +593,7 @@ class BridgeRuntime:
             crosspost_of_event=crosspost_of[1] if crosspost_of else None,
         )
         fields = [
-            metadata_text(1, mirror_subject(post.text)),
+            metadata_text(1, mirror_subject(post.subject or post.text)),
             metadata_text_list(2, model.bridge_tags(venue_type, src)),
             metadata_text(4, "text/plain"),
         ]
@@ -757,6 +757,7 @@ class BridgeRuntime:
                 text,
                 parent.src.foreign_id if parent is not None else None,
                 art.event_id.hex()[:32],
+                subject=art.subject or None,
             )
         except VenueUncertain as e:
             if not at_most_once:

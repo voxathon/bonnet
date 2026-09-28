@@ -81,6 +81,9 @@ class ForeignPost:
     raw: bytes
     raw_content_type: str
     url: str | None
+    # The venue's own subject for the post (a thread's title, say), where it
+    # has one. Mirrors use it; without one, the text's start.
+    subject: str | None = None
 
 
 @dataclass(frozen=True)
@@ -173,9 +176,11 @@ class VenueAdapter(Protocol):
         text: str,
         reply_to: str | None,
         idempotency_key: str,
+        subject: str | None = None,
     ) -> ForeignPost:
         """Post as `account`. Retrying with the same key must not post twice
-        on venues with `idempotent_post`. Raises VenueAuthError on bad credentials."""
+        on venues with `idempotent_post`. Raises VenueAuthError on bad credentials.
+        `subject` is the article's; a venue with titles uses it, others ignore it."""
         ...
 
     def render_outbound(self, text: str, marker: str, attribution: str | None) -> str:

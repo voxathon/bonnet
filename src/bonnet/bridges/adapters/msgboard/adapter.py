@@ -150,6 +150,8 @@ class MsgboardAdapter:
         self._limiter = limiter or ReadLimiter(self.limits.reads_per_minute)
         # thread -> the foreign id of its first message. Never changes.
         self._roots: dict[str, str] = {}
+        # thread -> its title, from any answer about the thread.
+        self._titles: dict[str, str] = {}
 
     async def close(self) -> None:
         if self._owns_http:
@@ -178,6 +180,14 @@ class MsgboardAdapter:
 
     async def _messages(self, path: str, params: dict) -> list[dict]:
         data = await self._get(path, params)
+        # A thread's answers describe the thread too: keep its title, which
+        # its first message is mirrored under. Every walk that finds a root
+        # passes through here, so a known root always has its title.
+        thread = data.get("thread")
+        if isinstance(thread, dict) and isinstance(thread.get("id"), str):
+            title = thread.get("title")
+            if isinstance(title, str) and title.strip():
+                self._titles[thread["id"]] = title
         messages = data.get("messages")
         if not isinstance(messages, list):
             raise VenueError(f"msgboard {path}: no message list")
@@ -281,6 +291,7 @@ class MsgboardAdapter:
             raw_content_type="application/json",
             url=f"{self._base}/messages?"
             + urlencode({"thread": thread, "before": n + 1, "limit": 1}),
+            subject=self._titles.get(thread) if root == fid else None,
         )
 
     async def poll(self, channel: str, cursor: str | None) -> list[ForeignPost]:
@@ -371,6 +382,15 @@ class MsgboardAdapter:
             raise VenueError("msgboard /threads: no thread id in the answer")
         return tid
 
+    async def _find_key(self, thread: str, key: str) -> dict | None:
+        """The message in `thread`'s newest page that carries `key` as its
+        `extra.request_id`, if any."""
+        for m in await self._messages("/messages", {"thread": thread, "limit": PAGE_SIZE}):
+            extra = m.get("extra")
+            if isinstance(extra, dict) and extra.get("request_id") == key:
+                return m
+        return None
+
     async def post(
         self,
         account: ForeignAccount,
@@ -378,37 +398,40 @@ class MsgboardAdapter:
         text: str,
         reply_to: str | None,
         idempotency_key: str,
+        subject: str | None = None,
     ) -> ForeignPost:
         """Post under `account.user` (its token means nothing here): into
-        `reply_to`'s thread, else the channel's, else a new thread named after
-        the text's first line."""
+        `reply_to`'s thread, else the channel's, else a new thread titled
+        `subject` (or, without one, the text's first line)."""
         name = account.user[:MAX_NAME_CHARS]
         split = split_foreign_id(reply_to) if reply_to else None
         thread = split[0] if split is not None else channel
         if not thread:
-            thread = await self._open_thread(text.split("\n", 1)[0].strip(), name)
-        form = {"thread": thread, "content": text}
+            title = (subject or "").strip() or text.split("\n", 1)[0].strip()
+            thread = await self._open_thread(title, name)
+        # Both kept under `extra`. `reply_to` reads back as the parent, so
+        # nesting survives the venue's flat threads for anyone reading
+        # through a bridge; `request_id` finds a post whose answer was lost.
+        form = {"thread": thread, "content": text, "request_id": idempotency_key}
         if name:
             form["name"] = name
         if split is not None:
-            # Kept under `extra` and read back as the parent: nesting survives
-            # the venue's flat threads for anyone reading through a bridge.
             form["reply_to"] = foreign_id(*split)
-        data = await self._send("/messages", form, uncertain=True)
-        # {"posted": <message>, "thread": <thread>, "poll": <url>}
-        msg = data.get("posted")
-        n = _id(msg.get("id")) if isinstance(msg, dict) else None
-        if n is None:
-            raise VenueUncertain("msgboard /messages: no message id in the answer")
-        # The post is made: reading it back is a nicety, and must never turn
-        # a post the venue took into an error.
         try:
-            fetched = await self.fetch(channel, foreign_id(thread, n))
-        except VenueError:
-            fetched = None
-        if isinstance(fetched, ForeignPost):
-            return fetched
-        stored = {"id": n, "thread": thread, "name": name or None, "content": text}
-        if split is not None:
-            stored["extra"] = {"reply_to": foreign_id(*split)}
-        return self._post(channel, stored, self._roots.get(thread))
+            data = await self._send("/messages", form, uncertain=True)
+            # {"posted": <message>, "thread": <thread>, "poll": <url>}
+            msg = data.get("posted")
+            if not _usable(msg):
+                raise VenueUncertain("msgboard /messages: no message in the answer")
+        except VenueUncertain:
+            # The venue may have taken it: look before giving up. The post
+            # would be seconds old, so the thread's newest page holds it.
+            try:
+                msg = await self._find_key(thread, idempotency_key)
+            except (VenueError, _NoSuchThread):
+                msg = None
+            if msg is None:
+                raise
+        assert isinstance(msg, dict)
+        (posted,) = await self._posts(channel, [msg])
+        return posted
