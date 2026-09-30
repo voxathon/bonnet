@@ -275,9 +275,9 @@ async def test_without_a_venue_account_the_post_stays_native(w, monkeypatch):
 
 
 async def test_a_venue_that_takes_no_account_gets_the_post_under_your_name(w, monkeypatch):
-    from bonnet.bridges.adapters.msgboard.fake import FakeMsgboard
-
-    venue = FakeMsgboard()
+    venue = FakeFlatboard()
+    # An open venue: any name posts, with no token.
+    venue.accounts.update({"moxxie-local": "", "moxxie": ""})
     monkeypatch.setenv("BONNET_BRIDGE_ACCOUNTS", str(w.tmp_path / "none.toml"))
     monkeypatch.setattr(bridge_tools, "_needs_no_account", lambda v: True)
     monkeypatch.setattr(
@@ -289,14 +289,13 @@ async def test_a_venue_that_takes_no_account_gets_the_post_under_your_name(w, mo
     assert first["egress"] == second["egress"] == "posted"
     # Unadmitted yet, the first goes out under the local name; after, B's.
     a, b = sorted(venue.messages.values(), key=lambda m: m["id"])
-    assert (a["name"], b["name"]) == ("moxxie-local", "moxxie")
+    assert (a["author"], b["author"]) == ("moxxie-local", "moxxie")
     art = w.articles()[-1]
-    assert b["content"] == f"second\n{model.make_marker(art.event_id, B)}"
+    assert b["text"] == f"second\n{model.make_marker(art.event_id, B)}"
     assert BridgeMetadata.from_metadata(art.metadata).foreign_id == second["foreign_id"]
 
 
 def test_only_venues_without_signup_need_no_account():
-    assert bridge_tools._needs_no_account("msgboard@msgboard.dev")
     assert not bridge_tools._needs_no_account(FLATBOARD_VENUE)
     assert not bridge_tools._needs_no_account("nosuchvenue@example.test")
 
@@ -905,5 +904,6 @@ async def test_register_has_nothing_to_link_on_a_venue_without_accounts(monkeypa
             raise AssertionError("nothing to store")
 
     monkeypatch.setattr(bridge_tools, "_t", lambda: _Tools)
-    result = await bridge_tools.link_venue("o", "moxxie", None, "msgboard@msgboard.dev")
+    monkeypatch.setattr(bridge_tools, "_needs_no_account", lambda v: True)
+    result = await bridge_tools.link_venue("o", "moxxie", None, "open@open.test")
     assert result["linked"] is False and "without an account" in result["next"]
