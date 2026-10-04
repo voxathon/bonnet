@@ -26,9 +26,18 @@ import json
 from pathlib import Path
 
 import httpx
+import nacl.signing
 import pytest
 
-from bonnet.bridges.adapter import ForeignPost, Gone, VenueError
+from bonnet.bridges.adapter import (
+    ForeignAccount,
+    ForeignPost,
+    Gone,
+    VenueAuthError,
+    VenueError,
+    VenueNameTaken,
+    VenueUncertain,
+)
 from bonnet.bridges.adapters import swarmrelay
 from bonnet.bridges.adapters.swarmrelay import PAGE_SIZE, SwarmRelayAdapter, verify
 from bonnet.bridges.adapters.swarmrelay.adapter import ENCRYPTED_TEXT, USER_AGENT
@@ -434,3 +443,157 @@ async def test_a_failed_key_lookup_fails_the_poll_instead_of_branding_the_post()
     finally:
         await adapter.close()
     assert await _verdicts(hub) == ["sig:verified"]
+
+
+# ---------------------------------------------------------------------------
+# Posting and accounts
+# ---------------------------------------------------------------------------
+
+
+def _stored(hub: FakeSwarmRelay, channel: str = "general") -> list[dict]:
+    return [hub.channels[channel][s] for s in sorted(hub.channels[channel])]
+
+
+async def test_posts_are_signed_verified_and_counted_per_author():
+    hub = FakeSwarmRelay()
+    account = hub.account("lanternfly")
+    adapter = hub.adapter(hub.venue_config())
+    try:
+        first = await adapter.post(account, "", "hello mesh", None, "k1")
+        second = await adapter.post(account, "", "again", None, "k2")
+    finally:
+        await adapter.close()
+    one, two = _stored(hub)
+    assert [one["sequence"], two["sequence"]] == [0, 1]
+    assert one["payload"] == {"message": "hello mesh", "origin": "lanternfly"}
+    assert first.tags == second.tags == ("sig:verified",)
+    assert first.foreign_id == "1" and second.foreign_id == "2"
+    # The second post knew its sequence without scanning the channel again.
+    assert len([u for u in hub.requests if "messages?limit=200&after=0" in u]) == 1
+
+
+async def test_an_authors_count_continues_from_the_hub():
+    hub = FakeSwarmRelay()
+    account = hub.account("lanternfly")
+    key = nacl.signing.SigningKey(bytes.fromhex(account.token))
+    sender = verify.agent_id(bytes(key.verify_key).hex())
+    for i in range(PAGE_SIZE + 5):  # past one page, so the scan pages too
+        hub.envelope(f"noise {i}")
+    hub.envelope("mine, earlier", sender=sender)  # unsigned here, but counted
+    hub.channels["general"][max(hub.channels["general"])]["sequence"] = 6
+    adapter = hub.adapter(hub.venue_config())
+    try:
+        await adapter.post(account, "", "next one", None, "k")
+    finally:
+        await adapter.close()
+    assert _stored(hub)[-1]["sequence"] == 7
+
+
+async def test_replies_name_the_parents_envelope_id():
+    hub = FakeSwarmRelay()
+    parent = hub.envelope("parent", envelope_id="5f0e0b7c-0000-4000-8000-000000000001")
+    adapter = hub.adapter(hub.venue_config())
+    try:
+        reply = await adapter.post(hub.account(), "", "a reply", str(parent["storedSeq"]), "k")
+        assert reply.reply_to == str(parent["storedSeq"])
+        assert _stored(hub)[-1]["payload"]["inReplyTo"] == parent["id"]
+        with pytest.raises(VenueError, match="parent 99 is gone"):
+            await adapter.post(hub.account(), "", "orphan", "99", "k2")
+    finally:
+        await adapter.close()
+
+
+async def test_posting_never_creates_a_channel():
+    hub = FakeSwarmRelay()
+    adapter = hub.adapter(hub.venue_config())
+    try:
+        with pytest.raises(VenueError, match="no channel 'genral'"):
+            await adapter.post(hub.account(), "genral", "typo", None, "k")
+    finally:
+        await adapter.close()
+    assert hub.created_channels == []
+
+
+async def test_a_lost_answer_is_uncertain_and_the_retry_finds_the_post():
+    hub = FakeSwarmRelay()
+    hub.lose_post_responses = 1
+    account = hub.account()
+    adapter = hub.adapter(hub.venue_config())
+    try:
+        with pytest.raises(VenueUncertain):
+            await adapter.post(account, "", "landed anyway", None, "same-key")
+        again = await adapter.post(account, "", "landed anyway", None, "same-key")
+        assert [e["storedSeq"] for e in _stored(hub)] == [int(again.foreign_id)]
+        # The count is read again, so the next post doesn't reuse sequence 0.
+        await adapter.post(account, "", "next", None, "other-key")
+    finally:
+        await adapter.close()
+    assert [e["sequence"] for e in _stored(hub)] == [0, 1]
+
+
+async def test_a_failed_post_leaves_no_gap_in_the_count():
+    hub = FakeSwarmRelay()
+    hub.fail_posts = 1
+    account = hub.account()
+    adapter = hub.adapter(hub.venue_config())
+    try:
+        with pytest.raises(VenueUncertain):
+            await adapter.post(account, "", "first try", None, "k")
+        await adapter.post(account, "", "first try", None, "k")
+    finally:
+        await adapter.close()
+    assert [e["sequence"] for e in _stored(hub)] == [0]
+
+
+@pytest.mark.parametrize("token", ["", "zz" * 32, "ab" * 31])
+async def test_a_token_that_isnt_a_key_is_an_auth_error_and_posts_nothing(token):
+    hub = FakeSwarmRelay()
+    adapter = hub.adapter(hub.venue_config())
+    try:
+        with pytest.raises(VenueAuthError):
+            await adapter.post(ForeignAccount("x", token), "", "hi", None, "k")
+    finally:
+        await adapter.close()
+    assert hub.requests == []
+
+
+async def test_a_pkcs8_token_works_like_its_seed():
+    hub = FakeSwarmRelay()
+    account = hub.account()
+    pkcs8 = ForeignAccount(account.user, "302e020100300506032b657004220420" + account.token)
+    adapter = hub.adapter(hub.venue_config())
+    try:
+        post = await adapter.post(pkcs8, "", "hello", None, "k")
+    finally:
+        await adapter.close()
+    assert post.tags == ("sig:verified",)
+
+
+async def test_register_mints_a_key_and_claims_the_name():
+    hub = FakeSwarmRelay()
+    adapter = hub.adapter(hub.venue_config())
+    try:
+        account = await adapter.register("lanternfly")
+        post = await adapter.post(account, "", "first words", None, "k")
+        with pytest.raises(VenueNameTaken):
+            await adapter.register("LanternFly")  # names compare folded
+    finally:
+        await adapter.close()
+    assert account.user == "lanternfly" and len(account.token) == 64
+    assert hub.names["lanternfly"] == post.author_id
+    assert post.tags == ("sig:verified",)
+
+
+async def test_register_retries_a_lost_answer_once_with_the_same_proof():
+    hub = FakeSwarmRelay()
+    hub.lose_register_responses = 1
+    adapter = hub.adapter(hub.venue_config())
+    try:
+        account = await adapter.register("lanternfly")
+        hub.lose_register_responses = 2
+        with pytest.raises(VenueUncertain, match="nobody kept"):
+            await adapter.register("someone-else")
+    finally:
+        await adapter.close()
+    assert account.user == "lanternfly"
+    assert len(hub.registered) == 2  # both applied; only the first one's key came back

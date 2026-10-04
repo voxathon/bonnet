@@ -15,10 +15,13 @@
 
 """An in-memory SwarmRelay hub, for tests: this adapter's `VenueFake`.
 
-Serves the endpoints the adapter reads through an `httpx.MockTransport`:
+Serves the endpoints the adapter uses through an `httpx.MockTransport`:
 channel lookups, message pages by `storedSeq` (`after` ascends from the
-cursor; without it, the newest page oldest first), and the Markdown
-permalink that states a message's relay position, and agent key lookups.
+cursor; without it, the newest page oldest first), the Markdown permalink
+that states a message's relay position, agent key lookups, and the two
+writes: `POST /v1/agents/register` (key announcements and v2 signed
+profiles, names unique) and `POST /v1/channels/<c>/messages`, which checks
+what the real hub's handler checks, in its order, and answers as it does.
 Envelopes carry the shape the real hub serves (`fixtures/page.json`) and
 are really signed, each author with its own Ed25519 key. Tests add, hide,
 tamper with and break envelopes directly; the conformance suite drives it
@@ -28,20 +31,27 @@ through the `VenueFake` methods.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import uuid
 from dataclasses import dataclass, field
 from urllib.parse import unquote
 
 import httpx
+import nacl.exceptions
 import nacl.signing
 
+from bonnet.bridges.adapter import ForeignAccount
 from bonnet.bridges.adapters.swarmrelay.adapter import (
     DEFAULT_CHANNEL,
     PAGE_SIZE,
+    REGISTRATION_DOMAIN,
     SwarmRelayAdapter,
 )
-from bonnet.bridges.adapters.swarmrelay.verify import agent_id, checksum, sign_string
+from bonnet.bridges.adapters.swarmrelay.verify import agent_id, canonical, checksum, sign_string
 from bonnet.bridges.venue import VenueConfig
+
+HUB = "https://hub.test"
 
 
 @dataclass
@@ -60,6 +70,20 @@ class FakeSwarmRelay:
     no_markdown: bool = False  # the permalink route is missing (404 for all)
     keys: dict[str, nacl.signing.SigningKey] = field(default_factory=dict)  # sender ->
     unregistered: set[str] = field(default_factory=set)  # senders the hub has no key for
+    registered: dict[str, str] = field(default_factory=dict)  # sender -> public key hex
+    names: dict[str, str] = field(default_factory=dict)  # casefolded name -> sender
+    created_channels: list[str] = field(default_factory=list)  # made by a post
+    fail_posts: int = 0  # the next N posts answer HTTP 500, storing nothing
+    rate_limit_posts: int = 0  # the next N posts answer HTTP 429
+    lose_post_responses: int = 0  # the next N posts land, then answer HTTP 502
+    lose_register_responses: int = 0  # the next N registrations apply, then answer 502
+
+    def public_key(self, sender: str) -> str | None:
+        if sender in self.unregistered:
+            return None
+        if sender in self.keys:
+            return bytes(self.keys[sender].verify_key).hex()
+        return self.registered.get(sender)
 
     def author(self, name: str = "alice") -> str:
         """The sender id of `name`'s key (made on first use)."""
@@ -118,11 +142,21 @@ class FakeSwarmRelay:
             self.rate_limit_reads -= 1
             return httpx.Response(429, json={"error": "slow down"}, headers={"retry-after": "7"})
         parts = request.url.raw_path.decode().split("?")[0].strip("/").split("/")
+        if request.method == "POST":
+            try:
+                body = json.loads(request.content)
+            except ValueError:
+                return httpx.Response(400, json={"error": "bad JSON"})
+            if parts == ["v1", "agents", "register"]:
+                return self._handle_register(body)
+            if parts[:2] == ["v1", "channels"] and len(parts) == 4 and parts[3] == "messages":
+                return self._handle_post(unquote(parts[2]), body)
+            return httpx.Response(404, json={"error": f"Route POST {request.url.path} not found"})
         if parts[:2] == ["v1", "agents"] and len(parts) == 3:
             sender = unquote(parts[2])
-            if sender not in self.keys or sender in self.unregistered:
+            key = self.public_key(sender)
+            if key is None:
                 return httpx.Response(404, json={"error": "Agent not found"})
-            key = bytes(self.keys[sender].verify_key).hex()
             return httpx.Response(200, json={"agent": {"agentId": sender, "publicKey": key}})
         if parts[:2] == ["v1", "channels"] and len(parts) == 3:
             channel = unquote(parts[2])
@@ -167,13 +201,112 @@ class FakeSwarmRelay:
                 return httpx.Response(200, text=body, headers={"content-type": "text/markdown"})
         return httpx.Response(404, text="# Public record not found")
 
+    def _handle_register(self, body: dict) -> httpx.Response:
+        key = body.get("publicKey")
+        if not isinstance(key, str) or len(key) != 64:
+            return httpx.Response(400, json={"error": "invalid_public_key"})
+        sender = agent_id(key)
+        if "proofVersion" not in body and "signature" not in body:  # an announcement
+            if self.registered.setdefault(sender, key) != key:
+                return httpx.Response(409, json={"error": "agent_key_conflict"})
+            return httpx.Response(
+                200, json={"success": True, "profileApplied": False, "agent": {"agentId": sender}}
+            )
+        doc = {k: v for k, v in body.items() if k != "signature"}
+        try:
+            nacl.signing.VerifyKey(bytes.fromhex(key)).verify(
+                REGISTRATION_DOMAIN + canonical(doc).encode(), bytes.fromhex(body["signature"])
+            )
+        except (KeyError, ValueError, nacl.exceptions.BadSignatureError):
+            return httpx.Response(403, json={"error": "invalid_registration_proof"})
+        if doc.get("hub") != HUB or doc.get("proofVersion") != 2:
+            return httpx.Response(403, json={"error": "invalid_registration_proof"})
+        name = doc["profile"]["name"]
+        holder = self.names.get(name.casefold())
+        if holder is not None and holder != sender:
+            return httpx.Response(409, json={"error": "display_name_claimed"})
+        self.registered[sender] = key
+        self.names[name.casefold()] = sender
+        if self.lose_register_responses:
+            self.lose_register_responses -= 1
+            return httpx.Response(502, text="bad gateway")
+        agent = {"agentId": sender, "name": name, "publicKey": key, "profileRevision": 1}
+        return httpx.Response(200, json={"success": True, "agent": agent, "replayed": False})
+
+    def _handle_post(self, channel: str, env: dict) -> httpx.Response:
+        """As the real hub's handler: fields, sender, checksum, signature, id."""
+        if self.fail_posts:
+            self.fail_posts -= 1
+            return httpx.Response(500, text="boom")
+        if self.rate_limit_posts:
+            self.rate_limit_posts -= 1
+            return httpx.Response(429, json={"error": "slow down"}, headers={"retry-after": "9"})
+        if not all(env.get(k) for k in ("id", "sender", "type", "signature", "checksum")):
+            return httpx.Response(400, json={"error": "Malformed MessageEnvelope"})
+        key = self.public_key(env["sender"])
+        if key is None:
+            return httpx.Response(401, json={"error": f"Sender {env['sender']} is not registered."})
+        if checksum(env.get("payload")) != env["checksum"]:
+            return httpx.Response(403, json={"error": "Payload checksum mismatch"})
+        try:
+            nacl.signing.VerifyKey(bytes.fromhex(key)).verify(
+                sign_string({**env, "channel": channel}), bytes.fromhex(env["signature"])
+            )
+        except (KeyError, TypeError, ValueError, nacl.exceptions.BadSignatureError):
+            return httpx.Response(403, json={"error": "Invalid Ed25519 signature"})
+        for msgs in self.channels.values():
+            for saved in msgs.values():
+                if saved["id"] == env["id"]:
+                    same = {k: v for k, v in saved.items() if k != "storedSeq"} == {
+                        **env,
+                        "channel": channel,
+                    }
+                    if same:
+                        return httpx.Response(
+                            200, json={"success": True, "alreadyStored": True, "envelope": saved}
+                        )
+                    return httpx.Response(
+                        409, json={"error": "Envelope id is already bound to a different envelope"}
+                    )
+        if channel not in self.channels:  # the real hub makes it, silently
+            self.channels[channel] = {}
+            self.created_channels.append(channel)
+        seq = self.next_seq.get(channel, 1)
+        self.next_seq[channel] = seq + 1
+        saved = {**env, "channel": channel, "storedSeq": seq}
+        self.channels[channel][seq] = saved
+        if self.lose_post_responses:
+            self.lose_post_responses -= 1
+            return httpx.Response(502, text="bad gateway")
+        return httpx.Response(200, json={"success": True, "envelope": saved})
+
     # -- VenueFake (bonnet.bridges.conformance) ---------------------------
 
     def venue_config(self) -> VenueConfig:
-        return VenueConfig(type="swarmrelay", venue="swarmrelay@hub.test", url="https://hub.test")
+        return VenueConfig(type="swarmrelay", venue="swarmrelay@hub.test", url=HUB)
 
     def _channel(self, channel: str) -> str:
         return channel or DEFAULT_CHANNEL
+
+    def account(self, name: str = "tester") -> ForeignAccount:
+        """A registered account: its key, with `name` claimed."""
+        seed = hashlib.sha256(b"account:" + name.encode()).digest()
+        key = bytes(nacl.signing.SigningKey(seed).verify_key).hex()
+        self.registered[agent_id(key)] = key
+        self.names[name.casefold()] = agent_id(key)
+        return ForeignAccount(name, seed.hex())
+
+    def good_account(self) -> ForeignAccount:
+        return self.account()
+
+    def bad_account(self) -> ForeignAccount:
+        return ForeignAccount("tester", os.urandom(32).hex())  # a key the hub never saw
+
+    def rate_limit_next_post(self) -> None:
+        self.rate_limit_posts += 1
+
+    def take_name(self, name: str) -> None:
+        self.names[name.casefold()] = "agent_0000000000000000"
 
     def native_post(self, text: str, author: str = "alice", reply_to: str | None = None) -> str:
         msgs = self.channels[DEFAULT_CHANNEL]
@@ -192,7 +325,9 @@ class FakeSwarmRelay:
         return httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
 
     def adapter(self, venue: VenueConfig) -> SwarmRelayAdapter:
-        return SwarmRelayAdapter(venue, http=self.client(), limiter=_NoLimit())
+        return SwarmRelayAdapter(
+            venue, http=self.client(), limiter=_NoLimit(), post_limiter=_NoLimit()
+        )
 
 
 class _NoLimit:

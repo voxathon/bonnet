@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SwarmRelay adapter, read-only (OpenAgentForum and other SwarmRelay hubs).
+"""SwarmRelay adapter (OpenAgentForum and other SwarmRelay hubs).
 
 A hub holds named channels of signed envelopes that are never edited or
 deleted. Each envelope the hub stores gets an unsigned, per-channel
@@ -30,20 +30,43 @@ Every envelope is verified here (`verify.py`) against the key the hub serves
 for its sender, and its mirror is tagged with the verdict: `sig:verified`,
 `sig:checksum-mismatch`, `sig:invalid` or `sig:no-key`.
 
+Posting: an account is an Ed25519 key the hub knows, and its "token" is the
+private key. `register` mints one and claims the name with a v2 signed
+profile; `post` signs an envelope with it. The envelope id is derived from
+the idempotency key, and the hub binds an id to one envelope, so a retry
+whose first attempt landed is refused and reads that one back instead.
+
 API reference: `/agent.md` and `/llms-full.txt` on the hub. See README.md.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import re
+import time
+import uuid
 from collections import OrderedDict
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
+import nacl.signing
 
-from bonnet.bridges.adapter import ForeignPost, Gone, RateLimits, ReadLimiter, VenueError
+from bonnet.bridges.adapter import (
+    ForeignAccount,
+    ForeignPost,
+    Gone,
+    RateLimits,
+    ReadLimiter,
+    VenueAuthError,
+    VenueError,
+    VenueNameTaken,
+    VenueRateLimited,
+    VenueUncertain,
+)
 from bonnet.bridges.adapters.swarmrelay import verify
+from bonnet.bridges.model import normalize_foreign_text, truncate_utf8
 from bonnet.bridges.venue import VenueConfig
 
 PAGE_SIZE = 200  # the hub's maximum `limit`
@@ -59,6 +82,18 @@ USER_AGENT = "bonnet-bridge/swarmrelay (+https://github.com/voxathon/bonnet)"
 MAX_KNOWN_IDS = 50_000
 ENCRYPTED_TEXT = "[encrypted SwarmRelay envelope]"
 SIG_TAG = "sig:"  # + a verify verdict
+# The hub sets no text limit; this keeps posts the size its residents write.
+MAX_TEXT_BYTES = 4000
+# Nor a post rate: one every 10 s per adapter is a considerate resident.
+POST_INTERVAL_SECONDS = 10.0
+# Pages scanned, from a channel's start, for an author's last sequence.
+MAX_SEQUENCE_SCAN_PAGES = 100
+# Post envelope ids: uuid5 of sender|channel|idempotency key in this space.
+ID_NAMESPACE = uuid.UUID("6f1c3a52-9b0e-4d8e-a1f5-2c7b5e0d9a41")
+REGISTRATION_DOMAIN = b"openagentforum:registration:v2\n"
+# A PKCS#8 DER Ed25519 private key is this prefix, then the 32-byte seed.
+_PKCS8_PREFIX = "302e020100300506032b657004220420"
+_HEX = re.compile(r"[0-9a-f]+")
 
 _URN = "urn:uuid:"
 _POSITION = re.compile(r"Unsigned relay position: (\d+)\.")
@@ -116,6 +151,25 @@ def _handle(envelope: dict, sender: str) -> str:
     return sender
 
 
+def _error_code(resp: httpx.Response) -> str | None:
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    return error if isinstance(error, str) else None
+
+
+def _signing_key(token: str) -> nacl.signing.SigningKey | None:
+    """The key a token holds: the 32-byte seed, or PKCS#8 DER, as hex."""
+    token = (token or "").strip().lower()
+    if token.startswith(_PKCS8_PREFIX) and len(token) == len(_PKCS8_PREFIX) + 64:
+        token = token[len(_PKCS8_PREFIX) :]
+    if len(token) != 64 or not _HEX.fullmatch(token):
+        return None
+    return nacl.signing.SigningKey(bytes.fromhex(token))
+
+
 def _retry_after(resp: httpx.Response) -> float | None:
     try:
         seconds = float(resp.headers.get("retry-after", ""))
@@ -127,21 +181,31 @@ def _retry_after(resp: httpx.Response) -> float | None:
 class SwarmRelayAdapter:
     protocol = 1
     type = "swarmrelay"
-    # Read-only for now: posting takes an Ed25519-signed envelope per author
-    # (see README.md). Envelopes are never edited or deleted: no "edit", no
-    # "deletion_log".
-    capabilities = frozenset({"read", "threads"})
-    # The hub publishes no read limit; it asks clients to respect 429/503.
-    limits = RateLimits(reads_per_minute=60)
+    # Envelopes are never edited or deleted: no "edit", no "deletion_log".
+    capabilities = frozenset(
+        {"read", "threads", "write", "idempotent_post", "signup", "self_register"}
+    )
+    # The hub publishes no limits; it asks clients to respect 429/503.
+    limits = RateLimits(reads_per_minute=60, posts_min_interval_seconds=POST_INTERVAL_SECONDS)
     options: frozenset[str] = frozenset()
 
-    def __init__(self, venue: VenueConfig, http: httpx.AsyncClient | None = None, limiter=None):
+    def __init__(
+        self,
+        venue: VenueConfig,
+        http: httpx.AsyncClient | None = None,
+        limiter=None,
+        post_limiter=None,
+    ):
         self.venue = venue.venue
         self._base = venue.url.rstrip("/")
         self._backfill_pages = venue.backfill_pages
         self._http = http or httpx.AsyncClient(timeout=30.0)
         self._owns_http = http is None
         self._limiter = limiter or ReadLimiter(self.limits.reads_per_minute)
+        self._post_limiter = post_limiter or ReadLimiter(int(60 / POST_INTERVAL_SECONDS))
+        # (sender, channel) -> the next sequence that sender signs there.
+        self._next_sequence: dict[tuple[str, str], int] = {}
+        self._sequence_locks: dict[tuple[str, str], asyncio.Lock] = {}
         # (channel, id key) -> storedSeq, or None for a parent the hub
         # doesn't have in that channel.
         self._known: OrderedDict[tuple[str, str], int | None] = OrderedDict()
@@ -244,6 +308,13 @@ class SwarmRelayAdapter:
         if key in self._known:
             self._known.move_to_end(key)
             return self._known[key]
+        seq = await self._lookup(channel, envelope_id)
+        self._remember(channel, envelope_id, seq)
+        return seq
+
+    async def _lookup(self, channel: str, envelope_id: str) -> int | None:
+        """Where the hub stored `envelope_id` in `channel`, if it did."""
+        want = _id_key(envelope_id)
         seq = None
         for form in _id_forms(envelope_id):
             resp = await self._get(
@@ -263,10 +334,9 @@ class SwarmRelayAdapter:
                 break
             # The page is a rendering, not the record: confirm it.
             envelope = await self._envelope(channel, candidate) if candidate > 0 else None
-            if envelope is not None and _id_key(envelope["id"]) == key[1]:
+            if envelope is not None and _id_key(envelope["id"]) == want:
                 seq = candidate
             break
-        self._remember(channel, envelope_id, seq)
         return seq
 
     # -- signatures -------------------------------------------------------
@@ -399,3 +469,209 @@ class SwarmRelayAdapter:
             # Envelopes are never deleted, but a hub may stop serving one.
             return Gone(foreign_id, "unknown")
         return (await self._posts(channel, [envelope]))[0]
+
+    # -- accounts ---------------------------------------------------------
+
+    def _origin(self) -> str:
+        parts = urlsplit(self._base)
+        return f"{parts.scheme}://{parts.netloc}"
+
+    def signup_instructions(self) -> str:
+        return (
+            f"An account at {self._origin()} is an Ed25519 key the hub knows, with a "
+            "name claimed by a signed profile. Make one with the hub's own client "
+            "(`npx swarmrelay hello --name NAME`) or any Ed25519 tool, following "
+            f"{self._origin()}/agent.md. Then link it by calling register again with "
+            "venue_user=NAME and venue_token=<the private key: its 32-byte seed as 64 "
+            "hex characters, or PKCS#8 DER as hex>. The token is the key itself: "
+            "everything posted as you is signed with it, and the hub never replaces a key."
+        )
+
+    async def register(self, user: str) -> ForeignAccount:
+        """Mint a key and claim `user` for it with a v2 signed profile."""
+        seed = os.urandom(32)
+        key = nacl.signing.SigningKey(seed)
+        issued = int(time.time() * 1000) - 10_000  # the hub allows 30 s of skew
+        doc = {
+            "proofVersion": 2,
+            "action": "register-profile",
+            "hub": self._origin(),
+            "publicKey": bytes(key.verify_key).hex(),
+            "expectedRevision": 0,
+            "issuedAt": issued,
+            "expiresAt": issued + 240_000,  # at most 5 minutes after issuedAt
+            "profile": {
+                "name": user,
+                "x25519PublicKey": None,
+                "capabilities": [],
+                "metadata": {"via": "bonnet"},
+                "endpoint": None,
+            },
+        }
+        signed = REGISTRATION_DOMAIN + verify.canonical(doc).encode("utf-8")
+        proof = {**doc, "signature": key.sign(signed).signature.hex()}
+        lost = (
+            f"swarmrelay registration of {user!r}: no answer arrived; the name may now "
+            "belong to a key nobody kept"
+        )
+        # The hub answers an exact replay of a proof from its receipt, so an
+        # answer that never arrived earns one retry of the same bytes.
+        resp: httpx.Response | None = None
+        for _ in range(2):
+            await self._post_limiter.wait()
+            try:
+                resp = await self._http.post(
+                    f"{self._base}/v1/agents/register",
+                    json=proof,
+                    headers={"user-agent": USER_AGENT},
+                )
+            except httpx.HTTPError:
+                resp = None
+                continue
+            if resp.status_code < 500:
+                break
+        if resp is None or resp.status_code >= 500:
+            raise VenueUncertain(lost)
+        error = _error_code(resp)
+        if resp.status_code == 409 and error == "display_name_claimed":
+            raise VenueNameTaken(f"swarmrelay name {user!r} is taken")
+        if resp.status_code == 429:
+            raise VenueRateLimited("swarmrelay registration: rate limited", _retry_after(resp))
+        if resp.status_code != 200:
+            raise VenueError(
+                f"swarmrelay registration of {user!r} refused: HTTP {resp.status_code} "
+                f"{error or ''}".rstrip()
+            )
+        try:
+            body = resp.json()
+        except ValueError:
+            raise VenueUncertain(lost) from None
+        agent = body.get("agent") if isinstance(body, dict) else None
+        name = agent.get("name") if isinstance(agent, dict) else None
+        return ForeignAccount(name if isinstance(name, str) and name else user, seed.hex())
+
+    # -- write ------------------------------------------------------------
+
+    def max_text_bytes(self) -> int:
+        return MAX_TEXT_BYTES
+
+    def render_outbound(self, text: str, marker: str, attribution: str | None) -> str:
+        head = f"{attribution}: " if attribution else ""
+        tail = f"\n{marker}"
+        budget = MAX_TEXT_BYTES - len((head + tail).encode("utf-8"))
+        body = truncate_utf8(normalize_foreign_text(text), max(budget, 0)).rstrip()
+        return f"{head}{body}{tail}"
+
+    async def _sequence(self, channel: str, sender: str) -> int:
+        """The next sequence `sender` signs in `channel`.
+
+        Authors number their envelopes per channel (0, 1, 2, ...), and a
+        skipped number reads as a withheld message, so the count comes from
+        the hub: scanned from the channel once per adapter, then kept here.
+        """
+        slot = (sender, self._slug(channel))
+        if slot in self._next_sequence:
+            return self._next_sequence[slot]
+        last, after = -1, 0
+        for _ in range(MAX_SEQUENCE_SCAN_PAGES):
+            page = await self._messages(channel, after, PAGE_SIZE)
+            for m in page:
+                seq = m.get("sequence")
+                if m.get("sender") == sender and isinstance(seq, int) and not isinstance(seq, bool):
+                    last = max(last, seq)
+            if len(page) < PAGE_SIZE:
+                self._next_sequence[slot] = last + 1
+                return last + 1
+            after = max(m["storedSeq"] for m in page)
+        raise VenueError(f"swarmrelay #{slot[1]}: too long to count {sender}'s envelopes")
+
+    async def _stored(self, channel: str, envelope_id: str) -> ForeignPost | None:
+        """The post the hub stored under `envelope_id`, if it did."""
+        seq = await self._lookup(channel, envelope_id)
+        envelope = await self._envelope(channel, seq) if seq else None
+        return (await self._posts(channel, [envelope]))[0] if envelope else None
+
+    async def post(
+        self,
+        account: ForeignAccount,
+        channel: str,
+        text: str,
+        reply_to: str | None,
+        idempotency_key: str,
+        subject: str | None = None,  # envelopes have no titles
+    ) -> ForeignPost:
+        key = _signing_key(account.token)
+        if key is None:
+            raise VenueAuthError(f"swarmrelay token for {account.user!r} is not an Ed25519 key")
+        sender = verify.agent_id(bytes(key.verify_key).hex())
+        slug = self._slug(channel)
+        # The hub creates a channel it lacks on the first post to it.
+        await self._check_channel(channel)
+        # The same key always makes the same id, and the hub binds an id to
+        # one envelope: a retry whose first attempt landed gets a 409 below.
+        envelope_id = f"urn:uuid:{uuid.uuid5(ID_NAMESPACE, f'{sender}|{slug}|{idempotency_key}')}"
+        payload: dict = {"message": text}
+        if account.user:
+            payload["origin"] = account.user
+        if reply_to:
+            parent = await self._envelope(channel, int(reply_to)) if reply_to.isdigit() else None
+            if parent is None:
+                raise VenueError(f"swarmrelay #{slug}: the parent {reply_to} is gone")
+            payload["inReplyTo"] = parent["id"]
+        slot = (sender, slug)
+        async with self._sequence_locks.setdefault(slot, asyncio.Lock()):
+            sequence = await self._sequence(channel, sender)
+            envelope = {
+                "id": envelope_id,
+                "channel": slug,
+                "sender": sender,
+                "type": "intel",
+                "sequence": sequence,
+                "timestamp": int(time.time() * 1000),
+                "payload": payload,
+                "checksum": verify.checksum(payload),
+                "encrypted": False,
+            }
+            envelope["signature"] = key.sign(verify.sign_string(envelope)).signature.hex()
+            await self._post_limiter.wait()
+            try:
+                resp = await self._http.post(
+                    f"{self._base}{self._path(channel)}/messages",
+                    json=envelope,
+                    headers={"user-agent": USER_AGENT},
+                )
+            except httpx.HTTPError as e:
+                # It may have landed under this sequence: count again next time.
+                self._next_sequence.pop(slot, None)
+                raise VenueUncertain(f"swarmrelay post: {type(e).__name__}") from None
+            if resp.status_code >= 500:
+                self._next_sequence.pop(slot, None)
+                raise VenueUncertain(f"swarmrelay post: HTTP {resp.status_code}")
+            if resp.status_code == 401:
+                raise VenueAuthError(f"swarmrelay doesn't know the key of {account.user!r}")
+            if resp.status_code == 429:
+                raise VenueRateLimited("swarmrelay post: rate limited", _retry_after(resp))
+            if resp.status_code == 409:
+                # The id is taken: by an earlier attempt with this key, which
+                # landed without our hearing (same id, older bytes)?
+                if (already := await self._stored(channel, envelope_id)) is not None:
+                    return already
+                raise VenueError("swarmrelay post: the envelope id is bound to another envelope")
+            if resp.status_code != 200:
+                raise VenueError(
+                    f"swarmrelay post refused: HTTP {resp.status_code} "
+                    f"{_error_code(resp) or ''}".rstrip()
+                )
+            self._next_sequence[slot] = sequence + 1
+            try:
+                body = resp.json()
+            except ValueError:
+                body = None
+        saved = body.get("envelope") if isinstance(body, dict) else None
+        if not isinstance(saved, dict) or _seq(saved.get("storedSeq")) is None:
+            # It landed, but the answer doesn't say where: read it back.
+            if (stored := await self._stored(channel, envelope_id)) is not None:
+                return stored
+            raise VenueUncertain("swarmrelay post: no envelope in the answer")
+        self._remember(channel, envelope_id, saved["storedSeq"])
+        return (await self._posts(channel, [saved]))[0]
