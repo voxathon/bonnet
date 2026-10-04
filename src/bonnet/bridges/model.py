@@ -410,8 +410,42 @@ def parse_src_tag(tag: str) -> SourceKey | None:
     return SourceKey(*(_src_unescape(p) for p in parts))
 
 
-def bridge_tags(venue_type: str, src: SourceKey) -> list[str]:
-    return ["bridged", f"venue:{venue_type}", src_tag(src)]
+MAX_ADAPTER_TAGS = 8
+MAX_ADAPTER_TAG_BYTES = 64
+_RESERVED_TAG_PREFIXES = ("venue:", "src:")
+
+
+def adapter_tags(tags) -> list[str]:
+    """The tags an adapter offered (`ForeignPost.tags`) that a mirror carries.
+
+    Each is stripped and kept if it's a non-empty string of at most 64 bytes
+    with no comma (tags are read back comma-separated), and isn't one of the
+    bridge's own: `bridged`, or `venue:`/`src:` anything, which readers trust
+    to say where a mirror came from. Duplicates go; at most 8 stay.
+    """
+    out: list[str] = []
+    for tag in tags or ():
+        if not isinstance(tag, str):
+            continue
+        tag = tag.strip()
+        if (
+            not tag
+            or "," in tag
+            or len(tag.encode("utf-8")) > MAX_ADAPTER_TAG_BYTES
+            or tag.lower() == "bridged"
+            or tag.lower().startswith(_RESERVED_TAG_PREFIXES)
+            or tag in out
+        ):
+            continue
+        out.append(tag)
+        if len(out) == MAX_ADAPTER_TAGS:
+            break
+    return out
+
+
+def bridge_tags(venue_type: str, src: SourceKey, extra=()) -> list[str]:
+    """A mirror's tags: the bridge's own, then what `adapter_tags` keeps of `extra`."""
+    return ["bridged", f"venue:{venue_type}", src_tag(src), *adapter_tags(extra)]
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,10 @@ same poll, from what this adapter has already seen, or else from the hub's
 Markdown permalink, which states the parent's relay position. That page is
 only a hint: the position is confirmed against the JSON record before use.
 
+Every envelope is verified here (`verify.py`) against the key the hub serves
+for its sender, and its mirror is tagged with the verdict: `sig:verified`,
+`sig:checksum-mismatch`, `sig:invalid` or `sig:no-key`.
+
 API reference: `/agent.md` and `/llms-full.txt` on the hub. See README.md.
 """
 
@@ -39,6 +43,7 @@ from urllib.parse import quote
 import httpx
 
 from bonnet.bridges.adapter import ForeignPost, Gone, RateLimits, ReadLimiter, VenueError
+from bonnet.bridges.adapters.swarmrelay import verify
 from bonnet.bridges.venue import VenueConfig
 
 PAGE_SIZE = 200  # the hub's maximum `limit`
@@ -53,6 +58,7 @@ USER_AGENT = "bonnet-bridge/swarmrelay (+https://github.com/voxathon/bonnet)"
 # Envelope id -> storedSeq translations kept per adapter.
 MAX_KNOWN_IDS = 50_000
 ENCRYPTED_TEXT = "[encrypted SwarmRelay envelope]"
+SIG_TAG = "sig:"  # + a verify verdict
 
 _URN = "urn:uuid:"
 _POSITION = re.compile(r"Unsigned relay position: (\d+)\.")
@@ -140,6 +146,9 @@ class SwarmRelayAdapter:
         # doesn't have in that channel.
         self._known: OrderedDict[tuple[str, str], int | None] = OrderedDict()
         self._checked_channels: set[str] = set()
+        # sender -> the public key the hub serves for it (None: none). Keys
+        # are never replaced or deleted, so a lookup holds for good.
+        self._keys: dict[str, str | None] = {}
 
     async def close(self) -> None:
         if self._owns_http:
@@ -260,9 +269,41 @@ class SwarmRelayAdapter:
         self._remember(channel, envelope_id, seq)
         return seq
 
+    # -- signatures -------------------------------------------------------
+
+    async def _public_key(self, sender: str) -> str | None:
+        if sender in self._keys:
+            return self._keys[sender]
+        resp = await self._get(f"/v1/agents/{quote(sender, safe='')}")
+        if resp.status_code == 404:
+            key = None
+        elif resp.status_code == 200:
+            try:
+                body = resp.json()
+            except ValueError as e:
+                raise VenueError(f"swarmrelay agent {sender}: bad JSON: {e}") from e
+            agent = body.get("agent") if isinstance(body, dict) else None
+            key = agent.get("publicKey") if isinstance(agent, dict) else None
+            if not isinstance(key, str):
+                raise VenueError(f"swarmrelay agent {sender}: no public key in the answer")
+        else:
+            # A failed lookup isn't a verdict: mirrors are written once, so
+            # fail the poll and look again next time.
+            raise VenueError(f"swarmrelay agent {sender}: HTTP {resp.status_code}")
+        self._keys[sender] = key
+        return key
+
+    async def _verdict(self, envelope: dict) -> str:
+        sender = envelope.get("sender")
+        if not isinstance(sender, str) or not verify.SENDER.fullmatch(sender):
+            return verify.INVALID
+        return verify.verify(envelope, await self._public_key(sender))
+
     # -- posts ------------------------------------------------------------
 
-    def _post(self, channel: str, envelope: dict, reply_to: int | None) -> ForeignPost:
+    def _post(
+        self, channel: str, envelope: dict, reply_to: int | None, verdict: str
+    ) -> ForeignPost:
         seq = envelope["storedSeq"]
         foreign_id = str(seq)
         sender = envelope.get("sender")
@@ -291,6 +332,7 @@ class SwarmRelayAdapter:
                 f"{self._base}/channels/{quote(self._slug(channel), safe='')}"
                 f"/messages/{quote(envelope['id'], safe='')}/"
             ),
+            tags=(SIG_TAG + verdict,),
         )
 
     async def _posts(self, channel: str, envelopes: list[dict]) -> list[ForeignPost]:
@@ -305,7 +347,7 @@ class SwarmRelayAdapter:
                 parent = await self._parent_seq(channel, ref)
                 if parent is not None and parent >= m["storedSeq"]:
                     parent = None  # a parent can't arrive after its reply
-            out.append(self._post(channel, m, parent))
+            out.append(self._post(channel, m, parent, await self._verdict(m)))
         return out
 
     async def _walk(

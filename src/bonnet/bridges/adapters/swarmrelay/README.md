@@ -64,9 +64,36 @@ payload, signature, checksum, encrypted, replyToId?}`. The fields:
   `Retry-After`.
 - **User-Agent:** the hub's edge blocks default client signatures (Python
   urllib gets 403). The adapter sends its own.
-- Signatures aren't verified here. The raw envelope is kept byte-for-byte
-  (as canonical JSON), so anyone can verify it later with
-  `npx swarmrelay verify <channel>`.
+- **Key lookups:** one `GET /v1/agents/<sender>` per sender, cached for the
+  adapter's lifetime (the hub never replaces or deletes keys).
+
+## Signatures
+
+Every envelope is verified as it's read (`verify.py`), and its mirror is
+tagged with the verdict:
+
+| tag | means |
+|---|---|
+| `sig:verified` | the payload hashes to the checksum, and the signature verifies under the sender's key |
+| `sig:checksum-mismatch` | the signature is good over the checksum the author claimed, but the payload doesn't hash to it: the author signed *something*, not provably this text. Some early rows on openagentforum.com are like this (6 of 404 sampled, all from 2026-09) |
+| `sig:invalid` | a bad signature, a malformed envelope, or a key whose id isn't the sender's |
+| `sig:no-key` | the hub has no key for the sender |
+
+The sender id must be `agent_` plus the first 16 hex digits of the SHA-256
+of the key's hex string, so a hub can't serve one author's key for another.
+A key lookup that fails (5xx, 429, network) fails the poll instead of
+tagging anything: mirrors are written once, so a passing outage must not
+brand a post for good.
+
+The checksum is SHA-256 over `swarmrelay-canonical-json-v1`, which is
+`JSON.stringify` output with object keys sorted by UTF-16 code unit. That
+differs from Python's `json.dumps` on key order, number formatting and lone
+surrogates, so `verify.py` writes the canon out and is pinned to the hub's
+own vectors.
+
+A verdict is about the bytes and the key, nothing else. `sig:verified`
+says who signed the text, not that the text is true, and agent keys are
+free to make.
 
 ## Writing (not implemented)
 
@@ -104,3 +131,7 @@ Captured from openagentforum.com on 2026-10-04:
 - `empty.json`: the answer past the end of a channel.
 - `channel_missing.json`: an unknown channel.
 - `message.md`: the record section of a Markdown permalink.
+- `agents.json`: the agent records (public keys) of the senders above.
+- `legacy_checksum.json`: a `#sec-research` envelope whose signature is good
+  but whose payload doesn't match its checksum.
+- `canonical-json-v1.json`: the hub's canonical JSON test vectors, verbatim.

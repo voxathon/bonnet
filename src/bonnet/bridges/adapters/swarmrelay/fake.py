@@ -18,25 +18,29 @@
 Serves the endpoints the adapter reads through an `httpx.MockTransport`:
 channel lookups, message pages by `storedSeq` (`after` ascends from the
 cursor; without it, the newest page oldest first), and the Markdown
-permalink that states a message's relay position. Envelopes carry the
-shape the real hub serves (`fixtures/page.json`) but aren't signed: the
-adapter doesn't verify signatures. Tests add, hide and break envelopes
-directly; the conformance suite drives it through the `VenueFake` methods.
+permalink that states a message's relay position, and agent key lookups.
+Envelopes carry the shape the real hub serves (`fixtures/page.json`) and
+are really signed, each author with its own Ed25519 key. Tests add, hide,
+tamper with and break envelopes directly; the conformance suite drives it
+through the `VenueFake` methods.
 """
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from urllib.parse import unquote
 
 import httpx
+import nacl.signing
 
 from bonnet.bridges.adapters.swarmrelay.adapter import (
     DEFAULT_CHANNEL,
     PAGE_SIZE,
     SwarmRelayAdapter,
 )
+from bonnet.bridges.adapters.swarmrelay.verify import agent_id, checksum, sign_string
 from bonnet.bridges.venue import VenueConfig
 
 
@@ -54,11 +58,20 @@ class FakeSwarmRelay:
     requests: list[str] = field(default_factory=list)
     rate_limit_reads: int = 0  # the next N requests answer HTTP 429
     no_markdown: bool = False  # the permalink route is missing (404 for all)
+    keys: dict[str, nacl.signing.SigningKey] = field(default_factory=dict)  # sender ->
+    unregistered: set[str] = field(default_factory=set)  # senders the hub has no key for
+
+    def author(self, name: str = "alice") -> str:
+        """The sender id of `name`'s key (made on first use)."""
+        key = nacl.signing.SigningKey(hashlib.sha256(name.encode()).digest())
+        sender = agent_id(bytes(key.verify_key).hex())
+        self.keys[sender] = key
+        return sender
 
     def envelope(
         self,
         text: str | None,
-        sender: str = "agent_00000000000a11ce",
+        sender: str | None = None,
         channel: str = DEFAULT_CHANNEL,
         reply_to: str | None = None,
         name: str | None = "alice",
@@ -67,6 +80,7 @@ class FakeSwarmRelay:
         payload: dict | None = None,
     ) -> dict:
         """Store an envelope as the hub would; returns it, `storedSeq` included."""
+        sender = sender or self.author()
         msgs = self.channels.setdefault(channel, {})
         seq = self.next_seq.get(channel, 1)
         self.next_seq[channel] = seq + 1
@@ -87,10 +101,12 @@ class FakeSwarmRelay:
             "storedSeq": seq,
             "timestamp": timestamp,
             "payload": payload,
-            "signature": "00" * 64,
-            "checksum": "00" * 32,
+            "signature": "",
+            "checksum": checksum(payload),
             "encrypted": False,
         }
+        if sender in self.keys:
+            env["signature"] = self.keys[sender].sign(sign_string(env)).signature.hex()
         msgs[seq] = env
         return env
 
@@ -102,6 +118,12 @@ class FakeSwarmRelay:
             self.rate_limit_reads -= 1
             return httpx.Response(429, json={"error": "slow down"}, headers={"retry-after": "7"})
         parts = request.url.raw_path.decode().split("?")[0].strip("/").split("/")
+        if parts[:2] == ["v1", "agents"] and len(parts) == 3:
+            sender = unquote(parts[2])
+            if sender not in self.keys or sender in self.unregistered:
+                return httpx.Response(404, json={"error": "Agent not found"})
+            key = bytes(self.keys[sender].verify_key).hex()
+            return httpx.Response(200, json={"agent": {"agentId": sender, "publicKey": key}})
         if parts[:2] == ["v1", "channels"] and len(parts) == 3:
             channel = unquote(parts[2])
             if channel not in self.channels:
@@ -156,8 +178,7 @@ class FakeSwarmRelay:
     def native_post(self, text: str, author: str = "alice", reply_to: str | None = None) -> str:
         msgs = self.channels[DEFAULT_CHANNEL]
         parent = msgs[int(reply_to)]["id"] if reply_to else None
-        sender = f"agent_{author.encode().hex()[:16]:0>16}"
-        env = self.envelope(text, sender=sender, reply_to=parent, name=author)
+        env = self.envelope(text, sender=self.author(author), reply_to=parent, name=author)
         return str(env["storedSeq"])
 
     def remove(self, foreign_id: str) -> None:

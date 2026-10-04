@@ -30,7 +30,7 @@ import pytest
 
 from bonnet.bridges.adapter import ForeignPost, Gone, VenueError
 from bonnet.bridges.adapters import swarmrelay
-from bonnet.bridges.adapters.swarmrelay import PAGE_SIZE, SwarmRelayAdapter
+from bonnet.bridges.adapters.swarmrelay import PAGE_SIZE, SwarmRelayAdapter, verify
 from bonnet.bridges.adapters.swarmrelay.adapter import ENCRYPTED_TEXT, USER_AGENT
 from bonnet.bridges.adapters.swarmrelay.fake import FakeSwarmRelay, _NoLimit
 
@@ -41,16 +41,26 @@ def fixture(name: str):
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
-def _routes(routes: dict[str, httpx.Response]):
-    """A hub that answers fixed bodies by path, and records what it was asked."""
+def _agent(request: httpx.Request) -> httpx.Response:
+    """Agent records captured from the hub, for the senders in the fixtures."""
+    record = fixture("agents.json").get(request.url.path.rsplit("/", 1)[-1])
+    if record is None:
+        return httpx.Response(404, json={"error": "Agent not found"})
+    return httpx.Response(200, json=record)
+
+
+def _routes(routes: dict):
+    """A hub that answers by path prefix (a fixed response, or a function of
+    the request), knows the captured agents, and records what it was asked."""
     seen: list[httpx.Request] = []
+    routes = {"/v1/agents/": _agent, **routes}
 
     def handle(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         key = request.url.raw_path.decode()
         for prefix, resp in routes.items():
             if key.startswith(prefix):
-                return resp
+                return resp(request) if callable(resp) else resp
         return httpx.Response(404, json={"error": "Route not found"})
 
     return handle, seen
@@ -105,6 +115,9 @@ async def test_parses_a_captured_page_and_threads_both_ways():
         "https://hub.test/channels/general/messages/caec80fc-28f1-4e0a-8dbd-3e8ab207b621/"
     )
     assert json.loads(second.raw) == newer
+    # Both captured envelopes really verify; the parent stand-in, a copy of
+    # `newer` under another id, doesn't (and isn't mirrored here anyway).
+    assert first.tags == second.tags == ("sig:verified",)
     assert all(r.headers["user-agent"] == USER_AGENT for r in seen)
     lookups = [r for r in seen if r.url.path.endswith("index.md")]
     assert len(lookups) == 1 and "urn%3Auuid%3Ac891a640" in str(lookups[0].url)
@@ -301,3 +314,123 @@ async def test_channels_are_independent():
         await adapter.close()
     assert post.channel == "cartographers" and post.text == "mapped"
     assert post.foreign_id == "1"  # storedSeq counts per channel
+
+
+# ---------------------------------------------------------------------------
+# Signatures
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "vector", fixture("canonical-json-v1.json")["vectors"], ids=lambda v: v["name"]
+)
+def test_canonical_json_matches_the_hubs_vectors(vector):
+    payload = json.loads(vector["payloadJson"])
+    assert verify.canonical(payload) == vector["canonical"]
+    assert verify.canonical(payload).encode("utf-8", "surrogatepass").hex() == vector["utf8Hex"]
+    assert verify.checksum(payload) == vector["sha256"]
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (0, "0"),
+        (-0.0, "0"),
+        (1.0, "1"),
+        (1e21, "1e+21"),
+        (1e20, "100000000000000000000"),
+        (1e-7, "1e-7"),
+        (0.000001, "0.000001"),
+        (123.456, "123.456"),
+        (-1.5e-10, "-1.5e-10"),
+        (2**53 + 1, "9007199254740992"),  # rounded through binary64, as in JS
+        (12345678901234567890, "12345678901234567000"),
+    ],
+)
+def test_numbers_print_as_javascript_does(value, text):
+    assert verify.js_number(value) == text
+
+
+def test_agent_ids_derive_from_the_keys_hex():
+    for sender, record in fixture("agents.json").items():
+        assert verify.agent_id(record["agent"]["publicKey"]) == sender
+
+
+def test_a_captured_legacy_row_is_a_checksum_mismatch_not_a_forgery():
+    (env,) = fixture("legacy_checksum.json")["messages"]
+    key = fixture("agents.json")[env["sender"]]["agent"]["publicKey"]
+    assert verify.verify(env, key) == verify.CHECKSUM_MISMATCH
+
+
+async def _verdicts(hub: FakeSwarmRelay) -> list[str]:
+    adapter = hub.adapter(hub.venue_config())
+    try:
+        return [p.tags[0] for p in await adapter.poll("", None)]
+    finally:
+        await adapter.close()
+
+
+async def test_every_verdict_reaches_the_tags():
+    hub = FakeSwarmRelay()
+    hub.envelope("good")
+    edited = hub.envelope("original")
+    edited["payload"]["message"] = "edited after signing"
+    resealed = hub.envelope("original")
+    resealed["payload"]["message"] = "edited, checksum redone"
+    resealed["checksum"] = verify.checksum(resealed["payload"])
+    stolen = hub.envelope("claims alice", sender=hub.author("alice"))
+    stolen["signature"] = (
+        hub.keys[hub.author("mallory")].sign(verify.sign_string(stolen)).signature.hex()
+    )
+    hub.envelope("nobody knows me", sender=hub.author("ghost"))
+    hub.unregistered.add(hub.author("ghost"))
+    hub.envelope("malformed", sender="not-an-agent")
+    assert await _verdicts(hub) == [
+        "sig:verified",
+        "sig:checksum-mismatch",
+        "sig:invalid",
+        "sig:invalid",
+        "sig:no-key",
+        "sig:invalid",
+    ]
+
+
+async def test_a_key_the_hub_serves_for_someone_else_is_not_trusted():
+    hub = FakeSwarmRelay()
+    alice, mallory = hub.author("alice"), hub.author("mallory")
+    # Mallory signs as alice, and the hub answers alice with mallory's key:
+    # the signature checks out, but that key's id isn't alice.
+    hub.keys[alice] = hub.keys[mallory]
+    hub.envelope("hello", sender=alice)
+    assert await _verdicts(hub) == ["sig:invalid"]
+
+
+async def test_keys_are_looked_up_once_per_sender():
+    hub = FakeSwarmRelay()
+    for i in range(5):
+        hub.envelope(f"m{i}", sender=hub.author("alice" if i % 2 else "bob"))
+    await _verdicts(hub)
+    assert len([u for u in hub.requests if "/v1/agents/" in u]) == 2
+
+
+async def test_a_failed_key_lookup_fails_the_poll_instead_of_branding_the_post():
+    hub = FakeSwarmRelay()
+    hub.envelope("hello")
+    real = hub._handle
+
+    def flaky(request):
+        if "/v1/agents/" in str(request.url):
+            return httpx.Response(500, text="boom")
+        return real(request)
+
+    adapter = SwarmRelayAdapter(
+        hub.venue_config(),
+        http=httpx.AsyncClient(transport=httpx.MockTransport(flaky)),
+        limiter=_NoLimit(),
+    )
+    try:
+        with pytest.raises(VenueError, match="agent"):
+            await adapter.poll("", None)
+    finally:
+        await adapter.close()
+    assert await _verdicts(hub) == ["sig:verified"]
