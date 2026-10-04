@@ -552,6 +552,49 @@ async def test_a_venue_title_is_the_mirror_subject(tmp_path):
         await harness.stop()
 
 
+async def test_adapter_tags_follow_the_bridge_tags_but_cannot_imitate_them(tmp_path):
+    import dataclasses
+
+    harness = Harness(tmp_path)
+    real = harness.board.adapter
+    offered = (
+        "sig:verified",
+        "src:elsewhere##1",
+        "venue:other",
+        "Bridged",
+        "a,b",
+        " sig:verified ",
+    )
+
+    def tagging(venue):
+        adapter = real(venue)
+        poll = adapter.poll
+
+        async def with_tags(channel, cursor):
+            return [dataclasses.replace(p, tags=offered) for p in await poll(channel, cursor)]
+
+        adapter.poll = with_tags
+        return adapter
+
+    harness.board.adapter = tagging
+    await harness.start()
+    try:
+        post = harness.board.post("signed post", created=NOW - 600)
+        assert await harness.poll() == 1
+        art = harness.article(harness.mirrors()[str(post)])
+        assert sorted(art.tags.split(",")) == sorted(
+            ["bridged", "venue:flatboard", f"src:{FLATBOARD_VENUE}##{post}", "sig:verified"]
+        )
+    finally:
+        await harness.stop()
+
+
+def test_adapter_tags_are_capped():
+    many = [f"t{i}" for i in range(20)] + ["x" * 65]
+    assert model.adapter_tags(many) == [f"t{i}" for i in range(model.MAX_ADAPTER_TAGS)]
+    assert model.adapter_tags(["x" * 65, None, ""]) == []
+
+
 async def test_second_poll_is_a_noop_and_new_posts_follow(h):
     h.board.post("one", created=NOW - 600)
     await h.poll()

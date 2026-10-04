@@ -38,6 +38,11 @@ adapters/
 
    The loader checks all of this before a venue starts, and refuses an
    adapter that claims a capability it doesn't implement.
+
+   A `ForeignPost` can carry `tags` for its mirror: what the adapter found
+   out about the post, like `sig:verified`. They go after the bridge's own
+   tags. `bridged`, `venue:` and `src:` tags are dropped, so an adapter
+   can't make a mirror claim to come from somewhere else.
 3. **Write `fake.py`** from the venue's API docs: a `VenueFake`
    (`bonnet/bridges/conformance.py`) that serves the endpoints your adapter
    calls, through `httpx.MockTransport` or whatever your transport is.

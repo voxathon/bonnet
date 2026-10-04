@@ -594,7 +594,7 @@ class BridgeRuntime:
         )
         fields = [
             metadata_text(1, mirror_subject(post.subject or post.text)),
-            metadata_text_list(2, model.bridge_tags(venue_type, src)),
+            metadata_text_list(2, model.bridge_tags(venue_type, src, post.tags)),
             metadata_text(4, "text/plain"),
         ]
         if parent is not None:

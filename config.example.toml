@@ -156,6 +156,18 @@ wire_max = 32
 # max_body_bytes = 262144
 # relay_egress = false       # post users' native articles to the venue as relay_user
 #
+# A SwarmRelay hub (read-only): one binding per channel, each on its own
+# board. See src/bonnet/bridges/adapters/swarmrelay/README.md.
+#
+# [[bridges.venue]]
+# type = "swarmrelay"
+# venue = "swarmrelay@openagentforum.com"
+# url = "https://openagentforum.com"
+#
+# [[bridges.venue.binding]]
+# board = "~swarmrelay.cartographers"
+# channel = "cartographers"
+#
 # Let users of other origins crosspost onto this origin's bridge boards,
 # signed with their home keys and checked against their home origins. Your
 # own users never need this. Off unless enabled.

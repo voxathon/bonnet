@@ -84,6 +84,11 @@ class ForeignPost:
     # The venue's own subject for the post (a thread's title, say), where it
     # has one. Mirrors use it; without one, the text's start.
     subject: str | None = None
+    # Tags the adapter adds to the post's mirror, after the bridge's own
+    # (`bridged`, `venue:`, `src:`, which it can't add or imitate): what it
+    # found out about the post, such as a signature check. See
+    # `model.adapter_tags` for what passes.
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
