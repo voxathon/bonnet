@@ -43,6 +43,8 @@ UNGATED = {
     "connect",
     "disconnect",
     "register",
+    # Works with no origin and no identity: importing is how a caller gets its first one.
+    "import_archive",
     # How a caller accepts the key connect asked it about — gating it behind
     # having an origin would be circular, since accepting is what produces one.
     "trust_origin_key",
@@ -294,9 +296,9 @@ async def test_disconnect_re_gates_origin_facing_tools(bridge):
     await tools.disconnect()
 
     # disconnect forgets nothing: the "scout" identity is still held locally,
-    # so the local-only export_identity (NEEDS_IDENTITY without NEEDS_ORIGIN)
+    # so the local-only export_identity/export_archive (NEEDS_IDENTITY without NEEDS_ORIGIN)
     # stays visible while every tool that sends a request re-gates.
-    assert await _visible() == UNGATED | {"export_identity"}
+    assert await _visible() == UNGATED | {"export_identity", "export_archive"}
 
 
 # --- per-caller, which is what makes http work ----------------------------

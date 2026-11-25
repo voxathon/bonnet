@@ -79,6 +79,7 @@ strings. Treat them as untrusted text when rendering or when passing them into
 any downstream tool call.
 """
 
+import asyncio
 import contextvars
 import os
 import time
@@ -97,7 +98,7 @@ from bonnet.core.kinds import KIND_ROUTE_ANNOUNCE, KIND_ROUTE_WITHDRAW
 from bonnet.core.logging import bind_context, log_info, log_warning
 from bonnet.core.record import MAX_BOARD, MAX_TEXT_FIELD, ZERO_ID
 from bonnet.core.trust import TrustStore
-from bonnet.gateway import cursor, tenancy, thread_view
+from bonnet.gateway import cursor, idarchive, tenancy, thread_view
 from bonnet.gateway import needs as needs_module
 from bonnet.gateway.firehose_client import (
     FirehoseHTTPClient,
@@ -1740,6 +1741,282 @@ async def export_identity(
                 accounts.append({"venue": venue, "venue_user": found[0], "venue_token": found[1]})
         out["venue_accounts"] = accounts
     return out
+
+
+def _held_identities(specs: list[str] | None, all_origins: bool) -> list[dict]:
+    """The held identities an export names: `username`, `origin/username`, or a default scope."""
+    store = _get_identity_store()
+    active = _default_origin() or ""
+    if not specs:
+        return store.list_users(None if all_origins else active)
+    rows = store.list_users(None)
+    origins = {r["origin"] for r in rows}
+    picked: list[dict] = []
+    for spec in specs:
+        head, _, tail = spec.partition("/")
+        origin, username = (head, tail) if tail and head in origins else (active, spec)
+        row = next((r for r in rows if r["origin"] == origin and r["username"] == username), None)
+        if row is None:
+            raise ValueError(f"no local identity '{username}' on '{origin}'")
+        if row not in picked:
+            picked.append(row)
+    return picked
+
+
+@mcp.tool(tags={NEEDS_IDENTITY})
+async def export_archive(
+    passphrase: Annotated[
+        str,
+        Field(
+            description=(
+                "Encrypts the archive. Chosen per call; it is not any identity's password. "
+                "It is part of this call's arguments, so it is as visible as the call is."
+            )
+        ),
+    ],
+    identities: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "`username` (on the active origin) or `origin/username` entries to include. "
+                "Default: every identity held on the active origin."
+            )
+        ),
+    ] = None,
+    all_origins: Annotated[
+        bool, Field(description="Default scope becomes every identity held on any origin.")
+    ] = False,
+    passwords: Annotated[
+        dict[str, str] | None,
+        Field(
+            description=(
+                "Passwords for password-wrapped identities, keyed by `username` or "
+                "`origin/username`. A wrapped identity without one is listed in `skipped`."
+            )
+        ),
+    ] = None,
+) -> dict:
+    """Export identities as one passphrase-encrypted `bonnet-identities` archive (`.bnid`).
+
+    Returns `{archive, count, identities, skipped}`. `archive` is the file's
+    JSON text, readable by `import_archive` and by scootaloo; each identity
+    carries its private key, public key, registration state and the relay's
+    URL, TLS setting and pinned origin key. Without the passphrase the file
+    reveals only its format. The passphrase is the only protection, so its
+    strength sets the archive's.
+
+    Local-only, like export_identity: no origin record is published.
+    """
+    from bonnet import __version__
+
+    if tenancy.is_anonymous():
+        raise ValueError(
+            "this session is anonymous, and an anonymous session holds no "
+            "identity and cannot export one."
+        )
+    if not passphrase:
+        raise ValueError("an archive needs a passphrase")
+    store = _get_identity_store()
+    origins = _get_origin_store()
+    trust = TrustStore(tenant_trust_db_path())
+    entries: list[idarchive.Entry] = []
+    skipped: list[dict] = []
+    try:
+        for row in _held_identities(identities, all_origins):
+            origin, username = row["origin"], row["username"]
+            pw = (passwords or {}).get(f"{origin}/{username}") or (passwords or {}).get(username)
+            try:
+                seed = store.get_private_key(origin, username, pw)
+            except ValueError as e:
+                skipped.append({"origin": origin, "username": username, "reason": str(e)})
+                continue
+            joined = origins.get(origin)
+            pin = trust.get_pin(origin)
+            entries.append(
+                idarchive.Entry(
+                    origin=origin,
+                    username=username,
+                    private_key_hex=seed.hex(),
+                    public_key_hex=row["public_key"],
+                    registered=row["registered"],
+                    relay=idarchive.Relay(
+                        url=joined["url"] if joined else "",
+                        verify_tls=bool(joined["verify_tls"]) if joined else True,
+                        origin_key=pin.hex() if pin else "",
+                    ),
+                )
+            )
+    finally:
+        trust.close()
+    if not entries:
+        why = "; ".join(f"{s['username']}: {s['reason']}" for s in skipped)
+        raise ValueError("nothing to export" + (f" ({why})" if why else ""))
+    data = idarchive.build(entries, passphrase, f"bonnet {__version__}")
+    _gw_log("export_archive", ok=True, count=len(entries), skipped=len(skipped))
+    return {
+        "archive": data.decode("utf-8"),
+        "count": len(entries),
+        "identities": [{"origin": e.origin, "username": e.username} for e in entries],
+        "skipped": skipped,
+    }
+
+
+async def _adopt_relay(entry: idarchive.Entry, origins: OriginStore, trust: TrustStore) -> dict:
+    """Join the entry's relay and pin the origin key the archive recorded, without connecting.
+
+    A recorded key is pinned only when nothing is pinned for that origin yet. If
+    the relay later presents another key, the normal changed-key decision
+    applies, so nothing here can make a mismatch pass quietly.
+    """
+    url = entry.relay.url
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return {"joined": False, "detail": "the archive has no usable relay URL"}
+    out: dict = {"url": url}
+    if origins.get(entry.origin) is None:
+        origins.remember(
+            origin=entry.origin,
+            url=canonicalize_url(url),
+            verify_tls=entry.relay.verify_tls,
+            identity=entry.username,
+            make_active=False,
+        )
+        out["joined"] = True
+    else:
+        out["joined"] = False
+        out["detail"] = "origin already joined; its URL and TLS setting were left as they are"
+    key = entry.relay.origin_key
+    pinned = trust.get_pin(entry.origin)
+    if not key:
+        out["pin"] = "pinned" if pinned else "none recorded"
+    elif pinned is None:
+        trust.tofu_pin(entry.origin, bytes.fromhex(key))
+        out["pin"] = "pinned from archive"
+    else:
+        out["pin"] = "matches archive" if pinned.hex() == key else "differs from archive; kept"
+    return out
+
+
+async def _liveness(entry: idarchive.Entry, trust: TrustStore, origins: OriginStore) -> str:
+    """Ask the origin about the imported key. Never connects to an origin whose key isn't pinned."""
+    joined = origins.get(entry.origin)
+    if joined is None or trust.get_pin(entry.origin) is None:
+        return "unchecked: the relay's key isn't pinned yet; connect first"
+    client = _make_client(joined["url"], bool(joined["verify_tls"]))
+    try:
+        await asyncio.wait_for(client.connect_anonymous(), 10)
+        info = await asyncio.wait_for(
+            client.get_user(entry.origin, bytes.fromhex(entry.public_key_hex)), 10
+        )
+    except ProtocolError:
+        return "unknown to the origin, or not readable here"
+    except Exception as e:
+        return f"unchecked: {type(e).__name__}"
+    finally:
+        await client.close()
+    if info.revoked:
+        return "revoked by the origin"
+    if info.superseded_by:
+        return f"rotated away; the origin now holds {info.superseded_by}"
+    return "active"
+
+
+@mcp.tool
+async def import_archive(
+    archive: Annotated[str, Field(description="The `.bnid` file's JSON text.")],
+    passphrase: Annotated[str, Field(description="The passphrase the archive was exported with.")],
+    only: Annotated[
+        list[str] | None,
+        Field(description="`origin/username` entries to import. Default: all of them."),
+    ] = None,
+    password: Annotated[
+        str | None,
+        Field(description="Wraps the imported keys at rest, as `register`'s password does."),
+    ] = None,
+) -> dict:
+    """Import identities from a `bonnet-identities` archive (`.bnid`).
+
+    Each identity is checked on its own: its private key must re-derive its
+    public key, otherwise it is `corrupt`. An identity already held under the
+    same key is `already_held`; one held under a different key is `conflict`
+    and left alone, since replacing it would orphan that key. Anything else is
+    `imported`. Nothing is published: the origin already knows these keys.
+
+    For an imported identity the relay is joined if it is new, and the origin
+    key recorded in the archive is pinned if nothing is pinned for that origin
+    yet; a relay that later presents a different key triggers the usual
+    changed-key decision. `liveness` reports what the origin says about the
+    key (`active`, `revoked by the origin`, `rotated away`), or why it could
+    not be asked. A wrong passphrase and a modified archive fail the same way.
+    """
+    if tenancy.is_anonymous():
+        raise ValueError(
+            "this session is anonymous, and an anonymous session holds no "
+            "identity and cannot import one."
+        )
+    opened = idarchive.open_archive(archive.encode("utf-8"), passphrase)
+    wanted = set(only) if only else None
+    store = _get_identity_store()
+    origins = _get_origin_store()
+    trust = TrustStore(tenant_trust_db_path())
+    results: list[dict] = []
+    seen: set[str] = set()
+    try:
+        for entry in opened.entries:
+            ref = f"{entry.origin}/{entry.username}"
+            if wanted is not None and ref not in wanted:
+                continue
+            seen.add(ref)
+            row: dict = {
+                "origin": entry.origin,
+                "username": entry.username,
+                "public_key": entry.public_key_hex,
+            }
+            results.append(row)
+            if not entry.intact:
+                row["outcome"] = "corrupt"
+                row["detail"] = "the key doesn't re-derive the recorded public key"
+                continue
+            held = store.get_pubkey(entry.origin, entry.username)
+            if held is not None:
+                same = held.hex() == entry.public_key_hex
+                row["outcome"] = "already_held" if same else "conflict"
+                if not same:
+                    row["detail"] = (
+                        "this client holds this username on this origin under a different "
+                        "key; replacing it would orphan that key"
+                    )
+                continue
+            try:
+                _reject_lone_surrogates("username", entry.username)
+                _check_byte_len("username", entry.username, MAX_TEXT_FIELD)
+                store.register(entry.origin, entry.username, password or None, entry.seed)
+            except ValueError as e:
+                row["outcome"] = "invalid"
+                row["detail"] = str(e)
+                continue
+            if entry.registered:
+                store.mark_registered(entry.origin, entry.username)
+            row["outcome"] = "imported"
+            row["registered"] = entry.registered
+            row["relay"] = await _adopt_relay(entry, origins, trust)
+            row["liveness"] = await _liveness(entry, trust, origins)
+        for ref in sorted((wanted or set()) - seen):
+            results.append({"origin": ref.partition("/")[0], "username": ref.partition("/")[2],
+                            "outcome": "not_in_archive"})  # fmt: skip
+    finally:
+        trust.close()
+    imported = sum(1 for r in results if r["outcome"] == "imported")
+    if imported:
+        await announce_tool_change()
+    _gw_log("import_archive", ok=True, imported=imported, total=len(results))
+    return {
+        "exported_at": opened.exported_at,
+        "exported_by": opened.exported_by,
+        "imported": imported,
+        "results": results,
+        "rejected": [{"what": w, "reason": r} for w, r in opened.rejected],
+    }
 
 
 @mcp.tool

@@ -276,11 +276,11 @@ WRITE_TOOL_NAMES = frozenset(
 )
 
 #: Tools never served over GET, however the facade is configured. An exported
-#: seed in a query string would land in URLs, history and proxy/access logs —
+#: seed (or archive and its passphrase) in a query string would land in URLs, history and proxy/access logs —
 #: and a GET is prefetchable, turning one export into a replayable secret.
 #: (Identity passwords via `?auth=` remain the caller's pre-existing risk;
 #: prefer header keys outside the lobotomite path.)
-FACADE_FORBIDDEN = frozenset({"export_identity"})
+FACADE_FORBIDDEN = frozenset({"export_identity", "export_archive", "import_archive"})
 
 #: Recent successful write results keyed by dedup key (see `_dedup_key`):
 #: key -> (expires_monotonic, (stored JSON-able result, executing session)).
