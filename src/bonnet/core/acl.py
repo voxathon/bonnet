@@ -53,7 +53,7 @@ allow, never a path to an allow this evaluator denied.
 
 Worth knowing which axis a grant travels on, because the two do not feed
 each other. `server.admin_pubkey` grants power through *rules* here and
-leaves `ctx.role` empty; `ctx.role` comes only from the `flags` on a user's
+leaves `ctx.role` with the admin flag; `ctx.role` comes only from the `flags` on a user's
 registration record (see `firehose_http_server`). An operator who wants both
 needs both.
 """
