@@ -565,6 +565,7 @@ class FirehoseHTTPServer:
             peer_public_key,
             remote_addr,
             self._anonymous_public_key,
+            admin_pubkey_hex=getattr(self._config, "admin_pubkey_hex", "") or "",
         )
         role = ctx.role
         is_registered = ctx.is_registered

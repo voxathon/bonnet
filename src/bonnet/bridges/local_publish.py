@@ -63,7 +63,9 @@ class LocalPublisher:
         users: UserProjection,
         origin: str,
         anonymous_pubkey: bytes,
+        config=None,
     ):
+        self._config = config
         self._handler = handler
         self._users = users
         self._origin = origin
@@ -77,12 +79,14 @@ class LocalPublisher:
             server.users,
             server.config.origin,
             server.anonymous_identity.public_key,
+            server.config,
         )
 
     def context_for(self, pubkey: bytes) -> FirehoseContext:
         """The context the HTTP server would give `pubkey`, marked as the runtime's."""
         ctx = derive_context(
-            self._users, self._origin, pubkey, LOCAL_REMOTE_ADDR, self._anonymous_pubkey
+            self._users, self._origin, pubkey, LOCAL_REMOTE_ADDR, self._anonymous_pubkey,
+            admin_pubkey_hex=getattr(self._config, "admin_pubkey_hex", "") or "",
         )
         ctx.via_bridge_runtime = True
         return ctx
