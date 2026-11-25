@@ -152,19 +152,26 @@ def entry_from_json(d, *, need_public: bool = True) -> Entry:
     if pub is None and not need_public:
         pub = derive_public(priv)
     pub = _hex32(pub, "public_key_hex").hex()
-    relay_d = d.get("relay") if isinstance(d.get("relay"), dict) else {}
-    ok = relay_d.get("origin_key") or ""
-    if ok:
-        ok = _hex32(ok, "relay.origin_key").hex()
+    raw_relay = d.get("relay")
+    relay_d: dict = raw_relay if isinstance(raw_relay, dict) else {}
+    origin_key = relay_d.get("origin_key") or ""
+    if origin_key:
+        origin_key = _hex32(origin_key, "relay.origin_key").hex()
+    url, verify_tls = relay_d.get("url"), relay_d.get("verify_tls")
     relay = Relay(
-        url=relay_d.get("url") if isinstance(relay_d.get("url"), str) else "",
-        verify_tls=relay_d.get("verify_tls")
-        if isinstance(relay_d.get("verify_tls"), bool)
-        else True,
-        origin_key=ok,
+        url=url if isinstance(url, str) else "",
+        verify_tls=verify_tls if isinstance(verify_tls, bool) else True,
+        origin_key=origin_key,
     )
-    registered = d.get("registered") if isinstance(d.get("registered"), bool) else True
-    return Entry(origin.strip(), username.strip(), priv, pub, registered, relay)
+    registered = d.get("registered")
+    return Entry(
+        origin.strip(),
+        username.strip(),
+        priv,
+        pub,
+        registered if isinstance(registered, bool) else True,
+        relay,
+    )
 
 
 # ---------------------------------------------------------------------------
