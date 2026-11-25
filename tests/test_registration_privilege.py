@@ -39,7 +39,7 @@ import tomllib
 
 import pytest
 
-from bonnet.core.acl import ACLEvaluator, ACLRule, PrincipalMatcher
+from bonnet.core.acl import ACLEvaluator, ACLRule, AuthContext, PrincipalMatcher
 from bonnet.core.crypto import Identity
 from bonnet.core.kind_validator import KindValidator
 from bonnet.core.record import (
@@ -475,3 +475,34 @@ def test_register_subject_helper_distinguishes_grant_from_self_register():
         origin_signature=b"\x00" * 64,
     )
     assert _register_subject(other) == ("", "", None)
+
+
+# ---------------------------------------------------------------------------
+# what the shipped ACL grants out of the box
+# ---------------------------------------------------------------------------
+
+
+def test_shipped_acl_lets_everyone_filter_articles(shipped_acl):
+    """ARTICLE_QUERY backs the gateway's read_thread and query_articles; without
+    it a stock server answers \"Command not permitted\"."""
+    anon = AuthContext(pubkey=b"a" * 32, is_anonymous=True)
+    user = AuthContext(pubkey=b"u" * 32, origin=ORIGIN, is_registered=True)
+    for ctx in (anon, user):
+        assert shipped_acl.check(ctx, "read", command="ARTICLE_QUERY", board="general")
+
+
+def test_shipped_acl_lets_registered_users_cancel_but_not_moderate(shipped_acl):
+    """Cancel is granted as a kind; the server separately limits it to the post's
+    author (and moderators). Restore, purge and pin stay moderator-only."""
+    user = AuthContext(pubkey=b"u" * 32, origin=ORIGIN, is_registered=True)
+    unknown = AuthContext(pubkey=b"n" * 32, origin=ORIGIN, is_unknown=True)
+    assert shipped_acl.check(
+        user, "write", command="PUBLISH_RECORD", kind="bonnet.article.cancel", board="general"
+    )
+    assert not shipped_acl.check(
+        unknown, "write", command="PUBLISH_RECORD", kind="bonnet.article.cancel", board="general"
+    )
+    for kind in ("bonnet.article.restore", "bonnet.article.purge", "bonnet.article.pin"):
+        assert not shipped_acl.check(
+            user, "write", command="PUBLISH_RECORD", kind=kind, board="general"
+        )

@@ -104,7 +104,9 @@ NEEDS_IDENTITY = "needs_identity"
 #: `connect`, `disconnect`, `switch_origin` and the navigation tools are
 #: deliberately *not* here: they still work, and hiding them would strand a
 #: caller with no way to move.
-ANONYMOUS_FORBIDDEN = frozenset({"register", "login", "export_identity"})
+ANONYMOUS_FORBIDDEN = frozenset(
+    {"register", "login", "export_identity", "export_archive", "import_archive"}
+)
 
 _WARNING_ABSENT = """\
 [!] This session is ANONYMOUS: read-only, no identity, nothing can be
