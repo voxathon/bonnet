@@ -1071,7 +1071,7 @@ interval_seconds = 300
 effect = "allow"
 match.anonymous = true
 actions = ["read"]
-commands = ["PERMISSIONS", "EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
+commands = ["PERMISSIONS", "EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_QUERY", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
 boards = ["*"]
 
 [[acl]]
@@ -1091,7 +1091,7 @@ kinds = ["bonnet.user.register"]
 effect = "allow"
 match.registered = true
 actions = ["read"]
-commands = ["PERMISSIONS", "EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
+commands = ["PERMISSIONS", "EVENT_HEAD", "EVENT_RANGE", "EVENT_GET", "KEY_EPOCHS", "BOARD_LIST", "ARTICLE_GET", "ARTICLE_LIST", "ARTICLE_SEARCH", "ARTICLE_QUERY", "ARTICLE_BODY", "USER_GET", "USER_LIST", "BAN_STATUS", "EVENT_BODY"]
 boards = ["*"]
 
 [[acl]]
@@ -1099,7 +1099,7 @@ effect = "allow"
 match.registered = true
 actions = ["write"]
 commands = ["PUBLISH_RECORD"]
-kinds = ["bonnet.article", "bonnet.board.create", "bonnet.report", "bonnet.user.key.rotate", "bonnet.punishment.ack"]
+kinds = ["bonnet.article", "bonnet.article.cancel", "bonnet.board.create", "bonnet.report", "bonnet.user.key.rotate", "bonnet.punishment.ack"]
 boards = ["*"]
 
 # Route announcements re-point other relays' outbound sync connections, so
