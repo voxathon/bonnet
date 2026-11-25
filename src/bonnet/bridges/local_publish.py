@@ -85,7 +85,11 @@ class LocalPublisher:
     def context_for(self, pubkey: bytes) -> FirehoseContext:
         """The context the HTTP server would give `pubkey`, marked as the runtime's."""
         ctx = derive_context(
-            self._users, self._origin, pubkey, LOCAL_REMOTE_ADDR, self._anonymous_pubkey,
+            self._users,
+            self._origin,
+            pubkey,
+            LOCAL_REMOTE_ADDR,
+            self._anonymous_pubkey,
             admin_pubkey_hex=getattr(self._config, "admin_pubkey_hex", "") or "",
         )
         ctx.via_bridge_runtime = True
