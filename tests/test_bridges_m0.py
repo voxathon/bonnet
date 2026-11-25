@@ -1001,3 +1001,14 @@ async def test_gateway_publish_article_merges_extra_metadata():
             BOARD, os.urandom(32), b"hi", "s", extra_metadata=[metadata_text(1, "dup")]
         )
     await client._http.aclose()
+
+
+def test_derive_context_configured_admin_pubkey_is_administrator():
+    from bonnet.net.firehose_commands import derive_context
+
+    key, anon = b"\x01" * 32, b"\x02" * 32
+    ctx = derive_context(None, "o.test", key, "", anon, admin_pubkey_hex=key.hex())
+    assert ctx.role == "administrator"
+    other = derive_context(None, "o.test", b"\x03" * 32, "", anon, admin_pubkey_hex=key.hex())
+    assert other.role == ""
+    assert derive_context(None, "o.test", anon, "", anon, admin_pubkey_hex=anon.hex()).role == ""

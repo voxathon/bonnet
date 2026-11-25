@@ -304,8 +304,13 @@ def derive_context(
     peer_pubkey: bytes,
     remote_addr: str,
     anonymous_pubkey: bytes,
+    admin_pubkey_hex: str = "",
 ) -> FirehoseContext:
     """The request context for an authenticated key, as the HTTP server sees it.
+
+    The configured `admin_pubkey` (inline or via admin_pubkey_file) is always
+    an administrator, like the server's own identity, so role gates agree with
+    the ACL and survive a restart without a re-grant from root.
 
     The single definition of how a key maps to a principal: anonymous, a
     registered user (with role from its flags), or unknown. Registered means
@@ -346,6 +351,13 @@ def derive_context(
                 is_unknown = True
         else:
             is_unknown = True
+
+        if admin_pubkey_hex:
+            try:
+                if peer_pubkey == bytes.fromhex(admin_pubkey_hex):
+                    role = "administrator"
+            except ValueError:
+                pass
 
     return FirehoseContext(
         peer_pubkey=peer_pubkey,
